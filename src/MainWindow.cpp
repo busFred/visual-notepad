@@ -817,6 +817,11 @@ void MainWindow::revealInFileManager(const QString &path)
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *event)
 {
+    dragMoveEvent(event);
+}
+
+void MainWindow::dragMoveEvent(QDragMoveEvent *event)
+{
     // A tab dropped beside the groups (menu bar, outline) joins the active one.
     if (event->mimeData()->hasFormat(EditorGroup::tabMimeType())) {
         event->acceptProposedAction();

@@ -8,10 +8,12 @@
 #include <QMenuBar>
 #include "DocumentTab.h"
 #include "Settings.h"
+#include "WelcomeView.h"
 #include "editor/FindBar.h"
 #include "editor/TextView.h"
 
 #include <QLineEdit>
+#include <QMimeData>
 
 #include <QTextDocument>
 #include <QStatusBar>
@@ -29,6 +31,8 @@ private Q_SLOTS:
     void markdownShowsOutline();
     void textFileHidesOutline();
     void crlfIsPreserved();
+    void fileDropOnEmptyWindowOpensIt();
+    void fileDropOnTextTabOpensIt();
 
 private:
     QString write(const QString &name, const QByteArray &content);
@@ -130,6 +134,66 @@ static void useTestSettings()
     vn::Settings::instance().useFile(dir.filePath(QStringLiteral("settings.ini")));
 }
 Q_COREAPP_STARTUP_FUNCTION(useTestSettings)
+
+// With no tabs, a file dragged from the file manager lands on the welcome
+// page. Qt sends the drag's moves and drop to whichever widget accepted its
+// entry; this used to bounce between the editor group and the window until
+// the stack overflowed.
+void TestMainWindow::fileDropOnEmptyWindowOpensIt()
+{
+    const QString path = write(QStringLiteral("dropped.md"), "# Dropped\n");
+    vn::MainWindow window;
+    window.resize(800, 500);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QCOMPARE(window.tabCount(), 0);
+    auto *welcome = window.findChild<vn::WelcomeView *>();
+    QVERIFY(welcome && welcome->isVisible());
+
+    QMimeData mime;
+    mime.setUrls({QUrl::fromLocalFile(path)});
+    const QPoint pos = welcome->rect().center();
+    const Qt::DropActions actions = Qt::CopyAction | Qt::MoveAction | Qt::LinkAction;
+    QDragEnterEvent enter(pos, actions, &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(welcome, &enter);
+    QVERIFY(enter.isAccepted());
+    QDragMoveEvent move(pos, actions, &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(welcome, &move);
+    QVERIFY(move.isAccepted());
+    QDropEvent drop(QPointF(pos), actions, &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(welcome, &drop);
+    QVERIFY(drop.isAccepted());
+    QCOMPARE(window.tabCount(), 1);
+    QCOMPARE(window.windowTitle(), QStringLiteral("dropped.md — Visual Notepad"));
+}
+
+// A plain-text editor does not take file drops itself; they open as tabs.
+void TestMainWindow::fileDropOnTextTabOpensIt()
+{
+    const QString text = write(QStringLiteral("plain.txt"), "plain\n");
+    const QString path = write(QStringLiteral("dropped2.md"), "# Dropped\n");
+    vn::MainWindow window;
+    window.resize(800, 500);
+    QVERIFY(window.openFile(text));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QWidget *target = window.currentTab()->editor()->viewport();
+
+    QMimeData mime;
+    mime.setUrls({QUrl::fromLocalFile(path)});
+    const QPoint pos = target->rect().center();
+    const Qt::DropActions actions = Qt::CopyAction | Qt::MoveAction | Qt::LinkAction;
+    QDragEnterEvent enter(pos, actions, &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(target, &enter);
+    QVERIFY(enter.isAccepted());
+    QDragMoveEvent move(pos, actions, &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(target, &move);
+    QDropEvent drop(QPointF(pos), actions, &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(target, &drop);
+    QVERIFY(drop.isAccepted());
+    QCOMPARE(window.tabCount(), 2);
+    QCOMPARE(window.windowTitle(), QStringLiteral("dropped2.md — Visual Notepad"));
+}
 
 QTEST_MAIN(TestMainWindow)
 #include "test_mainwindow.moc"

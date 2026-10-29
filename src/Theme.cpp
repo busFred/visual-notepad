@@ -380,10 +380,28 @@ UpdateBlocker::~UpdateBlocker()
     }
 }
 
+// The UI is laid out for Segoe UI, which may not be redistributed. Where it is
+// not installed, use the bundled Selawik, Microsoft's open-source stand-in
+// with nearly the same widths. The system font stays as the fallback for
+// scripts Selawik lacks, such as CJK.
+static void setUiFont(QApplication &app)
+{
+    QString family = QStringLiteral("Segoe UI");
+    if (!QFontDatabase::hasFamily(family)) {
+        for (const char *style : {"Regular", "Semibold", "Bold"})
+            QFontDatabase::addApplicationFont(QStringLiteral(":/vn/fonts/Selawik-%1.ttf").arg(QLatin1StringView(style)));
+        family = QStringLiteral("Selawik");
+    }
+    QFont font = QApplication::font();
+    font.setFamilies({family, font.family()});
+    app.setFont(font);
+}
+
 void apply(QApplication &app)
 {
     if (s_app != &app) {
         s_app = &app;
+        setUiFont(app);
         app.setStyle(new AppStyle);
         QObject::connect(&Settings::instance(), &Settings::changed, &app, &onSettingChanged);
     }
@@ -429,15 +447,32 @@ void apply(QApplication &app)
     notifier().changed();
 }
 
+// Consolas may not be redistributed either. Where it is not installed, use the
+// bundled Inconsolata, which was modelled on it; its SemiExpanded cut has the
+// same character width.
+static bool hasConsolas()
+{
+    static const bool installed = [] {
+        if (QFontDatabase::hasFamily(QStringLiteral("Consolas")))
+            return true;
+        for (const char *style : {"", "Bold"})
+            QFontDatabase::addApplicationFont(QStringLiteral(":/vn/fonts/Inconsolata-SemiExpanded%1.ttf").arg(QLatin1StringView(style)));
+        return false;
+    }();
+    return installed;
+}
+
 QFont editorFont()
 {
     QFont font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     const QString family = Settings::instance().text(key::fontFamily);
-    if (family.isEmpty()) {
-        font.setFamilies({QStringLiteral("Cascadia Mono"), QStringLiteral("DejaVu Sans Mono"),
-                          QStringLiteral("Consolas"), font.family()});
-    } else {
+    if (!family.isEmpty()) {
         font.setFamilies({family, font.family()});
+    } else if (hasConsolas()) {
+        font.setFamilies({QStringLiteral("Consolas"), font.family()});
+    } else {
+        font.setFamilies({QStringLiteral("Inconsolata"), font.family()});
+        font.setStretch(113); // fontconfig reads SemiExpanded as 113, not 112.
     }
     font.setStyleHint(QFont::Monospace);
     if (const int size = Settings::instance().number(key::fontSize); size > 0)
