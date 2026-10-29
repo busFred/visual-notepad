@@ -1,5 +1,8 @@
-//! Rust side of Visual Notepad: Markdown parsing (markdown-rs), later Mermaid
-//! rendering. Exposed to C++ through the cxx bridge below.
+//! Rust side of Visual Notepad: Markdown parsing and rendering (markdown-rs)
+//! and Mermaid diagrams. Exposed to C++ through the cxx bridge below.
+
+mod mermaid;
+mod render;
 
 use markdown::mdast::Node;
 use markdown::{Constructs, ParseOptions};
@@ -16,9 +19,66 @@ mod ffi {
         line: usize,
     }
 
+    /// How a top-level block is shown in the visual editor.
+    #[derive(Debug)]
+    enum BlockKind {
+        /// Rendered from `html`.
+        Html,
+        /// Fenced or indented code; `lang` and `text`.
+        Code,
+        /// Display math; TeX in `text`.
+        Math,
+        /// Front matter shown as code; source in `text`.
+        FrontMatter,
+        /// Not shown (link definitions, hidden front matter).
+        Hidden,
+    }
+
+    /// One top-level block with its 0-based source line range.
+    #[derive(Debug)]
+    struct Block {
+        kind: BlockKind,
+        first_line: usize,
+        last_line: usize,
+        /// For Html blocks. Inline math appears as <img src="vn-math:N">
+        /// (and display math nested in lists as "vn-math-display:N").
+        html: String,
+        lang: String,
+        text: String,
+        /// TeX for each vn-math image, by index.
+        inline_math: Vec<String>,
+    }
+
+    /// Markdown rendering settings from Preferences.
+    struct RenderOptions {
+        breaks: bool,
+        linkify: bool,
+        typographer: bool,
+        math: bool,
+        /// 0 = hide, 1 = code block, 2 = table.
+        front_matter: u8,
+    }
+
     extern "Rust" {
         fn outline(markdown: &str) -> Vec<Heading>;
+        fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block>;
+        /// PNG bytes of a Mermaid diagram; throws with the parse error.
+        fn mermaid_png(code: &str, theme: &str, scale: f32) -> Result<Vec<u8>>;
+        /// GitHub-style anchor for a heading's text.
+        fn heading_slug(text: &str) -> String;
     }
+}
+
+fn blocks(markdown: &str, options: &ffi::RenderOptions) -> Vec<ffi::Block> {
+    render::blocks(markdown, options)
+}
+
+fn mermaid_png(code: &str, theme: &str, scale: f32) -> Result<Vec<u8>, String> {
+    mermaid::png(code, theme, scale)
+}
+
+fn heading_slug(text: &str) -> String {
+    render::slug(text)
 }
 
 /// GFM plus math and front matter, matching what the VS Code Markdown

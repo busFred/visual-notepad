@@ -12,6 +12,8 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 cxx = "1.0.205"
 markdown = "1.0.0"
+mermaid-rs-renderer = { version = "0.3.1", default-features = false }
+resvg = "0.47"
 
 [profile.release]
 lto = true
