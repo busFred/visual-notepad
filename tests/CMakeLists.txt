@@ -78,3 +78,8 @@ qt_add_executable(test_formatting test_formatting.cpp)
 target_link_libraries(test_formatting PRIVATE vn_app Qt6::Test)
 add_test(NAME formatting COMMAND test_formatting)
 set_tests_properties(formatting PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
+
+qt_add_executable(test_shared_docs test_shared_docs.cpp)
+target_link_libraries(test_shared_docs PRIVATE vn_app Qt6::Test)
+add_test(NAME shared_docs COMMAND test_shared_docs)
+set_tests_properties(shared_docs PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")

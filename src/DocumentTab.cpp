@@ -1,5 +1,6 @@
 #include "DocumentTab.h"
 
+#include "EvenSplitter.h"
 #include "Settings.h"
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
@@ -16,9 +17,7 @@
 
 #include <algorithm>
 
-#include <QDir>
 #include <QEvent>
-#include <QFile>
 #include <QGraphicsDropShadowEffect>
 #include <QFileInfo>
 #include <QButtonGroup>
@@ -27,15 +26,10 @@
 #include <QLineEdit>
 #include <QPainter>
 #include <QPainterPath>
-#include <QRegularExpression>
-#include <QSaveFile>
-#include "EvenSplitter.h"
 #include <QSplitter>
 #include <QTextBlock>
 #include <QTextDocument>
-#include <QTimer>
 #include <QToolButton>
-#include <QUrl>
 #include <QVBoxLayout>
 
 namespace vn {
@@ -107,19 +101,19 @@ private:
 };
 
 DocumentTab::DocumentTab(QWidget *parent)
-    : QWidget(parent)
-    , m_doc(new QTextDocument(this))
+    : DocumentTab(TextFile::create(), parent)
 {
-    m_doc->setDocumentLayout(new DocumentLayout(m_doc));
-    m_doc->setUndoRedoEnabled(true);
+}
+
+DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
+    : QWidget(parent)
+    , m_file(std::move(file))
+    , m_doc(m_file->document())
+{
+    m_file->addView(this);
     m_splitter = new EvenSplitter(Qt::Horizontal, this);
     m_splitter->setHandleWidth(1);
     m_splitter->setChildrenCollapsible(false);
-    // Link checking runs shortly after the last edit.
-    m_linkTimer = new QTimer(this);
-    m_linkTimer->setSingleShot(true);
-    m_linkTimer->setInterval(500);
-    connect(m_linkTimer, &QTimer::timeout, this, &DocumentTab::checkLinks);
     m_editor = new TextView(m_doc, m_splitter);
     m_splitter->addWidget(m_editor);
     m_active = m_editor;
@@ -133,38 +127,19 @@ DocumentTab::DocumentTab(QWidget *parent)
     m_findBar->installEventFilter(this);
     m_goToLine = createGoToLine();
 
-    // New files take their line ending from the settings.
-    const QString eol = Settings::instance().text(key::lineEnding);
-#ifdef Q_OS_WIN
-    m_lineEnding = eol == QLatin1String("lf") ? LineEnding::LF : LineEnding::CRLF;
-#else
-    m_lineEnding = eol == QLatin1String("crlf") ? LineEnding::CRLF : LineEnding::LF;
-#endif
-    const QString newEncoding = encoding::canonical(Settings::instance().text(key::encoding));
-    m_encoding = newEncoding.isEmpty() ? encoding::utf8 : newEncoding;
     const QString defaultMode = Settings::instance().text(key::defaultMode);
     m_viewMode = defaultMode == QLatin1String("source")  ? ViewMode::Source
                  : defaultMode == QLatin1String("split") ? ViewMode::SourceVisual
                                                          : ViewMode::Visual;
-    m_indentation = defaultIndentation();
     applySettings();
     connect(&Settings::instance(), &Settings::changed, this, [this](const QString &changedKey) {
-        if (changedKey == QLatin1String(key::tabWidth) || changedKey == QLatin1String(key::insertSpaces)
-            || changedKey == QLatin1String(key::detectIndentation))
-            refreshIndentation();
         if (changedKey.startsWith(QLatin1String("editor/")) || changedKey == QLatin1String(key::highlightActiveBlock))
             applySettings();
-        if (changedKey == QLatin1String(key::validateLinks))
-            checkLinks();
     });
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->addWidget(m_splitter);
-
-    m_highlighter = new KSyntaxHighlighting::SyntaxHighlighter(m_doc);
-    m_highlighter->setTheme(theme::syntaxTheme());
-    updateDefinition();
 
     connect(m_pill->lockButton(), &QToolButton::toggled, this, [this](bool locked) {
         (m_viewMode == ViewMode::SourceVisual ? m_splitLocked : m_visualLocked) = locked;
@@ -174,224 +149,101 @@ DocumentTab::DocumentTab(QWidget *parent)
     connect(m_editor, &TextView::scrolled, this, [this] { syncScroll(m_editor, m_visual); });
     connect(m_editor, &TextView::selectionChanged, this, [this] { mirrorSelection(m_editor, m_visual); });
     m_editor->installEventFilter(this);
-    connect(m_doc, &QTextDocument::modificationChanged, this, &DocumentTab::modificationChanged);
     connect(m_editor, &TextView::cursorPositionChanged, this, [this] {
         if (m_active == m_editor)
             Q_EMIT cursorPositionChanged();
     });
-    connect(m_doc, &QTextDocument::contentsChanged, this, &DocumentTab::textChanged);
-    connect(m_doc, &QTextDocument::contentsChanged, this, &DocumentTab::scheduleLinkCheck);
     connect(m_editor, &TextView::linkRequested, this, &DocumentTab::linkActivated);
     connect(m_editor, &TextView::filesDropped, this, &DocumentTab::filesDropped);
-    updatePill();
+
+    // What the file shares with every tab showing it.
+    TextFile *f = m_file.get();
+    connect(f, &TextFile::modificationChanged, this, &DocumentTab::modificationChanged);
+    connect(f, &TextFile::contentsChanged, this, &DocumentTab::textChanged);
+    connect(f, &TextFile::contentReset, this, &DocumentTab::resetCarets);
+    connect(f, &TextFile::definitionChanged, this, &DocumentTab::onDefinitionChanged);
+    connect(f, &TextFile::formatChanged, this, &DocumentTab::formatChanged);
+    connect(f, &TextFile::indentationChanged, this, [this] {
+        applySettings();
+        Q_EMIT indentationChanged();
+    });
+    connect(f, &TextFile::diagnosticsChanged, this, &DocumentTab::applyDiagnostics);
+    connect(f, &TextFile::pathChanged, this, [this] {
+        updateViews();
+        Q_EMIT titleChanged();
+    });
+    connect(f, &TextFile::diskStateChanged, this, &DocumentTab::titleChanged);
+    onDefinitionChanged();
+    applyDiagnostics();
+}
+
+DocumentTab::~DocumentTab()
+{
+    // The views use the file's document: they go before the file can. No
+    // focus moves between dying views may reach this half-destroyed tab.
+    m_file->removeView(this);
+    m_editor->removeEventFilter(this);
+    m_editor->disconnect(this);
+    if (m_visual) {
+        m_visual->removeEventFilter(this);
+        m_visual->disconnect(this);
+    }
+    delete m_findBar;
+    delete m_goToLine;
+    delete m_splitter;
+}
+
+DocumentTab *DocumentTab::openAnotherView(QWidget *parent) const
+{
+    auto *tab = new DocumentTab(m_file, parent);
+    tab->m_splitLocked = m_splitLocked;
+    tab->m_visualLocked = m_visualLocked;
+    tab->setViewMode(m_viewMode);
+    tab->setZoom(m_zoom);
+    tab->editor()->setTextCursor(editor()->textCursor());
+    return tab;
+}
+
+void DocumentTab::setClosing()
+{
+    m_file->removeView(this);
+}
+
+QList<DocumentTab *> DocumentTab::otherViews() const
+{
+    QList<DocumentTab *> views = m_file->views();
+    views.removeAll(const_cast<DocumentTab *>(this));
+    return views;
 }
 
 bool DocumentTab::load(const QString &path)
 {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        m_error = file.errorString();
-        return false;
-    }
-    QByteArray bytes = file.readAll();
-    return applyBytes(path, bytes, encoding::detect(bytes));
-}
-
-bool DocumentTab::reopenWithEncoding(const Encoding &encoding)
-{
-    if (m_path.isEmpty() || isModified()) {
-        m_error = tr("Only a saved file without changes can be reopened.");
-        return false;
-    }
-    QFile file(m_path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        m_error = file.errorString();
-        return false;
-    }
-    return applyBytes(m_path, file.readAll(), encoding);
-}
-
-// Never fails on bad bytes: undecodable input becomes U+FFFD.
-bool DocumentTab::applyBytes(const QString &path, const QByteArray &bytes, const Encoding &encoding)
-{
-    QString content = encoding::decode(bytes, encoding);
-
-    // The first line ending decides the style used on save.
-    const qsizetype lf = content.indexOf(u'\n');
-    m_lineEnding = (lf > 0 && content.at(lf - 1) == u'\r') ? LineEnding::CRLF : LineEnding::LF;
-    content.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
-
-    m_encoding = encoding;
-    m_path = path;
-    m_languageOverridden = false;
-    updateDefinition();
-    m_doc->setPlainText(content);
-    m_doc->setModified(false);
-    m_editor->setTextCursor(QTextCursor(m_doc));
-    if (m_visual)
-        m_visual->setTextCursor(QTextCursor(m_doc));
-    m_indentationOverridden = false;
-    refreshIndentation();
-    Q_EMIT formatChanged();
-    return true;
+    return m_file->load(path);
 }
 
 void DocumentTab::loadBackup(const QString &path, const QString &content, const Encoding &encoding,
                              LineEnding lineEnding)
 {
-    m_encoding = encoding;
-    m_lineEnding = lineEnding;
-    m_path = path;
-    m_languageOverridden = false;
-    updateDefinition();
-    m_doc->setPlainText(content);
-    m_editor->setTextCursor(QTextCursor(m_doc));
-    if (m_visual)
-        m_visual->setTextCursor(QTextCursor(m_doc));
-    m_doc->setModified(true);
-    m_indentationOverridden = false;
-    refreshIndentation();
-    Q_EMIT formatChanged();
+    m_file->loadBackup(path, content, encoding, lineEnding);
 }
 
 bool DocumentTab::save(const QString &path)
 {
-    QString content = text();
-    if (m_lineEnding == LineEnding::CRLF)
-        content.replace(u'\n', QStringLiteral("\r\n"));
-
-    const std::optional<QByteArray> encoded = encoding::encode(content, m_encoding);
-    if (!encoded) {
-        m_error = tr("The document contains characters that %1 cannot represent. Save it as UTF-8 instead.")
-                      .arg(encodingName());
-        return false;
-    }
-
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly)) {
-        m_error = file.errorString();
-        return false;
-    }
-    file.write(*encoded);
-    if (!file.commit()) {
-        m_error = file.errorString();
-        return false;
-    }
-
-    const bool renamed = path != m_path;
-    m_path = path;
-    if (renamed) {
-        m_languageOverridden = false;
-        updateDefinition();
-    }
-    m_doc->setModified(false);
-    return true;
+    return m_file->save(path);
 }
 
-void DocumentTab::setLineEnding(LineEnding lineEnding)
+void DocumentTab::resetCarets()
 {
-    if (m_lineEnding == lineEnding)
-        return;
-    m_lineEnding = lineEnding;
-    m_doc->setModified(true);
-    Q_EMIT formatChanged();
-}
-
-void DocumentTab::setEncoding(const Encoding &encoding)
-{
-    if (m_encoding == encoding)
-        return;
-    m_encoding = encoding;
-    m_doc->setModified(true);
-    Q_EMIT formatChanged();
-}
-
-indentation::Settings DocumentTab::defaultIndentation() const
-{
-    const Settings &s = Settings::instance();
-    return {std::max(1, s.number(key::tabWidth)), s.flag(key::insertSpaces)};
-}
-
-void DocumentTab::setEffectiveIndentation(const indentation::Settings &indentation)
-{
-    if (m_indentation == indentation)
-        return;
-    m_indentation = indentation;
-    applySettings();
-    Q_EMIT indentationChanged();
-}
-
-void DocumentTab::refreshIndentation()
-{
-    if (m_indentationOverridden)
-        return;
-    const indentation::Settings defaults = defaultIndentation();
-    setEffectiveIndentation(Settings::instance().flag(key::detectIndentation)
-                                ? indentation::guess(m_doc, defaults.tabSize, defaults.insertSpaces)
-                                : defaults);
-}
-
-void DocumentTab::setIndentation(const indentation::Settings &indentation)
-{
-    m_indentationOverridden = true;
-    setEffectiveIndentation({std::max(1, indentation.tabSize), indentation.insertSpaces});
-}
-
-void DocumentTab::detectIndentation()
-{
-    m_indentationOverridden = false;
-    const indentation::Settings defaults = defaultIndentation();
-    setEffectiveIndentation(indentation::guess(m_doc, defaults.tabSize, defaults.insertSpaces));
+    m_editor->setTextCursor(QTextCursor(m_doc));
+    if (m_visual)
+        m_visual->setTextCursor(QTextCursor(m_doc));
 }
 
 void DocumentTab::convertIndentation(bool toSpaces)
 {
     if (isReadOnly())
         return;
-    indentation::convert(m_doc, m_indentation.tabSize, toSpaces);
-    setIndentation({m_indentation.tabSize, toSpaces});
-}
-
-QString DocumentTab::definitionName() const
-{
-    const auto def = m_highlighter->definition();
-    return def.isValid() ? def.name() : QString();
-}
-
-void DocumentTab::setLanguage(const QString &definitionName)
-{
-    m_languageOverridden = true;
-    m_languageOverride = definitionName;
-    updateDefinition();
-}
-
-QString DocumentTab::displayName() const
-{
-    return m_path.isEmpty() ? tr("Untitled") : QFileInfo(m_path).fileName();
-}
-
-bool DocumentTab::isModified() const
-{
-    return m_doc->isModified();
-}
-
-bool DocumentTab::isMarkdown() const
-{
-    return m_highlighter->definition().name() == QLatin1String("Markdown");
-}
-
-QString DocumentTab::languageName() const
-{
-    const auto def = m_highlighter->definition();
-    return def.isValid() ? def.translatedName() : tr("Plain Text");
-}
-
-QString DocumentTab::text() const
-{
-    // toPlainText() would turn non-breaking spaces into spaces.
-    QString text = m_doc->toRawText();
-    text.replace(QChar::ParagraphSeparator, u'\n');
-    return text;
+    m_file->convertIndentation(toSpaces);
 }
 
 void DocumentTab::goToLine(int line)
@@ -420,8 +272,7 @@ void DocumentTab::ensureVisualView()
 {
     if (m_visual)
         return;
-    m_model = new MarkdownModel(m_doc);
-    m_visual = new VisualView(m_model, m_splitter);
+    m_visual = new VisualView(m_file->markdownModel(), m_splitter);
     m_splitter->addWidget(m_visual);
     m_visual->setReadOnly(m_viewMode == ViewMode::SourceVisual ? m_splitLocked : m_visualLocked);
     m_visual->setTextCursor(QTextCursor(m_doc));
@@ -430,7 +281,7 @@ void DocumentTab::ensureVisualView()
     connect(m_visual, &VisualView::linkActivated, this, &DocumentTab::linkActivated);
     connect(m_visual, &TextView::linkRequested, this, &DocumentTab::linkActivated);
     connect(m_visual, &TextView::filesDropped, this, &DocumentTab::filesDropped);
-    m_visual->setDiagnostics(m_diagnostics);
+    m_visual->setDiagnostics(m_file->diagnostics());
     connect(m_visual, &TextView::scrolled, this, [this] { syncScroll(m_visual, m_editor); });
     connect(m_visual, &TextView::selectionChanged, this, [this] { mirrorSelection(m_visual, m_editor); });
     connect(m_visual, &TextView::cursorPositionChanged, this, [this] {
@@ -492,12 +343,10 @@ void DocumentTab::updateViews()
         }
         delete m_visual;
         m_visual = nullptr;
-        delete m_model;
-        m_model = nullptr;
     }
     if (mode != ViewMode::Source) {
         ensureVisualView();
-        m_visual->setBaseDirectory(m_path.isEmpty() ? QString() : QFileInfo(m_path).absolutePath());
+        m_visual->setBaseDirectory(path().isEmpty() ? QString() : QFileInfo(path()).absolutePath());
     }
     applyMarkdownState();
     m_editor->setVisible(mode != ViewMode::Visual);
@@ -524,95 +373,18 @@ void DocumentTab::applyMarkdownState()
 {
     const bool markdown = isMarkdown();
     m_editor->setMarkdownEditing(markdown);
-    m_editor->setDocumentPath(m_path);
+    m_editor->setDocumentPath(path());
     if (m_visual) {
         m_visual->setMarkdownEditing(markdown);
-        m_visual->setDocumentPath(m_path);
+        m_visual->setDocumentPath(path());
     }
-    scheduleLinkCheck();
 }
 
-void DocumentTab::scheduleLinkCheck()
+void DocumentTab::applyDiagnostics()
 {
-    if (isMarkdown() && Settings::instance().flag(key::validateLinks))
-        m_linkTimer->start();
-    else if (!m_diagnostics.isEmpty())
-        checkLinks();
-}
-
-void DocumentTab::checkLinks()
-{
-    m_linkTimer->stop();
-    if (isMarkdown() && Settings::instance().flag(key::validateLinks))
-        m_diagnostics = brokenLinks();
-    else
-        m_diagnostics.clear();
-    m_editor->setDiagnostics(m_diagnostics);
+    m_editor->setDiagnostics(m_file->diagnostics());
     if (m_visual)
-        m_visual->setDiagnostics(m_diagnostics);
-}
-
-QList<TextView::Diagnostic> DocumentTab::brokenLinks() const
-{
-    static const QRegularExpression scheme(QStringLiteral("^[A-Za-z][A-Za-z0-9+.-]+:"));
-    static const QRegularExpression lineAnchor(QStringLiteral("^L\\d+"), QRegularExpression::CaseInsensitiveOption);
-    const auto decode = [](const QString &s) { return QUrl::fromPercentEncoding(s.toUtf8()); };
-
-    const QDir dir = m_path.isEmpty() ? QDir() : QFileInfo(m_path).absoluteDir();
-    QStringList ownAnchors;
-    bool ownLoaded = false;
-    QHash<QString, QStringList> fileAnchors;
-    QList<TextView::Diagnostic> found;
-
-    for (const md::LinkTarget &target : md::linkTargets(text())) {
-        const QString &dest = target.dest;
-        if (dest.isEmpty() || scheme.match(dest).hasMatch())
-            continue;
-        QString path = dest.section(u'#', 0, 0);
-        const QString fragment = decode(dest.contains(u'#') ? dest.section(u'#', 1) : QString()).toLower();
-        path = decode(path.section(u'?', 0, 0));
-        const auto report = [&] {
-            found.append({target.start, target.end, tr("Link target not found: %1").arg(dest)});
-        };
-
-        if (path.isEmpty()) {
-            if (fragment.isEmpty() || lineAnchor.match(fragment, 0).hasMatch())
-                continue;
-            if (!ownLoaded) {
-                ownAnchors = md::anchorsOf(text());
-                ownLoaded = true;
-            }
-            if (!ownAnchors.contains(fragment))
-                report();
-            continue;
-        }
-        // "/x" is relative to a workspace root, which this app doesn't have.
-        if (path.startsWith(u'/'))
-            continue;
-        const QString file = QDir::isAbsolutePath(path) ? path : (m_path.isEmpty() ? QString() : dir.filePath(path));
-        if (file.isEmpty())
-            continue;
-        if (!QFileInfo::exists(file)) {
-            report();
-            continue;
-        }
-        const QString suffix = QFileInfo(file).suffix().toLower();
-        if (fragment.isEmpty() || lineAnchor.match(fragment, 0).hasMatch() || !QFileInfo(file).isFile()
-            || (suffix != QLatin1String("md") && suffix != QLatin1String("markdown") && suffix != QLatin1String("mdown")
-                && suffix != QLatin1String("mkd")))
-            continue;
-        auto it = fileAnchors.find(file);
-        if (it == fileAnchors.end()) {
-            QFile f(file);
-            QString content;
-            if (f.size() <= 8 * 1024 * 1024 && f.open(QIODevice::ReadOnly))
-                content = QString::fromUtf8(f.readAll());
-            it = fileAnchors.insert(file, md::anchorsOf(content));
-        }
-        if (!it->contains(fragment))
-            report();
-    }
-    return found;
+        m_visual->setDiagnostics(m_file->diagnostics());
 }
 
 void DocumentTab::formatDocument()
@@ -639,21 +411,13 @@ void DocumentTab::formatDocument()
     view->setTextCursor(restored);
 }
 
-void DocumentTab::updateDefinition()
+void DocumentTab::onDefinitionChanged()
 {
-    // New documents default to Markdown, like the old app, unless set otherwise.
-    auto &repository = theme::syntaxRepository();
-    const bool markdownByDefault = Settings::instance().text(key::newFileLanguage) != QLatin1String("plaintext");
-    const auto def = m_languageOverridden ? (m_languageOverride.isEmpty() ? KSyntaxHighlighting::Definition()
-                                                                          : repository.definitionForName(m_languageOverride))
-                     : m_path.isEmpty() ? (markdownByDefault ? repository.definitionForName(QStringLiteral("Markdown"))
-                                                           : KSyntaxHighlighting::Definition())
-                                      : repository.definitionForFileName(m_path);
-    m_highlighter->setDefinition(def);
+    const QString name = definitionName();
+    const auto def = name.isEmpty() ? KSyntaxHighlighting::Definition() : theme::syntaxRepository().definitionForName(name);
     m_editor->setCommentMarker(def.singleLineCommentMarker());
     m_editor->setCodeEditing(def.isValid() && def.name() != QLatin1String("Markdown"));
     updateViews();
-    Q_EMIT formatChanged();
 }
 
 void DocumentTab::setViewMode(ViewMode mode)
@@ -727,8 +491,8 @@ void DocumentTab::applyViewSettings(TextView *view)
     font.setPointSizeF(font.pointSizeF() * m_zoom / 100.0);
     view->setFont(font);
     view->setShowWhitespace(s.flag(key::drawWhitespace));
-    view->setTabWidth(m_indentation.tabSize);
-    view->setInsertSpaces(m_indentation.insertSpaces);
+    view->setTabWidth(indentation().tabSize);
+    view->setInsertSpaces(indentation().insertSpaces);
     view->setLineSpacing(s.value(key::lineSpacing).toDouble());
     view->setMultiCursorModifier(s.text(key::multiCursorModifier) == QLatin1String("ctrl") ? Qt::ControlModifier
                                                                                             : Qt::AltModifier);
