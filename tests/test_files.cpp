@@ -214,7 +214,7 @@ void TestFiles::legacySettingIsUsed()
     settings.setValue(vn::key::legacyEncoding, QStringLiteral("windows-1251"));
     const QString text = QStringLiteral("Привет, мир\n");
     const QString path = write(QStringLiteral("cyr.txt"), encoded("windows-1251", text));
-    const QString nul = write(QStringLiteral("nul.txt"), QByteArray("a\0\xff", 3));
+    const QString nul = write(QStringLiteral("with-nul.txt"), QByteArray("a\0\xff", 3));
 
     DocumentTab tab;
     QVERIFY(tab.load(path));

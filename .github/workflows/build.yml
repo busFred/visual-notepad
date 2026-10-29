@@ -232,7 +232,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: windows
         run: |
-          foreach ($t in 'preferences','files','theme') {
+          foreach ($t in 'visualview','files','session') {
             $exe = "build\tests\test_$t.exe"
             & $exe -o "$t.log,txt"
             "== $t exit $LASTEXITCODE"
