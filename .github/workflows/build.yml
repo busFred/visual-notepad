@@ -93,7 +93,19 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           FONTCONFIG_FILE: /etc/fonts/fonts.conf
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure --timeout 120
+
+      - name: Debug hung test
+        if: failure()
+        env:
+          QT_QPA_PLATFORM: offscreen
+          FONTCONFIG_FILE: /etc/fonts/fonts.conf
+        run: |
+          sudo apt-get install -y gdb
+          build/tests/test_markdown_editing pasteImageCreatesFile > /tmp/t.log 2>&1 &
+          sleep 15
+          gdb -p $! -batch -ex "thread apply all bt 25" 2>&1 | tail -80
+          cat /tmp/t.log
 
       - name: Package
         run: |
@@ -155,6 +167,10 @@ jobs:
           "CMAKE_PREFIX_PATH=$env:KF6_PREFIX;$prefix\Library" >> $env:GITHUB_ENV
           # Tools from the env (cmake, ninja, rust) come after the MSVC tools.
           foreach ($d in "$prefix\Library\bin", "$prefix\Scripts", "$prefix\bin", $prefix) { if (Test-Path $d) { $d >> $env:GITHUB_PATH } }
+          # Git's usr\bin\link.exe shadows the MSVC linker on PATH.
+          $link = (Get-ChildItem "$env:VCToolsInstallDir\bin\Hostx64\x64\link.exe").FullName
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$link" >> $env:GITHUB_ENV
+          "CMAKE_LINKER=$link" >> $env:GITHUB_ENV
           $v = (Select-String -Path CMakeLists.txt -Pattern '^project\(visnotepad VERSION ([0-9.]+)').Matches[0].Groups[1].Value
           "VN_VERSION=$v" >> $env:GITHUB_ENV
 
