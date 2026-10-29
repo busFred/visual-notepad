@@ -26,6 +26,7 @@
 #include <QSaveFile>
 #include <QSplitter>
 #include <QStringDecoder>
+#include <QStringEncoder>
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QToolButton>
@@ -36,6 +37,61 @@ namespace vn {
 namespace {
 
 const QByteArray utf8Bom("\xEF\xBB\xBF");
+const QByteArray utf16LeBom("\xFF\xFE");
+const QByteArray utf16BeBom("\xFE\xFF");
+constexpr int binarySniffSize = 8192;
+
+#ifdef Q_OS_WIN
+constexpr QStringConverter::Encoding legacyCodec = QStringConverter::System; // The ANSI code page.
+#else
+constexpr QStringConverter::Encoding legacyCodec = QStringConverter::Latin1;
+#endif
+
+QStringConverter::Encoding codecFor(DocumentTab::Encoding encoding)
+{
+    switch (encoding) {
+    case DocumentTab::Encoding::Utf16LE:
+        return QStringConverter::Utf16LE;
+    case DocumentTab::Encoding::Utf16BE:
+        return QStringConverter::Utf16BE;
+    case DocumentTab::Encoding::Legacy:
+        return legacyCodec;
+    default:
+        return QStringConverter::Utf8;
+    }
+}
+
+const QByteArray &bomFor(DocumentTab::Encoding encoding)
+{
+    static const QByteArray none;
+    switch (encoding) {
+    case DocumentTab::Encoding::Utf8Bom:
+        return utf8Bom;
+    case DocumentTab::Encoding::Utf16LE:
+        return utf16LeBom;
+    case DocumentTab::Encoding::Utf16BE:
+        return utf16BeBom;
+    default:
+        return none;
+    }
+}
+
+// BOM first, then strict UTF-8, else the legacy codec. Files with NUL bytes
+// that are not UTF-16 are treated as legacy text, like Notepad.
+DocumentTab::Encoding detectEncoding(const QByteArray &bytes)
+{
+    using E = DocumentTab::Encoding;
+    for (E e : {E::Utf8Bom, E::Utf16LE, E::Utf16BE}) {
+        if (bytes.startsWith(bomFor(e)))
+            return e;
+    }
+    if (bytes.left(binarySniffSize).contains('\0'))
+        return E::Legacy;
+    QStringDecoder utf8(QStringDecoder::Utf8, QStringDecoder::Flag::Stateless);
+    const QString decoded = utf8(bytes); // Decoding is lazy; force it.
+    Q_UNUSED(decoded);
+    return utf8.hasError() ? E::Legacy : E::Utf8;
+}
 constexpr int pillMarginRight = 12;
 constexpr int pillMarginTop = 8;
 constexpr int findBarMarginRight = 24;
@@ -128,7 +184,10 @@ DocumentTab::DocumentTab(QWidget *parent)
 #else
     m_lineEnding = eol == QLatin1String("crlf") ? LineEnding::CRLF : LineEnding::LF;
 #endif
-    m_hasBom = Settings::instance().text(key::encoding) == QLatin1String("utf8bom");
+    const QString encoding = Settings::instance().text(key::encoding);
+    m_encoding = encoding == QLatin1String("utf8bom")  ? Encoding::Utf8Bom
+                 : encoding == QLatin1String("utf16le") ? Encoding::Utf16LE
+                                                        : Encoding::Utf8;
     const QString defaultMode = Settings::instance().text(key::defaultMode);
     m_viewMode = defaultMode == QLatin1String("source")  ? ViewMode::Source
                  : defaultMode == QLatin1String("split") ? ViewMode::SourceVisual
@@ -163,6 +222,26 @@ DocumentTab::DocumentTab(QWidget *parent)
     updatePill();
 }
 
+QString DocumentTab::encodingDisplayName(Encoding encoding)
+{
+    switch (encoding) {
+    case Encoding::Utf8Bom:
+        return tr("UTF-8 with BOM");
+    case Encoding::Utf16LE:
+        return tr("UTF-16 LE");
+    case Encoding::Utf16BE:
+        return tr("UTF-16 BE");
+    case Encoding::Legacy:
+#ifdef Q_OS_WIN
+        return tr("Windows 1252");
+#else
+        return tr("ISO 8859-1");
+#endif
+    default:
+        return tr("UTF-8");
+    }
+}
+
 bool DocumentTab::load(const QString &path)
 {
     QFile file(path);
@@ -171,30 +250,48 @@ bool DocumentTab::load(const QString &path)
         return false;
     }
     QByteArray bytes = file.readAll();
+    return applyBytes(path, bytes, detectEncoding(bytes));
+}
 
-    m_hasBom = bytes.startsWith(utf8Bom);
-    if (m_hasBom)
-        bytes.remove(0, utf8Bom.size());
-
-    QStringDecoder decoder(QStringDecoder::Utf8, QStringDecoder::Flag::Stateless);
-    QString content = decoder(bytes);
-    if (decoder.hasError()) {
-        m_error = tr("The file is not valid UTF-8.");
+bool DocumentTab::reopenWithEncoding(Encoding encoding)
+{
+    if (m_path.isEmpty() || isModified()) {
+        m_error = tr("Only a saved file without changes can be reopened.");
         return false;
     }
+    QFile file(m_path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        m_error = file.errorString();
+        return false;
+    }
+    return applyBytes(m_path, file.readAll(), encoding);
+}
+
+// Never fails on bad bytes: undecodable input becomes U+FFFD.
+bool DocumentTab::applyBytes(const QString &path, QByteArray bytes, Encoding encoding)
+{
+    const QByteArray &bom = bomFor(encoding);
+    if (bytes.startsWith(bom))
+        bytes.remove(0, bom.size());
+
+    QStringDecoder decoder(codecFor(encoding), QStringDecoder::Flag::Stateless);
+    QString content = decoder(bytes);
 
     // The first line ending decides the style used on save.
     const qsizetype lf = content.indexOf(u'\n');
     m_lineEnding = (lf > 0 && content.at(lf - 1) == u'\r') ? LineEnding::CRLF : LineEnding::LF;
     content.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
 
+    m_encoding = encoding;
     m_path = path;
+    m_languageOverridden = false;
     updateDefinition();
     m_doc->setPlainText(content);
     m_doc->setModified(false);
     m_editor->setTextCursor(QTextCursor(m_doc));
     if (m_visual)
         m_visual->setTextCursor(QTextCursor(m_doc));
+    Q_EMIT formatChanged();
     return true;
 }
 
@@ -204,14 +301,26 @@ bool DocumentTab::save(const QString &path)
     if (m_lineEnding == LineEnding::CRLF)
         content.replace(u'\n', QStringLiteral("\r\n"));
 
+    QStringEncoder encoder(codecFor(m_encoding), QStringEncoder::Flag::Stateless);
+    const QByteArray encoded = encoder(content);
+    // The Latin-1 encoder substitutes '?' without flagging an error, so
+    // legacy text is verified by decoding it again.
+    bool lossy = encoder.hasError();
+    if (!lossy && m_encoding == Encoding::Legacy)
+        lossy = QStringDecoder(codecFor(m_encoding), QStringDecoder::Flag::Stateless).decode(encoded) != content;
+    if (lossy) {
+        m_error = tr("The document contains characters that %1 cannot represent. Save it as UTF-8 instead.")
+                      .arg(encodingName());
+        return false;
+    }
+
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
         m_error = file.errorString();
         return false;
     }
-    if (m_hasBom)
-        file.write(utf8Bom);
-    file.write(content.toUtf8());
+    file.write(bomFor(m_encoding));
+    file.write(encoded);
     if (!file.commit()) {
         m_error = file.errorString();
         return false;
@@ -219,10 +328,43 @@ bool DocumentTab::save(const QString &path)
 
     const bool renamed = path != m_path;
     m_path = path;
-    if (renamed)
+    if (renamed) {
+        m_languageOverridden = false;
         updateDefinition();
+    }
     m_doc->setModified(false);
     return true;
+}
+
+void DocumentTab::setLineEnding(LineEnding lineEnding)
+{
+    if (m_lineEnding == lineEnding)
+        return;
+    m_lineEnding = lineEnding;
+    m_doc->setModified(true);
+    Q_EMIT formatChanged();
+}
+
+void DocumentTab::setEncoding(Encoding encoding)
+{
+    if (m_encoding == encoding)
+        return;
+    m_encoding = encoding;
+    m_doc->setModified(true);
+    Q_EMIT formatChanged();
+}
+
+QString DocumentTab::definitionName() const
+{
+    const auto def = m_highlighter->definition();
+    return def.isValid() ? def.name() : QString();
+}
+
+void DocumentTab::setLanguage(const QString &definitionName)
+{
+    m_languageOverridden = true;
+    m_languageOverride = definitionName;
+    updateDefinition();
 }
 
 QString DocumentTab::displayName() const
@@ -344,12 +486,15 @@ void DocumentTab::updateDefinition()
     // New documents default to Markdown, like the old app, unless set otherwise.
     auto &repository = theme::syntaxRepository();
     const bool markdownByDefault = Settings::instance().text(key::newFileLanguage) != QLatin1String("plaintext");
-    const auto def = m_path.isEmpty() ? (markdownByDefault ? repository.definitionForName(QStringLiteral("Markdown"))
+    const auto def = m_languageOverridden ? (m_languageOverride.isEmpty() ? KSyntaxHighlighting::Definition()
+                                                                          : repository.definitionForName(m_languageOverride))
+                     : m_path.isEmpty() ? (markdownByDefault ? repository.definitionForName(QStringLiteral("Markdown"))
                                                            : KSyntaxHighlighting::Definition())
                                       : repository.definitionForFileName(m_path);
     m_highlighter->setDefinition(def);
     m_editor->setCommentMarker(def.singleLineCommentMarker());
     updateViews();
+    Q_EMIT formatChanged();
 }
 
 void DocumentTab::setViewMode(ViewMode mode)

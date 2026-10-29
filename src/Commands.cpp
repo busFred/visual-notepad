@@ -87,6 +87,7 @@ QList<Command> build()
         {QStringLiteral("view.moveToNewWindow"), view, tr("Move Tab to New Window"), {k("Ctrl+K, O")}},
         {QStringLiteral("view.wordWrap"), view, tr("Word Wrap"), {k("Alt+Z")}},
         {QStringLiteral("view.statusBar"), view, tr("Status Bar"), {}},
+        {QStringLiteral("edit.changeLanguage"), view, tr("Change Language Mode…"), {k("Ctrl+K, M")}},
         {QStringLiteral("view.zoomIn"), view, tr("Zoom In"), {k("Ctrl+="), k("Ctrl++")}},
         {QStringLiteral("view.zoomOut"), view, tr("Zoom Out"), {k("Ctrl+-")}},
         {QStringLiteral("view.zoomReset"), view, tr("Reset Zoom"), {k("Ctrl+0")}},

@@ -13,6 +13,11 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QMouseEvent>
+#include <QProcess>
 #include <QDir>
 #include <QClipboard>
 #include <QDesktopServices>
@@ -34,6 +39,12 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
+
+#include <KSyntaxHighlighting/Definition>
+#include <KSyntaxHighlighting/Repository>
+
+#include <algorithm>
+#include <map>
 
 namespace vn {
 
@@ -66,7 +77,8 @@ protected:
     }
 };
 
-// Status bar column: text with a divider on its left, as in Notepad.
+// Status bar column: text with a divider on its left, as in Notepad. Cells
+// with a click handler highlight on hover.
 class StatusCell : public QLabel
 {
 public:
@@ -77,9 +89,17 @@ public:
         setContentsMargins(10, 0, 10, 0);
     }
 
+    void setClickHandler(std::function<void()> handler)
+    {
+        m_handler = std::move(handler);
+        setCursor(m_handler ? Qt::PointingHandCursor : Qt::ArrowCursor);
+    }
+
 protected:
     void paintEvent(QPaintEvent *event) override
     {
+        if (m_hover && m_handler)
+            QPainter(this).fillRect(rect(), theme::panelTitle);
         QLabel::paintEvent(event);
         if (m_divider) {
             QPainter painter(this);
@@ -87,8 +107,32 @@ protected:
         }
     }
 
+    void enterEvent(QEnterEvent *event) override
+    {
+        m_hover = true;
+        update();
+        QLabel::enterEvent(event);
+    }
+
+    void leaveEvent(QEvent *event) override
+    {
+        m_hover = false;
+        update();
+        QLabel::leaveEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        if (m_handler && event->button() == Qt::LeftButton && rect().contains(event->position().toPoint()))
+            m_handler();
+        else
+            QLabel::mouseReleaseEvent(event);
+    }
+
 private:
     bool m_divider;
+    bool m_hover = false;
+    std::function<void()> m_handler;
 };
 
 } // namespace
@@ -101,6 +145,7 @@ MainWindow::MainWindow(QWidget *parent)
 {
     setWindowTitle(productName());
     resize(1100, 720);
+    setAcceptDrops(true);
 
     m_groups->setHandleWidth(1);
     m_groups->setChildrenCollapsible(false);
@@ -108,6 +153,8 @@ MainWindow::MainWindow(QWidget *parent)
     setCentralWidget(m_groups);
     connect(m_group, &EditorGroup::currentChanged, this, &MainWindow::onCurrentTabChanged);
     connect(m_group, &EditorGroup::tabCloseRequested, this, &MainWindow::closeTab);
+    connect(m_group, &EditorGroup::tabContextMenuRequested, this, &MainWindow::showTabContextMenu);
+    connect(m_group, &EditorGroup::newTabRequested, this, &MainWindow::newFile);
 
     m_zoomPercent = Settings::instance().number(key::zoom);
     m_outlineTimer->setSingleShot(true);
@@ -262,7 +309,8 @@ void MainWindow::createActions()
     m_splitAction->setIcon(QIcon(QStringLiteral(":/vn/icons/split-editor.svg")));
     m_splitAction->setCheckable(true);
     connect(m_splitAction, &QAction::toggled, this, &MainWindow::toggleSplitEditor);
-    makeAction(QStringLiteral("view.moveToNewWindow"), [this] { moveTabToNewWindow(); });
+    makeAction(QStringLiteral("view.moveToNewWindow"), [this] { moveTabToNewWindow(currentTab()); });
+    makeAction(QStringLiteral("edit.changeLanguage"), [this] { showLanguageMenu(); });
     makeAction(QStringLiteral("view.zoomIn"), [this] { zoom(1); });
     makeAction(QStringLiteral("view.zoomOut"), [this] { zoom(-1); });
     makeAction(QStringLiteral("view.zoomReset"), [this] { zoom(0); });
@@ -310,7 +358,7 @@ void MainWindow::createMenus()
 
     QMenu *view = menuBar()->addMenu(tr("&View"));
     add(view, {"view.outline", "-", "view.modeSource", "view.modeSplit", "view.modeVisual", "-", "view.splitEditor",
-               "view.moveToNewWindow", "-", "view.wordWrap", "view.statusBar", "-", "view.zoomIn", "view.zoomOut",
+               "view.moveToNewWindow", "-", "view.wordWrap", "view.statusBar", "edit.changeLanguage", "-", "view.zoomIn", "view.zoomOut",
                "view.zoomReset", "view.fullScreen"});
 
     QMenu *help = menuBar()->addMenu(tr("&Help"));
@@ -391,6 +439,13 @@ void MainWindow::createStatusBar()
         statusBar()->addPermanentWidget(*label);
         first = false;
     }
+    const auto clickable = [](QLabel *label, std::function<void()> handler) {
+        static_cast<StatusCell *>(label)->setClickHandler(std::move(handler));
+    };
+    clickable(m_zoom, [this] { zoom(0); });
+    clickable(m_lineEnding, [this] { showLineEndingMenu(); });
+    clickable(m_encoding, [this] { showEncodingMenu(); });
+    clickable(m_language, [this] { showLanguageMenu(); });
     statusBar()->addPermanentWidget(new DotGrip(this));
 }
 
@@ -442,6 +497,15 @@ void MainWindow::addTab(DocumentTab *tab)
     connect(tab, &DocumentTab::viewModeChanged, this, [this, tab] {
         if (tab == currentTab())
             updateModeControls();
+    });
+    connect(tab, &DocumentTab::formatChanged, this, [this, tab] {
+        if (tab != currentTab())
+            return;
+        updateStatus();
+        updateModeControls();
+        updateOutlineVisibility();
+        if (tab->isMarkdown())
+            m_outlineTimer->start();
     });
     connect(tab, &DocumentTab::linkActivated, this, [this, tab](const QString &url) { openLink(tab, url); });
     connect(tab, &DocumentTab::textChanged, this, [this, tab] {
@@ -515,6 +579,184 @@ bool MainWindow::closeTab(int index)
     return true;
 }
 
+int MainWindow::tabCount() const
+{
+    return m_group->count();
+}
+
+bool MainWindow::closeTabs(int index, CloseScope scope)
+{
+    DocumentTab *anchor = m_group->tab(index);
+    if (!anchor)
+        return false;
+    QList<DocumentTab *> victims;
+    for (int i = 0; i < m_group->count(); ++i) {
+        DocumentTab *tab = m_group->tab(i);
+        const bool hit = scope == CloseScope::All || (scope == CloseScope::This && i == index)
+                         || (scope == CloseScope::Others && i != index) || (scope == CloseScope::Right && i > index)
+                         || (scope == CloseScope::Saved && !tab->isModified());
+        if (hit)
+            victims.append(tab);
+    }
+    for (DocumentTab *tab : victims) {
+        if (!closeTab(m_group->indexOf(tab)))
+            return false;
+    }
+    return true;
+}
+
+void MainWindow::showTabContextMenu(int index, const QPoint &globalPos)
+{
+    DocumentTab *tab = m_group->tab(index);
+    if (!tab)
+        return;
+    const bool hasPath = !tab->path().isEmpty();
+    QMenu menu(this);
+    const auto close = [this, tab](CloseScope scope) {
+        return [this, tab, scope] { closeTabs(m_group->indexOf(tab), scope); };
+    };
+    menu.addAction(tr("Close"), this, close(CloseScope::This));
+    menu.addAction(tr("Close Others"), this, close(CloseScope::Others))->setEnabled(m_group->count() > 1);
+    menu.addAction(tr("Close to the Right"), this, close(CloseScope::Right))
+        ->setEnabled(index < m_group->count() - 1);
+    menu.addAction(tr("Close Saved"), this, close(CloseScope::Saved));
+    menu.addAction(tr("Close All"), this, close(CloseScope::All));
+    menu.addSeparator();
+    menu.addAction(tr("Copy Path"), this, [tab] {
+        QGuiApplication::clipboard()->setText(QDir::toNativeSeparators(tab->path()));
+    })->setEnabled(hasPath);
+    menu.addAction(tr("Reveal in File Manager"), this, [this, tab] { revealInFileManager(tab->path()); })
+        ->setEnabled(hasPath);
+    menu.addSeparator();
+    menu.addAction(tr("Move to New Window"), this, [this, tab] { moveTabToNewWindow(tab); });
+    menu.exec(globalPos);
+}
+
+void MainWindow::revealInFileManager(const QString &path)
+{
+#ifdef Q_OS_WIN
+    if (QProcess::startDetached(QStringLiteral("explorer"),
+                                {QStringLiteral("/select,") + QDir::toNativeSeparators(path)}))
+        return;
+#endif
+    QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent *event)
+{
+    const auto urls = event->mimeData()->urls();
+    if (std::any_of(urls.begin(), urls.end(), [](const QUrl &url) { return url.isLocalFile(); }))
+        event->acceptProposedAction();
+}
+
+void MainWindow::dropEvent(QDropEvent *event)
+{
+    const auto urls = event->mimeData()->urls();
+    for (const QUrl &url : urls) {
+        if (url.isLocalFile())
+            openFile(url.toLocalFile());
+    }
+    event->acceptProposedAction();
+}
+
+void MainWindow::popupAboveCell(QMenu *menu, QWidget *cell)
+{
+    QPoint pos;
+    if (statusBar()->isVisible()) {
+        pos = cell->mapToGlobal(QPoint(0, 0)) - QPoint(0, menu->sizeHint().height());
+    } else {
+        // No status bar: centre the menu under the tab strip.
+        pos = m_group->mapToGlobal(QPoint((m_group->width() - menu->sizeHint().width()) / 2, 32));
+    }
+    menu->exec(pos);
+}
+
+void MainWindow::showLineEndingMenu()
+{
+    DocumentTab *tab = currentTab();
+    if (!tab)
+        return;
+    QMenu menu(this);
+    const auto add = [&](const QString &text, DocumentTab::LineEnding ending) {
+        QAction *a = menu.addAction(text, this, [tab, ending] { tab->setLineEnding(ending); });
+        a->setCheckable(true);
+        a->setChecked(tab->lineEnding() == ending);
+    };
+    add(tr("Unix (LF)"), DocumentTab::LineEnding::LF);
+    add(tr("Windows (CRLF)"), DocumentTab::LineEnding::CRLF);
+    popupAboveCell(&menu, m_lineEnding);
+}
+
+bool MainWindow::reopenWithEncoding(DocumentTab *tab, DocumentTab::Encoding encoding)
+{
+    if (tab->isModified()) {
+        const auto answer = QMessageBox::warning(
+            this, productName(), tr("%1 has unsaved changes. Discard them and reopen with another encoding?")
+                                     .arg(tab->displayName()),
+            QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (answer != QMessageBox::Discard)
+            return false;
+        tab->document()->setModified(false);
+    }
+    if (!tab->reopenWithEncoding(encoding)) {
+        QMessageBox::warning(this, tr("Reopen with Encoding"), tab->errorString());
+        return false;
+    }
+    return true;
+}
+
+void MainWindow::showEncodingMenu()
+{
+    DocumentTab *tab = currentTab();
+    if (!tab)
+        return;
+    using E = DocumentTab::Encoding;
+    const E all[] = {E::Utf8, E::Utf8Bom, E::Utf16LE, E::Utf16BE, E::Legacy};
+    QMenu menu(this);
+    QMenu *reopen = menu.addMenu(tr("Reopen with Encoding"));
+    reopen->setEnabled(!tab->path().isEmpty());
+    QMenu *save = menu.addMenu(tr("Save with Encoding"));
+    for (E encoding : all) {
+        const QString name = DocumentTab::encodingDisplayName(encoding);
+        reopen->addAction(name, this, [this, tab, encoding] { reopenWithEncoding(tab, encoding); });
+        QAction *a = save->addAction(name, this, [tab, encoding] { tab->setEncoding(encoding); });
+        a->setCheckable(true);
+        a->setChecked(tab->encoding() == encoding);
+    }
+    popupAboveCell(&menu, m_encoding);
+}
+
+void MainWindow::showLanguageMenu()
+{
+    DocumentTab *tab = currentTab();
+    if (!tab)
+        return;
+    QMenu menu(this);
+    const QString current = tab->definitionName();
+    const auto add = [&](QMenu *parent, const QString &text, const QString &name) {
+        QAction *a = parent->addAction(text, this, [tab, name] { tab->setLanguage(name); });
+        a->setCheckable(true);
+        a->setChecked(current == name);
+    };
+    add(&menu, tr("Plain Text"), QString());
+    menu.addSeparator();
+
+    std::map<QString, QList<KSyntaxHighlighting::Definition>> sections;
+    for (const auto &def : theme::syntaxRepository().definitions()) {
+        if (!def.isHidden())
+            sections[def.translatedSection()].append(def);
+    }
+    for (auto &[section, defs] : sections) {
+        std::sort(defs.begin(), defs.end(), [](const auto &a, const auto &b) {
+            return a.translatedName().localeAwareCompare(b.translatedName()) < 0;
+        });
+        QMenu *submenu = menu.addMenu(section.isEmpty() ? tr("Other") : section);
+        for (const auto &def : defs)
+            add(submenu, def.translatedName(), def.name());
+    }
+    popupAboveCell(&menu, m_language);
+}
+
 void MainWindow::closeEvent(QCloseEvent *event)
 {
     for (int i = 0; i < m_group->count(); ++i) {
@@ -526,13 +768,12 @@ void MainWindow::closeEvent(QCloseEvent *event)
     event->accept();
 }
 
-void MainWindow::moveTabToNewWindow()
+void MainWindow::moveTabToNewWindow(DocumentTab *tab)
 {
-    DocumentTab *tab = currentTab();
     if (!tab)
         return;
     tab->disconnect(this);
-    m_group->removeTab(m_group->currentIndex());
+    m_group->removeTab(m_group->indexOf(tab));
 
     auto *window = new MainWindow;
     window->setAttribute(Qt::WA_DeleteOnClose);
@@ -661,7 +902,7 @@ void MainWindow::updateStatus()
     m_zoom->setText(QStringLiteral("%1%").arg(m_zoomPercent));
     m_lineEnding->setText(tab->lineEnding() == DocumentTab::LineEnding::CRLF ? tr("Windows (CRLF)")
                                                                              : tr("Unix (LF)"));
-    m_encoding->setText(QStringLiteral("UTF-8"));
+    m_encoding->setText(tab->encodingName());
     m_language->setText(tab->languageName());
 }
 

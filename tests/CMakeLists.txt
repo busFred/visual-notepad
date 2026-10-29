@@ -32,3 +32,8 @@ qt_add_executable(test_math test_math.cpp)
 target_link_libraries(test_math PRIVATE vn_app Qt6::Test)
 add_test(NAME math COMMAND test_math)
 set_tests_properties(math PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+qt_add_executable(test_files test_files.cpp)
+target_link_libraries(test_files PRIVATE vn_app Qt6::Test)
+add_test(NAME files COMMAND test_files)
+set_tests_properties(files PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

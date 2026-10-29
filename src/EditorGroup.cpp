@@ -5,6 +5,7 @@
 
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QStackedWidget>
 #include <QTabBar>
@@ -82,6 +83,14 @@ EditorGroup::EditorGroup(QWidget *parent)
         Q_EMIT currentChanged(index);
     });
     connect(m_tabBar, &QTabBar::tabCloseRequested, this, &EditorGroup::tabCloseRequested);
+    m_tabBar->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_tabBar, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
+        const int index = m_tabBar->tabAt(pos);
+        if (index >= 0)
+            Q_EMIT tabContextMenuRequested(index, m_tabBar->mapToGlobal(pos));
+    });
+    m_tabBar->installEventFilter(this);
+    m_strip->installEventFilter(this);
     connect(m_tabBar, &QTabBar::tabMoved, this, [this](int from, int to) {
         QWidget *widget = m_tabs->widget(from);
         m_tabs->removeWidget(widget);
@@ -156,6 +165,27 @@ void EditorGroup::setTabToolTip(int index, const QString &toolTip)
 void EditorGroup::addAction(QWidget *widget)
 {
     m_actions->addWidget(widget);
+}
+
+bool EditorGroup::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_tabBar || watched == m_strip) {
+        if (event->type() == QEvent::MouseButtonRelease || event->type() == QEvent::MouseButtonDblClick) {
+            auto *mouse = static_cast<QMouseEvent *>(event);
+            // The strip itself only receives clicks outside the tab bar.
+            const int index = watched == m_tabBar ? m_tabBar->tabAt(mouse->position().toPoint()) : -1;
+            if (event->type() == QEvent::MouseButtonRelease && watched == m_tabBar && mouse->button() == Qt::MiddleButton
+                && index >= 0) {
+                Q_EMIT tabCloseRequested(index);
+                return true;
+            }
+            if (event->type() == QEvent::MouseButtonDblClick && mouse->button() == Qt::LeftButton && index < 0) {
+                Q_EMIT newTabRequested();
+                return true;
+            }
+        }
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void EditorGroup::updateEmpty()

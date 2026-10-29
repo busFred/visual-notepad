@@ -1,6 +1,7 @@
 // One open file: the editor plus its floating lock/pencil pill.
 #pragma once
 
+#include <QByteArray>
 #include <QString>
 #include <QWidget>
 
@@ -25,6 +26,10 @@ class DocumentTab : public QWidget
 
 public:
     enum class LineEnding { LF, CRLF };
+    // Legacy is the platform's single-byte codec: Windows 1252 on Windows,
+    // ISO 8859-1 elsewhere. The UTF-16 variants are always written with a BOM.
+    enum class Encoding { Utf8, Utf8Bom, Utf16LE, Utf16BE, Legacy };
+    static QString encodingDisplayName(Encoding encoding);
     // How a Markdown document is shown.
     enum class ViewMode { Source, SourceVisual, Visual };
 
@@ -41,6 +46,19 @@ public:
     bool isMarkdown() const;
     QString languageName() const;
     LineEnding lineEnding() const { return m_lineEnding; }
+    // Changing the line ending or encoding marks the document modified so the
+    // next save rewrites the file.
+    void setLineEnding(LineEnding lineEnding);
+    Encoding encoding() const { return m_encoding; }
+    QString encodingName() const { return encodingDisplayName(m_encoding); }
+    void setEncoding(Encoding encoding);
+    // Re-reads the file from disk with the given encoding. Fails (and sets
+    // errorString()) for untitled or modified documents.
+    bool reopenWithEncoding(Encoding encoding);
+    // Syntax definition name as KSyntaxHighlighting knows it; empty for plain
+    // text. An override lasts until the file is saved under a new name.
+    QString definitionName() const;
+    void setLanguage(const QString &definitionName);
     QString text() const;
 
     ViewMode viewMode() const { return m_viewMode; }
@@ -64,6 +82,8 @@ Q_SIGNALS:
     void modificationChanged(bool modified);
     void cursorPositionChanged();
     void textChanged();
+    // Encoding, line ending or language changed.
+    void formatChanged();
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -71,6 +91,7 @@ protected:
 
 private:
     void updateDefinition();
+    bool applyBytes(const QString &path, QByteArray bytes, Encoding encoding);
     void updatePill();
     void placeOverlays();
     void applySettings();
@@ -97,7 +118,9 @@ private:
     QString m_error;
     LineEnding m_lineEnding = LineEnding::LF;
     ViewMode m_viewMode = ViewMode::Source;
-    bool m_hasBom = false;
+    Encoding m_encoding = Encoding::Utf8;
+    bool m_languageOverridden = false;
+    QString m_languageOverride;
 };
 
 } // namespace vn

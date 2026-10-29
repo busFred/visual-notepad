@@ -34,8 +34,16 @@ public:
     // Takes ownership of a tab from another window.
     void adoptTab(DocumentTab *tab);
 
+    // Which tabs a close request affects, relative to the tab at `index`.
+    enum class CloseScope { This, Others, Right, Saved, All };
+    // Stops at the first tab whose unsaved-changes prompt is cancelled.
+    bool closeTabs(int index, CloseScope scope);
+    int tabCount() const;
+
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
 
 private:
     QAction *makeAction(const QString &id);
@@ -54,7 +62,15 @@ private:
     bool saveAs(DocumentTab *tab);
     bool closeTab(int index);
     bool confirmDiscard(DocumentTab *tab);
-    void moveTabToNewWindow();
+    void moveTabToNewWindow(DocumentTab *tab);
+    void showTabContextMenu(int index, const QPoint &globalPos);
+    void revealInFileManager(const QString &path);
+    // Pops the menu up just above a status bar cell.
+    void popupAboveCell(QMenu *menu, QWidget *cell);
+    void showLineEndingMenu();
+    void showEncodingMenu();
+    void showLanguageMenu();
+    bool reopenWithEncoding(DocumentTab *tab, DocumentTab::Encoding encoding);
     void toggleSplitEditor(bool on);
     void setViewMode(DocumentTab::ViewMode mode);
     void zoom(int steps);

@@ -39,6 +39,12 @@ public:
 Q_SIGNALS:
     void currentChanged(int index);
     void tabCloseRequested(int index);
+    void tabContextMenuRequested(int index, const QPoint &globalPos);
+    // Double-click on the empty part of the strip.
+    void newTabRequested();
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void updateEmpty();
