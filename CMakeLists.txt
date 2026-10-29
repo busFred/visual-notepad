@@ -51,6 +51,7 @@ add_library(vn_app STATIC
     src/TextFile.cpp
     src/TextFile.h
     src/Theme.cpp
+    src/DesktopSettings.cpp
     src/Theme.h
     src/WelcomeView.cpp
     src/WelcomeView.h

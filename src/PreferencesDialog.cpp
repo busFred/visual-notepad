@@ -24,9 +24,11 @@
 #include <QPushButton>
 #include <QScreen>
 #include <QScrollArea>
+#include <QSet>
 #include <QSignalBlocker>
 #include <QStackedWidget>
 #include <QStyle>
+#include <QTextDocument>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -44,6 +46,35 @@ struct PreferencesDialog::ComboItem
 namespace {
 
 QPointer<PreferencesDialog> s_instance;
+
+// Gives every row label on `page` an Alt+letter that moves focus to its
+// control, unique on the page (only the visible page's shortcuts are live).
+// Prefers the first letter of a word, then any letter.
+void assignMnemonics(QWidget *page, QSet<QChar> used)
+{
+    for (QLabel *label : page->findChildren<QLabel *>()) {
+        const QString text = label->text();
+        if (!label->buddy() || text.contains(QLatin1Char('&')) || Qt::mightBeRichText(text))
+            continue;
+        const auto usable = [&](int i) {
+            const QChar c = text[i].toLower();
+            return c.isLetterOrNumber() && c.unicode() < 128 && !used.contains(c);
+        };
+        int at = -1;
+        for (int i = 0; i < text.size() && at < 0; ++i) {
+            if ((i == 0 || text[i - 1].isSpace()) && usable(i))
+                at = i;
+        }
+        for (int i = 0; i < text.size() && at < 0; ++i) {
+            if (usable(i))
+                at = i;
+        }
+        if (at < 0)
+            continue;
+        used.insert(text[at].toLower());
+        label->setText(QString(text).insert(at, QLatin1Char('&')));
+    }
+}
 
 constexpr int rowIndent = 28;
 
@@ -330,6 +361,8 @@ PreferencesDialog::PreferencesDialog(QWidget *parent)
     buildSavePage();
     buildViewPage();
     buildShortcutsPage();
+    for (int i = 0; i < m_stack->count(); ++i)
+        assignMnemonics(m_stack->widget(i), {});
 
     auto *buttons = new QHBoxLayout;
     auto *help = textButton(tr("Help"), QStringLiteral("help"), this);
@@ -958,6 +991,15 @@ void PreferencesDialog::refreshShortcuts()
                 others.append(QStringLiteral("%1 (%2)").arg(other->text, conflict.theirs.toString(QKeySequence::NativeText)));
             (conflict.mine == conflict.theirs ? identical : prefix) = true;
         }
+        const bool commandConflict = !others.isEmpty();
+        bool menu = false;
+        for (const QKeySequence &sequence : keys) {
+            const QString title = menuForMnemonic(sequence);
+            if (!title.isEmpty()) {
+                others.append(tr("the %1 menu (%2)").arg(title, sequence.toString(QKeySequence::NativeText)));
+                menu = true;
+            }
+        }
         others.removeDuplicates();
         const bool modified = settings.hasShortcutOverride(row.id);
         row.cell->setShortcut(names.join(QStringLiteral(", ")), modified);
@@ -970,11 +1012,13 @@ void PreferencesDialog::refreshShortcuts()
             consequences.append(tr("Neither shortcut will work while the conflict remains."));
         if (prefix)
             consequences.append(tr("The two-key shortcut can't be completed while the conflict remains."));
+        if (menu)
+            consequences.append(tr("The command won't run; the key opens the menu instead."));
         row.warning->setText(others.isEmpty() ? QString()
                                               : tr("Conflicts with: %1.").arg(others.join(QStringLiteral(", "))) + u' '
                                                     + consequences.join(u' '));
         row.warning->setVisible(!others.isEmpty());
-        row.resolve->setVisible(!others.isEmpty());
+        row.resolve->setVisible(commandConflict); // A menu can't be unbound.
     }
 }
 

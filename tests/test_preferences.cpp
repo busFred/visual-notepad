@@ -459,8 +459,9 @@ void TestPreferences::codeFontRow()
 {
     bool labelled = false;
     for (const QLabel *label : prefsWindow()->findChildren<QLabel *>()) {
-        labelled |= label->text() == QLatin1String("Code font");
-        QVERIFY(label->text() != QLatin1String("Font"));
+        const QString text = QString(label->text()).remove(QLatin1Char('&')); // Mnemonics
+        labelled |= text == QLatin1String("Code font");
+        QVERIFY(text != QLatin1String("Font"));
     }
     QVERIFY(labelled);
     QVERIFY(find<QLineEdit>(QStringLiteral("font")));

@@ -13,8 +13,9 @@ struct Command
 {
     QString id;       // e.g. "edit.find"
     QString category; // Menu name: File, Edit, Selection, View, Help
-    QString text;     // Menu text, translated
+    QString text;     // Title, translated, without the mnemonic
     QList<QKeySequence> defaults;
+    QString menuText; // Title with its mnemonic (&) for the menu item
 };
 
 const QList<Command> &commands();
@@ -35,5 +36,12 @@ struct ShortcutConflict
 };
 // Every clash between the effective shortcuts of id and those of other commands.
 QList<ShortcutConflict> shortcutConflicts(const QString &id);
+
+// The menu bar's titles with their mnemonics ("&File", "&Edit", …), in order.
+QStringList menuTitles();
+// The menu (title without mnemonic) whose Alt+letter is `sequence`, or empty.
+// Qt alternates an identical shortcut between the menu bar and the action and
+// never runs an ambiguous action, so such a command never runs.
+QString menuForMnemonic(const QKeySequence &sequence);
 
 } // namespace vn

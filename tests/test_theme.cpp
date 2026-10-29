@@ -1,4 +1,5 @@
 #include "CustomizeColorsDialog.h"
+#include "DesktopSettings.h"
 #include "PreferencesDialog.h"
 #include "Settings.h"
 #include "Theme.h"
@@ -7,6 +8,8 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QLineEdit>
+#include <QMainWindow>
+#include <QMenuBar>
 #include <QDialogButtonBox>
 #include <QFontInfo>
 #include <QFontMetricsF>
@@ -35,12 +38,14 @@ private Q_SLOTS:
     void classicUsesWindowsClassicColors();
     void legacySettingsMigrateToStandard();
     void dialogCancelWritesNothing();
+    void mnemonicsShowWhileAltOrMenuKeyboard();
     void dialogApplyWritesOverride();
     void dialogResetAndDefaults();
     void dialogHitTest();
     void dialogPickersFollowItem();
     void editorColorReachesFieldsAndLists();
     void uiFontIsSegoeOrBundledSelawik();
+    void parsesPangoFontDescriptions();
     void editorFontIsConsolasOrBundledInconsolata();
 
 private:
@@ -275,6 +280,36 @@ void TestTheme::uiFontIsSegoeOrBundledSelawik()
     QCOMPARE(QFontInfo(semibold).family(), family);
 }
 
+void TestTheme::parsesPangoFontDescriptions()
+{
+    using desktop::parseFontDescription;
+    auto d = parseFontDescription(QStringLiteral("Segoe UI 10"));
+    QCOMPARE(d.families, QStringList{QStringLiteral("Segoe UI")});
+    QCOMPARE(d.size, 10.0);
+    QVERIFY(!d.pixels);
+    QCOMPARE(d.weight, QFont::Normal);
+
+    d = parseFontDescription(QStringLiteral("Noto Sans, Sans Semi-Bold Italic 10.5"));
+    QCOMPARE(d.families, (QStringList{QStringLiteral("Noto Sans"), QStringLiteral("Sans")}));
+    QCOMPARE(d.size, 10.5);
+    QCOMPARE(d.weight, QFont::DemiBold);
+    QVERIFY(d.italic);
+
+    // A trailing comma ends the family list, so a style-like name stays.
+    d = parseFontDescription(QStringLiteral("Black, 12"));
+    QCOMPARE(d.families, QStringList{QStringLiteral("Black")});
+    QCOMPARE(d.weight, QFont::Normal);
+
+    d = parseFontDescription(QStringLiteral("Ubuntu Condensed 13px @wght=500 #tnum"));
+    QCOMPARE(d.families, QStringList{QStringLiteral("Ubuntu")});
+    QCOMPARE(d.size, 13.0);
+    QVERIFY(d.pixels);
+
+    d = parseFontDescription(QStringLiteral("Cantarell"));
+    QCOMPARE(d.families, QStringList{QStringLiteral("Cantarell")});
+    QCOMPARE(d.size, 0.0);
+}
+
 // Without Consolas installed, the bundled Inconsolata SemiExpanded must be
 // used, at Consolas's character width, without stretching fallback glyphs.
 void TestTheme::editorFontIsConsolasOrBundledInconsolata()
@@ -295,6 +330,42 @@ void TestTheme::editorFontIsConsolasOrBundledInconsolata()
     font.setBold(false);
     const QString cjk = QStringLiteral("中文");
     QCOMPARE(QFontMetricsF(font).horizontalAdvance(cjk), QFontMetricsF(plain).horizontalAdvance(cjk));
+}
+
+void TestTheme::mnemonicsShowWhileAltOrMenuKeyboard()
+{
+    const auto shown = [] { return qApp->style()->styleHint(QStyle::SH_UnderlineShortcut) != 0; };
+    QMainWindow window;
+    window.menuBar()->addMenu(QStringLiteral("&File"))->addAction(QStringLiteral("&Save"));
+    auto *button = new QPushButton(QStringLiteral("&Save"));
+    window.setCentralWidget(button);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    window.activateWindow();
+    button->setFocus();
+    QVERIFY(!shown());
+
+    // Held for a combination: shown, then gone once Alt is released.
+    QTest::keyPress(button, Qt::Key_Alt, Qt::AltModifier);
+    QVERIFY(shown());
+    QTest::keyClick(button, Qt::Key_Up, Qt::AltModifier);
+    QTest::keyRelease(button, Qt::Key_Alt);
+    QTRY_VERIFY(!shown());
+
+    // Tapped: the menu bar takes the keyboard and the underlines stay until
+    // Escape leaves it.
+    QTest::keyClick(button, Qt::Key_Alt);
+    QTRY_VERIFY(window.menuBar()->activeAction());
+    QVERIFY(shown());
+    QTest::keyClick(window.menuBar(), Qt::Key_Escape);
+    QTRY_VERIFY(!shown());
+
+    // A click hides them.
+    QTest::keyPress(button, Qt::Key_Alt, Qt::AltModifier);
+    QVERIFY(shown());
+    QTest::mouseClick(button, Qt::LeftButton, Qt::AltModifier);
+    QVERIFY(!shown());
+    QTest::keyRelease(button, Qt::Key_Alt);
 }
 
 QTEST_MAIN(TestTheme)

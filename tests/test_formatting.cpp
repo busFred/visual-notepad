@@ -26,7 +26,7 @@ QAction *actionOf(MainWindow &window, const QString &id)
 {
     const Command *cmd = command(id);
     for (QAction *a : window.actions()) {
-        if (a->text() == cmd->text)
+        if (a->text() == cmd->menuText)
             return a;
     }
     return nullptr;

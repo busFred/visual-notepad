@@ -35,6 +35,7 @@ private Q_SLOTS:
     void fileDropOnEmptyWindowOpensIt();
     void fileDropOnTextTabOpensIt();
     void vscodeEditorShortcuts();
+    void menuMnemonics();
 
 private:
     QString write(const QString &name, const QByteArray &content);
@@ -211,7 +212,7 @@ void TestMainWindow::vscodeEditorShortcuts()
     editor->setFocus();
     QVERIFY(QTest::qWaitFor([&] { return editor->hasFocus(); }));
     const auto actionFor = [&window](const QString &id) -> QAction * {
-        const QString text = vn::command(id)->text;
+        const QString text = vn::command(id)->menuText;
         for (QAction *action : window.actions()) {
             if (action->text() == text)
                 return action;
@@ -248,6 +249,36 @@ void TestMainWindow::vscodeEditorShortcuts()
     QTest::keyClick(editor, Qt::Key_K, Qt::ControlModifier);
     QTest::keyClick(editor, Qt::Key_X, Qt::ControlModifier);
     QVERIFY(editor->document()->toPlainText().startsWith(QStringLiteral("alpha\nbeta")));
+}
+
+void TestMainWindow::menuMnemonics()
+{
+    vn::MainWindow window;
+    QStringList barKeys;
+    for (QAction *menuAction : window.menuBar()->actions()) {
+        QMenu *menu = menuAction->menu();
+        QVERIFY(menu);
+        barKeys << QKeySequence::mnemonic(menuAction->text()).toString();
+        // A repeated letter only selects in QMenu; it must be unique to trigger.
+        QStringList keys;
+        for (QAction *item : menu->actions()) {
+            if (item->isSeparator() || item->text() == QLatin1String("Reset Zoom")) // No free letter
+                continue;
+            const QKeySequence key = QKeySequence::mnemonic(item->text());
+            QVERIFY2(!key.isEmpty(), qPrintable(item->text()));
+            QVERIFY2(!keys.contains(key.toString()), qPrintable(item->text()));
+            keys << key.toString();
+        }
+    }
+    barKeys.removeDuplicates();
+    QCOMPARE(barKeys.size(), window.menuBar()->actions().size());
+    for (const vn::Command &command : vn::commands())
+        QVERIFY2(!command.text.contains(QLatin1Char('&')), qPrintable(command.text));
+    QCOMPARE(vn::command(QStringLiteral("file.saveAs"))->text, QStringLiteral("Save As…"));
+    QCOMPARE(vn::command(QStringLiteral("file.saveAs"))->menuText, QStringLiteral("Save &As…"));
+    QCOMPARE(vn::menuForMnemonic(QKeySequence(QStringLiteral("Alt+O"))), QStringLiteral("Format"));
+    QVERIFY(vn::menuForMnemonic(QKeySequence(QStringLiteral("Alt+C"))).isEmpty());
+    QVERIFY(vn::menuForMnemonic(QKeySequence(QStringLiteral("Shift+Alt+F"))).isEmpty());
 }
 
 QTEST_MAIN(TestMainWindow)

@@ -1,5 +1,6 @@
 #include "Theme.h"
 
+#include "DesktopSettings.h"
 #include "Settings.h"
 
 #include <KSyntaxHighlighting/Repository>
@@ -10,10 +11,14 @@
 #include <QDialogButtonBox>
 #include <QFontDatabase>
 #include <QIcon>
+#include <QKeyEvent>
+#include <QMenu>
+#include <QMenuBar>
 #include <QPainter>
 #include <QPalette>
 #include <QProxyStyle>
 #include <QStyleFactory>
+#include <QTimer>
 #include <QWidget>
 
 #include <algorithm>
@@ -110,7 +115,9 @@ void onSettingChanged(const QString &changedKey)
         apply(*s_app);
 }
 
-// Fusion, minus the always-on mnemonic underlines (Alt+letter still works).
+// Fusion, with mnemonic underlines only while they're useful, as on Windows
+// and in Firefox: while Alt is held, and while the menu bar or a menu is used
+// from the keyboard (tapping Alt selects the menu bar).
 class AppStyle : public QProxyStyle
 {
 public:
@@ -119,11 +126,51 @@ public:
     {
     }
 
+    void polish(QApplication *app) override
+    {
+        QProxyStyle::polish(app);
+        app->installEventFilter(this);
+    }
+
+    void unpolish(QApplication *app) override
+    {
+        app->removeEventFilter(this);
+        QProxyStyle::unpolish(app);
+    }
+
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        switch (event->type()) {
+        case QEvent::KeyPress:
+            if (static_cast<QKeyEvent *>(event)->key() == Qt::Key_Alt)
+                setMnemonicsShown(true);
+            break;
+        case QEvent::KeyRelease:
+            // After QMenuBar has seen the release (a tap selects the bar).
+            if (m_mnemonicsShown)
+                QTimer::singleShot(0, this, [this] { setMnemonicsShown(keyboardMenuInUse()); });
+            break;
+        case QEvent::Hide:
+            if (m_mnemonicsShown && qobject_cast<QMenu *>(watched))
+                QTimer::singleShot(0, this, [this] { setMnemonicsShown(keyboardMenuInUse()); });
+            break;
+        case QEvent::MouseButtonPress:
+        case QEvent::ApplicationDeactivate:
+            setMnemonicsShown(false);
+            break;
+        default:
+            break;
+        }
+        return QProxyStyle::eventFilter(watched, event);
+    }
+
     int styleHint(StyleHint hint, const QStyleOption *option, const QWidget *widget,
                   QStyleHintReturn *returnData) const override
     {
-        // No icons on dialog buttons either, as on Windows.
-        if (hint == SH_UnderlineShortcut || hint == SH_DialogButtonBox_ButtonsHaveIcons)
+        if (hint == SH_UnderlineShortcut)
+            return m_mnemonicsShown;
+        // No icons on dialog buttons, as on Windows.
+        if (hint == SH_DialogButtonBox_ButtonsHaveIcons)
             return 0;
         // Windows button order everywhere: Save, Don't Save, Cancel; OK, Cancel.
         if (hint == SH_DialogButtonLayout)
@@ -160,6 +207,36 @@ public:
             return QIcon(QStringLiteral(":/vn/icons/dialog-%1.svg").arg(QLatin1String(name)));
         return QProxyStyle::standardIcon(icon, option, widget);
     }
+
+private:
+    // Alt still held, a menu open, or the menu bar selected from the keyboard.
+    static bool keyboardMenuInUse()
+    {
+        if (QGuiApplication::queryKeyboardModifiers() & Qt::AltModifier)
+            return true;
+        if (qobject_cast<QMenu *>(QApplication::activePopupWidget()))
+            return true;
+        if (QWidget *window = QApplication::activeWindow()) {
+            for (const QMenuBar *bar : window->findChildren<QMenuBar *>()) {
+                if (bar->activeAction())
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    void setMnemonicsShown(bool shown)
+    {
+        if (shown == m_mnemonicsShown)
+            return;
+        m_mnemonicsShown = shown;
+        for (QWidget *widget : QApplication::allWidgets()) {
+            if (widget->isVisible())
+                widget->update();
+        }
+    }
+
+    bool m_mnemonicsShown = false;
 };
 
 // @name placeholders are replaced with theme colours in apply().
@@ -380,20 +457,29 @@ UpdateBlocker::~UpdateBlocker()
     }
 }
 
-// The UI is laid out for Segoe UI, which may not be redistributed. Where it is
-// not installed, use the bundled Selawik, Microsoft's open-source stand-in
-// with nearly the same widths. The system font stays as the fallback for
-// scripts Selawik lacks, such as CJK.
+// The OS's UI font and size: on GTK desktops read from GSettings (our Qt
+// can't), elsewhere what Qt's platform theme reports. Behind it, for a missing
+// font and for scripts it lacks, Segoe UI, or where that is not installed (it
+// may not be redistributed) the bundled Selawik, Microsoft's open-source
+// stand-in with nearly the same widths; fontconfig still falls back further,
+// e.g. for CJK.
 static void setUiFont(QApplication &app)
 {
-    QString family = QStringLiteral("Segoe UI");
-    if (!QFontDatabase::hasFamily(family)) {
+    QString fallback = QStringLiteral("Segoe UI");
+    if (!QFontDatabase::hasFamily(fallback)) {
         for (const char *style : {"Regular", "Semibold", "Bold"})
             QFontDatabase::addApplicationFont(QStringLiteral(":/vn/fonts/Selawik-%1.ttf").arg(QLatin1StringView(style)));
-        family = QStringLiteral("Selawik");
+        fallback = QStringLiteral("Selawik");
     }
-    QFont font = QApplication::font();
-    font.setFamilies({family, font.family()});
+    QFont font = desktop::uiFont().value_or(QApplication::font());
+    QStringList families = font.families();
+    if (families.isEmpty())
+        families.append(font.family());
+    // Qt's generic Unix theme names this placeholder when it has no desktop font.
+    families.removeAll(QStringLiteral("Sans Serif"));
+    families.append(fallback);
+    families.removeDuplicates();
+    font.setFamilies(families);
     app.setFont(font);
 }
 

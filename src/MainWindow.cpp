@@ -200,7 +200,7 @@ QAction *MainWindow::makeAction(const QString &id)
 {
     const Command *cmd = command(id);
     Q_ASSERT(cmd);
-    auto *action = new QAction(cmd->text, this);
+    auto *action = new QAction(cmd->menuText, this);
     action->setShortcuts(shortcutsFor(id));
     action->setShortcutContext(Qt::WindowShortcut);
     action->setIconVisibleInMenu(false);
@@ -411,21 +411,22 @@ void MainWindow::createMenus()
         }
     };
 
-    QMenu *file = menuBar()->addMenu(tr("&File"));
+    const QStringList menus = menuTitles();
+    QMenu *file = menuBar()->addMenu(menus.at(0));
     add(file, {"file.new", "file.newWindow", "file.open"});
-    m_recentMenu = file->addMenu(tr("Open Recent"));
+    m_recentMenu = file->addMenu(tr("Open &Recent"));
     add(file, {"-", "file.save", "file.saveAs", "-", "file.closeTab", "file.closeWindow", "-", "file.quit"});
     connect(m_recentMenu, &QMenu::aboutToShow, this, &MainWindow::fillRecentMenu);
     m_recentMenu->menuAction()->setVisible(Settings::instance().flag(key::rememberRecent));
 
-    QMenu *edit = menuBar()->addMenu(tr("&Edit"));
+    QMenu *edit = menuBar()->addMenu(menus.at(1));
     add(edit, {"edit.undo", "edit.redo", "-", "edit.cut", "edit.copy", "edit.paste", "-", "edit.find", "edit.replace",
                "edit.findNext", "edit.findPrevious", "edit.findNextSelection", "edit.findPreviousSelection", "edit.goToLine",
                "-", "edit.toggleComment", "edit.indentLines", "edit.outdentLines", "edit.trimTrailingWhitespace",
                "edit.format", "-",
                "edit.preferences"});
 
-    QMenu *selection = menuBar()->addMenu(tr("&Selection"));
+    QMenu *selection = menuBar()->addMenu(menus.at(2));
     add(selection, {"selection.selectAll", "selection.expand", "selection.shrink", "-", "selection.addCursorAbove",
                     "selection.addCursorBelow", "selection.addCursorsToLineEnds", "selection.addNextOccurrence",
                     "selection.moveLastToNextMatch", "selection.selectAllOccurrences", "-", "selection.expandLine",
@@ -433,20 +434,20 @@ void MainWindow::createMenus()
                     "selection.copyLineUp", "selection.copyLineDown", "selection.moveLineUp",
                     "selection.moveLineDown", "selection.deleteLine"});
 
-    QMenu *format = menuBar()->addMenu(tr("F&ormat"));
+    QMenu *format = menuBar()->addMenu(menus.at(3));
     add(format, {"format.bold", "format.italic", "format.underline", "format.strikethrough", "format.inlineCode", "-",
                  "format.heading1", "format.heading2", "format.heading3", "format.heading4", "format.heading5",
                  "format.heading6", "format.headingUp", "format.headingDown", "-", "format.quote",
                  "format.orderedList", "format.bulletList", "format.taskList", "-", "format.link",
                  "format.codeBlock"});
 
-    QMenu *view = menuBar()->addMenu(tr("&View"));
+    QMenu *view = menuBar()->addMenu(menus.at(4));
     add(view, {"view.outline", "-", "view.modeSource", "view.modeSplit", "view.modeVisual", "-", "view.splitEditor",
                "view.splitEditorUp", "view.splitEditorDown", "view.splitEditorLeft", "view.splitEditorRight",
                "view.focusNextGroup", "view.focusPreviousGroup", "view.moveToNewWindow", "view.copyToNewWindow", "-", "view.wordWrap", "view.statusBar", "edit.changeLanguage", "-", "view.zoomIn", "view.zoomOut",
                "view.zoomReset", "view.fullScreen"});
 
-    QMenu *help = menuBar()->addMenu(tr("&Help"));
+    QMenu *help = menuBar()->addMenu(menus.at(5));
     add(help, {"help.shortcuts", "-", "help.about"});
 }
 
@@ -1109,8 +1110,8 @@ MainWindow::SaveConflictChoice MainWindow::askSaveConflict(DocumentTab *tab)
                     tr("%1 has been changed on disk since you opened or last saved it.").arg(tab->displayName()),
                     QMessageBox::NoButton, this);
     box.setInformativeText(tr("Overwrite it with your version, or revert to the version on disk and lose your changes?"));
-    QPushButton *overwrite = box.addButton(tr("Overwrite"), QMessageBox::AcceptRole);
-    QPushButton *revert = box.addButton(tr("Revert"), QMessageBox::DestructiveRole);
+    QPushButton *overwrite = box.addButton(tr("&Overwrite"), QMessageBox::AcceptRole);
+    QPushButton *revert = box.addButton(tr("&Revert"), QMessageBox::DestructiveRole);
     box.addButton(QMessageBox::Cancel);
     box.setDefaultButton(QMessageBox::Cancel);
     box.exec();
@@ -1185,7 +1186,10 @@ bool MainWindow::confirmDiscard(DocumentTab *tab)
     QMessageBox box(QMessageBox::NoIcon, productName(),
                     tr("Do you want to save changes to %1?").arg(tab->displayName()),
                     QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, this);
-    box.button(QMessageBox::Discard)->setText(tr("Don't Save"));
+    // Alt+S and Alt+N, as in VS Code (abstractTaskService.ts "&&Save",
+    // "Do&&n't Save"); Esc cancels.
+    box.button(QMessageBox::Save)->setText(tr("&Save"));
+    box.button(QMessageBox::Discard)->setText(tr("Do&n't Save"));
     if (auto *label = box.findChild<QLabel *>(QStringLiteral("qt_msgbox_label"))) {
         // A larger question on the left with room around it, buttons below.
         QFont font = label->font();
@@ -1429,11 +1433,13 @@ void MainWindow::showLineEndingMenu()
 bool MainWindow::reopenWithEncoding(DocumentTab *tab, const DocumentTab::Encoding &encoding)
 {
     if (tab->isModified()) {
-        const auto answer = QMessageBox::warning(
-            this, productName(), tr("%1 has unsaved changes. Discard them and reopen with another encoding?")
-                                     .arg(tab->displayName()),
-            QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Cancel);
-        if (answer != QMessageBox::Discard)
+        QMessageBox box(QMessageBox::Warning, productName(),
+                        tr("%1 has unsaved changes. Discard them and reopen with another encoding?")
+                            .arg(tab->displayName()),
+                        QMessageBox::Discard | QMessageBox::Cancel, this);
+        box.button(QMessageBox::Discard)->setText(tr("&Discard"));
+        box.setDefaultButton(QMessageBox::Cancel);
+        if (box.exec() != QMessageBox::Discard)
             return false;
         tab->document()->setModified(false);
     }
@@ -2010,7 +2016,7 @@ void MainWindow::updateModeControls()
         if (tab && tab->isMarkdown()) {
             QAction *shown = modeAction(tab->viewMode());
             it.value()->setIcon(shown->icon());
-            it.value()->setText(shown->text());
+            it.value()->setText(shown->iconText()); // Without the menu mnemonic.
         }
     }
     DocumentTab *tab = currentTab();

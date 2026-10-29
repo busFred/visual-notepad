@@ -4,6 +4,7 @@
 
 #include <QColorDialog>
 #include <QComboBox>
+#include <QApplication>
 #include <QDialogButtonBox>
 #include <QFontDatabase>
 #include <QFontMetrics>
@@ -53,13 +54,16 @@ enum ItemIndex {
     ItemCount
 };
 
+// Drawn for the sharpest screen so that it stays crisp when scaled.
 QPixmap swatch(const QColor &color)
 {
-    QPixmap pixmap(22, 14);
+    const qreal dpr = qApp->devicePixelRatio();
+    QPixmap pixmap((QSizeF(22, 14) * dpr).toSize());
+    pixmap.setDevicePixelRatio(dpr);
     pixmap.fill(color);
     QPainter painter(&pixmap);
-    painter.setPen(QColor(0x80, 0x80, 0x80));
-    painter.drawRect(pixmap.rect().adjusted(0, 0, -1, -1));
+    painter.setPen(QPen(QColor(0x80, 0x80, 0x80), 1));
+    painter.drawRect(QRectF(0.5, 0.5, 21, 13));
     return pixmap;
 }
 
@@ -80,7 +84,7 @@ public:
         layout->addWidget(m_hex);
         layout->addStretch(1);
         // Fixed sizes: the note is hidden and shown again as items change.
-        m_swatch->setFixedSize(swatch(Qt::white).size());
+        m_swatch->setFixedSize(swatch(Qt::white).deviceIndependentSize().toSize());
         m_hex->setMinimumWidth(m_hex->fontMetrics().horizontalAdvance(QStringLiteral("#WWWWWW")));
     }
 

@@ -1,3 +1,4 @@
+#include "DesktopSettings.h"
 #include "MainWindow.h"
 #include "Session.h"
 #include "Theme.h"
@@ -6,11 +7,6 @@
 #include <QIcon>
 #include <QCommandLineParser>
 
-#ifdef Q_OS_LINUX
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#endif
 #ifdef Q_OS_WIN
 #include <cstdio>
 #include <cstring>
@@ -20,28 +16,6 @@
 #include <windows.h>
 #endif
 
-#ifdef Q_OS_LINUX
-// The cursor size GNOME-style desktops (GNOME, Cinnamon) set in GSettings, or
-// 0. Without XCURSOR_SIZE or an Xcursor.size X resource, libxcb-cursor
-// guesses Xft.dpi * 16 / 72 (21 px at 96 dpi), so the cursor changes size
-// when it enters our windows.
-static int desktopCursorSize()
-{
-    const char *desktop = std::getenv("XDG_CURRENT_DESKTOP");
-    const bool cinnamon = desktop && std::strstr(desktop, "Cinnamon");
-    const char *command = cinnamon
-        ? "gsettings get org.cinnamon.desktop.interface cursor-size 2>/dev/null"
-        : "gsettings get org.gnome.desktop.interface cursor-size 2>/dev/null";
-    FILE *pipe = popen(command, "r");
-    if (!pipe)
-        return 0;
-    int size = 0;
-    if (std::fscanf(pipe, "%d", &size) != 1)
-        size = 0;
-    pclose(pipe);
-    return size > 0 && size <= 256 ? size : 0;
-}
-#endif
 
 int main(int argc, char *argv[])
 {
@@ -55,7 +29,9 @@ int main(int argc, char *argv[])
     if (qEnvironmentVariableIsEmpty("XCURSOR_PATH"))
         qputenv("XCURSOR_PATH", "~/.local/share/icons:~/.icons:/usr/local/share/icons:/usr/share/icons:/usr/share/pixmaps");
     if (qEnvironmentVariableIsEmpty("XCURSOR_SIZE")) {
-        if (const int size = desktopCursorSize())
+        // Else libxcb-cursor guesses Xft.dpi * 16 / 72 (21 px at 96 dpi), so
+        // the cursor would change size when it enters our windows.
+        if (const int size = vn::desktop::cursorSize())
             qputenv("XCURSOR_SIZE", QByteArray::number(size));
     }
 #endif
