@@ -3,7 +3,9 @@
 // synthetic drop events. Set VN_SCREENSHOT_DIR=<dir> to save a split-editor
 // rendering.
 #include "DocumentTab.h"
+#include "DragGeometry.h"
 #include "EditorGroup.h"
+#include "EvenSplitter.h"
 #include "MainWindow.h"
 #include "Session.h"
 #include "Settings.h"
@@ -42,6 +44,9 @@ private Q_SLOTS:
     void lastTabClosedKeepsRightGroup();
     void contextMenuMovesToOtherGroup();
     void tabsListBothGroups();
+    void doubleClickingHandleEvensGroups();
+    void doubleClickingHandleEvensSourceAndVisual();
+    void dragHotSpotStaysOnTab();
     void screenshot();
 
 private:
@@ -377,6 +382,60 @@ void TestGroups::tabsListBothGroups()
     window.setCurrentTabIndex(0);
     QCOMPARE(window.activeGroup(), window.mainGroup());
     QCOMPARE(window.currentTab(), mainTab);
+}
+
+void TestGroups::doubleClickingHandleEvensGroups()
+{
+    MainWindow window;
+    show(window);
+    window.setSplit(true);
+    auto *groups = window.findChild<vn::EvenSplitter *>();
+    QVERIFY(groups);
+    QCOMPARE(groups->count(), 2);
+    const int total = groups->width() - groups->handleWidth();
+    groups->setSizes({total / 4, total - total / 4});
+    QVERIFY(qAbs(groups->sizes()[0] - groups->sizes()[1]) > 50);
+    QSplitterHandle *handle = groups->handle(1);
+    // The widened hit area over the 1-px handle forwards to it.
+    QWidget *strip = groups->childAt(handle->geometry().center());
+    QVERIFY(strip);
+    QVERIFY(strip != handle);
+    QVERIFY(strip->width() > handle->width());
+    QTest::mouseDClick(strip, Qt::LeftButton, {}, strip->rect().center());
+    QVERIFY(qAbs(groups->sizes()[0] - groups->sizes()[1]) <= 1);
+    groups->setSizes({total / 4, total - total / 4});
+    QTest::mouseDClick(handle, Qt::LeftButton, {}, handle->rect().center());
+    QVERIFY(qAbs(groups->sizes()[0] - groups->sizes()[1]) <= 1);
+}
+
+void TestGroups::doubleClickingHandleEvensSourceAndVisual()
+{
+    MainWindow window;
+    QVERIFY(window.openFile(write(QStringLiteral("even.md"), "# Title\n\ntext\n")));
+    show(window);
+    DocumentTab *tab = window.currentTab();
+    QVERIFY(tab);
+    tab->setViewMode(DocumentTab::ViewMode::SourceVisual);
+    auto *splitter = tab->findChild<vn::EvenSplitter *>();
+    QVERIFY(splitter);
+    QCOMPARE(splitter->count(), 2);
+    const int total = splitter->sizes()[0] + splitter->sizes()[1];
+    splitter->setSizes({total / 5, total - total / 5});
+    QVERIFY(qAbs(splitter->sizes()[0] - splitter->sizes()[1]) > 50);
+    QSplitterHandle *handle = splitter->handle(1);
+    QTest::mouseDClick(handle, Qt::LeftButton, {}, handle->rect().center());
+    QVERIFY(qAbs(splitter->sizes()[0] - splitter->sizes()[1]) <= 1);
+}
+
+void TestGroups::dragHotSpotStaysOnTab()
+{
+    const QRect tab(100, 0, 120, 30);
+    // Pressed inside the tab: the hot spot is the press offset, however far
+    // the cursor has moved since.
+    QCOMPARE(vn::dragGeometry::hotSpot(QPoint(130, 12), tab), QPoint(30, 12));
+    // A press point outside the pixmap is held to its edge.
+    QCOMPARE(vn::dragGeometry::hotSpot(QPoint(400, 90), tab), QPoint(119, 29));
+    QCOMPARE(vn::dragGeometry::hotSpot(QPoint(50, -5), tab), QPoint(0, 0));
 }
 
 void TestGroups::screenshot()

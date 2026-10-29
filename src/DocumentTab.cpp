@@ -29,6 +29,7 @@
 #include <QPainterPath>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include "EvenSplitter.h"
 #include <QSplitter>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -111,7 +112,7 @@ DocumentTab::DocumentTab(QWidget *parent)
 {
     m_doc->setDocumentLayout(new DocumentLayout(m_doc));
     m_doc->setUndoRedoEnabled(true);
-    m_splitter = new QSplitter(Qt::Horizontal, this);
+    m_splitter = new EvenSplitter(Qt::Horizontal, this);
     m_splitter->setHandleWidth(1);
     m_splitter->setChildrenCollapsible(false);
     // Link checking runs shortly after the last edit.

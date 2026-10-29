@@ -35,6 +35,7 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QSizeGrip>
+#include "EvenSplitter.h"
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTimer>
@@ -140,7 +141,7 @@ private:
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
-    , m_groups(new QSplitter(Qt::Horizontal, this))
+    , m_groups(new EvenSplitter(Qt::Horizontal, this))
     , m_group(new EditorGroup(m_groups))
     , m_activeGroup(m_group)
     , m_outlineTimer(new QTimer(this))

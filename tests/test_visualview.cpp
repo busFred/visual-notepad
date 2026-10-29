@@ -138,6 +138,7 @@ private Q_SLOTS:
     void screenshots();
     void lineMarkersAreInvisible();
     void scrollSyncLinesUpTableRows();
+    void selectedImageKeepsPictureVisible();
     void scrollSyncIsContinuous_data();
     void scrollSyncIsContinuous();
     void scrollSyncEnds();
@@ -548,6 +549,63 @@ void TestVisualView::lineMarkersAreInvisible()
     QCOMPARE(anchors[0].first, 2);
     QCOMPARE(anchors[1].first, 3);
     QVERIFY(anchors[0].second > 5 && anchors[1].second > anchors[0].second + 10);
+}
+
+void TestVisualView::selectedImageKeepsPictureVisible()
+{
+    // The math block is an image; selecting it must only tint it lightly and
+    // outline it, even where the selection colour is dark.
+    const auto &blocks = m_model->blocks();
+    QCOMPARE(blocks[10].kind, core::BlockKind::Math);
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    const auto block = RenderedBlock::create(blocks[10], m_model->sourceText(int(blocks[10].first_line), int(blocks[10].last_line)), ctx);
+    QCOMPARE(block->kind(), RenderedBlock::Kind::Image);
+    const QColor selection(0x10, 0x20, 0x50); // Dark navy.
+    const QString themeId = theme::currentThemeId();
+    const QString role = theme::roleName(theme::Role::selection);
+    Settings::instance().setColorOverride(themeId, role, selection);
+    QCOMPARE(theme::color(theme::Role::selection), selection);
+    auto render = [&](bool whole) {
+        QImage image(int(ctx.width), int(block->height()), QImage::Format_ARGB32);
+        image.fill(Qt::white);
+        QPainter painter(&image);
+        RenderedSelection sel;
+        sel.whole = whole;
+        block->paint(painter, QPointF(0, 0), ctx.width, sel);
+        return image;
+    };
+    const QImage plain = render(false);
+    const QImage selected = render(true);
+    Settings::instance().resetColorOverride(themeId, role);
+    // Bounding box of what the selection changed.
+    QRect changed;
+    for (int y = 0; y < plain.height(); ++y)
+        for (int x = 0; x < plain.width(); ++x)
+            if (plain.pixel(x, y) != selected.pixel(x, y))
+                changed |= QRect(x, y, 1, 1);
+    QVERIFY(!changed.isEmpty());
+    // One pixel outline in the selection colour all around.
+    for (int x = changed.left(); x <= changed.right(); ++x) {
+        QCOMPARE(QColor(selected.pixel(x, changed.top())), selection);
+        QCOMPARE(QColor(selected.pixel(x, changed.bottom())), selection);
+    }
+    for (int y = changed.top(); y <= changed.bottom(); ++y) {
+        QCOMPARE(QColor(selected.pixel(changed.left(), y)), selection);
+        QCOMPARE(QColor(selected.pixel(changed.right(), y)), selection);
+    }
+    // Inside, every channel keeps at least 70% of the plain picture.
+    const QRect inner = changed.adjusted(1, 1, -1, -1);
+    for (int y = inner.top(); y <= inner.bottom(); ++y) {
+        for (int x = inner.left(); x <= inner.right(); ++x) {
+            const QColor a(plain.pixel(x, y));
+            const QColor b(selected.pixel(x, y));
+            QVERIFY(b.red() >= a.red() * 0.7 - 1);
+            QVERIFY(b.green() >= a.green() * 0.7 - 1);
+            QVERIFY(b.blue() >= a.blue() * 0.7 - 1);
+        }
+    }
 }
 
 void TestVisualView::scrollSyncLinesUpTableRows()

@@ -38,6 +38,8 @@ add_library(vn_app STATIC
     src/Encodings.h
     src/EditorGroup.cpp
     src/EditorGroup.h
+    src/EvenSplitter.cpp
+    src/EvenSplitter.h
     src/MainWindow.cpp
     src/MainWindow.h
     src/PreferencesDialog.cpp

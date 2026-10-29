@@ -105,6 +105,7 @@ private:
     QWidget *m_dropOverlay;
     QWidget *m_dropMarker;
     QPointer<DocumentTab> m_pressedTab;
+    QPoint m_pressPos; // In tab bar coordinates, where m_pressedTab was pressed.
 };
 
 } // namespace vn

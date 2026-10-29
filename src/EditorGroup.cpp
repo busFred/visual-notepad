@@ -6,6 +6,7 @@
 
 #include <QApplication>
 #include <QCursor>
+#include "DragGeometry.h"
 #include <QDrag>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
@@ -320,6 +321,8 @@ bool EditorGroup::eventFilter(QObject *watched, QEvent *event)
             m_pressedTab = nullptr;
             if (watched == m_tabBar && mouse->button() == Qt::LeftButton)
                 m_pressedTab = tab(m_tabBar->tabAt(mouse->position().toPoint()));
+            if (m_pressedTab)
+                m_pressPos = mouse->position().toPoint();
         } else if (type == QEvent::MouseButtonRelease) {
             m_pressedTab = nullptr;
         } else if (type == QEvent::MouseMove && watched == m_tabBar) {
@@ -371,7 +374,7 @@ void EditorGroup::startDrag(DocumentTab *tab)
     auto *drag = new QDrag(m_tabBar);
     drag->setMimeData(mimeForTab(tab));
     drag->setPixmap(m_tabBar->grab(rect));
-    drag->setHotSpot(local - rect.topLeft());
+    drag->setHotSpot(dragGeometry::hotSpot(m_pressPos, rect));
 
     // The drop may close this group's window, so keep guarded handles.
     QPointer<EditorGroup> self(this);

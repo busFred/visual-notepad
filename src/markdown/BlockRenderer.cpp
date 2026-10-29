@@ -287,9 +287,18 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
         const QRectF imageRect(QPointF(x, topLeft.y() + codePadY), size);
         painter.drawImage(imageRect, m_image);
         if (selection.whole) {
+            // A light tint and an outline keep the picture readable on
+            // themes whose selection colour is dark.
             QColor tint = theme::color(theme::Role::selection);
-            tint.setAlpha(110);
+            const QColor outline = tint;
+            tint.setAlpha(56);
             painter.fillRect(imageRect, tint);
+            painter.save();
+            painter.setRenderHint(QPainter::Antialiasing, false);
+            painter.setPen(QPen(outline, 1));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRect(imageRect.toAlignedRect().adjusted(0, 0, -1, -1));
+            painter.restore();
         }
         return;
     }
