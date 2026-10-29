@@ -17,6 +17,7 @@
 
 #include <QString>
 
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -295,6 +296,7 @@ private:
     bool moveVertically(Caret &caret, int direction, QTextCursor::MoveMode mode);
     void moveCaretsHome(bool select);
     void normalizeCarets();
+    void undoRedo(bool undo);
     void caretsChanged();
     QTextCursor wordAt(const QTextCursor &cursor) const;
     QTextCursor findNext(const QString &text, int from) const;
@@ -305,6 +307,27 @@ private:
     std::vector<LineCache> m_lines;
     std::vector<Caret> m_carets;
     int m_primary = 0;
+
+    // Caret state around each undo step made through beginEdit()/endEdit(),
+    // indexed by undo step, so undo/redo can restore every caret.
+    struct CaretState
+    {
+        QList<std::pair<int, int>> ranges; // anchor, position
+        int primary = 0;
+    };
+    struct UndoEntry
+    {
+        CaretState before;
+        CaretState after; // Filled in when the step is undone, for redo.
+    };
+    CaretState captureCarets() const;
+    void restoreCarets(const CaretState &state);
+    std::map<int, UndoEntry> m_undoEntries; // Keyed by undo position after the step.
+    CaretState m_editStart;
+    int m_editStartRevision = -1;
+    int m_editStartSteps = 0;
+    int m_syncedRevision = -1; // Document revision our entries are valid for.
+    int m_editDepth = 0;
     QList<QList<QTextCursor>> m_expandHistory;
 
     QList<QTextCursor> m_searchRanges;
