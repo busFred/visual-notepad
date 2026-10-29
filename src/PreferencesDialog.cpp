@@ -74,7 +74,7 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
         p.setPen(Qt::NoPen);
-        p.setBrush(isChecked() ? theme::color(theme::Role::switchOn) : theme::color(theme::Role::menuHover));
+        p.setBrush(isChecked() ? theme::color(theme::Role::switchOn) : theme::color(theme::Role::divider));
         p.drawRoundedRect(QRectF(0, 0, 40, 22), 11, 11);
 
         const qreal x = isChecked() ? 20 : 2;
@@ -808,8 +808,7 @@ void PreferencesDialog::addColorsRow()
     const auto refresh = [summary] {
         const QString id = theme::currentThemeId();
         const int changed = int(Settings::instance().overriddenColors(id).size());
-        summary->setText(changed > 0 ? tr("%1 changed from %2").arg(changed).arg(theme::themeLabel(id))
-                                     : tr("Theme defaults"));
+        summary->setText(changed > 0 ? tr("%1 changed from %2").arg(changed).arg(theme::themeLabel(id)) : QString());
     };
     refresh();
     connect(&Settings::instance(), &Settings::changed, summary, [refresh](const QString &changedKey) {

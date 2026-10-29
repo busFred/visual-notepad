@@ -10,6 +10,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QGridLayout>
 #include <QIcon>
 #include <QPainter>
 #include <QPushButton>
@@ -48,6 +49,7 @@ enum ItemIndex {
     MutedTextItem,
     LineNumbersItem,
     ButtonsItem, // Not in the preview; chosen from the list.
+    ButtonHoverItem,
     ItemCount
 };
 
@@ -78,6 +80,8 @@ protected:
     void paintEvent(QPaintEvent *event) override
     {
         QPushButton::paintEvent(event);
+        if (!isEnabled())
+            return;
         QPainter painter(this);
         const QRect arrow(width() - 20, (height() - 8) / 2, 8, 8);
         QIcon(QStringLiteral(":/vn/icons/chevron-down.svg")).paint(&painter, arrow);
@@ -199,7 +203,7 @@ protected:
         fill(l.menuBar, Role::menuBar);
         fill(l.fileItem, Role::menuHover);
         for (int i = 0; i < 4; ++i)
-            label(l.menuItems[i], menuTitles[i], Role::text, Qt::AlignHCenter);
+            label(l.menuItems[i], menuTitles[i], i == 0 ? Role::menuHoverText : Role::text, Qt::AlignHCenter);
 
         // Outline
         fill(l.outline, Role::sideBar);
@@ -258,8 +262,10 @@ protected:
         p.drawRect(l.popup.adjusted(0, 0, -1, -1));
         fill(l.popupRows[1], Role::menuHover);
         for (int i = 0; i < 3; ++i) {
-            label(l.popupRows[i].adjusted(14, 0, 0, 0), popupTexts[i], Role::text);
-            label(l.popupRows[i].adjusted(0, 0, -10, 0), popupKeys[i], Role::mutedText, Qt::AlignRight);
+            const bool highlighted = i == 1;
+            label(l.popupRows[i].adjusted(14, 0, 0, 0), popupTexts[i], highlighted ? Role::menuHoverText : Role::text);
+            label(l.popupRows[i].adjusted(0, 0, -10, 0), popupKeys[i], highlighted ? Role::menuHoverText : Role::mutedText,
+                  Qt::AlignRight);
         }
 
         // Selection marker
@@ -409,26 +415,28 @@ private:
 
 QList<CustomizeColorsDialog::Item> CustomizeColorsDialog::items()
 {
+    constexpr std::nullopt_t none = std::nullopt;
     return {
-        {tr("Menu bar"), Role::menuBar, std::nullopt},
-        {tr("Menu"), Role::menu, std::nullopt},
-        {tr("Menu highlight"), Role::menuHover, std::nullopt},
-        {tr("Tab strip"), Role::tabStrip, std::nullopt},
-        {tr("Active tab"), Role::activeTab, Role::text},
+        {tr("Menu bar"), Role::menuBar, none},
+        {tr("Menu"), Role::menu, none},
+        {tr("Menu highlight"), Role::menuHover, Role::menuHoverText},
+        {tr("Tab strip"), Role::tabStrip, none},
+        {tr("Active tab"), Role::activeTab, none},
         {tr("Inactive tab"), Role::inactiveTab, Role::inactiveTabText},
-        {tr("Outline panel"), Role::sideBar, std::nullopt},
-        {tr("Outline title"), Role::panelTitle, std::nullopt},
-        {tr("Outline hover"), Role::sideBarHover, std::nullopt},
-        {tr("Status bar"), Role::statusBar, std::nullopt},
-        {tr("Dividers"), Role::divider, std::nullopt},
+        {tr("Outline panel"), Role::sideBar, none},
+        {tr("Outline title"), Role::panelTitle, none},
+        {tr("Outline hover"), Role::sideBarHover, none},
+        {tr("Status bar"), Role::statusBar, none},
+        {tr("Dividers"), none, Role::divider},
         {tr("Editor"), Role::editor, Role::text},
         {tr("Selection"), Role::selection, Role::selectionText},
-        {tr("Block being edited"), Role::activeBlock, std::nullopt},
-        {tr("Code and tables"), Role::codeBlock, std::nullopt},
-        {tr("Links and accent"), Role::accent, std::nullopt},
-        {tr("Muted text"), Role::mutedText, std::nullopt},
-        {tr("Line numbers"), Role::gutterText, std::nullopt},
-        {tr("Buttons"), Role::button, Role::text},
+        {tr("Block being edited"), Role::activeBlock, none},
+        {tr("Code and tables"), Role::codeBlock, none},
+        {tr("Links and accent"), none, Role::accent},
+        {tr("Muted text"), none, Role::mutedText},
+        {tr("Line numbers"), none, Role::gutterText},
+        {tr("Buttons"), Role::button, none},
+        {tr("Button hover"), Role::buttonHover, none},
     };
 }
 
@@ -453,35 +461,45 @@ CustomizeColorsDialog::CustomizeColorsDialog(QWidget *parent)
     hint->setWordWrap(true);
     layout->addWidget(hint);
 
-    auto *grid = new QHBoxLayout;
-    grid->setSpacing(8);
+    // Item, then its two colours underneath, each with its theme default
+    // beside it when changed.
     m_itemCombo = new QComboBox;
     m_itemCombo->setObjectName(QStringLiteral("ItemCombo"));
-    m_itemCombo->setMinimumWidth(180);
+    m_itemCombo->setMinimumWidth(200);
     for (const Item &item : std::as_const(m_items))
         m_itemCombo->addItem(item.label);
     m_backgroundButton = new ColorButton;
     m_backgroundButton->setObjectName(QStringLiteral("BackgroundButton"));
-    m_textButton = new ColorButton;
-    m_textButton->setObjectName(QStringLiteral("TextButton"));
-    m_textLabel = new QLabel(tr("Text:"));
+    m_foregroundButton = new ColorButton;
+    m_foregroundButton->setObjectName(QStringLiteral("ForegroundButton"));
+    for (QPushButton *button : {m_backgroundButton, m_foregroundButton})
+        button->setMinimumWidth(130);
     auto *itemLabel = new QLabel(tr("Item:"));
     itemLabel->setBuddy(m_itemCombo);
-    auto *backgroundLabel = new QLabel(tr("Background:"));
-    backgroundLabel->setBuddy(m_backgroundButton);
-    grid->addWidget(itemLabel);
-    grid->addWidget(m_itemCombo);
-    grid->addStretch(1);
-    grid->addWidget(backgroundLabel);
-    grid->addWidget(m_backgroundButton);
-    grid->addWidget(m_textLabel);
-    grid->addWidget(m_textButton);
-    layout->addLayout(grid);
+    m_backgroundLabel = new QLabel(tr("Background:"));
+    m_backgroundLabel->setBuddy(m_backgroundButton);
+    m_foregroundLabel = new QLabel(tr("Foreground:"));
+    m_foregroundLabel->setBuddy(m_foregroundButton);
+    m_backgroundDefault = new QLabel;
+    m_foregroundDefault = new QLabel;
+    for (QLabel *label : {m_backgroundDefault, m_foregroundDefault}) {
+        label->setObjectName(QStringLiteral("MutedHint"));
+        label->setTextFormat(Qt::RichText);
+    }
 
-    m_defaultLabel = new QLabel;
-    m_defaultLabel->setObjectName(QStringLiteral("MutedHint"));
-    m_defaultLabel->setTextFormat(Qt::RichText);
-    layout->addWidget(m_defaultLabel);
+    auto *grid = new QGridLayout;
+    grid->setHorizontalSpacing(8);
+    grid->setVerticalSpacing(6);
+    grid->addWidget(itemLabel, 0, 0);
+    grid->addWidget(m_itemCombo, 0, 1, 1, 2, Qt::AlignLeft);
+    grid->addWidget(m_backgroundLabel, 1, 0);
+    grid->addWidget(m_backgroundButton, 1, 1);
+    grid->addWidget(m_backgroundDefault, 1, 2);
+    grid->addWidget(m_foregroundLabel, 2, 0);
+    grid->addWidget(m_foregroundButton, 2, 1);
+    grid->addWidget(m_foregroundDefault, 2, 2);
+    grid->setColumnStretch(2, 1);
+    layout->addLayout(grid);
     layout->addStretch(1);
 
     auto *footer = new QHBoxLayout;
@@ -502,7 +520,7 @@ CustomizeColorsDialog::CustomizeColorsDialog(QWidget *parent)
         refresh();
     });
     connect(m_backgroundButton, &QPushButton::clicked, this, [this] { chooseColor(false); });
-    connect(m_textButton, &QPushButton::clicked, this, [this] { chooseColor(true); });
+    connect(m_foregroundButton, &QPushButton::clicked, this, [this] { chooseColor(true); });
     connect(resetItem, &QPushButton::clicked, this, &CustomizeColorsDialog::resetItem);
     connect(resetAll, &QPushButton::clicked, this, &CustomizeColorsDialog::resetAll);
     connect(m_buttons, &QDialogButtonBox::accepted, this, &CustomizeColorsDialog::accept);
@@ -584,21 +602,25 @@ void CustomizeColorsDialog::accept()
     QDialog::accept();
 }
 
-void CustomizeColorsDialog::chooseColor(bool text)
+void CustomizeColorsDialog::chooseColor(bool foreground)
 {
     const Item &item = m_items.at(currentItem());
-    const Role role = text ? *item.text : item.background;
-    const QColor chosen = QColorDialog::getColor(color(role), this, text ? tr("Text color") : tr("Background color"));
+    const std::optional<Role> role = foreground ? item.foreground : item.background;
+    if (!role)
+        return;
+    const QColor chosen = QColorDialog::getColor(color(*role), this,
+                                                 foreground ? tr("Foreground color") : tr("Background color"));
     if (chosen.isValid())
-        stage(role, chosen);
+        stage(*role, chosen);
 }
 
 void CustomizeColorsDialog::resetItem()
 {
     const Item &item = m_items.at(currentItem());
-    stage(item.background, defaultColor(item.background));
-    if (item.text)
-        stage(*item.text, defaultColor(*item.text));
+    for (const std::optional<Role> &role : {item.background, item.foreground}) {
+        if (role)
+            stage(*role, defaultColor(*role));
+    }
 }
 
 void CustomizeColorsDialog::resetAll()
@@ -614,20 +636,23 @@ void CustomizeColorsDialog::refresh()
         colors[i] = color(Role(i));
     m_preview->setColors(colors);
 
+    // A colour the item does not have is greyed out, as in Windows.
     const Item &item = m_items.at(currentItem());
-    showColor(m_backgroundButton, color(item.background));
-    m_textLabel->setVisible(item.text.has_value());
-    m_textButton->setVisible(item.text.has_value());
-    if (item.text)
-        showColor(m_textButton, color(*item.text));
-
-    QStringList differing;
-    for (const Role role : {item.background, item.text.value_or(item.background)}) {
-        if (color(role) != defaultColor(role) && !differing.contains(swatchHtml(defaultColor(role))))
-            differing.append(swatchHtml(defaultColor(role)));
-    }
-    m_defaultLabel->setText(differing.isEmpty() ? tr("Theme default")
-                                                : tr("Changed · theme default %1").arg(differing.join(QStringLiteral("  "))));
+    const auto show = [this](const std::optional<Role> &role, QLabel *label, QPushButton *button, QLabel *note) {
+        label->setEnabled(role.has_value());
+        button->setEnabled(role.has_value());
+        if (!role) {
+            button->setIcon({});
+            button->setText(QString());
+            note->clear();
+            return;
+        }
+        showColor(button, color(*role));
+        const QColor original = defaultColor(*role);
+        note->setText(color(*role) == original ? QString() : tr("Changed · theme default %1").arg(swatchHtml(original)));
+    };
+    show(item.background, m_backgroundLabel, m_backgroundButton, m_backgroundDefault);
+    show(item.foreground, m_foregroundLabel, m_foregroundButton, m_foregroundDefault);
 
     m_buttons->button(QDialogButtonBox::Apply)->setEnabled(hasStagedChanges());
 }

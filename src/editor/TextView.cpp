@@ -831,16 +831,28 @@ void TextView::paintEvent(QPaintEvent *event)
             fillRange(match.selectionStart() - blockStart, match.selectionEnd() - blockStart,
                       i == m_searchCurrent ? searchCurrentColor() : searchColor(), false);
         }
+        // A selection text colour other than the normal text (Legacy's white on
+        // navy) replaces the syntax colours inside the selection.
+        const QColor selectionText = theme::color(theme::Role::selectionText);
+        const bool recolorSelection = selectionText != theme::color(theme::Role::text);
+        QList<QTextLayout::FormatRange> selectedText;
         for (const Caret &caret : m_carets) {
             const QTextCursor &c = caret.cursor;
             if (!c.hasSelection() || c.selectionEnd() < blockStart || c.selectionStart() >= blockEnd)
                 continue;
             fillRange(c.selectionStart() - blockStart, c.selectionEnd() - blockStart, theme::color(theme::Role::selection),
                       c.selectionEnd() >= blockEnd);
+            if (recolorSelection) {
+                QTextLayout::FormatRange range;
+                range.start = qMax(c.selectionStart(), blockStart) - blockStart;
+                range.length = qMin(c.selectionEnd(), blockEnd) - blockStart - range.start;
+                range.format.setForeground(selectionText);
+                selectedText.append(range);
+            }
         }
 
         painter.setPen(theme::color(theme::Role::text));
-        layout->draw(&painter, origin);
+        layout->draw(&painter, origin, selectedText);
 
         for (const DiagnosticRange &d : std::as_const(m_diagnostics)) {
             const int rangeStart = d.start.position();

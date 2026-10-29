@@ -19,6 +19,7 @@ enum class Role {
     menuBar,
     menu, // Popup background
     menuHover,
+    menuHoverText,
     tabStrip,
     statusBar,
     activeTab,
@@ -30,6 +31,7 @@ enum class Role {
     divider,
     surface, // Preferences page and tooltips
     button, // Push buttons
+    buttonHover,
     // Content
     editor,
     text,

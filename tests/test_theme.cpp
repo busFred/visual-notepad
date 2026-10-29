@@ -33,6 +33,7 @@ private Q_SLOTS:
     void dialogApplyWritesOverride();
     void dialogResetAndDefaults();
     void dialogHitTest();
+    void dialogPickersFollowItem();
     void editorColorReachesFieldsAndLists();
 
 private:
@@ -120,8 +121,13 @@ void TestTheme::legacyMatchesOriginalColors()
         QCOMPARE(theme::color(role), QColor(0xD4D0C8));
     QCOMPARE(theme::color(Role::activeTab), theme::color(Role::editor));
     QCOMPARE(theme::color(Role::inactiveTab), theme::color(Role::sideBar));
-    QCOMPARE(theme::color(Role::selectionText), theme::color(Role::accent));
-    QCOMPARE(QApplication::palette().color(QPalette::HighlightedText), QColor(0x0A246A));
+    // The classic highlight: white on navy, for menus, lists and selected text.
+    for (const Role role : {Role::menuHover, Role::selection})
+        QCOMPARE(theme::color(role), QColor(0x0A246A));
+    for (const Role role : {Role::menuHoverText, Role::selectionText})
+        QCOMPARE(theme::color(role), QColor(0xFFFFFF));
+    QCOMPARE(QApplication::palette().color(QPalette::Highlight), QColor(0x0A246A));
+    QCOMPARE(QApplication::palette().color(QPalette::HighlightedText), QColor(0xFFFFFF));
 }
 
 void TestTheme::dialogCancelWritesNothing()
@@ -191,6 +197,33 @@ void TestTheme::dialogHitTest()
     QCOMPARE(items.at(dialog.currentItem()).label, QStringLiteral("Editor"));
     QTest::mouseClick(dialog.preview(), Qt::LeftButton, {}, QPoint(300, 208));
     QCOMPARE(items.at(dialog.currentItem()).label, QStringLiteral("Status bar"));
+}
+
+// An item offers only the colours it has: Line numbers is a foreground,
+// Menu bar a background, Editor both.
+void TestTheme::dialogPickersFollowItem()
+{
+    CustomizeColorsDialog dialog;
+    auto *background = dialog.findChild<QPushButton *>(QStringLiteral("BackgroundButton"));
+    auto *foreground = dialog.findChild<QPushButton *>(QStringLiteral("ForegroundButton"));
+    QVERIFY(background && foreground);
+    const auto items = CustomizeColorsDialog::items();
+    auto select = [&](const QString &label) {
+        for (int i = 0; i < items.size(); ++i) {
+            if (items.at(i).label == label)
+                dialog.setCurrentItem(i);
+        }
+    };
+    select(QStringLiteral("Line numbers"));
+    QVERIFY(!background->isEnabled());
+    QVERIFY(foreground->isEnabled());
+    QCOMPARE(foreground->text(), QStringLiteral("#9A9A9A"));
+    select(QStringLiteral("Menu bar"));
+    QVERIFY(background->isEnabled());
+    QVERIFY(!foreground->isEnabled());
+    select(QStringLiteral("Editor"));
+    QVERIFY(background->isEnabled());
+    QVERIFY(foreground->isEnabled());
 }
 
 QTEST_MAIN(TestTheme)

@@ -25,13 +25,13 @@ class CustomizeColorsDialog : public QDialog
     Q_OBJECT
 
 public:
-    // One entry of the item list: a background role and, if the item has
-    // text, the role of that text.
+    // One entry of the item list: the role of its background and/or of its
+    // foreground (text, numbers or lines drawn on it).
     struct Item
     {
         QString label;
-        theme::Role background;
-        std::optional<theme::Role> text;
+        std::optional<theme::Role> background;
+        std::optional<theme::Role> foreground;
     };
     static QList<Item> items();
 
@@ -58,7 +58,7 @@ public:
 private:
     QColor savedColor(theme::Role role) const;
     QColor defaultColor(theme::Role role) const;
-    void chooseColor(bool text);
+    void chooseColor(bool foreground);
     void resetItem();
     void resetAll();
     void refresh();
@@ -68,10 +68,12 @@ private:
     QHash<theme::Role, QColor> m_staged;
     ColorPreview *m_preview = nullptr;
     QComboBox *m_itemCombo = nullptr;
-    QLabel *m_textLabel = nullptr;
     QPushButton *m_backgroundButton = nullptr;
-    QPushButton *m_textButton = nullptr;
-    QLabel *m_defaultLabel = nullptr;
+    QPushButton *m_foregroundButton = nullptr;
+    QLabel *m_backgroundLabel = nullptr;
+    QLabel *m_foregroundLabel = nullptr;
+    QLabel *m_backgroundDefault = nullptr;
+    QLabel *m_foregroundDefault = nullptr;
     QDialogButtonBox *m_buttons = nullptr;
 };
 

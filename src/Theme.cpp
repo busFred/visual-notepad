@@ -39,7 +39,8 @@ struct RoleInfo
 constexpr RoleInfo roleTable[] = {
     {"menuBar", 0xD4D0C8, 0xF3F3F3},
     {"menu", 0xD4D0C8, 0xF9F9F9},
-    {"menuHover", 0xC4C0B6, 0xE5E5E5},
+    {"menuHover", 0x0A246A, 0xE5E5E5}, // Legacy: the classic navy highlight
+    {"menuHoverText", 0xFFFFFF, 0x1A1A1A},
     {"tabStrip", 0xD4D0C8, 0xF3F3F3},
     {"statusBar", 0xD4D0C8, 0xF3F3F3},
     {"activeTab", 0xFFFFFF, 0xFFFFFF},
@@ -51,10 +52,11 @@ constexpr RoleInfo roleTable[] = {
     {"divider", 0xBAB5AB, 0xE5E5E5},
     {"surface", 0xE9E7E2, 0xF9F9F9},
     {"button", 0xD4D0C8, 0xFBFBFB}, // Legacy: the classic button face
+    {"buttonHover", 0xE0DDD6, 0xF5F5F5},
     {"editor", 0xFFFFFF, 0xFFFFFF},
     {"text", 0x222222, 0x1A1A1A},
-    {"selection", 0xCFD5E3, 0xCCE4F7},
-    {"selectionText", 0x0A246A, 0x1A1A1A},
+    {"selection", 0x0A246A, 0xCCE4F7},
+    {"selectionText", 0xFFFFFF, 0x1A1A1A},
     {"accent", 0x0A246A, 0x005FB8},
     {"accentBorder", 0x9AA7C4, 0x99C3E6},
     {"switchOn", 0x6F82AD, 0x005FB8},
@@ -144,11 +146,11 @@ QMainWindow::separator { background: @divider; width: 1px; height: 1px; }
 /* Menus share the chrome colour, with a quiet hover instead of a navy highlight. */
 QMenuBar { background: @menuBar; border-bottom: 1px solid @divider; padding: 1px 0 1px 4px; spacing: 0px; }
 QMenuBar::item { padding: 3px 8px; margin: 0; border-radius: 2px; background: transparent; color: @text; }
-QMenuBar::item:selected, QMenuBar::item:pressed { background: @menuHover; color: @text; }
+QMenuBar::item:selected, QMenuBar::item:pressed { background: @menuHover; color: @menuHoverText; }
 
 QMenu { background: @menu; border: 1px solid @divider; padding: 3px 0; }
 QMenu::item { padding: 4px 24px 4px 26px; color: @text; }
-QMenu::item:selected { background: @menuHover; color: @text; }
+QMenu::item:selected { background: @menuHover; color: @menuHoverText; }
 QMenu::item:disabled { color: #aaa59b; }
 QMenu::item:disabled:selected { background: transparent; }
 QMenu::separator { height: 1px; background: @divider; margin: 3px 0; }
@@ -182,7 +184,7 @@ QToolButton#IconButton:checked { background: @panelTitle; }
 QTreeWidget { background: @sideBar; border: none; outline: 0; }
 QTreeWidget::item { padding: 2px 0; color: @text; }
 QTreeWidget::item:hover, QTreeWidget::branch:hover { background: @sideBarHover; }
-QTreeWidget::item:selected, QTreeWidget::branch:selected { background: @selection; color: @text; }
+QTreeWidget::item:selected, QTreeWidget::branch:selected { background: @selection; color: @selectionText; }
 
 #Pill QToolButton { border: none; border-radius: 12px; background: transparent; }
 #Pill QToolButton:hover { background: @panelTitle; }
@@ -195,15 +197,15 @@ QTreeWidget::item:selected, QTreeWidget::branch:selected { background: @selectio
 #FindInput QLineEdit { background: transparent; border: none; padding: 2px 0; }
 QToolButton#FindOption { color: @text; padding: 0 3px; border: 1px solid transparent; border-radius: 2px; }
 QToolButton#FindOption:hover { background: @sideBar; }
-QToolButton#FindOption:checked { background: @selection; border-color: @accentBorder; color: @accent; }
+QToolButton#FindOption:checked { background: @panelTitle; border-color: @accentBorder; color: @accent; }
 QToolButton#FindAction, QToolButton#FindToggle { border: none; border-radius: 3px; }
 QToolButton#FindAction:hover, QToolButton#FindToggle:hover { background: @panelTitle; }
-QToolButton#FindAction:checked { background: @selection; }
+QToolButton#FindAction:checked { background: @panelTitle; }
 QLabel#FindCount { color: #444444; padding-left: 4px; }
 QLabel#FindCount[empty="true"] { color: #cd3131; }
 QPushButton#FindButton { background: @button; border: 1px solid @divider; border-radius: 2px; padding: 2px 8px; }
-QPushButton#FindButton:hover { background: @menuHover; }
-QPushButton#FindButton:pressed { background: @selection; }
+QPushButton#FindButton:hover { background: @buttonHover; }
+QPushButton#FindButton:pressed { background: @panelTitle; }
 
 #Welcome { background: @editor; }
 #Welcome QLabel#WelcomeTitle { color: @mutedText; }
@@ -227,7 +229,7 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 #PrefCategories { background: @sideBar; border: none; border-right: 1px solid @divider; outline: 0; }
 #PrefCategories::item { padding: 8px 14px; color: @text; }
 #PrefCategories::item:hover { background: @sideBarHover; }
-#PrefCategories::item:selected { background: @selection; color: @accent; font-weight: bold; }
+#PrefCategories::item:selected { background: @selection; color: @selectionText; font-weight: bold; }
 #PrefScroll { background: @surface; border: none; }
 #PrefPage { background: @surface; }
 #PrefPage QLabel, #PrefRow QLabel { background: transparent; color: @text; }
@@ -244,20 +246,20 @@ QLabel[warning="true"] { color: #a33a1c; }
 #PreferencesDialog QComboBox::drop-down { border: none; width: 22px; }
 #PreferencesDialog QComboBox::down-arrow { image: url(:/vn/icons/chevron-down.svg); width: 8px; height: 8px; }
 #PreferencesDialog QComboBox QAbstractItemView { background: @editor; border: 1px solid @divider; outline: 0;
-                                                 selection-background-color: @menuHover; selection-color: @text; }
+                                                 selection-background-color: @menuHover; selection-color: @menuHoverText; }
 #PreferencesDialog QComboBox QAbstractItemView::item { min-height: 24px; padding: 0 8px; color: @text; }
 #PreferencesDialog QComboBox QAbstractItemView::item:hover,
-#PreferencesDialog QComboBox QAbstractItemView::item:selected { background: @menuHover; color: @text; }
+#PreferencesDialog QComboBox QAbstractItemView::item:selected { background: @menuHover; color: @menuHoverText; }
 
 #PreferencesDialog QPushButton { background: @button; border: 1px solid @divider; border-radius: 3px; padding: 3px 14px; }
-#PreferencesDialog QPushButton:hover { background: @menuHover; }
-#PreferencesDialog QPushButton:pressed { background: @selection; }
+#PreferencesDialog QPushButton:hover { background: @buttonHover; }
+#PreferencesDialog QPushButton:pressed { background: @panelTitle; }
 #PreferencesDialog QPushButton:focus { border-color: @switchOn; }
 #PreferencesDialog QPushButton[link="true"] { background: transparent; border: none; color: @accent; padding: 3px 0; }
 #PreferencesDialog QPushButton[link="true"]:hover { text-decoration: underline; }
 #PreferencesDialog QToolButton[prefSmall="true"] { background: @button; border: 1px solid @divider; border-radius: 3px; color: @text; }
-#PreferencesDialog QToolButton[prefSmall="true"]:hover { background: @menuHover; }
-#PreferencesDialog QToolButton[prefSmall="true"]:pressed { background: @selection; }
+#PreferencesDialog QToolButton[prefSmall="true"]:hover { background: @buttonHover; }
+#PreferencesDialog QToolButton[prefSmall="true"]:pressed { background: @panelTitle; }
 #PreferencesDialog QPushButton[shortcutCell="true"] { background: @editor; border: 1px solid @divider; border-radius: 3px;
                                                        padding: 1px 6px; text-align: left; }
 #PreferencesDialog QPushButton[shortcutCell="true"][empty="true"] { color: @mutedText; }
@@ -268,21 +270,23 @@ QLabel[warning="true"] { color: #a33a1c; }
 #CustomizeColorsDialog { background: @statusBar; }
 #CustomizeColorsDialog QLabel { color: @text; }
 #CustomizeColorsDialog QLabel#MutedHint { color: @mutedText; }
+#CustomizeColorsDialog QLabel:disabled { color: @mutedText; }
 #CustomizeColorsDialog QComboBox { background: @editor; border: 1px solid @divider; border-radius: 3px; padding: 0 8px;
                                    min-height: 24px; color: @text; }
 #CustomizeColorsDialog QComboBox:focus, #CustomizeColorsDialog QComboBox:on { border-color: @switchOn; }
 #CustomizeColorsDialog QComboBox::drop-down { border: none; width: 22px; }
 #CustomizeColorsDialog QComboBox::down-arrow { image: url(:/vn/icons/chevron-down.svg); width: 8px; height: 8px; }
 #CustomizeColorsDialog QComboBox QAbstractItemView { background: @editor; border: 1px solid @divider; outline: 0;
-                                                     selection-background-color: @menuHover; selection-color: @text; }
+                                                     selection-background-color: @menuHover; selection-color: @menuHoverText; }
 #CustomizeColorsDialog QPushButton { background: @button; border: 1px solid @divider; border-radius: 3px; padding: 3px 14px; color: @text; }
-#CustomizeColorsDialog QPushButton:hover { background: @menuHover; }
-#CustomizeColorsDialog QPushButton:pressed { background: @selection; }
+#CustomizeColorsDialog QPushButton:hover { background: @buttonHover; }
+#CustomizeColorsDialog QPushButton:pressed { background: @panelTitle; }
 #CustomizeColorsDialog QPushButton:focus { border-color: @switchOn; }
 #CustomizeColorsDialog QPushButton:disabled { color: @mutedText; }
 /* The colour pickers read as drop-downs, so their field takes the Editor colour like other drop-down fields. */
-#CustomizeColorsDialog QPushButton#BackgroundButton, #CustomizeColorsDialog QPushButton#TextButton { background: @editor; padding: 3px 28px 3px 8px; }
-#CustomizeColorsDialog QPushButton#BackgroundButton:hover, #CustomizeColorsDialog QPushButton#TextButton:hover { background: @editor; border-color: @switchOn; }
+#CustomizeColorsDialog QPushButton#BackgroundButton, #CustomizeColorsDialog QPushButton#ForegroundButton { background: @editor; padding: 3px 28px 3px 8px; }
+#CustomizeColorsDialog QPushButton#BackgroundButton:hover, #CustomizeColorsDialog QPushButton#ForegroundButton:hover { background: @editor; border-color: @switchOn; }
+#CustomizeColorsDialog QPushButton#BackgroundButton:disabled, #CustomizeColorsDialog QPushButton#ForegroundButton:disabled { background: @button; }
 
 QStatusBar { background: @statusBar; border-top: 1px solid @divider; min-height: 22px; }
 QStatusBar::item { border: none; }
