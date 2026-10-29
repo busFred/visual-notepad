@@ -10,6 +10,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QIcon>
 #include <QPainter>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -65,6 +66,23 @@ QString swatchHtml(const QColor &color)
     return QStringLiteral("<span style=\"background-color:%1\">&nbsp;&nbsp;&nbsp;&nbsp;</span> %1")
         .arg(color.name(QColor::HexRgb).toUpper());
 }
+
+// A colour picker button like the classic Windows one: swatch, hex code and
+// a drop arrow on the right (the style sheet leaves room for it).
+class ColorButton : public QPushButton
+{
+public:
+    using QPushButton::QPushButton;
+
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        QPushButton::paintEvent(event);
+        QPainter painter(this);
+        const QRect arrow(width() - 20, (height() - 8) / 2, 8, 8);
+        QIcon(QStringLiteral(":/vn/icons/chevron-down.svg")).paint(&painter, arrow);
+    }
+};
 
 void showColor(QPushButton *button, const QColor &color)
 {
@@ -442,9 +460,9 @@ CustomizeColorsDialog::CustomizeColorsDialog(QWidget *parent)
     m_itemCombo->setMinimumWidth(180);
     for (const Item &item : std::as_const(m_items))
         m_itemCombo->addItem(item.label);
-    m_backgroundButton = new QPushButton;
+    m_backgroundButton = new ColorButton;
     m_backgroundButton->setObjectName(QStringLiteral("BackgroundButton"));
-    m_textButton = new QPushButton;
+    m_textButton = new ColorButton;
     m_textButton->setObjectName(QStringLiteral("TextButton"));
     m_textLabel = new QLabel(tr("Text:"));
     auto *itemLabel = new QLabel(tr("Item:"));

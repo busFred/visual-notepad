@@ -280,6 +280,7 @@ QLabel[warning="true"] { color: #a33a1c; }
 #CustomizeColorsDialog QPushButton:pressed { background: @selection; }
 #CustomizeColorsDialog QPushButton:focus { border-color: @switchOn; }
 #CustomizeColorsDialog QPushButton:disabled { color: @mutedText; }
+#CustomizeColorsDialog QPushButton#BackgroundButton, #CustomizeColorsDialog QPushButton#TextButton { padding: 3px 28px 3px 8px; }
 
 QStatusBar { background: @statusBar; border-top: 1px solid @divider; min-height: 22px; }
 QStatusBar::item { border: none; }
