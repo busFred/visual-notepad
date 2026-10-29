@@ -30,6 +30,8 @@ private Q_SLOTS:
     void replaceOneThenAll();
     void replaceAllIsOneUndoStep();
     void invalidRegexFlagsField();
+    void findSelectionWithoutOpeningBar();
+    void altEnterSelectsAllMatches();
 
 private:
     QTextDocument *m_doc = nullptr;
@@ -175,6 +177,62 @@ void TestFind::invalidRegexFlagsField()
     m_bar->setQuery(QStringLiteral("(unclosed"));
     QCOMPARE(m_bar->matchCount(), 0);
     QCOMPARE(m_bar->findField()->parentWidget()->property("error").toBool(), true);
+}
+
+void TestFind::findSelectionWithoutOpeningBar()
+{
+    m_doc->setPlainText(QStringLiteral("foo bar foo baz foo"));
+    // The word under the caret.
+    QTextCursor c(m_doc);
+    c.setPosition(1);
+    m_view->setTextCursor(c);
+    m_bar->findSelection(true);
+    QVERIFY(!m_bar->isVisible());
+    QCOMPARE(m_bar->query(), QStringLiteral("foo"));
+    QCOMPARE(m_view->textCursor().selectionStart(), 8);
+    QCOMPARE(m_view->textCursor().selectedText(), QStringLiteral("foo"));
+    // The selection is now the search text.
+    m_bar->findSelection(true);
+    QCOMPARE(m_view->textCursor().selectionStart(), 16);
+    m_bar->findSelection(true); // Wraps.
+    QCOMPARE(m_view->textCursor().selectionStart(), 0);
+    m_bar->findSelection(false);
+    QCOMPARE(m_view->textCursor().selectionStart(), 16);
+    QVERIFY(!m_bar->isVisible());
+
+    // A selected phrase replaces the old query.
+    c.setPosition(4);
+    c.setPosition(7, QTextCursor::KeepAnchor);
+    m_view->setTextCursor(c); // "bar"
+    m_bar->findSelection(true);
+    QCOMPARE(m_bar->query(), QStringLiteral("bar"));
+    QCOMPARE(m_view->textCursor().selectionStart(), 4);
+
+    // With the bar open it keeps showing the results.
+    m_bar->open(false);
+    c.setPosition(0);
+    c.setPosition(3, QTextCursor::KeepAnchor);
+    m_view->setTextCursor(c);
+    m_bar->findSelection(true);
+    QVERIFY(m_bar->isVisible());
+    QCOMPARE(m_bar->matchCount(), 3);
+    QCOMPARE(m_view->textCursor().selectionStart(), 8);
+}
+
+void TestFind::altEnterSelectsAllMatches()
+{
+    m_doc->setPlainText(QStringLiteral("x y x y x"));
+    m_view->setTextCursor(QTextCursor(m_doc));
+    m_bar->open(false);
+    QTest::keyClicks(m_bar->findField(), QStringLiteral("x"));
+    QTest::keyClick(m_bar->findField(), Qt::Key_Return, Qt::AltModifier);
+    QCOMPARE(m_view->cursorCount(), 3);
+    QCOMPARE(m_view->selectedText(), QStringLiteral("x\nx\nx"));
+    QVERIFY(m_view->hasFocus());
+    QVERIFY(m_bar->isVisible());
+    // Typing now replaces every match.
+    QTest::keyClicks(m_view, QStringLiteral("z"));
+    QCOMPARE(m_doc->toPlainText(), QStringLiteral("z y z y z"));
 }
 
 // Keep tests away from the user's settings file.
