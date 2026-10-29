@@ -1,13 +1,14 @@
-//! Rust side of Visual Notepad: Markdown parsing and rendering (markdown-rs)
+//! Rust side of Visual Notepad: Markdown parsing and rendering (comrak)
 //! and Mermaid diagrams. Exposed to C++ through the cxx bridge below.
 
 mod format;
 mod links;
+mod md;
 mod mermaid;
 mod render;
 
-use markdown::mdast::Node;
-use markdown::{Constructs, ParseOptions};
+use comrak::nodes::{AstNode, NodeValue};
+use comrak::{Arena, parse_document};
 
 #[cxx::bridge(namespace = "vn::core")]
 mod ffi {
@@ -113,44 +114,25 @@ fn link_targets(markdown: &str) -> Vec<ffi::LinkTarget> {
     links::targets(markdown)
 }
 
-/// GFM plus math and front matter, matching what the VS Code Markdown
-/// editor accepted.
-pub(crate) fn parse_options() -> ParseOptions {
-    ParseOptions {
-        constructs: Constructs {
-            frontmatter: true,
-            math_flow: true,
-            math_text: true,
-            ..Constructs::gfm()
-        },
-        ..ParseOptions::gfm()
-    }
-}
-
-/// Headings in document order. Returns an empty list if parsing fails, which
-/// cannot happen without MDX constructs enabled.
+/// Headings in document order.
 pub fn outline(markdown: &str) -> Vec<ffi::Heading> {
-    let mut headings = Vec::new();
-    if let Ok(root) = markdown::to_mdast(markdown, &parse_options()) {
-        collect_headings(&root, &mut headings);
-    }
-    headings
+    let arena = Arena::new();
+    let root = parse_document(&arena, markdown, &md::options(true, false));
+    root.descendants().filter_map(heading).collect()
 }
 
-fn collect_headings(node: &Node, out: &mut Vec<ffi::Heading>) {
-    if let Node::Heading(heading) = node {
-        out.push(ffi::Heading {
-            level: heading.depth,
-            text: node.to_string(),
-            line: heading.position.as_ref().map_or(0, |p| p.start.line),
-        });
-        return;
-    }
-    if let Some(children) = node.children() {
-        for child in children {
-            collect_headings(child, out);
-        }
-    }
+fn heading<'a>(node: &'a AstNode<'a>) -> Option<ffi::Heading> {
+    let data = node.data();
+    let NodeValue::Heading(h) = &data.value else {
+        return None;
+    };
+    let mut text = String::new();
+    md::plain_text(node, &mut text);
+    Some(ffi::Heading {
+        level: h.level,
+        text,
+        line: data.sourcepos.start.line,
+    })
 }
 
 #[cfg(test)]

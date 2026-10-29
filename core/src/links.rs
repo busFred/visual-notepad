@@ -1,15 +1,16 @@
 //! Link destinations: locating them in the source (for broken-link checks) and
 //! rewriting relative ones when text moves between folders.
 
-use markdown::mdast::Node;
+use comrak::nodes::NodeValue;
+use comrak::{Arena, parse_document};
 
 use crate::ffi::LinkTarget;
-use crate::parse_options;
+use crate::md;
 
 /// A destination in the source: byte range of the text as written.
-struct Dest {
-    start: usize,
-    end: usize,
+pub(crate) struct Dest {
+    pub start: usize,
+    pub end: usize,
 }
 
 fn skip_space(src: &[u8], mut i: usize) -> usize {
@@ -101,56 +102,184 @@ fn inline_destination(src: &[u8], start: usize, image: bool, label_from: usize) 
     destination(src, close + 2)
 }
 
-/// Destination of a definition `[id]: dest` starting at `start`.
-fn definition_destination(src: &[u8], start: usize) -> Option<Dest> {
-    if src.get(start) != Some(&b'[') {
-        return None;
-    }
-    let close = label_end(src, start + 1)?;
-    if src.get(close + 1) != Some(&b':') {
-        return None;
-    }
-    destination(src, close + 2)
+fn is_line_end(src: &[u8], i: usize) -> bool {
+    i >= src.len() || matches!(src[i], b'\n' | b'\r')
 }
 
-fn collect(node: &Node, src: &str, out: &mut Vec<Dest>) {
+fn skip_blanks(src: &[u8], mut i: usize) -> usize {
+    while i < src.len() && matches!(src[i], b' ' | b'\t') {
+        i += 1;
+    }
+    i
+}
+
+/// Start of the line after the one containing `i`.
+fn next_line(src: &[u8], i: usize) -> usize {
+    match src.get(i) {
+        Some(b'\r') if src.get(i + 1) == Some(&b'\n') => i + 2,
+        Some(_) => i + 1,
+        None => i,
+    }
+}
+
+/// A link title starting at `from` that is followed only by blanks on its
+/// last line. Returns the end of that line.
+fn title_end(src: &[u8], from: usize) -> Option<usize> {
+    let closer = match src.get(from)? {
+        b'"' => b'"',
+        b'\'' => b'\'',
+        b'(' => b')',
+        _ => return None,
+    };
+    let mut i = from + 1;
+    loop {
+        match *src.get(i)? {
+            b'\\' => i += 1,
+            c if c == closer => break,
+            b'(' if closer == b')' => return None,
+            _ => {}
+        }
+        i += 1;
+    }
+    let end = skip_blanks(src, i + 1);
+    is_line_end(src, end).then_some(end)
+}
+
+/// A link reference definition `[label]: dest "title"` starting at `start`
+/// (the whole of `src` is the available text). Returns the destination and
+/// the offset where the definition ends.
+fn definition_at(src: &[u8], start: usize) -> Option<(Dest, usize)> {
+    let mut i = start;
+    while i < start + 3 && src.get(i) == Some(&b' ') {
+        i += 1;
+    }
+    if src.get(i) != Some(&b'[') || src.get(i + 1) == Some(&b'^') {
+        return None;
+    }
+    i += 1;
+    let label_start = i;
+    loop {
+        match *src.get(i)? {
+            b'\\' => i += 1,
+            b'[' => return None,
+            b']' => break,
+            _ => {}
+        }
+        i += 1;
+    }
+    if src[label_start..i].iter().all(u8::is_ascii_whitespace) || src.get(i + 1) != Some(&b':') {
+        return None;
+    }
+    i = skip_blanks(src, i + 2);
+    if is_line_end(src, i) {
+        i = skip_blanks(src, next_line(src, i));
+    }
+    let dest = destination(src, i)?;
+    let after = if src[i] == b'<' {
+        dest.end + 1
+    } else {
+        dest.end
+    };
+    let rest = skip_blanks(src, after);
+    if !is_line_end(src, rest) {
+        if rest == after {
+            return None;
+        }
+        return title_end(src, rest).map(|end| (dest, end));
+    }
+    let next = skip_blanks(src, next_line(src, rest));
+    let end = title_end(src, next).unwrap_or(rest);
+    Some((dest, end))
+}
+
+/// A link reference definition found in the source.
+pub(crate) struct Definition {
+    pub first_line: usize,
+    pub last_line: usize,
+    pub dest: Dest,
+}
+
+/// Link reference definitions that sit on lines no top-level node covers
+/// (comrak resolves definitions and drops them from the tree).
+pub(crate) fn definitions(src: &str, starts: &[usize], covered: &[bool]) -> Vec<Definition> {
     let bytes = src.as_bytes();
-    match node {
-        Node::Link(link) => {
-            if let Some(pos) = &link.position {
-                // Children end inside the label, past any `]` they contain.
-                let from = link
-                    .children
-                    .last()
-                    .and_then(|c| c.position())
-                    .map_or(pos.start.offset + 1, |p| p.end.offset);
-                out.extend(inline_destination(bytes, pos.start.offset, false, from));
+    let line_of = |offset: usize| starts.partition_point(|s| *s <= offset) - 1;
+    let blank = |line: usize| {
+        let end = starts.get(line + 1).copied().unwrap_or(bytes.len());
+        bytes[starts[line]..end].iter().all(u8::is_ascii_whitespace)
+    };
+    let mut out = Vec::new();
+    let mut line = 0;
+    while line < starts.len() {
+        if covered[line] || blank(line) {
+            line += 1;
+            continue;
+        }
+        // A run of uncovered, non-blank lines.
+        let mut run_end = line;
+        while run_end + 1 < starts.len() && !covered[run_end + 1] && !blank(run_end + 1) {
+            run_end += 1;
+        }
+        let bound = starts.get(run_end + 1).copied().unwrap_or(bytes.len());
+        let text = &bytes[..bound];
+        let mut l = line;
+        while l <= run_end {
+            match definition_at(text, starts[l]) {
+                Some((dest, end)) => {
+                    let last_line = line_of(end).min(run_end);
+                    out.push(Definition {
+                        first_line: l,
+                        last_line,
+                        dest,
+                    });
+                    l = last_line + 1;
+                }
+                None => l += 1,
             }
         }
-        Node::Image(image) => {
-            if let Some(pos) = &image.position {
-                out.extend(inline_destination(bytes, pos.start.offset, true, 0));
-            }
-        }
-        Node::Definition(def) => {
-            if let Some(pos) = &def.position {
-                out.extend(definition_destination(bytes, pos.start.offset));
-            }
-        }
-        _ => {}
+        line = run_end + 1;
     }
-    if let Some(children) = node.children() {
-        for child in children {
-            collect(child, src, out);
-        }
-    }
+    out
 }
 
 fn destinations(markdown: &str) -> Vec<Dest> {
+    let arena = Arena::new();
+    let root = parse_document(&arena, markdown, &md::options(true, false));
+    let starts = md::line_starts(markdown);
+    let bytes = markdown.as_bytes();
     let mut out = Vec::new();
-    if let Ok(root) = markdown::to_mdast(markdown, &parse_options()) {
-        collect(&root, markdown, &mut out);
+    let mut covered = vec![false; starts.len()];
+    for node in root.children() {
+        let (first, last) = md::line_range(node);
+        for flag in covered.iter_mut().take(last + 1).skip(first) {
+            *flag = true;
+        }
     }
+    for node in root.descendants() {
+        let data = node.data();
+        let image = match data.value {
+            NodeValue::Link(_) => false,
+            NodeValue::Image(_) => true,
+            _ => continue,
+        };
+        let Some(start) = md::byte_offset(&starts, data.sourcepos.start) else {
+            continue;
+        };
+        // Children end inside the label, past any `]` they contain.
+        let from = if image {
+            0
+        } else {
+            node.last_child()
+                .and_then(|c| md::byte_offset(&starts, c.data().sourcepos.end))
+                .map_or(start + 1, |end| end + 1)
+        };
+        out.extend(inline_destination(bytes, start, image, from));
+    }
+    out.extend(
+        definitions(markdown, &starts, &covered)
+            .into_iter()
+            .map(|d| d.dest),
+    );
     out.retain(|d| {
         d.start < d.end && markdown.is_char_boundary(d.start) && markdown.is_char_boundary(d.end)
     });
@@ -414,5 +543,16 @@ mod tests {
             rebase("é 😀 [a](x.md) ü", "/a", "/b"),
             "é 😀 [a](../a/x.md) ü"
         );
+    }
+
+    #[test]
+    fn multi_line_definitions_are_located() {
+        let doc = "é\n\n[a]:\n  <x y.md>\n  \"t\"\n[b]: z.md\n";
+        let units: Vec<u16> = doc.encode_utf16().collect();
+        let got: Vec<String> = targets(doc)
+            .iter()
+            .map(|t| String::from_utf16(&units[t.start..t.end]).unwrap())
+            .collect();
+        assert_eq!(got, vec!["x y.md", "z.md"]);
     }
 }

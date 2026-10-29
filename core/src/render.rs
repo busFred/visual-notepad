@@ -5,38 +5,35 @@
 
 use std::collections::HashMap;
 
-use markdown::mdast::{AlignKind, Node};
-use markdown::{Constructs, ParseOptions};
+use comrak::nodes::{AstNode, NodeValue, TableAlignment};
+use comrak::{Arena, parse_document};
 
 use crate::ffi::{Block, BlockKind, RenderOptions};
-
-pub fn parse_options(options: &RenderOptions) -> ParseOptions {
-    ParseOptions {
-        constructs: Constructs {
-            frontmatter: true,
-            math_flow: options.math,
-            math_text: options.math,
-            gfm_autolink_literal: options.linkify,
-            ..Constructs::gfm()
-        },
-        ..ParseOptions::gfm()
-    }
-}
+use crate::{links, md};
 
 pub fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block> {
-    let Ok(root) = markdown::to_mdast(markdown, &parse_options(options)) else {
-        return Vec::new();
-    };
-    let Some(children) = root.children() else {
-        return Vec::new();
-    };
+    let arena = Arena::new();
+    let root = parse_document(
+        &arena,
+        markdown,
+        &md::options(options.math, options.linkify),
+    );
+    let starts = md::line_starts(markdown);
+    let mut covered = vec![false; starts.len()];
 
-    let mut definitions = HashMap::new();
-    let mut footnotes = Vec::new();
-    collect_definitions(&root, &mut definitions, &mut footnotes);
+    // comrak moves footnote definitions to the end of the document; the
+    // numbering follows their order in the source.
+    let mut footnotes: Vec<(usize, String)> = Vec::new();
+    for node in root.children() {
+        if let NodeValue::FootnoteDefinition(f) = &node.data().value {
+            footnotes.push((node.data().sourcepos.start.line, f.name.to_lowercase()));
+        }
+    }
+    footnotes.sort();
+    let footnotes: Vec<String> = footnotes.into_iter().map(|(_, name)| name).collect();
+
     let mut renderer = Html {
         options,
-        definitions: &definitions,
         footnotes: &footnotes,
         out: String::new(),
         inline_math: Vec::new(),
@@ -44,17 +41,11 @@ pub fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block> {
     };
 
     let mut result = Vec::new();
-    for node in children {
-        let Some(position) = node.position() else {
-            continue;
-        };
-        let first_line = position.start.line - 1;
-        // The end point is the first character after the node.
-        let last_line = if position.end.column == 1 && position.end.line > position.start.line {
-            position.end.line - 2
-        } else {
-            position.end.line - 1
-        };
+    for node in root.children() {
+        let (first_line, last_line) = md::line_range(node);
+        for flag in covered.iter_mut().take(last_line + 1).skip(first_line) {
+            *flag = true;
+        }
         let mut block = Block {
             kind: BlockKind::Html,
             first_line,
@@ -64,30 +55,87 @@ pub fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block> {
             text: String::new(),
             inline_math: Vec::new(),
         };
-        match node {
-            Node::Code(code) => {
+        let data = node.data();
+        match &data.value {
+            NodeValue::CodeBlock(code) => {
                 block.kind = BlockKind::Code;
-                block.lang = code.lang.clone().unwrap_or_default();
-                block.text = code.value.clone();
+                block.lang = code
+                    .info
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                block.text = strip_newline(&code.literal).to_string();
             }
-            Node::Math(math) => {
-                block.kind = BlockKind::Math;
-                block.text = math.value.clone();
+            NodeValue::FrontMatter(raw) => {
+                front_matter(&mut block, &front_matter_body(raw), options)
             }
-            Node::Yaml(yaml) => front_matter(&mut block, &yaml.value, options),
-            Node::Toml(toml) => front_matter(&mut block, &toml.value, options),
-            Node::Definition(_) => block.kind = BlockKind::Hidden,
             _ => {
-                renderer.out.clear();
-                renderer.inline_math.clear();
-                renderer.node(node);
-                block.html = std::mem::take(&mut renderer.out);
-                block.inline_math = std::mem::take(&mut renderer.inline_math);
+                if let Some(tex) = display_math(node) {
+                    block.kind = BlockKind::Math;
+                    block.text = tex;
+                } else {
+                    renderer.out.clear();
+                    renderer.inline_math.clear();
+                    renderer.node(node);
+                    block.html = std::mem::take(&mut renderer.out);
+                    block.inline_math = std::mem::take(&mut renderer.inline_math);
+                }
             }
         }
         result.push(block);
     }
+
+    // Definitions are not in the tree; they are the leftover lines.
+    for def in links::definitions(markdown, &starts, &covered) {
+        result.push(Block {
+            kind: BlockKind::Hidden,
+            first_line: def.first_line,
+            last_line: def.last_line,
+            html: String::new(),
+            lang: String::new(),
+            text: String::new(),
+            inline_math: Vec::new(),
+        });
+    }
+    result.sort_by_key(|b| b.first_line);
     result
+}
+
+fn strip_newline(text: &str) -> &str {
+    text.strip_suffix('\n')
+        .map_or(text, |t| t.strip_suffix('\r').unwrap_or(t))
+}
+
+/// The YAML between the `---` lines of a front matter node.
+fn front_matter_body(raw: &str) -> String {
+    let mut lines: Vec<&str> = raw.lines().collect();
+    if !lines.is_empty() {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    if lines.last().is_some_and(|l| l.trim_end() == "---") {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// TeX of a paragraph that consists of one multi-line `$$` display math.
+fn display_math<'a>(node: &'a AstNode<'a>) -> Option<String> {
+    if !matches!(node.data().value, NodeValue::Paragraph) {
+        return None;
+    }
+    let sp = node.data().sourcepos;
+    let child = node.first_child()?;
+    if sp.start.line == sp.end.line || child.next_sibling().is_some() {
+        return None;
+    }
+    match &child.data().value {
+        NodeValue::Math(m) if m.display_math => Some(m.literal.trim_matches('\n').to_string()),
+        _ => None,
+    }
 }
 
 fn front_matter(block: &mut Block, value: &str, options: &RenderOptions) {
@@ -114,30 +162,11 @@ fn front_matter(block: &mut Block, value: &str, options: &RenderOptions) {
                 ));
             }
             block.kind = BlockKind::Html;
-            block.html = format!("<table class=\"frontmatter\" cellspacing=\"0\" cellpadding=\"4\">{rows}</table>");
+            block.html = format!(
+                "<table class=\"frontmatter\" cellspacing=\"0\" cellpadding=\"4\">{rows}</table>"
+            );
         }
         _ => block.kind = BlockKind::FrontMatter,
-    }
-}
-
-fn collect_definitions<'a>(
-    node: &'a Node,
-    definitions: &mut HashMap<String, (String, Option<String>)>,
-    footnotes: &mut Vec<String>,
-) {
-    match node {
-        Node::Definition(d) => {
-            definitions
-                .entry(d.identifier.to_lowercase())
-                .or_insert((d.url.clone(), d.title.clone()));
-        }
-        Node::FootnoteDefinition(f) => footnotes.push(f.identifier.to_lowercase()),
-        _ => {}
-    }
-    if let Some(children) = node.children() {
-        for child in children {
-            collect_definitions(child, definitions, footnotes);
-        }
     }
 }
 
@@ -174,7 +203,10 @@ pub fn slug(text: &str) -> String {
 
 /// Smart quotes and dashes, like markdown-it's typographer.
 fn typographer(text: &str) -> String {
-    let text = text.replace("---", "\u{2014}").replace("--", "\u{2013}").replace("...", "\u{2026}");
+    let text = text
+        .replace("---", "\u{2014}")
+        .replace("--", "\u{2013}")
+        .replace("...", "\u{2026}");
     let mut out = String::with_capacity(text.len());
     let mut previous: Option<char> = None;
     for c in text.chars() {
@@ -191,7 +223,6 @@ fn typographer(text: &str) -> String {
 
 struct Html<'a> {
     options: &'a RenderOptions,
-    definitions: &'a HashMap<String, (String, Option<String>)>,
     footnotes: &'a [String],
     out: String,
     inline_math: Vec<String>,
@@ -199,17 +230,32 @@ struct Html<'a> {
 }
 
 impl Html<'_> {
-    fn children(&mut self, node: &Node) {
-        if let Some(children) = node.children() {
-            for child in children {
-                self.node(child);
+    /// Children, with runs of text merged so that the typographer sees whole
+    /// sentences.
+    fn children<'a>(&mut self, node: &'a AstNode<'a>) {
+        let mut text = String::new();
+        for child in node.children() {
+            match &child.data().value {
+                NodeValue::Text(t) => text.push_str(t),
+                NodeValue::SoftBreak => text.push('\n'),
+                _ => {
+                    self.text(&std::mem::take(&mut text));
+                    self.node(child);
+                }
             }
         }
+        self.text(&text);
     }
 
     fn text(&mut self, value: &str) {
-        let value = if self.options.typographer { typographer(value) } else { value.to_string() };
-        let escaped = escape(&value);
+        if value.is_empty() {
+            return;
+        }
+        let escaped = if self.options.typographer {
+            escape(&typographer(value))
+        } else {
+            escape(value)
+        };
         if self.options.breaks {
             self.out.push_str(&escaped.replace('\n', "<br />"));
         } else {
@@ -217,190 +263,195 @@ impl Html<'_> {
         }
     }
 
-    fn link_open(&mut self, url: &str, title: Option<&String>) {
+    fn link_open(&mut self, url: &str, title: &str) {
         self.out.push_str(&format!("<a href=\"{}\"", escape(url)));
-        if let Some(title) = title {
+        if !title.is_empty() {
             self.out.push_str(&format!(" title=\"{}\"", escape(title)));
         }
         self.out.push('>');
     }
 
-    fn image(&mut self, url: &str, alt: &str, title: Option<&String>) {
-        self.out.push_str(&format!("<img src=\"{}\" alt=\"{}\"", escape(url), escape(alt)));
-        if let Some(title) = title {
-            self.out.push_str(&format!(" title=\"{}\"", escape(title)));
-        }
-        self.out.push_str(" />");
+    fn wrap<'a>(&mut self, node: &'a AstNode<'a>, tag: &str) {
+        self.out.push_str(&format!("<{tag}>"));
+        self.children(node);
+        self.out.push_str(&format!("</{tag}>"));
     }
 
-    fn node(&mut self, node: &Node) {
-        match node {
-            Node::Root(_) => self.children(node),
-            Node::Paragraph(_) => {
-                self.out.push_str("<p>");
-                self.children(node);
-                self.out.push_str("</p>");
+    fn footnote_number(&self, id: &str) -> usize {
+        self.footnotes
+            .iter()
+            .position(|x| x == id)
+            .map_or(0, |i| i + 1)
+    }
+
+    fn node<'a>(&mut self, node: &'a AstNode<'a>) {
+        let data = node.data();
+        match &data.value {
+            NodeValue::Paragraph => {
+                if let Some(tex) = display_math(node) {
+                    // Display math nested in a list or quote.
+                    self.out.push_str(&format!(
+                        "<p align=\"center\"><img src=\"vn-math-display:{}\" /></p>",
+                        self.inline_math.len()
+                    ));
+                    self.inline_math.push(tex);
+                } else {
+                    self.wrap(node, "p");
+                }
             }
-            Node::Heading(h) => {
-                let mut slug = slug(&node.to_string());
+            NodeValue::Heading(h) => {
+                let mut plain = String::new();
+                md::plain_text(node, &mut plain);
+                let mut slug = slug(&plain);
                 let count = self.slugs.entry(slug.clone()).or_insert(0);
                 if *count > 0 {
                     slug = format!("{slug}-{count}");
                 }
                 *count += 1;
-                self.out.push_str(&format!("<h{d}><a name=\"{}\"></a>", escape(&slug), d = h.depth));
+                self.out.push_str(&format!(
+                    "<h{d}><a name=\"{}\"></a>",
+                    escape(&slug),
+                    d = h.level
+                ));
                 self.children(node);
-                self.out.push_str(&format!("</h{}>", h.depth));
+                self.out.push_str(&format!("</h{}>", h.level));
             }
-            Node::Text(t) => self.text(&t.value),
-            Node::Emphasis(_) => {
-                self.out.push_str("<em>");
-                self.children(node);
-                self.out.push_str("</em>");
-            }
-            Node::Strong(_) => {
-                self.out.push_str("<strong>");
-                self.children(node);
-                self.out.push_str("</strong>");
-            }
-            Node::Delete(_) => {
-                self.out.push_str("<s>");
-                self.children(node);
-                self.out.push_str("</s>");
-            }
-            Node::InlineCode(c) => {
-                self.out.push_str(&format!("<code>{}</code>", escape(&c.value)));
-            }
-            Node::InlineMath(m) => {
+            NodeValue::Text(t) => self.text(t),
+            NodeValue::SoftBreak => self.text("\n"),
+            NodeValue::LineBreak => self.out.push_str("<br />"),
+            NodeValue::Emph => self.wrap(node, "em"),
+            NodeValue::Strong => self.wrap(node, "strong"),
+            NodeValue::Strikethrough => self.wrap(node, "s"),
+            NodeValue::Code(c) => self
+                .out
+                .push_str(&format!("<code>{}</code>", escape(&c.literal))),
+            NodeValue::Math(m) => {
                 self.out.push_str(&format!(
                     "<img src=\"vn-math:{}\" style=\"vertical-align: middle\" />",
                     self.inline_math.len()
                 ));
-                self.inline_math.push(m.value.clone());
+                self.inline_math
+                    .push(m.literal.trim_matches('\n').to_string());
             }
-            Node::Math(m) => {
-                // Display math nested in a list or quote.
-                self.out.push_str(&format!(
-                    "<p align=\"center\"><img src=\"vn-math-display:{}\" /></p>",
-                    self.inline_math.len()
-                ));
-                self.inline_math.push(m.value.clone());
-            }
-            Node::Break(_) => self.out.push_str("<br />"),
-            Node::Link(l) => {
-                self.link_open(&l.url, l.title.as_ref());
+            NodeValue::Link(l) => {
+                self.link_open(&l.url, &l.title);
                 self.children(node);
                 self.out.push_str("</a>");
             }
-            Node::LinkReference(r) => match self.definitions.get(&r.identifier.to_lowercase()).cloned() {
-                Some((url, title)) => {
-                    self.link_open(&url, title.as_ref());
-                    self.children(node);
-                    self.out.push_str("</a>");
+            NodeValue::Image(i) => {
+                let mut alt = String::new();
+                md::plain_text(node, &mut alt);
+                self.out.push_str(&format!(
+                    "<img src=\"{}\" alt=\"{}\"",
+                    escape(&i.url),
+                    escape(&alt)
+                ));
+                if !i.title.is_empty() {
+                    self.out
+                        .push_str(&format!(" title=\"{}\"", escape(&i.title)));
                 }
-                None => self.children(node),
-            },
-            Node::Image(i) => self.image(&i.url, &i.alt, i.title.as_ref()),
-            Node::ImageReference(r) => {
-                if let Some((url, title)) = self.definitions.get(&r.identifier.to_lowercase()).cloned() {
-                    self.image(&url, &r.alt, title.as_ref());
-                } else {
-                    self.text(&r.alt);
-                }
+                self.out.push_str(" />");
             }
-            Node::FootnoteReference(f) => {
-                let id = f.identifier.to_lowercase();
-                let n = self.footnotes.iter().position(|x| *x == id).map_or(0, |i| i + 1);
+            NodeValue::FootnoteReference(f) => {
+                let id = f.name.to_lowercase();
+                let n = self.footnote_number(&id);
                 self.out.push_str(&format!(
                     "<sup><a href=\"#fn-{}\">{}</a></sup>",
                     escape(&slug(&id)),
                     if n > 0 { n.to_string() } else { escape(&id) }
                 ));
             }
-            Node::FootnoteDefinition(f) => {
-                let id = f.identifier.to_lowercase();
-                let n = self.footnotes.iter().position(|x| *x == id).map_or(0, |i| i + 1);
+            NodeValue::FootnoteDefinition(f) => {
+                let id = f.name.to_lowercase();
                 self.out.push_str(&format!(
                     "<div class=\"footnote\"><a name=\"fn-{}\"></a><sup>{}</sup> ",
                     escape(&slug(&id)),
-                    n
+                    self.footnote_number(&id)
                 ));
                 self.children(node);
                 self.out.push_str("</div>");
             }
-            Node::Blockquote(_) => {
-                self.out.push_str("<blockquote>");
-                self.children(node);
-                self.out.push_str("</blockquote>");
-            }
-            Node::List(l) => {
+            NodeValue::BlockQuote => self.wrap(node, "blockquote"),
+            NodeValue::List(l) => {
                 let tasks = node
                     .children()
-                    .is_some_and(|items| items.iter().all(|i| matches!(i, Node::ListItem(li) if li.checked.is_some())));
-                let style = if tasks { " style=\"list-style-type: none\"" } else { "" };
-                if l.ordered {
-                    let start = l.start.unwrap_or(1);
-                    self.out.push_str(&format!("<ol start=\"{start}\"{style}>"));
+                    .all(|i| matches!(i.data().value, NodeValue::TaskItem(_)));
+                let style = if tasks {
+                    " style=\"list-style-type: none\""
+                } else {
+                    ""
+                };
+                let ordered = l.list_type == comrak::nodes::ListType::Ordered;
+                if ordered {
+                    self.out
+                        .push_str(&format!("<ol start=\"{}\"{style}>", l.start));
                 } else {
                     self.out.push_str(&format!("<ul{style}>"));
                 }
-                self.children(node);
-                self.out.push_str(if l.ordered { "</ol>" } else { "</ul>" });
-            }
-            Node::ListItem(item) => {
-                self.out.push_str("<li>");
-                if let Some(checked) = item.checked {
-                    let line = node.position().map_or(0, |p| p.start.line - 1);
-                    self.out.push_str(&format!(
-                        "<a class=\"task\" href=\"vn-task:{line}\">{}</a> ",
-                        if checked { "\u{2611}" } else { "\u{2610}" }
-                    ));
+                for item in node.children() {
+                    self.item(item, l.tight);
                 }
-                // Tight list items hold paragraphs; drop their <p> so items
-                // don't get paragraph spacing.
-                if let Some(children) = node.children() {
-                    for child in children {
-                        if let (Node::Paragraph(_), false) = (child, item.spread) {
-                            self.children(child);
-                        } else {
-                            self.node(child);
-                        }
-                    }
-                }
-                self.out.push_str("</li>");
+                self.out.push_str(if ordered { "</ol>" } else { "</ul>" });
             }
-            Node::Code(c) => {
-                self.out.push_str(&format!("<pre>{}</pre>", escape(c.value.trim_end_matches('\n'))));
+            NodeValue::Item(_) | NodeValue::TaskItem(_) => self.item(node, false),
+            NodeValue::CodeBlock(c) => {
+                self.out.push_str(&format!(
+                    "<pre>{}</pre>",
+                    escape(c.literal.trim_end_matches('\n'))
+                ));
             }
-            Node::Html(h) => self.out.push_str(&h.value),
-            Node::ThematicBreak(_) => self.out.push_str("<hr />"),
-            Node::Table(t) => {
-                self.out.push_str("<table cellspacing=\"0\" cellpadding=\"5\">");
-                if let Some(rows) = node.children() {
-                    for (r, row) in rows.iter().enumerate() {
-                        self.out.push_str("<tr>");
-                        if let Some(cells) = row.children() {
-                            for (c, cell) in cells.iter().enumerate() {
-                                let tag = if r == 0 { "th" } else { "td" };
-                                let align = match t.align.get(c) {
-                                    Some(AlignKind::Left) => " align=\"left\"",
-                                    Some(AlignKind::Right) => " align=\"right\"",
-                                    Some(AlignKind::Center) => " align=\"center\"",
-                                    _ => "",
-                                };
-                                self.out.push_str(&format!("<{tag}{align}>"));
-                                self.children(cell);
-                                self.out.push_str(&format!("</{tag}>"));
-                            }
-                        }
-                        self.out.push_str("</tr>");
+            NodeValue::HtmlBlock(h) => self.out.push_str(h.literal.trim_end_matches(['\n', '\r'])),
+            NodeValue::HtmlInline(h) => self.out.push_str(h),
+            NodeValue::ThematicBreak => self.out.push_str("<hr />"),
+            NodeValue::Table(t) => {
+                self.out
+                    .push_str("<table cellspacing=\"0\" cellpadding=\"5\">");
+                for (r, row) in node.children().enumerate() {
+                    self.out.push_str("<tr>");
+                    for (c, cell) in row.children().enumerate() {
+                        let tag = if r == 0 { "th" } else { "td" };
+                        let align = match t.alignments.get(c) {
+                            Some(TableAlignment::Left) => " align=\"left\"",
+                            Some(TableAlignment::Right) => " align=\"right\"",
+                            Some(TableAlignment::Center) => " align=\"center\"",
+                            _ => "",
+                        };
+                        self.out.push_str(&format!("<{tag}{align}>"));
+                        self.children(cell);
+                        self.out.push_str(&format!("</{tag}>"));
                     }
+                    self.out.push_str("</tr>");
                 }
                 self.out.push_str("</table>");
             }
-            Node::Definition(_) | Node::Yaml(_) | Node::Toml(_) => {}
+            NodeValue::FrontMatter(_) => {}
             _ => self.children(node),
         }
+    }
+
+    fn item<'a>(&mut self, node: &'a AstNode<'a>, tight: bool) {
+        self.out.push_str("<li>");
+        if let NodeValue::TaskItem(task) = &node.data().value {
+            let line = node.data().sourcepos.start.line.saturating_sub(1);
+            self.out.push_str(&format!(
+                "<a class=\"task\" href=\"vn-task:{line}\">{}</a> ",
+                if task.symbol.is_some() {
+                    "\u{2611}"
+                } else {
+                    "\u{2610}"
+                }
+            ));
+        }
+        // Tight list items hold paragraphs; drop their <p> so items don't
+        // get paragraph spacing.
+        for child in node.children() {
+            if tight && matches!(child.data().value, NodeValue::Paragraph) {
+                self.children(child);
+            } else {
+                self.node(child);
+            }
+        }
+        self.out.push_str("</li>");
     }
 }
 
@@ -409,19 +460,36 @@ mod tests {
     use super::*;
 
     fn opts() -> RenderOptions {
-        RenderOptions { breaks: false, linkify: true, typographer: false, math: true, front_matter: 2 }
+        RenderOptions {
+            breaks: false,
+            linkify: true,
+            typographer: false,
+            math: true,
+            front_matter: 2,
+        }
     }
 
     #[test]
     fn splits_blocks_with_lines() {
         let doc = "# Title\n\nPara *em*\nnext line\n\n```python\nx = 1\n```\n\n$$\na^2\n$$\n";
         let b = blocks(doc, &opts());
-        let summary: Vec<_> = b.iter().map(|b| (b.kind, b.first_line, b.last_line)).collect();
+        let summary: Vec<_> = b
+            .iter()
+            .map(|b| (b.kind, b.first_line, b.last_line))
+            .collect();
         assert_eq!(
             summary,
-            vec![(BlockKind::Html, 0, 0), (BlockKind::Html, 2, 3), (BlockKind::Code, 5, 7), (BlockKind::Math, 9, 11)]
+            vec![
+                (BlockKind::Html, 0, 0),
+                (BlockKind::Html, 2, 3),
+                (BlockKind::Code, 5, 7),
+                (BlockKind::Math, 9, 11)
+            ]
         );
-        assert!(b[0].html.starts_with("<h1><a name=\"title\"></a>Title</h1>"));
+        assert!(
+            b[0].html
+                .starts_with("<h1><a name=\"title\"></a>Title</h1>")
+        );
         assert_eq!(b[1].html, "<p>Para <em>em</em>\nnext line</p>");
         assert_eq!(b[2].lang, "python");
         assert_eq!(b[2].text, "x = 1");
@@ -434,8 +502,14 @@ mod tests {
         let b = blocks(doc, &opts());
         assert_eq!(b.len(), 2);
         assert!(b[0].html.contains("list-style-type: none"));
-        assert!(b[0].html.contains("<a class=\"task\" href=\"vn-task:0\">\u{2611}</a>"));
-        assert!(b[0].html.contains("<a href=\"https://example.com\" title=\"Ex\">site</a>"));
+        assert!(
+            b[0].html
+                .contains("<a class=\"task\" href=\"vn-task:0\">\u{2611}</a>")
+        );
+        assert!(
+            b[0].html
+                .contains("<a href=\"https://example.com\" title=\"Ex\">site</a>")
+        );
         assert!(b[0].html.contains("vn-math:0"));
         assert_eq!(b[0].inline_math, vec!["x^2".to_string()]);
         assert_eq!(b[1].kind, BlockKind::Hidden);
@@ -465,7 +539,11 @@ mod tests {
         o.linkify = false;
         assert!(!blocks("see www.example.com\n", &o)[0].html.contains("<a"));
         o.linkify = true;
-        assert!(blocks("see www.example.com\n", &o)[0].html.contains("<a href"));
+        assert!(
+            blocks("see www.example.com\n", &o)[0]
+                .html
+                .contains("<a href")
+        );
     }
 
     #[test]
@@ -474,5 +552,107 @@ mod tests {
         assert!(b[0].html.contains("<th align=\"left\">a</th>"));
         assert!(b[0].html.contains("<td align=\"left\">1 &lt; 2</td>"));
         assert!(b[0].html.contains("<td align=\"right\">2</td>"));
+    }
+
+    fn lines(doc: &str) -> Vec<(BlockKind, usize, usize)> {
+        blocks(doc, &opts())
+            .iter()
+            .map(|b| (b.kind, b.first_line, b.last_line))
+            .collect()
+    }
+
+    #[test]
+    fn definitions_become_hidden_blocks() {
+        let doc = "text\n\n[a]: x.md\n[b]: <y z.md>\n   \"multi\n   line\"\n[c]:\n  w.md 'T'\n\nafter [a]\n";
+        assert_eq!(
+            lines(doc),
+            vec![
+                (BlockKind::Html, 0, 0),
+                (BlockKind::Hidden, 2, 2),
+                (BlockKind::Hidden, 3, 5),
+                (BlockKind::Hidden, 6, 7),
+                (BlockKind::Html, 9, 9),
+            ]
+        );
+        assert!(
+            blocks(doc, &opts())[4]
+                .html
+                .contains("<a href=\"x.md\">a</a>")
+        );
+    }
+
+    #[test]
+    fn text_that_is_not_a_definition_stays_text() {
+        let b = blocks("[a]: x.md trailing\n\npara\n[b]: y\n", &opts());
+        assert!(b.iter().all(|b| b.kind == BlockKind::Html));
+        assert_eq!(b.len(), 2);
+    }
+
+    #[test]
+    fn footnotes_keep_source_order_and_numbers() {
+        let doc = "One[^b] two[^a]\n\n[^a]: Note A\n\n[^b]: Note B\n\nLast\n";
+        let b = blocks(doc, &opts());
+        let kinds: Vec<_> = b.iter().map(|b| b.first_line).collect();
+        assert_eq!(kinds, vec![0, 2, 4, 6]);
+        assert!(b[0].html.contains("<sup><a href=\"#fn-b\">2</a></sup>"));
+        assert!(
+            b[1].html
+                .starts_with("<div class=\"footnote\"><a name=\"fn-a\"></a><sup>1</sup> ")
+        );
+    }
+
+    #[test]
+    fn nested_display_math_and_tight_lists() {
+        let b = blocks("- a\n- b\n\n> $$\n> x\n> $$\n", &opts());
+        assert_eq!(b[0].html, "<ul><li>a</li><li>b</li></ul>");
+        assert!(b[1].html.contains("vn-math-display:0"));
+        assert_eq!(b[1].inline_math, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn duplicate_headings_get_suffixes() {
+        let b = blocks("# A\n\n# A\n", &opts());
+        assert!(b[1].html.contains("<a name=\"a-1\"></a>"));
+    }
+
+    #[test]
+    fn front_matter_text_is_the_yaml_body() {
+        let mut o = opts();
+        o.front_matter = 1;
+        let b = blocks("---\ntitle: x\n---\n\ntext\n", &o);
+        assert_eq!(b[0].text, "title: x");
+        assert_eq!((b[0].first_line, b[0].last_line), (0, 2));
+    }
+
+    #[test]
+    fn crlf_line_ranges() {
+        assert_eq!(
+            lines("# a\r\n\r\n[x]: y\r\n\r\ntext\r\n"),
+            vec![
+                (BlockKind::Html, 0, 0),
+                (BlockKind::Hidden, 2, 2),
+                (BlockKind::Html, 4, 4)
+            ]
+        );
+    }
+
+    #[test]
+    fn perf_two_megabyte_document() {
+        let unit = "## Heading\n\nA paragraph with *emphasis*, a [link](https://example.com/page) and `code`.\n\n- first item\n- second item\n\n\n";
+        let doc = unit.repeat(20_000);
+        assert!(doc.len() > 1_900_000);
+        let start = std::time::Instant::now();
+        let b = blocks(&doc, &opts());
+        let elapsed = start.elapsed();
+        println!(
+            "blocks() on {} bytes: {elapsed:?} ({} blocks)",
+            doc.len(),
+            b.len()
+        );
+        assert_eq!(b.len(), 60_000);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "took {elapsed:?}"
+        );
     }
 }

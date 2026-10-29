@@ -12,7 +12,6 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 comrak = { version = "0.59.0", default-features = false }
 cxx = "1.0.205"
-markdown = "1.0.0"
 mermaid-rs-renderer = { version = "0.3.1", default-features = false }
 resvg = "0.47"
 
