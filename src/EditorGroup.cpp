@@ -449,17 +449,19 @@ void EditorGroup::hideDropHints()
 void EditorGroup::dragEnterEvent(QDragEnterEvent *event)
 {
     // Anything but a tab (e.g. files from the file manager) is the window's.
+    // Ignoring the entry lets Qt offer the drag to the parents; it then sends
+    // the moves and the drop straight to the window. (Forwarding them from
+    // here looped: Qt delivers every move to the widget that took the entry.)
     if (!event->mimeData()->hasFormat(tabMimeType()))
-        QCoreApplication::sendEvent(window(), event);
+        event->ignore();
     else
         handleTabDrag(event, event->position().toPoint());
 }
 
 void EditorGroup::dragMoveEvent(QDragMoveEvent *event)
 {
-    // Anything but a tab (e.g. files from the file manager) is the window's.
     if (!event->mimeData()->hasFormat(tabMimeType()))
-        QCoreApplication::sendEvent(window(), event);
+        event->ignore();
     else
         handleTabDrag(event, event->position().toPoint());
 }
@@ -471,9 +473,8 @@ void EditorGroup::dragLeaveEvent(QDragLeaveEvent *)
 
 void EditorGroup::dropEvent(QDropEvent *event)
 {
-    // Anything but a tab (e.g. files from the file manager) is the window's.
     if (!event->mimeData()->hasFormat(tabMimeType()))
-        QCoreApplication::sendEvent(window(), event);
+        event->ignore();
     else
         handleTabDrag(event, event->position().toPoint());
 }
