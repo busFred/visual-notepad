@@ -247,6 +247,33 @@ void TextView::setTextCursor(const QTextCursor &cursor)
     setCursors({cursor}, 0);
 }
 
+bool TextView::hasSelection() const
+{
+    for (const Caret &caret : m_carets) {
+        if (caret.cursor.hasSelection())
+            return true;
+    }
+    return false;
+}
+
+void TextView::mirrorCursorsFrom(const TextView *other, bool reveal)
+{
+    if (!other || other == this || other->m_doc != m_doc)
+        return;
+    m_carets.clear();
+    for (const Caret &caret : other->m_carets)
+        m_carets.push_back({caret.cursor, -1});
+    m_primary = qBound(0, other->m_primary, int(m_carets.size()) - 1);
+    m_expandHistory.clear();
+    // Like caretsChanged(), but silent: the owner of the selection announces it.
+    normalizeCarets();
+    rowsMayHaveChanged();
+    updateScrollBars();
+    if (reveal)
+        ensureCursorVisible();
+    viewport()->update();
+}
+
 QList<QTextCursor> TextView::cursors() const
 {
     QList<QTextCursor> result;
@@ -588,6 +615,17 @@ int TextView::hitTestRenderedRow(const Row &row, const QPointF &)
 
 void TextView::paintLineBackground(QPainter &, int, const QRectF &)
 {
+}
+
+QTextCursor TextView::lineUnitAt(int position) const
+{
+    QTextCursor target(m_doc);
+    target.setPosition(position);
+    target.movePosition(QTextCursor::StartOfBlock);
+    target.movePosition(QTextCursor::NextBlock, QTextCursor::KeepAnchor);
+    if (!target.hasSelection())
+        target.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
+    return target;
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,6 +1208,15 @@ void TextView::mousePressEvent(QMouseEvent *event)
             && renderedRowPressed(info, QPointF(event->position().x() - textLeft(), event->position().y() - top), event))
             return;
     }
+    // Third click in a row: select the line (the paragraph in rendered text).
+    if (m_doubleClickTime.isValid() && m_doubleClickTime.elapsed() <= QApplication::doubleClickInterval()
+        && (event->position() - m_doubleClickPos).manhattanLength() <= QApplication::startDragDistance() * 2) {
+        m_doubleClickTime.invalidate();
+        m_dragUnit = Unit::Line;
+        m_dragging = true;
+        selectByUnit(event->position(), false);
+        return;
+    }
     const int pos = positionAt(event->position());
     const auto mods = event->modifiers();
 
@@ -1223,6 +1270,8 @@ void TextView::mouseDoubleClickEvent(QMouseEvent *event)
         return;
     m_dragUnit = Unit::Word;
     m_dragging = true;
+    m_doubleClickTime.start();
+    m_doubleClickPos = event->position();
     selectByUnit(event->position(), false);
 }
 
@@ -1233,12 +1282,8 @@ void TextView::selectByUnit(const QPointF &point, bool extend)
     target.setPosition(pos);
     if (m_dragUnit == Unit::Word)
         target = wordAt(target);
-    else if (m_dragUnit == Unit::Line) {
-        target.movePosition(QTextCursor::StartOfBlock);
-        target.movePosition(QTextCursor::NextBlock, QTextCursor::KeepAnchor);
-        if (!target.hasSelection())
-            target.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
-    }
+    else if (m_dragUnit == Unit::Line)
+        target = lineUnitAt(pos);
     if (!extend) {
         m_dragOrigin = target;
         Caret &caret = m_carets[m_primary];

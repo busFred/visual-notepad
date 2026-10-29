@@ -27,9 +27,8 @@ bool sameChar(QChar a, QChar b)
     return a == b || (a.isSpace() && b.isSpace());
 }
 
-// Maps a prefix of the rendered text onto the block's source by walking the
-// source and matching rendered characters in order; Markdown syntax that is
-// not rendered (#, *, [ ], URLs) is skipped over.
+} // namespace
+
 int sourceOffsetFor(const QString &renderedPrefix, const QString &source)
 {
     int r = 0;
@@ -42,7 +41,16 @@ int sourceOffsetFor(const QString &renderedPrefix, const QString &source)
     return int(source.size());
 }
 
-} // namespace
+int renderedOffsetFor(const QString &rendered, const QString &source, int sourceOffset)
+{
+    int r = 0;
+    const int end = qMin(sourceOffset, int(source.size()));
+    for (int s = 0; s < end && r < rendered.size(); ++s) {
+        if (sameChar(rendered.at(r), source.at(s)))
+            ++r;
+    }
+    return r;
+}
 
 VisualView::VisualView(MarkdownModel *model, QWidget *parent)
     : TextView(model->document(), parent)
@@ -110,6 +118,13 @@ void VisualView::rebuildRows()
 
     // Blocks open for editing only while this view has focus, so a document
     // opens (and stays, when you look elsewhere) fully rendered.
+    // While the mouse is selecting, rows stay as they are: blocks must not
+    // swap to source and shift under the pointer mid-drag. mouseReleaseEvent
+    // applies the expansion once the selection is made.
+    if (isMouseSelecting() && !m_rows.empty() && !m_rowsStale
+        && int(m_lineToRow.size()) == document()->blockCount())
+        return;
+
     QSet<int> caretLines;
     if (!isReadOnly() && hasFocus()) {
         for (const QTextCursor &c : cursors()) {
@@ -239,7 +254,82 @@ qreal VisualView::renderedRowHeight(const Row &r, qreal)
 void VisualView::paintRenderedRow(QPainter &painter, const Row &r, const QRectF &rect)
 {
     if (const RenderedBlock *block = renderedForRow(r))
-        block->paint(painter, rect.topLeft(), rect.width());
+        block->paint(painter, rect.topLeft(), rect.width(), selectionForRow(r, block));
+}
+
+RenderedSelection VisualView::selectionForRow(const Row &r, const RenderedBlock *block) const
+{
+    RenderedSelection result;
+    if (!block || block->kind() == RenderedBlock::Kind::Empty || blockForRow(r) < 0)
+        return result;
+    QTextDocument *doc = document();
+    const QTextBlock first = doc->findBlockByNumber(r.firstLine);
+    const QTextBlock last = doc->findBlockByNumber(r.lastLine);
+    const int rowStart = first.position();
+    const int rowEnd = last.position() + last.length() - 1; // Without the line break.
+
+    QString source;
+    QString text;
+    for (const QTextCursor &c : cursors()) {
+        if (!c.hasSelection())
+            continue;
+        const int a = c.selectionStart();
+        const int b = c.selectionEnd();
+        if (b <= rowStart || a >= rowEnd)
+            continue;
+        switch (block->kind()) {
+        case RenderedBlock::Kind::Image: {
+            // Highlight the picture when the selection spans its content.
+            const int contentStart = r.lastLine > r.firstLine ? first.next().position() : rowStart;
+            const int contentEnd = r.lastLine > r.firstLine ? last.position() : rowEnd;
+            if (a <= contentStart && b >= contentEnd)
+                result.whole = true;
+            break;
+        }
+        case RenderedBlock::Kind::Code:
+            // The code box is a plain-text copy of the source.
+            result.ranges.append({qMax(a, rowStart) - rowStart, qMin(b, rowEnd) - rowStart});
+            break;
+        case RenderedBlock::Kind::Rich: {
+            if (source.isNull()) {
+                source = m_model->sourceText(r.firstLine, r.lastLine);
+                text = block->renderedText();
+            }
+            const int from = a <= rowStart ? 0 : renderedOffsetFor(text, source, a - rowStart);
+            const int to = b >= rowEnd ? int(text.size()) : renderedOffsetFor(text, source, b - rowStart);
+            if (to > from)
+                result.ranges.append({from, to});
+            break;
+        }
+        case RenderedBlock::Kind::Empty:
+            break;
+        }
+    }
+    return result;
+}
+
+QTextCursor VisualView::lineUnitAt(int position) const
+{
+    // A rendered block is one paragraph however many source lines it has.
+    const QTextBlock b = document()->findBlock(position);
+    const Row r = row(rowOfLine(b.blockNumber()));
+    if (!r.rendered || r.lastLine <= r.firstLine)
+        return TextView::lineUnitAt(position);
+    const QTextBlock last = document()->findBlockByNumber(r.lastLine);
+    QTextCursor cursor(document());
+    cursor.setPosition(document()->findBlockByNumber(r.firstLine).position());
+    cursor.setPosition(last.next().isValid() ? last.next().position() : last.position() + last.length() - 1,
+                       QTextCursor::KeepAnchor);
+    return cursor;
+}
+
+void VisualView::mouseReleaseEvent(QMouseEvent *event)
+{
+    const bool wasSelecting = isMouseSelecting();
+    TextView::mouseReleaseEvent(event);
+    // Editable: the blocks the selection touches open for editing now.
+    if (wasSelecting && !isReadOnly())
+        relayout();
 }
 
 void VisualView::paintLineBackground(QPainter &painter, int line, const QRectF &rect)
@@ -283,7 +373,12 @@ int VisualView::hitTestRenderedRow(const Row &r, const QPointF &point)
         [[fallthrough]];
     }
     default: {
-        // Images (math, diagrams): the first content line.
+        // Images (math, diagrams): the lower half is the end of the block, so
+        // a drag past the picture selects all of it; else the first content line.
+        if (block->kind() == RenderedBlock::Kind::Image && point.y() > block->height() / 2) {
+            const QTextBlock last = doc->findBlockByNumber(r.lastLine);
+            return last.position() + last.length() - 1;
+        }
         const QTextBlock content = r.lastLine > r.firstLine ? first.next() : first;
         return content.position();
     }

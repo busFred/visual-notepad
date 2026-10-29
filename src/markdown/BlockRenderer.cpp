@@ -236,7 +236,7 @@ QPointF RenderedBlock::contentOffset() const
     return m_kind == Kind::Code ? QPointF(codePadX, codePadY) : QPointF(0, 0);
 }
 
-void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width) const
+void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width, const RenderedSelection &selection) const
 {
     switch (m_kind) {
     case Kind::Empty:
@@ -244,7 +244,13 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
     case Kind::Image: {
         const QSizeF size = m_image.size() / m_image.devicePixelRatio();
         const qreal x = m_centered ? topLeft.x() + qMax<qreal>(0, (width - size.width()) / 2) : topLeft.x();
-        painter.drawImage(QRectF(QPointF(x, topLeft.y() + codePadY), size), m_image);
+        const QRectF imageRect(QPointF(x, topLeft.y() + codePadY), size);
+        painter.drawImage(imageRect, m_image);
+        if (selection.whole) {
+            QColor tint = theme::color(theme::Role::selection);
+            tint.setAlpha(110);
+            painter.fillRect(imageRect, tint);
+        }
         return;
     }
     case Kind::Code: {
@@ -261,6 +267,19 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
         painter.translate(topLeft + contentOffset());
         QAbstractTextDocumentLayout::PaintContext ctx;
         ctx.palette.setColor(QPalette::Text, theme::color(theme::Role::text));
+        const QColor selectionText = theme::color(theme::Role::selectionText);
+        for (const auto &range : selection.ranges) {
+            QAbstractTextDocumentLayout::Selection sel;
+            sel.cursor = QTextCursor(m_doc.get());
+            sel.cursor.setPosition(qBound(0, range.first, m_doc->characterCount() - 1));
+            sel.cursor.setPosition(qBound(0, range.second, m_doc->characterCount() - 1), QTextCursor::KeepAnchor);
+            sel.format.setBackground(theme::color(theme::Role::selection));
+            // Like the source rows: only a distinct selection colour replaces
+            // the text (and syntax) colours.
+            if (selectionText != theme::color(theme::Role::text))
+                sel.format.setForeground(selectionText);
+            ctx.selections.append(sel);
+        }
         m_doc->documentLayout()->draw(&painter, ctx);
         painter.restore();
         return;
