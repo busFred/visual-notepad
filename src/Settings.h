@@ -28,6 +28,9 @@ inline constexpr char breaks[] = "markdown/breaks";
 inline constexpr char linkify[] = "markdown/linkify";
 inline constexpr char typographer[] = "markdown/typographer";
 inline constexpr char frontMatter[] = "markdown/frontMatter"; // "hide" | "code" | "table"
+inline constexpr char textFontFamily[] = "markdown/textFontFamily"; // "" = system UI font
+inline constexpr char textFontSize[] = "markdown/textFontSize";     // points; 0 = UI size x 1.15
+inline constexpr char textLineHeight[] = "markdown/textLineHeight"; // multiple of the font height
 inline constexpr char renderMath[] = "markdown/renderMath";
 inline constexpr char mathMacros[] = "markdown/mathMacros"; // QVariantMap command -> expansion
 inline constexpr char mermaidTheme[] = "markdown/mermaidTheme"; // "auto" | "base" | "default" | ...
@@ -40,6 +43,8 @@ inline constexpr char restoreSession[] = "files/restoreSession";
 inline constexpr char autoSave[] = "files/autoSave"; // "off" | "afterDelay" | "onFocusChange"
 inline constexpr char newFileLanguage[] = "files/newFileLanguage"; // "markdown" | "plaintext"
 inline constexpr char encoding[] = "files/encoding"; // "utf8" | "utf8bom" | "utf16le"
+inline constexpr char guessEncoding[] = "files/guessEncoding";
+inline constexpr char legacyEncoding[] = "files/legacyEncoding"; // codec name; "" = automatic (system)
 inline constexpr char lineEnding[] = "files/lineEnding"; // "auto" | "lf" | "crlf"
 // View
 inline constexpr char statusBar[] = "view/statusBar";

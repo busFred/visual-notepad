@@ -47,35 +47,7 @@ QString backupsDir()
     return SessionManager::dataDir() + QStringLiteral("/backups");
 }
 
-using Encoding = DocumentTab::Encoding;
 using ViewMode = DocumentTab::ViewMode;
-
-const QList<std::pair<Encoding, const char *>> &encodingNames()
-{
-    static const QList<std::pair<Encoding, const char *>> names = {
-        {Encoding::Utf8, "utf8"},       {Encoding::Utf8Bom, "utf8bom"}, {Encoding::Utf16LE, "utf16le"},
-        {Encoding::Utf16BE, "utf16be"}, {Encoding::Legacy, "legacy"},
-    };
-    return names;
-}
-
-QString encodingToString(Encoding encoding)
-{
-    for (const auto &[value, name] : encodingNames()) {
-        if (value == encoding)
-            return QLatin1String(name);
-    }
-    return QStringLiteral("utf8");
-}
-
-Encoding encodingFromString(const QString &text)
-{
-    for (const auto &[value, name] : encodingNames()) {
-        if (text == QLatin1String(name))
-            return value;
-    }
-    return Encoding::Utf8;
-}
 
 QString modeToString(ViewMode mode)
 {
@@ -224,7 +196,7 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
                 entry[QStringLiteral("backup")] = backup;
                 entry[QStringLiteral("modified")] = tab->isModified();
             }
-            entry[QStringLiteral("encoding")] = encodingToString(tab->encoding());
+            entry[QStringLiteral("encoding")] = tab->encoding();
             entry[QStringLiteral("crlf")] = tab->lineEnding() == DocumentTab::LineEnding::CRLF;
             entry[QStringLiteral("mode")] = modeToString(tab->viewMode());
             if (tab->languageOverridden())
@@ -363,7 +335,10 @@ bool SessionManager::restore()
             const QJsonObject entry = tabValue.toObject();
             const QString path = entry.value(QStringLiteral("path")).toString();
             const QString backupName = entry.value(QStringLiteral("backup")).toString();
-            const auto encoding = encodingFromString(entry.value(QStringLiteral("encoding")).toString());
+            // Older sessions stored "utf8", "utf8bom", "legacy", ...
+            QString encoding = encoding::canonical(entry.value(QStringLiteral("encoding")).toString());
+            if (encoding.isEmpty())
+                encoding = encoding::utf8;
             const auto lineEnding = entry.value(QStringLiteral("crlf")).toBool() ? DocumentTab::LineEnding::CRLF
                                                                                  : DocumentTab::LineEnding::LF;
 

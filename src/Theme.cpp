@@ -227,6 +227,19 @@ QFont editorFont()
     return font;
 }
 
+QFont textFont()
+{
+    QFont font = QApplication::font();
+    const Settings &settings = Settings::instance();
+    if (const QString family = settings.text(key::textFontFamily); !family.isEmpty())
+        font.setFamily(family);
+    if (const int size = settings.number(key::textFontSize); size > 0)
+        font.setPointSize(size);
+    else
+        font.setPointSizeF(font.pointSizeF() * 1.15); // Slightly larger than the UI.
+    return font;
+}
+
 KSyntaxHighlighting::Repository &syntaxRepository()
 {
     static KSyntaxHighlighting::Repository repository;

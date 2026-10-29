@@ -1,17 +1,23 @@
 // Preferences window: settings controls and the shortcut editor.
 #include "Commands.h"
+#include "Encodings.h"
 #include "PreferencesDialog.h"
 #include "Settings.h"
 #include "Theme.h"
+#include "editor/DocumentLayout.h"
+#include "markdown/MarkdownModel.h"
+#include "markdown/VisualView.h"
 
 #include <QAbstractButton>
 #include <QComboBox>
 #include <QDir>
+#include <QFontDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTextDocument>
 #include <QToolButton>
 
 using namespace vn;
@@ -59,6 +65,12 @@ private Q_SLOTS:
     void modifierAloneIsIgnored();
     void conflictWarning();
     void resetButtonAndResetAll();
+    void codeFontRow();
+    void textFontPickerWritesKeys();
+    void textFontResetRestoresDefault();
+    void lineSpacingWritesKey();
+    void lineSpacingChangesRenderedHeight();
+    void encodingRows();
     void showPageSelectsCategory();
     void singleInstance();
     void screenshots();
@@ -72,7 +84,9 @@ void TestPreferences::initTestCase()
 void TestPreferences::init()
 {
     Settings::instance().resetAllShortcuts();
-    for (const char *k : {key::lineNumbers, key::tabWidth, key::autoSave, key::mathMacros, key::zoom})
+    for (const char *k : {key::lineNumbers, key::tabWidth, key::autoSave, key::mathMacros, key::zoom, key::fontFamily,
+                          key::fontSize, key::textFontFamily, key::textFontSize, key::textLineHeight,
+                          key::guessEncoding, key::legacyEncoding, key::encoding})
         Settings::instance().reset(k);
     PreferencesDialog::showPage(nullptr, QStringLiteral("editor"));
     QVERIFY(prefsWindow());
@@ -323,6 +337,142 @@ void TestPreferences::resetButtonAndResetAll()
     for (const char *id : {"edit.findNext", "edit.find", "file.save"})
         QVERIFY(!Settings::instance().hasShortcutOverride(QLatin1String(id)));
     QCOMPARE(cell->text(), QKeySequence(Qt::Key_F3).toString(QKeySequence::NativeText));
+}
+
+void TestPreferences::codeFontRow()
+{
+    bool labelled = false;
+    for (const QLabel *label : prefsWindow()->findChildren<QLabel *>()) {
+        labelled |= label->text() == QLatin1String("Code font");
+        QVERIFY(label->text() != QLatin1String("Font"));
+    }
+    QVERIFY(labelled);
+    QVERIFY(find<QLineEdit>(QStringLiteral("font")));
+    auto *reset = find<QAbstractButton>(QStringLiteral("fontReset"));
+    QVERIFY(reset);
+    Settings::instance().setValue(key::fontFamily, QStringLiteral("DejaVu Sans Mono"));
+    QVERIFY(find<QLineEdit>(QStringLiteral("font"))->text().startsWith(QStringLiteral("DejaVu Sans Mono")));
+    reset->click();
+    QVERIFY(Settings::instance().text(key::fontFamily).isEmpty());
+}
+
+void TestPreferences::textFontPickerWritesKeys()
+{
+    PreferencesDialog::showPage(nullptr, QStringLiteral("markdown"));
+    auto *input = find<QLineEdit>(QStringLiteral("textFont"));
+    QVERIFY(input);
+    QCOMPARE(Settings::instance().text(key::textFontFamily), QString());
+    QCOMPARE(Settings::instance().number(key::textFontSize), 0);
+
+    QTest::mouseClick(input, Qt::LeftButton);
+    auto *picker = prefsWindow()->findChild<QFontDialog *>();
+    QVERIFY(picker);
+    // Proportional fonts must be offered here.
+    QVERIFY(!picker->testOption(QFontDialog::MonospacedFonts));
+    QFont chosen = QApplication::font();
+    chosen.setPointSize(14);
+    picker->setCurrentFont(chosen);
+    picker->accept();
+    QCOMPARE(Settings::instance().text(key::textFontFamily), picker->currentFont().family());
+    QCOMPARE(Settings::instance().number(key::textFontSize), 14);
+    QVERIFY(input->text().endsWith(QStringLiteral(" 14")));
+    QCOMPARE(theme::textFont().pointSize(), 14);
+}
+
+void TestPreferences::textFontResetRestoresDefault()
+{
+    PreferencesDialog::showPage(nullptr, QStringLiteral("markdown"));
+    Settings::instance().setValue(key::textFontFamily, QStringLiteral("Serif"));
+    Settings::instance().setValue(key::textFontSize, 18);
+    auto *reset = find<QAbstractButton>(QStringLiteral("textFontReset"));
+    QVERIFY(reset);
+    reset->click();
+    QCOMPARE(Settings::instance().text(key::textFontFamily), QString());
+    QCOMPARE(Settings::instance().number(key::textFontSize), 0);
+    // Default size: the UI font, 15% larger.
+    QCOMPARE(theme::textFont().pointSizeF(), QApplication::font().pointSizeF() * 1.15);
+}
+
+void TestPreferences::lineSpacingWritesKey()
+{
+    PreferencesDialog::showPage(nullptr, QStringLiteral("markdown"));
+    auto *combo = find<QComboBox>(key::textLineHeight);
+    QVERIFY(combo);
+    QCOMPARE(combo->count(), 5);
+    QCOMPARE(combo->currentText(), QStringLiteral("1.6"));
+    QCOMPARE(Settings::instance().value(key::textLineHeight).toDouble(), 1.6);
+    combo->setCurrentIndex(combo->findText(QStringLiteral("2.0")));
+    QCOMPARE(Settings::instance().value(key::textLineHeight).toDouble(), 2.0);
+    // Reading it back (stored as text in the INI file) selects the same item.
+    Settings::instance().setValue(key::textLineHeight, 1.2);
+    QCOMPARE(combo->currentText(), QStringLiteral("1.2"));
+}
+
+void TestPreferences::lineSpacingChangesRenderedHeight()
+{
+    QTextDocument doc;
+    doc.setDocumentLayout(new DocumentLayout(&doc));
+    QString paragraph;
+    for (int i = 0; i < 60; ++i)
+        paragraph += QStringLiteral("word%1 ").arg(i);
+    doc.setPlainText(paragraph);
+    MarkdownModel model(&doc);
+    VisualView view(&model);
+    view.resize(420, 900);
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+    // The bottom of the painted text: a taller paragraph reaches further down.
+    const auto textBottom = [&] {
+        const QImage image = view.grab().toImage();
+        const QRgb background = image.pixel(1, 1);
+        for (int y = image.height() - 1; y >= 0; --y) {
+            for (int x = 0; x < image.width(); ++x) {
+                if (image.pixel(x, y) != background)
+                    return y;
+            }
+        }
+        return 0;
+    };
+    const auto bottomAt = [&](double lineHeight) {
+        Settings::instance().setValue(key::textLineHeight, lineHeight);
+        return textBottom();
+    };
+    const int tight = bottomAt(1.2);
+    const int normal = bottomAt(1.6);
+    const int loose = bottomAt(2.0);
+    QVERIFY2(tight < normal && normal < loose, qPrintable(QStringLiteral("%1 %2 %3").arg(tight).arg(normal).arg(loose)));
+
+    // A different text font is a different render, not a cached one.
+    Settings::instance().setValue(key::textFontSize, 24);
+    QVERIFY(textBottom() > normal);
+}
+
+void TestPreferences::encodingRows()
+{
+    PreferencesDialog::showPage(nullptr, QStringLiteral("save"));
+    auto *guess = find<QAbstractButton>(key::guessEncoding);
+    QVERIFY(guess);
+    QVERIFY(guess->isChecked());
+    guess->click();
+    QVERIFY(!Settings::instance().flag(key::guessEncoding));
+
+    auto *legacy = find<QComboBox>(key::legacyEncoding);
+    QVERIFY(legacy);
+    QCOMPARE(legacy->currentText(), QStringLiteral("Automatic (system)"));
+    QVERIFY(legacy->findData(QStringLiteral("Big5")) >= 0);
+    legacy->setCurrentIndex(legacy->findData(QStringLiteral("Big5")));
+    QCOMPARE(Settings::instance().text(key::legacyEncoding), QStringLiteral("Big5"));
+    QCOMPARE(encoding::legacy(), QStringLiteral("Big5"));
+    legacy->setCurrentIndex(0);
+    QCOMPARE(Settings::instance().text(key::legacyEncoding), QString());
+
+    // Stored values of the new-file encoding keep working.
+    auto *newFiles = find<QComboBox>(key::encoding);
+    QVERIFY(newFiles);
+    QCOMPARE(newFiles->count(), 3);
+    for (const char *value : {"utf8", "utf8bom", "utf16le"})
+        QVERIFY(newFiles->findData(QString::fromLatin1(value)) >= 0);
 }
 
 void TestPreferences::showPageSelectsCategory()

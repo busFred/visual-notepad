@@ -94,6 +94,7 @@ h1 { font-size: %1px; font-weight: 600; margin: 0; }
 h2 { font-size: %2px; font-weight: 600; margin: 0; }
 h3 { font-size: %3px; font-weight: 600; margin: 0; }
 h4, h5, h6 { font-size: %4px; font-weight: 600; margin: 0; }
+p, li, blockquote, td, th { line-height: %13%; }
 p { margin: 0; }
 a { color: %5; text-decoration: underline; }
 a.task { color: %6; text-decoration: none; }
@@ -115,7 +116,8 @@ div.footnote { font-size: %12px; color: #444444; }
         .arg(theme::accent.name(), theme::text.name(), context.codeFont.family(), theme::codeBlock.name(),
              theme::divider.name())
         .arg(theme::sideBar.name(), theme::mutedText.name())
-        .arg(qRound(px * 0.9));
+        .arg(qRound(px * 0.9))
+        .arg(qRound(context.lineHeight * 100));
 }
 
 QImage mermaidImage(const QString &code, const RenderContext &context, QString *error)

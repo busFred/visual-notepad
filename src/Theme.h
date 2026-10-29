@@ -40,6 +40,8 @@ void apply(QApplication &app);
 
 // Monospace font for editors.
 QFont editorFont();
+// Proportional font for rendered Markdown text, before editor zoom.
+QFont textFont();
 
 // Shared syntax definitions, including the app's own highlighting theme.
 KSyntaxHighlighting::Repository &syntaxRepository();

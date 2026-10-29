@@ -1,6 +1,7 @@
 // One open file: the editor plus its floating lock/pencil pill.
 #pragma once
 
+#include "Encodings.h"
 #include "editor/TextView.h"
 
 #include <QByteArray>
@@ -29,10 +30,9 @@ class DocumentTab : public QWidget
 
 public:
     enum class LineEnding { LF, CRLF };
-    // Legacy is the platform's single-byte codec: Windows 1252 on Windows,
-    // ISO 8859-1 elsewhere. The UTF-16 variants are always written with a BOM.
-    enum class Encoding { Utf8, Utf8Bom, Utf16LE, Utf16BE, Legacy };
-    static QString encodingDisplayName(Encoding encoding);
+    // A canonical name from encoding:: (Encodings.h). The UTF-16 variants are
+    // always written with a BOM.
+    using Encoding = QString;
     // How a Markdown document is shown.
     enum class ViewMode { Source, SourceVisual, Visual };
 
@@ -43,7 +43,7 @@ public:
     bool save(const QString &path);
     // Restores unsaved content saved by hot exit: the tab keeps `path` (empty
     // for untitled), shows `content` and is marked modified.
-    void loadBackup(const QString &path, const QString &content, Encoding encoding, LineEnding lineEnding);
+    void loadBackup(const QString &path, const QString &content, const Encoding &encoding, LineEnding lineEnding);
 
     QString path() const { return m_path; }
     QString displayName() const;
@@ -56,11 +56,11 @@ public:
     // next save rewrites the file.
     void setLineEnding(LineEnding lineEnding);
     Encoding encoding() const { return m_encoding; }
-    QString encodingName() const { return encodingDisplayName(m_encoding); }
-    void setEncoding(Encoding encoding);
+    QString encodingName() const { return encoding::label(m_encoding); }
+    void setEncoding(const Encoding &encoding);
     // Re-reads the file from disk with the given encoding. Fails (and sets
     // errorString()) for untitled or modified documents.
-    bool reopenWithEncoding(Encoding encoding);
+    bool reopenWithEncoding(const Encoding &encoding);
     // Syntax definition name as KSyntaxHighlighting knows it; empty for plain
     // text. An override lasts until the file is saved under a new name.
     QString definitionName() const;
@@ -101,7 +101,7 @@ protected:
 
 private:
     void updateDefinition();
-    bool applyBytes(const QString &path, QByteArray bytes, Encoding encoding);
+    bool applyBytes(const QString &path, const QByteArray &bytes, const Encoding &encoding);
     void updatePill();
     void placeOverlays();
     void applySettings();
@@ -134,7 +134,7 @@ private:
     QString m_error;
     LineEnding m_lineEnding = LineEnding::LF;
     ViewMode m_viewMode = ViewMode::Source;
-    Encoding m_encoding = Encoding::Utf8;
+    Encoding m_encoding = encoding::utf8;
     bool m_languageOverridden = false;
     QString m_languageOverride;
 };

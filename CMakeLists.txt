@@ -23,11 +23,17 @@ corrosion_import_crate(MANIFEST_PATH core/Cargo.toml CRATES vn-core CRATE_TYPES 
 corrosion_add_cxxbridge(vn_core_bridge CRATE vn_core FILES lib.rs)
 
 # Everything except main() lives in a static library so tests can link it.
+# Encoding guessing is optional: without ICU files that are not UTF-8 open
+# in the legacy encoding.
+find_package(ICU COMPONENTS uc i18n)
+
 add_library(vn_app STATIC
     src/Commands.cpp
     src/Commands.h
     src/DocumentTab.cpp
     src/DocumentTab.h
+    src/Encodings.cpp
+    src/Encodings.h
     src/EditorGroup.cpp
     src/EditorGroup.h
     src/MainWindow.cpp
@@ -77,6 +83,11 @@ target_link_libraries(vn_app PUBLIC
     vn_core_bridge
     microtex
 )
+
+if(ICU_FOUND)
+    target_compile_definitions(vn_app PUBLIC VN_HAVE_ICU)
+    target_link_libraries(vn_app PUBLIC ICU::i18n ICU::uc)
+endif()
 
 qt_add_executable(visnotepad WIN32 src/main.cpp)
 target_link_libraries(visnotepad PRIVATE vn_app)

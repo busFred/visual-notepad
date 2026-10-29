@@ -1,6 +1,7 @@
 #include "PreferencesDialog.h"
 
 #include "Commands.h"
+#include "Encodings.h"
 #include "Settings.h"
 #include "Theme.h"
 
@@ -498,8 +499,8 @@ void PreferencesDialog::addTextInput(const QString &label, const char *settingKe
 void PreferencesDialog::buildEditorPage()
 {
     beginPage();
-    addHeading(tr("Font"));
-    addFontRow();
+    addHeading(tr("Code font"));
+    addFontRow(tr("Code font"), QStringLiteral("font"), key::fontFamily, key::fontSize, &theme::editorFont, true);
     addHeading(tr("Display"));
     addSwitch(tr("Display line numbers"), key::lineNumbers);
     addSwitch(tr("Highlight the current line"), key::highlightCurrentLine);
@@ -515,46 +516,52 @@ void PreferencesDialog::buildEditorPage()
     endPage(tr("Editor"), QStringLiteral("editor"));
 }
 
-void PreferencesDialog::addFontRow()
+void PreferencesDialog::addFontRow(const QString &label, const QString &name, const char *familyKey,
+                                   const char *sizeKey, QFont (*currentFont)(), bool monospaced)
 {
     auto *box = new QWidget;
     auto *layout = new QHBoxLayout(box);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(6);
     auto *input = new ClickableLineEdit;
-    input->setObjectName(QStringLiteral("font"));
+    input->setObjectName(name);
     input->setReadOnly(true);
     input->setFixedHeight(26);
     input->setMinimumWidth(180);
     input->setCursor(Qt::PointingHandCursor);
-    input->onClicked = [this] { chooseFont(); };
-    auto *reset = textButton(tr("Reset"), QStringLiteral("fontReset"));
+    input->onClicked = [this, familyKey, sizeKey, currentFont, monospaced] {
+        chooseFont(familyKey, sizeKey, currentFont, monospaced);
+    };
+    auto *reset = textButton(tr("Reset"), name + QStringLiteral("Reset"));
     layout->addWidget(input);
     layout->addWidget(reset);
-    addRow(tr("Font"), box);
+    addRow(label, box);
 
-    connect(reset, &QAbstractButton::clicked, this, [] {
-        Settings::instance().reset(key::fontFamily);
-        Settings::instance().reset(key::fontSize);
+    connect(reset, &QAbstractButton::clicked, this, [familyKey, sizeKey] {
+        Settings::instance().reset(familyKey);
+        Settings::instance().reset(sizeKey);
     });
-    auto refresh = [input] {
-        const QFont font = theme::editorFont();
-        const QString family = Settings::instance().text(key::fontFamily);
+    auto refresh = [input, familyKey, currentFont] {
+        const QFont font = currentFont();
+        const QString family = Settings::instance().text(familyKey);
         const QString shown = family.isEmpty() ? QFontInfo(font).family() : family;
-        input->setText(QStringLiteral("%1 %2").arg(shown).arg(font.pointSize()));
+        input->setText(QStringLiteral("%1 %2").arg(shown).arg(qRound(font.pointSizeF())));
     };
-    track(key::fontFamily, refresh);
-    m_refreshers.insert(QString::fromLatin1(key::fontSize), refresh);
+    track(familyKey, refresh);
+    m_refreshers.insert(QString::fromLatin1(sizeKey), refresh);
 }
 
-void PreferencesDialog::chooseFont()
+// Proportional fonts are allowed unless `monospaced`.
+void PreferencesDialog::chooseFont(const char *familyKey, const char *sizeKey, QFont (*currentFont)(),
+                                   bool monospaced)
 {
-    auto *picker = new QFontDialog(theme::editorFont(), this);
-    picker->setOption(QFontDialog::MonospacedFonts);
+    auto *picker = new QFontDialog(currentFont(), this);
+    picker->setObjectName(QStringLiteral("fontDialog"));
+    picker->setOption(QFontDialog::MonospacedFonts, monospaced);
     picker->setAttribute(Qt::WA_DeleteOnClose);
-    connect(picker, &QFontDialog::fontSelected, this, [](const QFont &font) {
-        Settings::instance().setValue(key::fontFamily, font.family());
-        Settings::instance().setValue(key::fontSize, font.pointSize());
+    connect(picker, &QFontDialog::fontSelected, this, [familyKey, sizeKey](const QFont &font) {
+        Settings::instance().setValue(familyKey, font.family());
+        Settings::instance().setValue(sizeKey, font.pointSize());
     });
     picker->open();
 }
@@ -599,6 +606,14 @@ void PreferencesDialog::buildMarkdownPage()
     addSwitch(tr("Treat single line breaks as line breaks"), key::breaks);
     addSwitch(tr("Turn URL-like text into links"), key::linkify);
     addSwitch(tr("Smart quotes and dashes"), key::typographer);
+    addFontRow(tr("Text font"), QStringLiteral("textFont"), key::textFontFamily, key::textFontSize, &theme::textFont,
+               false);
+    addCombo(tr("Line spacing"), key::textLineHeight,
+             {{QStringLiteral("1.2"), 1.2},
+              {QStringLiteral("1.4"), 1.4},
+              {QStringLiteral("1.6"), 1.6},
+              {QStringLiteral("1.8"), 1.8},
+              {QStringLiteral("2.0"), 2.0}});
     addCombo(tr("Front matter"), key::frontMatter,
              {{tr("Hide"), QStringLiteral("hide")},
               {tr("Code block"), QStringLiteral("code")},
@@ -733,6 +748,9 @@ void PreferencesDialog::buildSavePage()
              {{tr("Off"), QStringLiteral("off")},
               {tr("After a delay"), QStringLiteral("afterDelay")},
               {tr("When focus changes"), QStringLiteral("onFocusChange")}});
+    addHeading(tr("Opening files"));
+    addSwitch(tr("Guess the encoding of files that aren't UTF-8"), key::guessEncoding);
+    addLegacyEncodingRow();
     addHeading(tr("New files"));
     addCombo(tr("Open new files as"), key::newFileLanguage,
              {{tr("Markdown"), QStringLiteral("markdown")}, {tr("Plain text"), QStringLiteral("plaintext")}});
@@ -745,6 +763,18 @@ void PreferencesDialog::buildSavePage()
               {tr("Unix (LF)"), QStringLiteral("lf")},
               {tr("Windows (CRLF)"), QStringLiteral("crlf")}});
     endPage(tr("Save"), QStringLiteral("save"));
+}
+
+void PreferencesDialog::addLegacyEncodingRow()
+{
+    QList<ComboItem> items{{tr("Automatic (system)"), QString()}};
+    // Unicode encodings (the first group) are not "legacy".
+    const auto groups = encoding::curatedGroups();
+    for (qsizetype i = 1; i < groups.size(); ++i) {
+        for (const encoding::Entry &entry : groups[i])
+            items.append({entry.label, entry.name});
+    }
+    addCombo(tr("Encoding for non-UTF-8 files"), key::legacyEncoding, items);
 }
 
 void PreferencesDialog::buildViewPage()

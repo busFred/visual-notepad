@@ -108,7 +108,7 @@ private:
     void showLineEndingMenu();
     void showEncodingMenu();
     void showLanguageMenu();
-    bool reopenWithEncoding(DocumentTab *tab, DocumentTab::Encoding encoding);
+    bool reopenWithEncoding(DocumentTab *tab, const DocumentTab::Encoding &encoding);
     void toggleSplitEditor(bool on);
     void setViewMode(DocumentTab::ViewMode mode);
     void zoom(int steps);

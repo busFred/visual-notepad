@@ -183,10 +183,11 @@ RenderContext VisualView::context() const
     RenderContext ctx;
     ctx.baseDirectory = m_baseDirectory;
     ctx.codeFont = font();
-    // Body text uses the UI face, scaled with the editor's zoom.
+    // Body text follows the "text font" setting, scaled with the editor's zoom.
     const qreal zoom = font().pointSizeF() / theme::editorFont().pointSizeF();
-    ctx.font = QApplication::font();
-    ctx.font.setPointSizeF(ctx.font.pointSizeF() * 1.15 * zoom);
+    ctx.font = theme::textFont();
+    ctx.font.setPointSizeF(ctx.font.pointSizeF() * zoom);
+    ctx.lineHeight = Settings::instance().value(key::textLineHeight).toDouble();
     ctx.width = textWidth();
     ctx.devicePixelRatio = devicePixelRatioF();
     ctx.mermaidTheme = Settings::instance().text(key::mermaidTheme);
@@ -202,7 +203,13 @@ const RenderedBlock *VisualView::rendered(int blockIndex)
     const QString source = m_model->sourceText(int(block.first_line), int(block.last_line));
     const RenderContext ctx = context();
     // Identical blocks render identically, so the source is the cache key.
-    const QString key = QStringLiteral("%1|%2|%3|").arg(int(ctx.width)).arg(ctx.font.pointSizeF()).arg(int(block.kind))
+    const QString key = QStringLiteral("%1|%2|%3|%4|%5|%6|")
+                            .arg(int(ctx.width))
+                            .arg(ctx.font.pointSizeF())
+                            .arg(ctx.font.family())
+                            .arg(ctx.lineHeight)
+                            .arg(int(block.kind))
+                            .arg(ctx.codeFont.family())
                         + source;
     auto it = m_cache.find(key);
     if (it == m_cache.end())

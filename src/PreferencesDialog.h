@@ -3,6 +3,7 @@
 #pragma once
 
 #include <QDialog>
+#include <QFont>
 #include <QMultiHash>
 
 #include <functional>
@@ -63,14 +64,18 @@ private:
     void buildSavePage();
     void buildViewPage();
     void buildShortcutsPage();
-    void addFontRow();
+    // currentFont gives the font in effect; the dialog offers only monospaced
+    // fonts if `monospaced`.
+    void addFontRow(const QString &label, const QString &name, const char *familyKey, const char *sizeKey,
+                    QFont (*currentFont)(), bool monospaced);
+    void addLegacyEncodingRow();
     void addTabWidthRow();
     void addMacroTable();
     void addMacroRow(const QString &command, const QString &expansion);
     QVariantMap collectMacros() const;
     void saveMacros();
     void refreshShortcuts();
-    void chooseFont();
+    void chooseFont(const char *familyKey, const char *sizeKey, QFont (*currentFont)(), bool monospaced);
 
     QListWidget *m_categories = nullptr;
     QStackedWidget *m_stack = nullptr;

@@ -856,7 +856,7 @@ void MainWindow::showLineEndingMenu()
     popupAboveCell(&menu, m_lineEnding);
 }
 
-bool MainWindow::reopenWithEncoding(DocumentTab *tab, DocumentTab::Encoding encoding)
+bool MainWindow::reopenWithEncoding(DocumentTab *tab, const DocumentTab::Encoding &encoding)
 {
     if (tab->isModified()) {
         const auto answer = QMessageBox::warning(
@@ -879,18 +879,37 @@ void MainWindow::showEncodingMenu()
     DocumentTab *tab = currentTab();
     if (!tab)
         return;
-    using E = DocumentTab::Encoding;
-    const E all[] = {E::Utf8, E::Utf8Bom, E::Utf16LE, E::Utf16BE, E::Legacy};
     QMenu menu(this);
     QMenu *reopen = menu.addMenu(tr("Reopen with Encoding"));
     reopen->setEnabled(!tab->path().isEmpty());
     QMenu *save = menu.addMenu(tr("Save with Encoding"));
-    for (E encoding : all) {
-        const QString name = DocumentTab::encodingDisplayName(encoding);
-        reopen->addAction(name, this, [this, tab, encoding] { reopenWithEncoding(tab, encoding); });
-        QAction *a = save->addAction(name, this, [tab, encoding] { tab->setEncoding(encoding); });
-        a->setCheckable(true);
-        a->setChecked(tab->encoding() == encoding);
+    const auto fill = [&](QMenu *parent, const QList<encoding::Entry> &entries, bool checkable) {
+        for (const encoding::Entry &entry : entries) {
+            const QString name = entry.name;
+            QAction *a = parent->addAction(entry.label);
+            if (checkable) {
+                connect(a, &QAction::triggered, this, [tab, name] { tab->setEncoding(name); });
+                a->setCheckable(true);
+                a->setChecked(tab->encoding() == name);
+            } else {
+                connect(a, &QAction::triggered, this, [this, tab, name] { reopenWithEncoding(tab, name); });
+            }
+        }
+    };
+    for (QMenu *target : {reopen, save}) {
+        const bool checkable = target == save;
+        bool first = true;
+        for (const auto &group : encoding::curatedGroups()) {
+            if (!first)
+                target->addSeparator();
+            first = false;
+            fill(target, group, checkable);
+        }
+        // Every other codec: a long list that the menu scrolls.
+        if (const auto others = encoding::otherEntries(); !others.isEmpty()) {
+            target->addSeparator();
+            fill(target->addMenu(tr("More…")), others, checkable);
+        }
     }
     popupAboveCell(&menu, m_encoding);
 }

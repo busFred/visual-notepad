@@ -33,6 +33,7 @@ private Q_SLOTS:
     void roundTrip();
     void hotExit();
     void hotExitOffPrompts();
+    void encodingNameIsRestored();
     void missingFileIsSkipped();
     void autoSaveAfterDelay();
     void autoSaveOnFocusChange();
@@ -215,6 +216,27 @@ void TestSession::hotExit()
     QCOMPARE(m_prompts, 1);
     SessionManager::instance().saveSession();
     QCOMPARE(backupCount(), 0);
+}
+
+void TestSession::encodingNameIsRestored()
+{
+    MainWindow *window = makeWindow();
+    window->newFile();
+    append(window->tabs().at(0), QStringLiteral("日本語"));
+    window->tabs().at(0)->setEncoding(QStringLiteral("Shift_JIS"));
+    window->newFile();
+    append(window->tabs().at(1), QStringLiteral("abc"));
+    window->tabs().at(1)->setEncoding(encoding::utf8Bom);
+
+    QVERIFY(SessionManager::instance().quit());
+    closeWindows();
+    QVERIFY(SessionManager::instance().restore());
+    const QList<DocumentTab *> tabs = SessionManager::instance().windows().at(0)->tabs();
+    QCOMPARE(tabs.size(), 2);
+    QCOMPARE(tabs.at(0)->encoding(), QStringLiteral("Shift_JIS"));
+    QCOMPARE(tabs.at(0)->text(), QStringLiteral("日本語"));
+    QCOMPARE(tabs.at(1)->encoding(), encoding::utf8Bom);
+    SessionManager::instance().saveSession();
 }
 
 void TestSession::hotExitOffPrompts()
