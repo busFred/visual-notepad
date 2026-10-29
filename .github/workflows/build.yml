@@ -216,23 +216,27 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
-            "-DCMAKE_IGNORE_PREFIX_PATH=C:/Strawberry/c;C:/Strawberry/perl" `
-            -DVN_TEST_QPA=windows
+            "-DCMAKE_IGNORE_PREFIX_PATH=C:/Strawberry/c;C:/Strawberry/perl"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cmake --build build
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Test
         shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          # The offscreen plugin has no font database of its own on Windows.
+          QT_QPA_FONTDIR: C:\Windows\Fonts
         run: ctest --test-dir build --output-on-failure
 
       - name: Failed test details
         if: failure()
         shell: pwsh
         env:
-          QT_QPA_PLATFORM: windows
+          QT_QPA_PLATFORM: offscreen
+          QT_QPA_FONTDIR: C:\Windows\Fonts
         run: |
-          foreach ($t in 'visualview','files','session') {
+          foreach ($t in 'preferences','visualview','session','theme') {
             $exe = "build\tests\test_$t.exe"
             & $exe -o "$t.log,txt"
             "== $t exit $LASTEXITCODE"
