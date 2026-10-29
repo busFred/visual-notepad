@@ -6,7 +6,9 @@
 #include <KSyntaxHighlighting/Theme>
 
 #include <QApplication>
+#include <QDialogButtonBox>
 #include <QFontDatabase>
+#include <QIcon>
 #include <QPalette>
 #include <QProxyStyle>
 #include <QStyleFactory>
@@ -32,9 +34,26 @@ public:
     int styleHint(StyleHint hint, const QStyleOption *option, const QWidget *widget,
                   QStyleHintReturn *returnData) const override
     {
-        if (hint == SH_UnderlineShortcut)
+        // No icons on dialog buttons either, as on Windows.
+        if (hint == SH_UnderlineShortcut || hint == SH_DialogButtonBox_ButtonsHaveIcons)
             return 0;
+        // Windows button order everywhere: Save, Don't Save, Cancel; OK, Cancel.
+        if (hint == SH_DialogButtonLayout)
+            return QDialogButtonBox::WinLayout;
         return QProxyStyle::styleHint(hint, option, widget, returnData);
+    }
+
+    // Fusion's message box icons are pale on a grey dialog; ours have outlines.
+    QIcon standardIcon(StandardPixmap icon, const QStyleOption *option, const QWidget *widget) const override
+    {
+        const char *name = icon == SP_MessageBoxWarning       ? "warning"
+                           : icon == SP_MessageBoxCritical    ? "error"
+                           : icon == SP_MessageBoxInformation ? "information"
+                           : icon == SP_MessageBoxQuestion    ? "question"
+                                                              : nullptr;
+        if (name)
+            return QIcon(QStringLiteral(":/vn/icons/dialog-%1.svg").arg(QLatin1String(name)));
+        return QProxyStyle::standardIcon(icon, option, widget);
     }
 };
 

@@ -684,9 +684,22 @@ bool MainWindow::confirmDiscard(DocumentTab *tab)
         activateGroup(group);
         group->setCurrentIndex(group->indexOf(tab));
     }
-    const auto answer = QMessageBox::warning(
-        this, productName(), tr("Do you want to save the changes you made to %1?").arg(tab->displayName()),
-        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    // Laid out like Windows Notepad's prompt: no icon, Save / Don't Save / Cancel.
+    QMessageBox box(QMessageBox::NoIcon, productName(),
+                    tr("Do you want to save changes to %1?").arg(tab->displayName()),
+                    QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, this);
+    box.button(QMessageBox::Discard)->setText(tr("Don't Save"));
+    if (auto *label = box.findChild<QLabel *>(QStringLiteral("qt_msgbox_label"))) {
+        // A larger question on the left with room around it, buttons below.
+        QFont font = label->font();
+        font.setPointSizeF(font.pointSizeF() * 1.3);
+        label->setFont(font);
+        label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        label->setMinimumWidth(360);
+        label->setContentsMargins(4, 8, 4, 16);
+    }
+    box.setDefaultButton(QMessageBox::Save);
+    const auto answer = box.exec();
     if (answer == QMessageBox::Save)
         return save(tab);
     return answer == QMessageBox::Discard;
