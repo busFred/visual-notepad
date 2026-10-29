@@ -68,6 +68,7 @@ private Q_SLOTS:
     void escapeCancels();
     void modifierAloneIsIgnored();
     void conflictWarning();
+    void defaultShortcutsDoNotCollide();
     void resetButtonAndResetAll();
     void codeFontRow();
     void textFontPickerWritesKeys();
@@ -321,6 +322,39 @@ void TestPreferences::conflictWarning()
 
     Settings::instance().resetShortcut(QStringLiteral("edit.findNext"));
     QVERIFY(!warning->isVisible());
+}
+
+void TestPreferences::defaultShortcutsDoNotCollide()
+{
+    QMap<QString, QString> owner;
+    for (const Command &c : commands()) {
+        for (const QKeySequence &sequence : c.defaults) {
+            const QString key = sequence.toString(QKeySequence::PortableText);
+            QVERIFY2(!key.isEmpty(), qPrintable(c.id + QStringLiteral(" has an unparsable default")));
+            QVERIFY2(!owner.contains(key), qPrintable(key + QStringLiteral(" is used by ") + owner.value(key)
+                                                      + QStringLiteral(" and ") + c.id));
+            owner.insert(key, c.id);
+        }
+    }
+    // No single-key shortcut may also begin a chord (Ctrl+K, ...).
+    for (auto it = owner.cbegin(); it != owner.cend(); ++it) {
+        if (it.key().contains(QLatin1String(", ")))
+            QVERIFY2(!owner.contains(it.key().section(QLatin1String(", "), 0, 0)), qPrintable(it.key()));
+    }
+    const auto defaultOf = [](const char *id) { return command(QLatin1String(id))->defaults; };
+    const auto k = [](const char *text) { return QKeySequence(QString::fromLatin1(text), QKeySequence::PortableText); };
+    QCOMPARE(defaultOf("selection.addCursorsToLineEnds"), QList<QKeySequence>{k("Shift+Alt+I")});
+    QCOMPARE(defaultOf("selection.expandLine"), QList<QKeySequence>{k("Ctrl+L")});
+    QCOMPARE(defaultOf("selection.moveLastToNextMatch"), QList<QKeySequence>{k("Ctrl+K, Ctrl+D")});
+    QCOMPARE(defaultOf("edit.indentLines"), QList<QKeySequence>{k("Ctrl+]")});
+    QCOMPARE(defaultOf("edit.outdentLines"), QList<QKeySequence>{k("Ctrl+[")});
+    QCOMPARE(defaultOf("edit.trimTrailingWhitespace"), QList<QKeySequence>{k("Ctrl+K, Ctrl+X")});
+    QCOMPARE(defaultOf("edit.findNextSelection"), QList<QKeySequence>{k("Ctrl+F3")});
+    QCOMPARE(defaultOf("edit.findPreviousSelection"), QList<QKeySequence>{k("Ctrl+Shift+F3")});
+    QCOMPARE(defaultOf("view.scrollPageUp"), QList<QKeySequence>{k("Alt+PgUp")});
+    QCOMPARE(defaultOf("view.scrollPageDown"), QList<QKeySequence>{k("Alt+PgDown")});
+    QVERIFY(defaultOf("selection.cursorUndo").isEmpty());
+    QVERIFY(defaultOf("selection.cursorRedo").isEmpty());
 }
 
 void TestPreferences::resetButtonAndResetAll()

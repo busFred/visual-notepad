@@ -271,8 +271,19 @@ void MainWindow::createActions()
         if (auto *tab = currentTab())
             tab->findBar()->findPrevious();
     });
+    makeAction(QStringLiteral("edit.findNextSelection"), [this] {
+        if (auto *tab = currentTab())
+            tab->findBar()->findSelection(true);
+    });
+    makeAction(QStringLiteral("edit.findPreviousSelection"), [this] {
+        if (auto *tab = currentTab())
+            tab->findBar()->findSelection(false);
+    });
     makeAction(QStringLiteral("edit.goToLine"), [this] { goToLine(); });
     makeAction(QStringLiteral("edit.toggleComment"), onEditor(&TextView::toggleLineComment));
+    makeAction(QStringLiteral("edit.indentLines"), onEditor(&TextView::indent));
+    makeAction(QStringLiteral("edit.outdentLines"), onEditor(&TextView::outdent));
+    makeAction(QStringLiteral("edit.trimTrailingWhitespace"), onEditor(&TextView::trimTrailingWhitespace));
     makeAction(QStringLiteral("edit.format"), onTab(&DocumentTab::formatDocument))->setEnabled(false);
     makeAction(QStringLiteral("edit.preferences"), [this] { showPreferences(QString()); });
 
@@ -283,6 +294,11 @@ void MainWindow::createActions()
     makeAction(QStringLiteral("selection.addCursorBelow"), onEditor(&TextView::addCursorBelow));
     makeAction(QStringLiteral("selection.addNextOccurrence"), onEditor(&TextView::addNextOccurrence));
     makeAction(QStringLiteral("selection.selectAllOccurrences"), onEditor(&TextView::selectAllOccurrences));
+    makeAction(QStringLiteral("selection.addCursorsToLineEnds"), onEditor(&TextView::addCursorsToLineEnds));
+    makeAction(QStringLiteral("selection.moveLastToNextMatch"), onEditor(&TextView::moveLastSelectionToNextMatch));
+    makeAction(QStringLiteral("selection.expandLine"), onEditor(&TextView::expandLineSelection));
+    makeAction(QStringLiteral("selection.cursorUndo"), onEditor(&TextView::cursorUndo));
+    makeAction(QStringLiteral("selection.cursorRedo"), onEditor(&TextView::cursorRedo));
     makeAction(QStringLiteral("selection.copyLineUp"), onEditor(&TextView::copyLinesUp));
     makeAction(QStringLiteral("selection.copyLineDown"), onEditor(&TextView::copyLinesDown));
     makeAction(QStringLiteral("selection.moveLineUp"), onEditor(&TextView::moveLinesUp));
@@ -321,6 +337,14 @@ void MainWindow::createActions()
     connect(m_splitAction, &QAction::toggled, this, &MainWindow::toggleSplitEditor);
     makeAction(QStringLiteral("view.moveToNewWindow"), [this] { moveTabToNewWindow(currentTab()); });
     makeAction(QStringLiteral("edit.changeLanguage"), [this] { showLanguageMenu(); });
+    makeAction(QStringLiteral("view.scrollPageUp"), [this] {
+        if (auto *tab = currentTab())
+            tab->editor()->scrollPage(false);
+    });
+    makeAction(QStringLiteral("view.scrollPageDown"), [this] {
+        if (auto *tab = currentTab())
+            tab->editor()->scrollPage(true);
+    });
     makeAction(QStringLiteral("view.zoomIn"), [this] { zoom(1); });
     makeAction(QStringLiteral("view.zoomOut"), [this] { zoom(-1); });
     makeAction(QStringLiteral("view.zoomReset"), [this] { zoom(0); });
@@ -358,12 +382,16 @@ void MainWindow::createMenus()
 
     QMenu *edit = menuBar()->addMenu(tr("&Edit"));
     add(edit, {"edit.undo", "edit.redo", "-", "edit.cut", "edit.copy", "edit.paste", "-", "edit.find", "edit.replace",
-               "edit.findNext", "edit.findPrevious", "edit.goToLine", "-", "edit.toggleComment", "edit.format", "-",
+               "edit.findNext", "edit.findPrevious", "edit.findNextSelection", "edit.findPreviousSelection", "edit.goToLine",
+               "-", "edit.toggleComment", "edit.indentLines", "edit.outdentLines", "edit.trimTrailingWhitespace",
+               "edit.format", "-",
                "edit.preferences"});
 
     QMenu *selection = menuBar()->addMenu(tr("&Selection"));
     add(selection, {"selection.selectAll", "selection.expand", "selection.shrink", "-", "selection.addCursorAbove",
-                    "selection.addCursorBelow", "selection.addNextOccurrence", "selection.selectAllOccurrences", "-",
+                    "selection.addCursorBelow", "selection.addCursorsToLineEnds", "selection.addNextOccurrence",
+                    "selection.moveLastToNextMatch", "selection.selectAllOccurrences", "-", "selection.expandLine",
+                    "selection.cursorUndo", "selection.cursorRedo", "-",
                     "selection.copyLineUp", "selection.copyLineDown", "selection.moveLineUp",
                     "selection.moveLineDown", "selection.deleteLine"});
 

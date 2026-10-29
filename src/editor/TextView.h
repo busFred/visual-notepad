@@ -114,6 +114,16 @@ public:
     // Walks every row above, so it is meant for tests.
     qreal scrollPixels();
 
+    // The text a "find selection" command searches for: the primary caret's
+    // one-line selection, or else the word at the caret. Empty if neither.
+    QString searchSeedText() const;
+    // Scrolls by a viewport height without moving the carets (down when
+    // forward).
+    void scrollPage(bool forward);
+    // Inserts text at a document position and puts the only caret after it;
+    // what a middle click does with the X11 primary selection.
+    void pasteTextAt(int position, const QString &text);
+
     // Background highlights for find results; current is an index or -1.
     void setSearchHighlights(const QList<QTextCursor> &ranges, int current);
 
@@ -133,6 +143,16 @@ public Q_SLOTS:
     void expandSelection();
     void shrinkSelection();
     void selectLine();
+    // Selects whole lines for each caret; again, one more line.
+    void expandLineSelection();
+    // One caret at the end of each line of each selection.
+    void addCursorsToLineEnds();
+    // Like addNextOccurrence(), but the last added selection moves.
+    void moveLastSelectionToNextMatch();
+    // Steps back and forth through earlier caret and selection states.
+    void cursorUndo();
+    void cursorRedo();
+    void trimTrailingWhitespace();
 
     void moveLinesUp();
     void moveLinesDown();
@@ -302,6 +322,13 @@ private:
     QTextCursor findNext(const QString &text, int from) const;
     void restartBlink();
     void selectByUnit(const QPointF &point, bool extend);
+    // Box selection from the anchor to the point.
+    bool columnSelectTo(const QPointF &point);
+    // Block and wrapped line under a viewport point; false for rendered rows.
+    bool sourceLineAt(const QPointF &point, int *block, int *subLine);
+    void recordCursorHistory();
+    void resetCursorHistory();
+    void applyCursorHistory(int index, bool undo);
 
     QTextDocument *m_doc;
     std::vector<LineCache> m_lines;
@@ -314,6 +341,7 @@ private:
     {
         QList<std::pair<int, int>> ranges; // anchor, position
         int primary = 0;
+        bool operator==(const CaretState &other) const { return ranges == other.ranges && primary == other.primary; }
     };
     struct UndoEntry
     {
@@ -329,6 +357,32 @@ private:
     int m_syncedRevision = -1; // Document revision our entries are valid for.
     int m_editDepth = 0;
     QList<QList<QTextCursor>> m_expandHistory;
+
+    // Earlier caret states for cursorUndo(), cleared by document changes.
+    struct CursorHistoryEntry
+    {
+        CaretState state;
+        int topRow = 0;
+        qreal topOffset = 0;
+        int scrollX = 0;
+    };
+    QList<CursorHistoryEntry> m_cursorUndo;
+    QList<CursorHistoryEntry> m_cursorRedo;
+    CaretState m_cursorLast;
+    int m_cursorLastRevision = -1;
+    bool m_cursorHistoryPaused = false;
+
+    // Box selection: where it started (block, wrapped line, x in the line).
+    struct ColumnAnchor
+    {
+        int block = 0;
+        int subLine = 0;
+        qreal x = 0;
+    };
+    ColumnAnchor m_columnAnchor;
+    CaretState m_columnResult; // Carets the last box selection produced.
+    bool m_columnAnchorValid = false;
+    bool m_columnDragging = false;
 
     QList<QTextCursor> m_searchRanges;
     int m_searchCurrent = -1;
