@@ -70,6 +70,7 @@ private:
                     QFont (*currentFont)(), bool monospaced);
     void addLegacyEncodingRow();
     void addTabWidthRow();
+    void addColorsRow();
     void addMacroTable();
     void addMacroRow(const QString &command, const QString &expansion);
     QVariantMap collectMacros() const;

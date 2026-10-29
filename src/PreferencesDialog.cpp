@@ -1,6 +1,7 @@
 #include "PreferencesDialog.h"
 
 #include "Commands.h"
+#include "CustomizeColorsDialog.h"
 #include "Encodings.h"
 #include "Settings.h"
 #include "Theme.h"
@@ -72,7 +73,7 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
         p.setPen(Qt::NoPen);
-        p.setBrush(isChecked() ? theme::switchOn : QColor(0xCD, 0xC9, 0xC1));
+        p.setBrush(isChecked() ? theme::color(theme::Role::switchOn) : theme::color(theme::Role::menuHover));
         p.drawRoundedRect(QRectF(0, 0, 40, 22), 11, 11);
 
         const qreal x = isChecked() ? 20 : 2;
@@ -83,7 +84,7 @@ protected:
 
         if (hasFocus()) {
             p.setBrush(Qt::NoBrush);
-            p.setPen(QPen(theme::accent, 1));
+            p.setPen(QPen(theme::color(theme::Role::accent), 1));
             p.drawRoundedRect(QRectF(0.5, 0.5, 39, 21), 10.5, 10.5);
         }
     }
@@ -778,9 +779,46 @@ void PreferencesDialog::addLegacyEncodingRow()
     addCombo(tr("Encoding for non-UTF-8 files"), key::legacyEncoding, items);
 }
 
+// "Colors" row: how many colours differ from the theme, and the dialog button.
+void PreferencesDialog::addColorsRow()
+{
+    auto *box = new QWidget;
+    auto *boxLayout = new QHBoxLayout(box);
+    boxLayout->setContentsMargins(0, 0, 0, 0);
+    boxLayout->setSpacing(12);
+    auto *summary = new QLabel;
+    summary->setObjectName(QStringLiteral("PrefMuted"));
+    auto *customize = textButton(tr("Customize colors…"), QStringLiteral("customizeColors"), box);
+    boxLayout->addWidget(summary);
+    boxLayout->addWidget(customize);
+    addRow(tr("Colors"), box);
+
+    const auto refresh = [summary] {
+        const QString id = theme::currentThemeId();
+        const int changed = int(Settings::instance().overriddenColors(id).size());
+        summary->setText(changed > 0 ? tr("%1 changed from %2").arg(changed).arg(theme::themeLabel(id))
+                                     : tr("Theme defaults"));
+    };
+    refresh();
+    connect(&Settings::instance(), &Settings::changed, summary, [refresh](const QString &changedKey) {
+        if (changedKey == QLatin1String(key::theme) || changedKey.startsWith(QLatin1String(key::colorsGroup)))
+            refresh();
+    });
+    connect(customize, &QAbstractButton::clicked, this, [this] {
+        CustomizeColorsDialog dialog(this);
+        dialog.exec();
+    });
+}
+
 void PreferencesDialog::buildViewPage()
 {
     beginPage();
+    addHeading(tr("Appearance"));
+    QList<ComboItem> themes;
+    for (const theme::ThemeInfo &info : theme::themes())
+        themes.append({info.label, info.id});
+    addCombo(tr("Theme"), key::theme, themes);
+    addColorsRow();
     addHeading(tr("Layout"));
     addSwitch(tr("Show status bar"), key::statusBar);
     addSwitch(tr("Show Outline panel for Markdown files"), key::outline);

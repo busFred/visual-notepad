@@ -2,6 +2,7 @@
 // windows. Every change is announced through changed(key).
 #pragma once
 
+#include <QColor>
 #include <QKeySequence>
 #include <QObject>
 #include <QVariant>
@@ -51,10 +52,13 @@ inline constexpr char lineEnding[] = "files/lineEnding"; // "auto" | "lf" | "crl
 inline constexpr char statusBar[] = "view/statusBar";
 inline constexpr char outline[] = "view/outline";
 inline constexpr char zoom[] = "view/zoom"; // percent
+inline constexpr char theme[] = "view/theme"; // "modern" | "legacy"
 // Not a preference: announced through changed() when the list changes.
 inline constexpr char recentFiles[] = "state/recentFiles";
 // Shortcut overrides live under "shortcuts/<command id>".
 inline constexpr char shortcutsGroup[] = "shortcuts/";
+// Colour overrides live under "colors/<theme id>/<role>" as "#RRGGBB".
+inline constexpr char colorsGroup[] = "colors/";
 } // namespace key
 
 class Settings : public QObject
@@ -81,6 +85,13 @@ public:
     void resetShortcut(const QString &commandId);
     void resetAllShortcuts();
 
+    // Colour overrides for one theme, by role name (see theme::roleName).
+    // colorOverride returns an invalid colour when the role is not overridden.
+    QColor colorOverride(const QString &themeId, const QString &role) const;
+    void setColorOverride(const QString &themeId, const QString &role, const QColor &color);
+    void resetColorOverride(const QString &themeId, const QString &role);
+    QStringList overriddenColors(const QString &themeId) const;
+
     // Most recently opened files, newest first. Nothing is recorded while
     // rememberRecent is off, and turning it off clears the list.
     QStringList recentFiles() const;
@@ -92,7 +103,8 @@ public:
     void useFile(const QString &path);
 
 Q_SIGNALS:
-    // key is a settings key, or "shortcuts/<id>" for shortcut changes.
+    // key is a settings key, or "shortcuts/<id>" for shortcut changes
+    // and "colors/<theme>/<role>" for colour overrides.
     void changed(const QString &key);
 
 private:

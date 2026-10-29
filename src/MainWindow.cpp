@@ -74,7 +74,7 @@ protected:
         QPainter painter(this);
         const QPoint origin(width() - 14, height() - 14);
         for (const QPoint &dot : {QPoint(9, 9), QPoint(5, 9), QPoint(1, 9), QPoint(9, 5), QPoint(5, 5), QPoint(9, 1)})
-            painter.fillRect(QRect(origin + dot, QSize(2, 2)), theme::gripDots);
+            painter.fillRect(QRect(origin + dot, QSize(2, 2)), theme::color(theme::Role::gripDots));
     }
 };
 
@@ -100,11 +100,11 @@ protected:
     void paintEvent(QPaintEvent *event) override
     {
         if (m_hover && m_handler)
-            QPainter(this).fillRect(rect(), theme::panelTitle);
+            QPainter(this).fillRect(rect(), theme::color(theme::Role::panelTitle));
         QLabel::paintEvent(event);
         if (m_divider) {
             QPainter painter(this);
-            painter.fillRect(QRect(0, 0, 1, height()), theme::divider);
+            painter.fillRect(QRect(0, 0, 1, height()), theme::color(theme::Role::divider));
         }
     }
 

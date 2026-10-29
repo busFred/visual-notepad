@@ -1,8 +1,9 @@
-// The single built-in theme, "Light Grey Warm". Not user-selectable.
+// Colour themes: two built-in sets of colours plus per-theme user overrides.
 #pragma once
 
 #include <QColor>
 #include <QFont>
+#include <QObject>
 
 class QApplication;
 
@@ -13,29 +14,82 @@ class Theme;
 
 namespace vn::theme {
 
-// Warm grey family derived from #D4D0C8 (hue 40, saturation 12%).
-inline const QColor editor{0xEF, 0xEE, 0xEB};
-inline const QColor activeBlock{0xF6, 0xF5, 0xF3};
-inline const QColor menuBar{0xE9, 0xE7, 0xE2};
-inline const QColor currentLine{0xE9, 0xE7, 0xE2};
-inline const QColor codeBlock{0xE4, 0xE2, 0xDD};
-inline const QColor sideBar{0xDD, 0xDA, 0xD4};
-inline const QColor sideBarHover{0xD3, 0xD0, 0xC9};
-inline const QColor statusBar{0xD4, 0xD0, 0xC8};
-inline const QColor panelTitle{0xCB, 0xC7, 0xBD};
-inline const QColor menuHover{0xC4, 0xC0, 0xB6};
-inline const QColor divider{0xBA, 0xB5, 0xAB};
-inline const QColor gripDots{0x8F, 0x8A, 0x7F};
-inline const QColor gutterText{0x9A, 0x94, 0x88};
-inline const QColor mutedText{0x7C, 0x76, 0x6A};
-inline const QColor inactiveTabText{0x55, 0x55, 0x55};
-inline const QColor text{0x22, 0x22, 0x22};
-inline const QColor accent{0x0A, 0x24, 0x6A};
-inline const QColor accentBorder{0x9A, 0xA7, 0xC4};
-inline const QColor selection{0xCF, 0xD5, 0xE3};
-inline const QColor switchOn{0x6F, 0x82, 0xAD};
+enum class Role {
+    // Chrome
+    menuBar,
+    menu, // Popup background
+    menuHover,
+    tabStrip,
+    statusBar,
+    activeTab,
+    inactiveTab,
+    inactiveTabText,
+    sideBar,
+    sideBarHover,
+    panelTitle,
+    divider,
+    surface, // Preferences page, buttons and tooltips
+    // Content
+    editor,
+    text,
+    selection,
+    selectionText,
+    accent,
+    accentBorder,
+    switchOn,
+    activeBlock,
+    currentLine,
+    codeBlock,
+    gutterText,
+    gripDots,
+    mutedText,
+    Count
+};
 
-// Sets the Fusion style, palette and style sheet on the application.
+struct ThemeInfo
+{
+    QString id;    // Stored in view/theme
+    QString label; // Shown to the user
+};
+
+// Built-in themes; the first is the default.
+QList<ThemeInfo> themes();
+// The theme selected by view/theme; unknown ids fall back to the default.
+QString currentThemeId();
+QString themeLabel(const QString &themeId);
+
+// Name used in settings keys ("colors/<theme>/<role>") and the style sheet.
+QString roleName(Role role);
+// Colour of the current theme, including the user's overrides.
+QColor color(Role role);
+// Built-in colour of a theme, ignoring overrides.
+QColor defaultColor(const QString &themeId, Role role);
+
+// Announces that colours changed. apply() emits it after the palette and
+// style sheet are replaced; widgets that cache colours or rendered output
+// connect to it.
+class Notifier : public QObject
+{
+    Q_OBJECT
+
+Q_SIGNALS:
+    void changed();
+};
+Notifier &notifier();
+
+// While alive, setting changes do not re-apply the theme; it is applied once
+// when the last blocker is destroyed. For writing many overrides at once.
+class UpdateBlocker
+{
+public:
+    UpdateBlocker();
+    ~UpdateBlocker();
+    UpdateBlocker(const UpdateBlocker &) = delete;
+    UpdateBlocker &operator=(const UpdateBlocker &) = delete;
+};
+
+// Sets the Fusion style, palette and style sheet on the application, and keeps
+// them current when view/theme or a colour override changes.
 void apply(QApplication &app);
 
 // Monospace font for editors.

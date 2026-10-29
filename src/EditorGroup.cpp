@@ -47,8 +47,8 @@ protected:
     void paintEvent(QPaintEvent *) override
     {
         QPainter painter(this);
-        painter.fillRect(rect(), theme::statusBar);
-        painter.fillRect(QRect(0, height() - 1, width(), 1), theme::divider);
+        painter.fillRect(rect(), theme::color(theme::Role::tabStrip));
+        painter.fillRect(QRect(0, height() - 1, width(), 1), theme::color(theme::Role::divider));
     }
 };
 
@@ -66,7 +66,7 @@ public:
 protected:
     void paintEvent(QPaintEvent *) override
     {
-        QColor color = theme::selection;
+        QColor color = theme::color(theme::Role::selection);
         color.setAlphaF(0.4);
         QPainter(this).fillRect(rect(), color);
     }
@@ -84,7 +84,7 @@ public:
     }
 
 protected:
-    void paintEvent(QPaintEvent *) override { QPainter(this).fillRect(rect(), theme::accent); }
+    void paintEvent(QPaintEvent *) override { QPainter(this).fillRect(rect(), theme::color(theme::Role::accent)); }
 };
 
 EditorGroup *groupAround(QWidget *widget)

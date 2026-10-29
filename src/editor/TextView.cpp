@@ -752,7 +752,7 @@ void TextView::paintEvent(QPaintEvent *event)
 {
     QPainter painter(viewport());
     const QRect area = event->rect();
-    painter.fillRect(area, theme::editor);
+    painter.fillRect(area, theme::color(theme::Role::editor));
 
     const qreal left = textLeft();
     const qreal hscroll = horizontalScrollBar()->value();
@@ -797,7 +797,7 @@ void TextView::paintEvent(QPaintEvent *event)
         const QRectF rowRect(gutter, y, viewport()->width() - gutter, h);
         paintLineBackground(painter, lineNo, rowRect);
         if (m_highlightCurrentLine && currentLines.contains(lineNo))
-            painter.fillRect(rowRect, theme::currentLine);
+            painter.fillRect(rowRect, theme::color(theme::Role::currentLine));
 
         const int blockStart = block.position();
         const int blockEnd = blockStart + block.length(); // Includes the separator.
@@ -835,11 +835,11 @@ void TextView::paintEvent(QPaintEvent *event)
             const QTextCursor &c = caret.cursor;
             if (!c.hasSelection() || c.selectionEnd() < blockStart || c.selectionStart() >= blockEnd)
                 continue;
-            fillRange(c.selectionStart() - blockStart, c.selectionEnd() - blockStart, theme::selection,
+            fillRange(c.selectionStart() - blockStart, c.selectionEnd() - blockStart, theme::color(theme::Role::selection),
                       c.selectionEnd() >= blockEnd);
         }
 
-        painter.setPen(theme::text);
+        painter.setPen(theme::color(theme::Role::text));
         layout->draw(&painter, origin);
 
         for (const DiagnosticRange &d : std::as_const(m_diagnostics)) {
@@ -872,7 +872,7 @@ void TextView::paintEvent(QPaintEvent *event)
         }
 
         if (hasFocus() && m_caretOn) {
-            painter.setPen(m_readOnly ? theme::mutedText : theme::text);
+            painter.setPen(m_readOnly ? theme::color(theme::Role::mutedText) : theme::color(theme::Role::text));
             for (const Caret &caret : m_carets) {
                 if (caret.cursor.block() != block)
                     continue;
@@ -888,11 +888,11 @@ void TextView::paintEvent(QPaintEvent *event)
     painter.restore();
 
     if (gutter > 0) {
-        painter.fillRect(QRect(0, 0, gutter, height), theme::editor);
+        painter.fillRect(QRect(0, 0, gutter, height), theme::color(theme::Role::editor));
         painter.setFont(font());
         const QFontMetricsF fm(font());
         for (const VisibleLine &line : std::as_const(visibleLines)) {
-            painter.setPen(currentLines.contains(line.line) ? theme::text : theme::gutterText);
+            painter.setPen(currentLines.contains(line.line) ? theme::color(theme::Role::text) : theme::color(theme::Role::gutterText));
             painter.drawText(QRectF(0, line.top + m_linePad, gutter - gutterRightPad, fm.height()),
                              Qt::AlignRight | Qt::AlignVCenter, QString::number(line.line + 1));
         }

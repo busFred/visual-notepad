@@ -92,8 +92,8 @@ protected:
         QPainterPath path;
         const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
         path.addRoundedRect(r, r.height() / 2, r.height() / 2);
-        painter.fillPath(path, theme::sideBar);
-        painter.setPen(theme::divider);
+        painter.fillPath(path, theme::color(theme::Role::sideBar));
+        painter.setPen(theme::color(theme::Role::divider));
         painter.drawPath(path);
     }
 

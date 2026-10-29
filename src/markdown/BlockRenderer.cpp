@@ -47,7 +47,7 @@ protected:
             const int index = name.section(u':', 1).toInt();
             math::Style style;
             style.pixelSize = QFontInfo(m_context.font).pixelSize() * (display ? 1.2 : 1.1);
-            style.color = theme::text;
+            style.color = theme::color(theme::Role::text);
             style.devicePixelRatio = m_context.devicePixelRatio;
             style.display = display;
             return math::render(math::withMacros(m_math.value(index)), style);
@@ -86,6 +86,11 @@ private:
     QStringList m_math;
 };
 
+QString hex(theme::Role role)
+{
+    return theme::color(role).name();
+}
+
 QString styleSheet(const RenderContext &context)
 {
     const int px = QFontInfo(context.font).pixelSize();
@@ -113,9 +118,8 @@ div.footnote { font-size: %12px; color: #444444; }
         .arg(qRound(px * 1.2))
         .arg(qRound(px * 1.07))
         .arg(px)
-        .arg(theme::accent.name(), theme::text.name(), context.codeFont.family(), theme::codeBlock.name(),
-             theme::divider.name())
-        .arg(theme::sideBar.name(), theme::mutedText.name())
+        .arg(hex(theme::Role::accent), hex(theme::Role::text), context.codeFont.family(), hex(theme::Role::codeBlock), hex(theme::Role::divider))
+        .arg(hex(theme::Role::sideBar), hex(theme::Role::mutedText))
         .arg(qRound(px * 0.9))
         .arg(qRound(context.lineHeight * 100));
 }
@@ -173,7 +177,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
     case core::BlockKind::Math: {
         math::Style style;
         style.pixelSize = QFontInfo(context.font).pixelSize() * 1.2;
-        style.color = theme::text;
+        style.color = theme::color(theme::Role::text);
         style.devicePixelRatio = context.devicePixelRatio;
         style.display = true;
         r.m_kind = Kind::Image;
@@ -248,7 +252,7 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
         box.addRoundedRect(QRectF(topLeft, QSizeF(width, m_height - blockGap)), 3, 3);
         painter.save();
         painter.setRenderHint(QPainter::Antialiasing);
-        painter.fillPath(box, theme::codeBlock);
+        painter.fillPath(box, theme::color(theme::Role::codeBlock));
         painter.restore();
         [[fallthrough]];
     }
@@ -256,7 +260,7 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
         painter.save();
         painter.translate(topLeft + contentOffset());
         QAbstractTextDocumentLayout::PaintContext ctx;
-        ctx.palette.setColor(QPalette::Text, theme::text);
+        ctx.palette.setColor(QPalette::Text, theme::color(theme::Role::text));
         m_doc->documentLayout()->draw(&painter, ctx);
         painter.restore();
         return;

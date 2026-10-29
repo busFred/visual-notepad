@@ -57,6 +57,11 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
         m_cache.clear();
         relayout();
     });
+    // Rendered blocks have the theme's colours baked in.
+    connect(&theme::notifier(), &theme::Notifier::changed, this, [this] {
+        m_cache.clear();
+        relayout();
+    });
     // Rows are built when the view is first shown (see showEvent).
 }
 
@@ -248,8 +253,8 @@ void VisualView::paintLineBackground(QPainter &painter, int line, const QRectF &
         return;
     const qreal left = textLeft() - activeBarInset;
     const QRectF area(left, rect.top(), viewport()->width() - left - sideMargin + activeBarInset, rect.height());
-    painter.fillRect(area, theme::activeBlock);
-    painter.fillRect(QRectF(left, rect.top(), 2, rect.height()), theme::accent);
+    painter.fillRect(area, theme::color(theme::Role::activeBlock));
+    painter.fillRect(QRectF(left, rect.top(), 2, rect.height()), theme::color(theme::Role::accent));
 }
 
 int VisualView::hitTestRenderedRow(const Row &r, const QPointF &point)

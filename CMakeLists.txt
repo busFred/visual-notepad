@@ -30,6 +30,8 @@ find_package(ICU COMPONENTS uc i18n)
 add_library(vn_app STATIC
     src/Commands.cpp
     src/Commands.h
+    src/CustomizeColorsDialog.cpp
+    src/CustomizeColorsDialog.h
     src/DocumentTab.cpp
     src/DocumentTab.h
     src/Encodings.cpp

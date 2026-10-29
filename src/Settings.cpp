@@ -46,6 +46,7 @@ const QHash<QString, QVariant> &defaults()
         {key::statusBar, true},
         {key::outline, true},
         {key::zoom, 100},
+        {key::theme, QStringLiteral("modern")},
     };
     return values;
 }
@@ -53,6 +54,11 @@ const QHash<QString, QVariant> &defaults()
 QString shortcutKey(const QString &commandId)
 {
     return QLatin1String(key::shortcutsGroup) + commandId;
+}
+
+QString colorKey(const QString &themeId, const QString &role)
+{
+    return QLatin1String(key::colorsGroup) + themeId + u'/' + role;
 }
 
 } // namespace
@@ -145,6 +151,37 @@ void Settings::resetShortcut(const QString &commandId)
         return;
     m_store->remove(shortcutKey(commandId));
     Q_EMIT changed(shortcutKey(commandId));
+}
+
+QColor Settings::colorOverride(const QString &themeId, const QString &role) const
+{
+    const QColor color(m_store->value(colorKey(themeId, role)).toString());
+    return color.isValid() ? color : QColor();
+}
+
+void Settings::setColorOverride(const QString &themeId, const QString &role, const QColor &color)
+{
+    const QString name = color.name(QColor::HexRgb);
+    if (m_store->value(colorKey(themeId, role)).toString() == name)
+        return;
+    m_store->setValue(colorKey(themeId, role), name);
+    Q_EMIT changed(colorKey(themeId, role));
+}
+
+void Settings::resetColorOverride(const QString &themeId, const QString &role)
+{
+    if (!m_store->contains(colorKey(themeId, role)))
+        return;
+    m_store->remove(colorKey(themeId, role));
+    Q_EMIT changed(colorKey(themeId, role));
+}
+
+QStringList Settings::overriddenColors(const QString &themeId) const
+{
+    m_store->beginGroup(QLatin1String(key::colorsGroup) + themeId);
+    const QStringList roles = m_store->childKeys();
+    m_store->endGroup();
+    return roles;
 }
 
 QStringList Settings::recentFiles() const

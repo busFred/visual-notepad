@@ -53,6 +53,11 @@ target_link_libraries(test_markdown_editing PRIVATE vn_app Qt6::Test)
 add_test(NAME markdown_editing COMMAND test_markdown_editing)
 set_tests_properties(markdown_editing PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+qt_add_executable(test_theme test_theme.cpp)
+target_link_libraries(test_theme PRIVATE vn_app Qt6::Test)
+add_test(NAME theme COMMAND test_theme)
+set_tests_properties(theme PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 qt_add_executable(perf_probe perf_probe.cpp)
 target_link_libraries(perf_probe PRIVATE vn_app Qt6::Test)
 target_link_options(perf_probe PRIVATE -rdynamic)
