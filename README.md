@@ -45,3 +45,8 @@ installed system-wide.
 
 Set `VN_SCREENSHOT=/path/shot.png` when running the tests to save a
 rendering of the main window.
+
+## License
+
+MIT; see [LICENSE](LICENSE). Third-party components and their licenses are
+listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

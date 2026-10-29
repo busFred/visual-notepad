@@ -100,4 +100,4 @@ if(BUILD_TESTING)
 endif()
 
 install(TARGETS visnotepad RUNTIME DESTINATION bin)
-install(DIRECTORY ${VN_MICROTEX_RES_SOURCE}/ DESTINATION share/visnotepad/microtex/res)
+install(DIRECTORY ${VN_MICROTEX_RES_BUILD}/ DESTINATION share/visnotepad/microtex/res)

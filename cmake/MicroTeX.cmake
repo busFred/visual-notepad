@@ -50,9 +50,14 @@ set_target_properties(microtex PROPERTIES AUTOMOC OFF POSITION_INDEPENDENT_CODE 
 # Runtime resources (fonts and XML). Copied into the build tree for development
 # runs and tests; installed to share/visnotepad/microtex/res.
 set(VN_MICROTEX_RES_BUILD ${CMAKE_BINARY_DIR}/microtex/res)
+# res/greek and res/cyrillic are GPL-3.0 and are left out. They only serve
+# literal Greek/Cyrillic letters inside \text{}, which then use a system font
+# (\alpha and friends come from the Computer Modern fonts and still work).
 add_custom_target(microtex_res ALL
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${VN_MICROTEX_RES_BUILD}
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${_mt}/res ${VN_MICROTEX_RES_BUILD}
-    COMMENT "Copying MicroTeX resources"
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${VN_MICROTEX_RES_BUILD}/greek ${VN_MICROTEX_RES_BUILD}/cyrillic
+    COMMENT "Copying MicroTeX resources (without the GPL Greek/Cyrillic packages)"
 )
 add_dependencies(microtex microtex_res)
 set(VN_MICROTEX_RES_SOURCE ${_mt}/res)
