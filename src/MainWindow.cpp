@@ -321,6 +321,25 @@ void MainWindow::createActions()
     connect(m_splitAction, &QAction::toggled, this, &MainWindow::toggleSplitEditor);
     makeAction(QStringLiteral("view.moveToNewWindow"), [this] { moveTabToNewWindow(currentTab()); });
     makeAction(QStringLiteral("edit.changeLanguage"), [this] { showLanguageMenu(); });
+    // Markdown formatting; enabled for Markdown documents only.
+    using Format = TextView::MarkdownFormat;
+    static const QList<std::pair<const char *, Format>> formats{
+        {"format.bold", Format::Bold}, {"format.italic", Format::Italic},
+        {"format.underline", Format::Underline}, {"format.strikethrough", Format::Strikethrough},
+        {"format.inlineCode", Format::InlineCode}, {"format.heading1", Format::Heading1},
+        {"format.heading2", Format::Heading2}, {"format.heading3", Format::Heading3},
+        {"format.heading4", Format::Heading4}, {"format.heading5", Format::Heading5},
+        {"format.heading6", Format::Heading6}, {"format.headingUp", Format::HeadingUp},
+        {"format.headingDown", Format::HeadingDown}, {"format.quote", Format::Quote},
+        {"format.orderedList", Format::OrderedList}, {"format.bulletList", Format::BulletList},
+        {"format.taskList", Format::TaskList}, {"format.link", Format::Link},
+        {"format.codeBlock", Format::CodeBlock}};
+    for (const auto &[id, format] : formats) {
+        makeAction(QLatin1String(id), [this, format = format] {
+            if (auto *tab = currentTab(); tab && tab->isMarkdown())
+                tab->editor()->formatMarkdown(format);
+        })->setEnabled(false);
+    }
     makeAction(QStringLiteral("view.zoomIn"), [this] { zoom(1); });
     makeAction(QStringLiteral("view.zoomOut"), [this] { zoom(-1); });
     makeAction(QStringLiteral("view.zoomReset"), [this] { zoom(0); });
@@ -366,6 +385,13 @@ void MainWindow::createMenus()
                     "selection.addCursorBelow", "selection.addNextOccurrence", "selection.selectAllOccurrences", "-",
                     "selection.copyLineUp", "selection.copyLineDown", "selection.moveLineUp",
                     "selection.moveLineDown", "selection.deleteLine"});
+
+    QMenu *format = menuBar()->addMenu(tr("F&ormat"));
+    add(format, {"format.bold", "format.italic", "format.underline", "format.strikethrough", "format.inlineCode", "-",
+                 "format.heading1", "format.heading2", "format.heading3", "format.heading4", "format.heading5",
+                 "format.heading6", "format.headingUp", "format.headingDown", "-", "format.quote",
+                 "format.orderedList", "format.bulletList", "format.taskList", "-", "format.link",
+                 "format.codeBlock"});
 
     QMenu *view = menuBar()->addMenu(tr("&View"));
     add(view, {"view.outline", "-", "view.modeSource", "view.modeSplit", "view.modeVisual", "-", "view.splitEditor",
@@ -1418,6 +1444,10 @@ void MainWindow::updateModeControls()
     DocumentTab *tab = currentTab();
     const bool markdown = tab && tab->isMarkdown();
     action(QStringLiteral("edit.format"))->setEnabled(markdown);
+    for (auto it = m_actions.cbegin(); it != m_actions.cend(); ++it) {
+        if (it.key().startsWith(QLatin1String("format.")))
+            it.value()->setEnabled(markdown);
+    }
     for (QAction *action : m_modeGroup->actions())
         action->setEnabled(markdown);
     if (!markdown) {

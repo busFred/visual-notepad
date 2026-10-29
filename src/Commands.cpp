@@ -35,6 +35,7 @@ QList<Command> build()
     const QString file = tr("File");
     const QString edit = tr("Edit");
     const QString selection = tr("Selection");
+    const QString format = tr("Format");
     const QString view = tr("View");
     const QString help = tr("Help");
     return {
@@ -79,7 +80,27 @@ QList<Command> build()
         {QStringLiteral("selection.moveLineDown"), selection, tr("Move Line Down"), {k("Alt+Down")}},
         {QStringLiteral("selection.deleteLine"), selection, tr("Delete Line"), {k("Ctrl+Shift+K")}},
 
-        {QStringLiteral("view.outline"), view, tr("Outline"), {k("Ctrl+B")}},
+        {QStringLiteral("format.bold"), format, tr("Bold"), {k("Ctrl+B")}},
+        {QStringLiteral("format.italic"), format, tr("Italic"), {k("Ctrl+I")}},
+        {QStringLiteral("format.underline"), format, tr("Underline"), {k("Ctrl+U")}},
+        {QStringLiteral("format.strikethrough"), format, tr("Strikethrough"), {k("Alt+Shift+5")}},
+        {QStringLiteral("format.inlineCode"), format, tr("Inline Code"), {k("Ctrl+Shift+`")}},
+        {QStringLiteral("format.heading1"), format, tr("Heading 1"), {k("Ctrl+1")}},
+        {QStringLiteral("format.heading2"), format, tr("Heading 2"), {k("Ctrl+2")}},
+        {QStringLiteral("format.heading3"), format, tr("Heading 3"), {k("Ctrl+3")}},
+        {QStringLiteral("format.heading4"), format, tr("Heading 4"), {k("Ctrl+4")}},
+        {QStringLiteral("format.heading5"), format, tr("Heading 5"), {k("Ctrl+5")}},
+        {QStringLiteral("format.heading6"), format, tr("Heading 6"), {k("Ctrl+6")}},
+        {QStringLiteral("format.headingUp"), format, tr("Promote Heading"), {}},
+        {QStringLiteral("format.headingDown"), format, tr("Demote Heading"), {}},
+        {QStringLiteral("format.quote"), format, tr("Quote"), {k("Ctrl+Shift+Q")}},
+        {QStringLiteral("format.orderedList"), format, tr("Numbered List"), {k("Ctrl+Shift+[")}},
+        {QStringLiteral("format.bulletList"), format, tr("Bulleted List"), {k("Ctrl+Shift+]")}},
+        {QStringLiteral("format.taskList"), format, tr("Task List"), {k("Alt+C")}},
+        {QStringLiteral("format.link"), format, tr("Link"), {}},
+        {QStringLiteral("format.codeBlock"), format, tr("Code Block"), {}},
+
+        {QStringLiteral("view.outline"), view, tr("Outline"), {k("Ctrl+Shift+B")}},
         {QStringLiteral("view.modeSource"), view, tr("Source"), {}},
         {QStringLiteral("view.modeSplit"), view, tr("Source / Visual"), {k("Ctrl+K, V")}},
         {QStringLiteral("view.modeVisual"), view, tr("Visual Editor"), {}},

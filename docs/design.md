@@ -67,7 +67,7 @@ no bevels. Values live in `src/Theme.h`.
   windows with OS title bars.
 - Menu bar (File, Edit, Selection, View, Help) inside the window on every
   desktop; no command palette.
-- Outline: left panel, Markdown only, toggled by View > Outline or Ctrl+B;
+- Outline: left panel, Markdown only, toggled by View > Outline or Ctrl+Shift+B;
   hidden for other files.
 - Tab strip, right end: Split Editor (opens an empty right group) and a mode
   dropdown showing an icon plus the current mode. Items: Source,
