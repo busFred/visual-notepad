@@ -83,6 +83,7 @@ public:
     }
 
     QToolButton *lockButton() const { return m_lock; }
+    QToolButton *penButton() const { return m_pen; }
 
 protected:
     void paintEvent(QPaintEvent *) override
@@ -159,7 +160,7 @@ DocumentTab::DocumentTab(QWidget *parent)
     updateDefinition();
 
     connect(m_pill->lockButton(), &QToolButton::toggled, this, [this](bool locked) {
-        m_editor->setReadOnly(locked);
+        (m_viewMode == ViewMode::SourceVisual ? m_splitLocked : m_visualLocked) = locked;
         if (m_visual)
             m_visual->setReadOnly(locked);
     });
@@ -353,7 +354,8 @@ TextView *DocumentTab::editor() const
 
 bool DocumentTab::isReadOnly() const
 {
-    return m_pill->lockButton()->isChecked();
+    // The source view is always editable, so only Visual mode can be locked.
+    return isMarkdown() && m_viewMode == ViewMode::Visual && m_visualLocked;
 }
 
 void DocumentTab::ensureVisualView()
@@ -363,7 +365,7 @@ void DocumentTab::ensureVisualView()
     m_model = new MarkdownModel(m_doc);
     m_visual = new VisualView(m_model, m_splitter);
     m_splitter->addWidget(m_visual);
-    m_visual->setReadOnly(isReadOnly());
+    m_visual->setReadOnly(m_viewMode == ViewMode::SourceVisual ? m_splitLocked : m_visualLocked);
     m_visual->setTextCursor(QTextCursor(m_doc));
     applyViewSettings(m_visual);
     m_visual->installEventFilter(this);
@@ -583,6 +585,10 @@ void DocumentTab::setViewMode(ViewMode mode)
 
 void DocumentTab::updatePill()
 {
+    // The pill locks the visual view; each mode remembers its own state.
+    const bool locked = m_viewMode == ViewMode::SourceVisual ? m_splitLocked : m_visualLocked;
+    if (m_pill->lockButton()->isChecked() != locked)
+        (locked ? m_pill->lockButton() : m_pill->penButton())->setChecked(true);
     m_pill->setVisible(isMarkdown() && m_viewMode != ViewMode::Source);
     m_pill->raise();
     placeOverlays();
@@ -640,6 +646,7 @@ void DocumentTab::applyViewSettings(TextView *view)
     view->setShowWhitespace(s.flag(key::drawWhitespace));
     view->setTabWidth(s.number(key::tabWidth));
     view->setInsertSpaces(s.flag(key::insertSpaces));
+    view->setLineSpacing(s.value(key::lineSpacing).toDouble());
     view->setMultiCursorModifier(s.text(key::multiCursorModifier) == QLatin1String("ctrl") ? Qt::ControlModifier
                                                                                             : Qt::AltModifier);
     if (view == m_visual) {

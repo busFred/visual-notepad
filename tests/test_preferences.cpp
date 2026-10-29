@@ -404,8 +404,8 @@ void TestPreferences::lineSpacingWritesKey()
     auto *combo = find<QComboBox>(key::textLineHeight);
     QVERIFY(combo);
     QCOMPARE(combo->count(), 5);
-    QCOMPARE(combo->currentText(), QStringLiteral("1.6"));
-    QCOMPARE(Settings::instance().value(key::textLineHeight).toDouble(), 1.6);
+    QCOMPARE(combo->currentText(), QStringLiteral("1.4"));
+    QCOMPARE(Settings::instance().value(key::textLineHeight).toDouble(), 1.4);
     combo->setCurrentIndex(combo->findText(QStringLiteral("2.0")));
     QCOMPARE(Settings::instance().value(key::textLineHeight).toDouble(), 2.0);
     // Reading it back (stored as text in the INI file) selects the same item.

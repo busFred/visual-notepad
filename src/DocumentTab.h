@@ -134,6 +134,10 @@ private:
     QString m_error;
     LineEnding m_lineEnding = LineEnding::LF;
     ViewMode m_viewMode = ViewMode::Source;
+    // Whether the visual view is read-only, per mode: beside the source it is
+    // a preview, on its own an editor.
+    bool m_splitLocked = true;
+    bool m_visualLocked = false;
     Encoding m_encoding = encoding::utf8;
     bool m_languageOverridden = false;
     QString m_languageOverride;

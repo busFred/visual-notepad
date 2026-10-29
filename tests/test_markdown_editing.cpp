@@ -22,6 +22,7 @@
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QTimer>
+#include <QToolButton>
 #include <QToolTip>
 #include <QUrl>
 
@@ -45,6 +46,9 @@ private Q_SLOTS:
     void multipleCarets();
     void notContinuedOutsideMarkdown();
     void visualViewContinuesLists();
+    void splitIsTheDefaultMode();
+    void splitLocksOnlyThePreview();
+    void lineSpacingSetting();
     void tabIndentsItem();
     void formatIsOneUndoStep();
     void formatKeepsCaretLine();
@@ -246,6 +250,79 @@ void TestMarkdownEditing::visualViewContinuesLists()
     QCOMPARE(plain(tab), QStringLiteral("- item\n- "));
     press(view, Qt::Key_Return);
     QCOMPARE(plain(tab), QStringLiteral("- item\n"));
+}
+
+void TestMarkdownEditing::splitIsTheDefaultMode()
+{
+    Settings::instance().reset(key::defaultMode);
+    DocumentTab tab;
+    QCOMPARE(tab.viewMode(), DocumentTab::ViewMode::SourceVisual);
+}
+
+void TestMarkdownEditing::splitLocksOnlyThePreview()
+{
+    DocumentTab *tab = makeTab({}, QStringLiteral("# Title\n\ntext"));
+    const auto pillButton = [tab](const QString &tip) {
+        for (QToolButton *button : tab->findChildren<QToolButton *>()) {
+            if (button->toolTip() == tip)
+                return button;
+        }
+        return static_cast<QToolButton *>(nullptr);
+    };
+    QToolButton *lock = pillButton(QStringLiteral("Read-only"));
+    QToolButton *pen = pillButton(QStringLiteral("Editing"));
+    QVERIFY(lock && pen);
+
+    // Beside the source, the visual view is a locked preview.
+    tab->setViewMode(DocumentTab::ViewMode::SourceVisual);
+    QVERIFY(tab->visualView()->isReadOnly());
+    QVERIFY(lock->isChecked());
+    QVERIFY(!tab->sourceView()->isReadOnly());
+    QVERIFY(!tab->isReadOnly());
+    // On its own it is an editor.
+    tab->setViewMode(DocumentTab::ViewMode::Visual);
+    QVERIFY(!tab->visualView()->isReadOnly());
+    QVERIFY(pen->isChecked());
+    QVERIFY(!tab->isReadOnly());
+
+    // Each mode remembers its own choice.
+    lock->click();
+    QVERIFY(tab->visualView()->isReadOnly());
+    QVERIFY(tab->isReadOnly());
+    tab->setViewMode(DocumentTab::ViewMode::SourceVisual);
+    pen->click();
+    QVERIFY(!tab->visualView()->isReadOnly());
+    tab->setViewMode(DocumentTab::ViewMode::Visual);
+    QVERIFY(tab->visualView()->isReadOnly());
+    tab->setViewMode(DocumentTab::ViewMode::SourceVisual);
+    QVERIFY(!tab->visualView()->isReadOnly());
+    // The source view never locks, not even after Visual mode was locked.
+    tab->setViewMode(DocumentTab::ViewMode::Source);
+    QVERIFY(!tab->sourceView()->isReadOnly());
+    QVERIFY(!tab->isReadOnly());
+}
+
+void TestMarkdownEditing::lineSpacingSetting()
+{
+    DocumentTab *tab = makeTab({}, QStringLiteral("one\ntwo"));
+    TextView *view = tab->sourceView();
+    // The distance between two lines' carets is the line height.
+    const auto lineStep = [view] {
+        QTextCursor c(view->document());
+        view->setTextCursor(c);
+        const int first = static_cast<QWidget *>(view)->inputMethodQuery(Qt::ImCursorRectangle).toRect().top();
+        c.movePosition(QTextCursor::NextBlock);
+        view->setTextCursor(c);
+        return static_cast<QWidget *>(view)->inputMethodQuery(Qt::ImCursorRectangle).toRect().top() - first;
+    };
+    const int fontHeight = QFontMetrics(view->font()).height();
+    Settings::instance().reset(key::lineSpacing);
+    QCOMPARE(Settings::instance().value(key::lineSpacing).toDouble(), 1.4);
+    const int normal = lineStep();
+    QVERIFY2(qAbs(normal - fontHeight * 1.4) <= 1, qPrintable(QStringLiteral("%1 vs %2").arg(normal).arg(fontHeight)));
+    Settings::instance().setValue(key::lineSpacing, 2.0);
+    QVERIFY2(qAbs(lineStep() - fontHeight * 2.0) <= 1, qPrintable(QString::number(lineStep())));
+    Settings::instance().reset(key::lineSpacing);
 }
 
 void TestMarkdownEditing::tabIndentsItem()

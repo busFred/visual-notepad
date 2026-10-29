@@ -518,6 +518,13 @@ void PreferencesDialog::buildEditorPage()
     addSwitch(tr("Display line numbers"), key::lineNumbers);
     addSwitch(tr("Highlight the current line"), key::highlightCurrentLine);
     addSwitch(tr("Draw whitespace"), key::drawWhitespace);
+    addCombo(tr("Line spacing"), key::lineSpacing,
+             {{QStringLiteral("1.0"), 1.0},
+              {QStringLiteral("1.2"), 1.2},
+              {QStringLiteral("1.4"), 1.4},
+              {QStringLiteral("1.6"), 1.6},
+              {QStringLiteral("1.8"), 1.8},
+              {QStringLiteral("2.0"), 2.0}});
     addHeading(tr("Indentation"));
     addTabWidthRow();
     addSwitch(tr("Use spaces instead of tabs"), key::insertSpaces);
