@@ -1,0 +1,18 @@
+[package]
+name = "vn-core"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+name = "vn_core"
+# staticlib is linked into the Qt app; rlib keeps `cargo test` working.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+cxx = "1.0.205"
+markdown = "1.0.0"
+
+[profile.release]
+lto = true
+codegen-units = 1

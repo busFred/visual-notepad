@@ -1,0 +1,11 @@
+# Project-local toolchain (conda env, KDE libraries, cargo home)
+/.toolchain/
+
+# Build output
+/build*/
+/core/target/
+
+# Editors
+/.vscode/
+/.idea/
+*.user
