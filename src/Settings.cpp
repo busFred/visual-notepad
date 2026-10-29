@@ -73,12 +73,31 @@ Settings::Settings()
     : m_store(new QSettings(QSettings::IniFormat, QSettings::UserScope, QStringLiteral("visnotepad"),
                             QStringLiteral("settings"), this))
 {
+    migrate();
 }
 
 void Settings::useFile(const QString &path)
 {
     delete m_store;
     m_store = new QSettings(path, QSettings::IniFormat, this);
+    migrate();
+}
+
+void Settings::migrate()
+{
+    // "Legacy Windows" became "Windows Standard", custom colours included.
+    if (m_store->value(QLatin1String(key::theme)).toString() == QLatin1String("legacy"))
+        m_store->setValue(QLatin1String(key::theme), QStringLiteral("standard"));
+    m_store->beginGroup(QStringLiteral("colors/legacy"));
+    const QStringList roles = m_store->childKeys();
+    m_store->endGroup();
+    for (const QString &role : roles) {
+        const QString from = QStringLiteral("colors/legacy/") + role;
+        const QString to = QStringLiteral("colors/standard/") + role;
+        if (!m_store->contains(to))
+            m_store->setValue(to, m_store->value(from));
+        m_store->remove(from);
+    }
 }
 
 QVariant Settings::defaultValue(const char *key) const

@@ -9,6 +9,7 @@
 #include <QLineEdit>
 #include <QDialogButtonBox>
 #include <QPushButton>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -28,7 +29,9 @@ private Q_SLOTS:
     void overrideSurvivesThemeSwitch();
     void resetRestoresDefault();
     void notifierFiresOnChange();
-    void legacyMatchesOriginalColors();
+    void standardMatchesOriginalColors();
+    void classicUsesWindowsClassicColors();
+    void legacySettingsMigrateToStandard();
     void dialogCancelWritesNothing();
     void dialogApplyWritesOverride();
     void dialogResetAndDefaults();
@@ -58,7 +61,7 @@ void TestTheme::defaultIsModern()
 
 void TestTheme::switchingThemeIsLive()
 {
-    Settings::instance().setValue(key::theme, QStringLiteral("legacy"));
+    Settings::instance().setValue(key::theme, QStringLiteral("standard"));
     QCOMPARE(QApplication::palette().color(QPalette::Base), QColor(0xFFFFFF));
     QCOMPARE(QApplication::palette().color(QPalette::Window), QColor(0xDDDAD4));
     QCOMPARE(theme::color(Role::menuBar), QColor(0xD4D0C8));
@@ -76,9 +79,9 @@ void TestTheme::overrideSurvivesThemeSwitch()
     QCOMPARE(QApplication::palette().color(QPalette::Base), QColor(0x102030));
     QCOMPARE(settings.overriddenColors(QStringLiteral("modern")), QStringList{QStringLiteral("editor")});
 
-    settings.setValue(key::theme, QStringLiteral("legacy"));
+    settings.setValue(key::theme, QStringLiteral("standard"));
     QCOMPARE(theme::color(Role::editor), QColor(0xFFFFFF));
-    QVERIFY(settings.overriddenColors(QStringLiteral("legacy")).isEmpty());
+    QVERIFY(settings.overriddenColors(QStringLiteral("standard")).isEmpty());
 
     settings.setValue(key::theme, QStringLiteral("modern"));
     QCOMPARE(theme::color(Role::editor), QColor(0x102030));
@@ -101,21 +104,21 @@ void TestTheme::notifierFiresOnChange()
     Settings::instance().setColorOverride(QStringLiteral("modern"), QStringLiteral("gripDots"), QColor(0x123456));
     QCOMPARE(colors.count(), 1);
     QCOMPARE(keys.last().first().toString(), QStringLiteral("colors/modern/gripDots"));
-    Settings::instance().setValue(key::theme, QStringLiteral("legacy"));
+    Settings::instance().setValue(key::theme, QStringLiteral("standard"));
     QCOMPARE(colors.count(), 2);
     // Overrides of another theme do not change what is shown, but are cheap to re-apply.
     {
         const theme::UpdateBlocker blocker;
-        Settings::instance().setColorOverride(QStringLiteral("legacy"), QStringLiteral("text"), QColor(0x111111));
-        Settings::instance().setColorOverride(QStringLiteral("legacy"), QStringLiteral("accent"), QColor(0x222222));
+        Settings::instance().setColorOverride(QStringLiteral("standard"), QStringLiteral("text"), QColor(0x111111));
+        Settings::instance().setColorOverride(QStringLiteral("standard"), QStringLiteral("accent"), QColor(0x222222));
         QCOMPARE(colors.count(), 2);
     }
     QCOMPARE(colors.count(), 3);
 }
 
-void TestTheme::legacyMatchesOriginalColors()
+void TestTheme::standardMatchesOriginalColors()
 {
-    Settings::instance().setValue(key::theme, QStringLiteral("legacy"));
+    Settings::instance().setValue(key::theme, QStringLiteral("standard"));
     // Roles split from the old shared colours keep their old value.
     for (const Role role : {Role::menuBar, Role::menu, Role::tabStrip, Role::statusBar})
         QCOMPARE(theme::color(role), QColor(0xD4D0C8));
@@ -133,7 +136,7 @@ void TestTheme::legacyMatchesOriginalColors()
 void TestTheme::dialogCancelWritesNothing()
 {
     CustomizeColorsDialog dialog;
-    QCOMPARE(dialog.windowTitle(), QStringLiteral("Customize Colors — Modern Windows"));
+    QCOMPARE(dialog.windowTitle(), QStringLiteral("Customize Colors — Windows Modern"));
     QPushButton *apply = dialog.buttonBox()->button(QDialogButtonBox::Apply);
     QVERIFY(!apply->isEnabled());
     dialog.stage(Role::editor, QColor(0x445566));
@@ -226,6 +229,37 @@ void TestTheme::dialogPickersFollowItem()
     QVERIFY(foreground->isEnabled());
 }
 
+// Windows Classic: #C0C0C0 faces and the #000080 highlight.
+void TestTheme::classicUsesWindowsClassicColors()
+{
+    Settings::instance().setValue(key::theme, QStringLiteral("classic"));
+    QCOMPARE(theme::themeLabel(theme::currentThemeId()), QStringLiteral("Windows Classic"));
+    for (const Role role : {Role::menuBar, Role::menu, Role::tabStrip, Role::statusBar, Role::button})
+        QCOMPARE(theme::color(role), QColor(0xC0C0C0));
+    for (const Role role : {Role::menuHover, Role::selection})
+        QCOMPARE(theme::color(role), QColor(0x000080));
+    QCOMPARE(theme::color(Role::editor), QColor(0xFFFFFF));
+    QCOMPARE(QApplication::palette().color(QPalette::Highlight), QColor(0x000080));
+}
+
+// Settings from before the split: "legacy" and its custom colours become
+// Windows Standard.
+void TestTheme::legacySettingsMigrateToStandard()
+{
+    const QString path = m_dir.filePath(QStringLiteral("old.ini"));
+    {
+        QSettings old(path, QSettings::IniFormat);
+        old.setValue(QStringLiteral("view/theme"), QStringLiteral("legacy"));
+        old.setValue(QStringLiteral("colors/legacy/editor"), QStringLiteral("#efeeeb"));
+    }
+    Settings::instance().useFile(path);
+    theme::apply(*qApp);
+    QCOMPARE(theme::currentThemeId(), QStringLiteral("standard"));
+    QCOMPARE(theme::color(Role::editor), QColor(0xEFEEEB));
+    QCOMPARE(Settings::instance().overriddenColors(QStringLiteral("standard")), QStringList{QStringLiteral("editor")});
+    QVERIFY(Settings::instance().overriddenColors(QStringLiteral("legacy")).isEmpty());
+}
+
 QTEST_MAIN(TestTheme)
 #include "test_theme.moc"
 
@@ -234,8 +268,8 @@ QTEST_MAIN(TestTheme)
 void TestTheme::editorColorReachesFieldsAndLists()
 {
     const QColor cream(0xEFEEEB);
-    Settings::instance().setValue(key::theme, QStringLiteral("legacy"));
-    Settings::instance().setColorOverride(QStringLiteral("legacy"), QStringLiteral("editor"), cream);
+    Settings::instance().setValue(key::theme, QStringLiteral("standard"));
+    Settings::instance().setColorOverride(QStringLiteral("standard"), QStringLiteral("editor"), cream);
     PreferencesDialog::showPage(nullptr, QStringLiteral("editor"));
     QWidget *prefs = nullptr;
     for (QWidget *w : QApplication::topLevelWidgets()) {

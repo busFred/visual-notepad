@@ -52,7 +52,7 @@ inline constexpr char lineEnding[] = "files/lineEnding"; // "auto" | "lf" | "crl
 inline constexpr char statusBar[] = "view/statusBar";
 inline constexpr char outline[] = "view/outline";
 inline constexpr char zoom[] = "view/zoom"; // percent
-inline constexpr char theme[] = "view/theme"; // "modern" | "legacy"
+inline constexpr char theme[] = "view/theme"; // "modern" | "standard" | "classic"
 // Not a preference: announced through changed() when the list changes.
 inline constexpr char recentFiles[] = "state/recentFiles";
 // Shortcut overrides live under "shortcuts/<command id>".
@@ -109,6 +109,8 @@ Q_SIGNALS:
 
 private:
     Settings();
+    // Renames values written by older versions.
+    void migrate();
     QSettings *m_store;
 };
 

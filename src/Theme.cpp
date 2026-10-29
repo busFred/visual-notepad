@@ -30,50 +30,55 @@ QString hex(const QColor &c)
 struct RoleInfo
 {
     const char *name;
-    QRgb legacy;
+    QRgb standard;
+    QRgb classic;
     QRgb modern;
 };
 
-// Indexed by Role. Legacy is the warm grey family derived from #D4D0C8 (hue 40,
-// saturation 12%); Modern follows Windows 11 Notepad.
+// Indexed by Role. Standard and Classic are Windows' two classic schemes:
+// button faces #D4D0C8 and #C0C0C0, highlights #0A246A and #000080; the
+// panels around them are the same steps lighter or darker from the face (a
+// warm grey for Standard, a neutral one for Classic). Modern follows Windows
+// 11 Notepad.
 constexpr RoleInfo roleTable[] = {
-    {"menuBar", 0xD4D0C8, 0xF3F3F3},
-    {"menu", 0xD4D0C8, 0xF9F9F9},
-    {"menuHover", 0x0A246A, 0xE5E5E5}, // Legacy: the classic navy highlight
-    {"menuHoverText", 0xFFFFFF, 0x1A1A1A},
-    {"tabStrip", 0xD4D0C8, 0xF3F3F3},
-    {"statusBar", 0xD4D0C8, 0xF3F3F3},
-    {"activeTab", 0xFFFFFF, 0xFFFFFF},
-    {"inactiveTab", 0xDDDAD4, 0xF3F3F3},
-    {"inactiveTabText", 0x555555, 0x5C5C5C},
-    {"sideBar", 0xDDDAD4, 0xF9F9F9},
-    {"sideBarHover", 0xD3D0C9, 0xEAEAEA},
-    {"panelTitle", 0xCBC7BD, 0xE5E5E5},
-    {"divider", 0xBAB5AB, 0xE5E5E5},
-    {"surface", 0xE9E7E2, 0xF9F9F9},
-    {"button", 0xD4D0C8, 0xFBFBFB}, // Legacy: the classic button face
-    {"buttonHover", 0xE0DDD6, 0xF5F5F5},
-    {"editor", 0xFFFFFF, 0xFFFFFF},
-    {"text", 0x222222, 0x1A1A1A},
-    {"selection", 0x0A246A, 0xCCE4F7},
-    {"selectionText", 0xFFFFFF, 0x1A1A1A},
-    {"accent", 0x0A246A, 0x005FB8},
-    {"accentBorder", 0x9AA7C4, 0x99C3E6},
-    {"switchOn", 0x6F82AD, 0x005FB8},
-    {"activeBlock", 0xF6F5F3, 0xF9F9F9},
-    {"currentLine", 0xE9E7E2, 0xF5F5F5},
-    {"codeBlock", 0xE4E2DD, 0xF3F3F3},
-    {"gutterText", 0x9A9488, 0x9A9A9A},
-    {"gripDots", 0x8F8A7F, 0x8A8A8A},
-    {"mutedText", 0x7C766A, 0x5C5C5C},
+    {"menuBar", 0xD4D0C8, 0xC0C0C0, 0xF3F3F3},
+    {"menu", 0xD4D0C8, 0xC0C0C0, 0xF9F9F9},
+    {"menuHover", 0x0A246A, 0x000080, 0xE5E5E5},
+    {"menuHoverText", 0xFFFFFF, 0xFFFFFF, 0x1A1A1A},
+    {"tabStrip", 0xD4D0C8, 0xC0C0C0, 0xF3F3F3},
+    {"statusBar", 0xD4D0C8, 0xC0C0C0, 0xF3F3F3},
+    {"activeTab", 0xFFFFFF, 0xFFFFFF, 0xFFFFFF},
+    {"inactiveTab", 0xDDDAD4, 0xCCCCCC, 0xF3F3F3},
+    {"inactiveTabText", 0x555555, 0x404040, 0x5C5C5C},
+    {"sideBar", 0xDDDAD4, 0xCCCCCC, 0xF9F9F9},
+    {"sideBarHover", 0xD3D0C9, 0xC4C4C4, 0xEAEAEA},
+    {"panelTitle", 0xCBC7BD, 0xB4B4B4, 0xE5E5E5},
+    {"divider", 0xBAB5AB, 0x999999, 0xE5E5E5},
+    {"surface", 0xE9E7E2, 0xDCDCDC, 0xF9F9F9},
+    {"button", 0xD4D0C8, 0xC0C0C0, 0xFBFBFB},
+    {"buttonHover", 0xE0DDD6, 0xCECECE, 0xF5F5F5},
+    {"editor", 0xFFFFFF, 0xFFFFFF, 0xFFFFFF},
+    {"text", 0x222222, 0x000000, 0x1A1A1A},
+    {"selection", 0x0A246A, 0x000080, 0xCCE4F7},
+    {"selectionText", 0xFFFFFF, 0xFFFFFF, 0x1A1A1A},
+    {"accent", 0x0A246A, 0x000080, 0x005FB8},
+    {"accentBorder", 0x9AA7C4, 0x8080C0, 0x99C3E6},
+    {"switchOn", 0x6F82AD, 0x4A5FA8, 0x005FB8},
+    {"activeBlock", 0xF6F5F3, 0xF4F4F4, 0xF9F9F9},
+    {"currentLine", 0xE9E7E2, 0xEBEBEB, 0xF5F5F5},
+    {"codeBlock", 0xE4E2DD, 0xE2E2E2, 0xF3F3F3},
+    {"gutterText", 0x9A9488, 0x808080, 0x9A9A9A},
+    {"gripDots", 0x8F8A7F, 0x808080, 0x8A8A8A},
+    {"mutedText", 0x7C766A, 0x808080, 0x5C5C5C},
 };
 static_assert(std::size(roleTable) == size_t(Role::Count));
 
 const QList<ThemeInfo> &themeList()
 {
     static const QList<ThemeInfo> list = {
-        {QStringLiteral("modern"), QCoreApplication::translate("vn::theme", "Modern Windows")},
-        {QStringLiteral("legacy"), QCoreApplication::translate("vn::theme", "Legacy Windows")},
+        {QStringLiteral("modern"), QCoreApplication::translate("vn::theme", "Windows Modern")},
+        {QStringLiteral("standard"), QCoreApplication::translate("vn::theme", "Windows Standard")},
+        {QStringLiteral("classic"), QCoreApplication::translate("vn::theme", "Windows Classic")},
     };
     return list;
 }
@@ -334,7 +339,9 @@ QColor color(Role role)
 QColor defaultColor(const QString &themeId, Role role)
 {
     const RoleInfo &info = roleTable[size_t(role)];
-    return QColor(themeId == QLatin1String("legacy") ? info.legacy : info.modern);
+    return QColor(themeId == QLatin1String("standard")  ? info.standard
+                  : themeId == QLatin1String("classic") ? info.classic
+                                                        : info.modern);
 }
 
 Notifier &notifier()
