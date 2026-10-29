@@ -32,6 +32,10 @@ add_library(vn_app STATIC
     src/Theme.h
     src/editor/DocumentLayout.cpp
     src/editor/DocumentLayout.h
+    src/editor/FindBar.cpp
+    src/editor/FindBar.h
+    src/editor/Search.cpp
+    src/editor/Search.h
     src/editor/TextView.cpp
     src/editor/TextView.h
 )

@@ -13,6 +13,7 @@ class SyntaxHighlighter;
 namespace vn {
 
 class EditorPill;
+class FindBar;
 class TextView;
 
 class DocumentTab : public QWidget
@@ -45,6 +46,8 @@ public:
     QTextDocument *document() const { return m_doc; }
     TextView *editor() const { return m_editor; }
     void goToLine(int line);
+    FindBar *findBar() const { return m_findBar; }
+    void showFind(bool replace);
 
 Q_SIGNALS:
     void modificationChanged(bool modified);
@@ -53,15 +56,18 @@ Q_SIGNALS:
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void updateDefinition();
     void updatePill();
+    void placeOverlays();
 
     QTextDocument *m_doc;
     KSyntaxHighlighting::SyntaxHighlighter *m_highlighter;
     TextView *m_editor;
     EditorPill *m_pill;
+    FindBar *m_findBar;
     QString m_path;
     QString m_error;
     LineEnding m_lineEnding = LineEnding::LF;

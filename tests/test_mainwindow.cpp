@@ -6,7 +6,11 @@
 #include <QDockWidget>
 #include <QMenu>
 #include <QMenuBar>
+#include "DocumentTab.h"
+#include "editor/FindBar.h"
 #include "editor/TextView.h"
+
+#include <QLineEdit>
 
 #include <QTextDocument>
 #include <QStatusBar>
@@ -78,6 +82,12 @@ void TestMainWindow::markdownShowsOutline()
             QVERIFY(menu->grab().save(QString(shot).replace(QStringLiteral(".png"), u'-' + name + u".png")));
             menu->hide();
         }
+        // And the find/replace bar.
+        auto *tab = window.findChild<vn::DocumentTab *>();
+        tab->showFind(true);
+        tab->findBar()->setQuery(QStringLiteral("Section"));
+        tab->findBar()->replaceField()->setText(QStringLiteral("Part"));
+        QVERIFY(window.grab().save(QString(shot).replace(QStringLiteral(".png"), QStringLiteral("-find.png"))));
     }
 }
 

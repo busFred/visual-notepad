@@ -2,6 +2,7 @@
 
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
+#include "editor/FindBar.h"
 #include "editor/TextView.h"
 
 #include <KSyntaxHighlighting/Definition>
@@ -9,7 +10,9 @@
 #include <KSyntaxHighlighting/SyntaxHighlighter>
 #include <KSyntaxHighlighting/Theme>
 
+#include <QEvent>
 #include <QFile>
+#include <QGraphicsDropShadowEffect>
 #include <QFileInfo>
 #include <QButtonGroup>
 #include <QHBoxLayout>
@@ -29,6 +32,7 @@ namespace {
 const QByteArray utf8Bom("\xEF\xBB\xBF");
 constexpr int pillMarginRight = 12;
 constexpr int pillMarginTop = 8;
+constexpr int findBarMarginRight = 24;
 
 QIcon pillIcon(const QString &name)
 {
@@ -97,6 +101,13 @@ DocumentTab::DocumentTab(QWidget *parent)
     m_doc->setUndoRedoEnabled(true);
     m_editor = new TextView(m_doc, this);
     m_pill = new EditorPill(this);
+    m_findBar = new FindBar(m_editor, this);
+    auto *shadow = new QGraphicsDropShadowEffect(m_findBar);
+    shadow->setBlurRadius(8);
+    shadow->setOffset(0, 3);
+    shadow->setColor(QColor(0, 0, 0, 40));
+    m_findBar->setGraphicsEffect(shadow);
+    m_findBar->installEventFilter(this);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -241,7 +252,29 @@ void DocumentTab::updatePill()
 void DocumentTab::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
+    placeOverlays();
+}
+
+bool DocumentTab::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_findBar && (event->type() == QEvent::Resize || event->type() == QEvent::Show))
+        placeOverlays();
+    return QWidget::eventFilter(watched, event);
+}
+
+void DocumentTab::placeOverlays()
+{
     m_pill->move(width() - m_pill->width() - pillMarginRight, pillMarginTop);
+    // The find bar hangs from the top edge, clear of the scroll bar and pill.
+    const int right = m_pill->isVisible() ? m_pill->width() + pillMarginRight * 2 : findBarMarginRight;
+    m_findBar->adjustSize();
+    m_findBar->move(qMax(0, width() - m_findBar->width() - right), 0);
+}
+
+void DocumentTab::showFind(bool replace)
+{
+    m_findBar->open(replace);
+    placeOverlays();
 }
 
 } // namespace vn

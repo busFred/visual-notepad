@@ -82,6 +82,23 @@ QTreeWidget::item { padding: 2px 0; color: @text; }
 QTreeWidget::item:hover, QTreeWidget::branch:hover { background: @sideBarHover; }
 QTreeWidget::item:selected, QTreeWidget::branch:selected { background: @selection; color: @text; }
 
+#FindBar { background: @sideBar; border: 1px solid @divider; border-top: none; }
+#FindInput { background: @editor; border: 1px solid @divider; border-radius: 2px; }
+#FindInput[focused="true"] { border-color: @switchOn; }
+#FindInput[error="true"] { border-color: #cd3131; }
+#FindInput QLineEdit { background: transparent; border: none; padding: 2px 0; }
+QToolButton#FindOption { color: @text; padding: 0 3px; border: 1px solid transparent; border-radius: 2px; }
+QToolButton#FindOption:hover { background: @sideBar; }
+QToolButton#FindOption:checked { background: @selection; border-color: @accentBorder; color: @accent; }
+QToolButton#FindAction, QToolButton#FindToggle { border: none; border-radius: 3px; }
+QToolButton#FindAction:hover, QToolButton#FindToggle:hover { background: @panelTitle; }
+QToolButton#FindAction:checked { background: @selection; }
+QLabel#FindCount { color: #444444; padding-left: 4px; }
+QLabel#FindCount[empty="true"] { color: #cd3131; }
+QPushButton#FindButton { background: @editor; border: 1px solid @divider; border-radius: 2px; padding: 2px 8px; }
+QPushButton#FindButton:hover { background: @activeBlock; }
+QPushButton#FindButton:pressed { background: @selection; }
+
 QLabel#EmptyGroup { background: @editor; color: @mutedText; }
 
 QScrollBar:vertical { background: @editor; width: 12px; margin: 0; border-left: 1px solid @sideBar; }
@@ -130,7 +147,7 @@ void apply(QApplication &app)
         {"@accent", accent},         {"@divider", divider},       {"@statusBar", statusBar},
         {"@sideBarHover", sideBarHover}, {"@sideBar", sideBar},   {"@editor", editor},
         {"@text", text},             {"@panelTitle", panelTitle}, {"@mutedText", mutedText},
-        {"@inactiveTabText", inactiveTabText},
+        {"@inactiveTabText", inactiveTabText}, {"@switchOn", switchOn}, {"@activeBlock", activeBlock},
     };
     QString sheet = QString::fromLatin1(styleSheet);
     for (const auto &[name, color] : colors)

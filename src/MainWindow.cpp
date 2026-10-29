@@ -2,6 +2,7 @@
 
 #include "EditorGroup.h"
 #include "Theme.h"
+#include "editor/FindBar.h"
 #include "editor/TextView.h"
 #include "vn_core_bridge/lib.h"
 
@@ -236,8 +237,22 @@ void MainWindow::createMenus()
     edit->addAction(tr("Copy"), QKeySequence::Copy, this, forward(&TextView::copy));
     edit->addAction(tr("Paste"), QKeySequence::Paste, this, forward(&TextView::paste));
     edit->addSeparator();
-    todo(edit->addAction(tr("Find"), keys("Ctrl+F"), this, [] {}));
-    todo(edit->addAction(tr("Replace"), keys("Ctrl+H"), this, [] {}));
+    edit->addAction(tr("Find"), keys("Ctrl+F"), this, [this] {
+        if (auto *tab = currentTab())
+            tab->showFind(false);
+    });
+    edit->addAction(tr("Replace"), keys("Ctrl+H"), this, [this] {
+        if (auto *tab = currentTab())
+            tab->showFind(true);
+    });
+    edit->addAction(tr("Find Next"), keys("F3"), this, [this] {
+        if (auto *tab = currentTab())
+            tab->findBar()->findNext();
+    });
+    edit->addAction(tr("Find Previous"), keys("Shift+F3"), this, [this] {
+        if (auto *tab = currentTab())
+            tab->findBar()->findPrevious();
+    });
     todo(edit->addAction(tr("Go to Line…"), keys("Ctrl+G"), this, [] {}));
     edit->addSeparator();
     edit->addAction(tr("Toggle Line Comment"), keys("Ctrl+/"), this, forward(&TextView::toggleLineComment));

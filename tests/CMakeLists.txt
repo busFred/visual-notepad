@@ -12,3 +12,8 @@ qt_add_executable(test_textview test_textview.cpp)
 target_link_libraries(test_textview PRIVATE vn_app Qt6::Test)
 add_test(NAME textview COMMAND test_textview)
 set_tests_properties(textview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+qt_add_executable(test_find test_find.cpp)
+target_link_libraries(test_find PRIVATE vn_app Qt6::Test)
+add_test(NAME find COMMAND test_find)
+set_tests_properties(find PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
