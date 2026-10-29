@@ -216,22 +216,21 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
-            "-DCMAKE_IGNORE_PREFIX_PATH=C:/Strawberry/c;C:/Strawberry/perl"
+            "-DCMAKE_IGNORE_PREFIX_PATH=C:/Strawberry/c;C:/Strawberry/perl" `
+            -DVN_TEST_QPA=windows
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cmake --build build
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Test
         shell: pwsh
-        env:
-          QT_QPA_PLATFORM: offscreen
         run: ctest --test-dir build --output-on-failure
 
       - name: Failed test details
         if: failure()
         shell: pwsh
         env:
-          QT_QPA_PLATFORM: offscreen
+          QT_QPA_PLATFORM: windows
         run: |
           foreach ($t in 'preferences','files','theme') {
             $exe = "build\tests\test_$t.exe"
