@@ -24,11 +24,20 @@
 
 #include <algorithm>
 
+#ifdef Q_OS_UNIX
+#include <QSocketNotifier>
+
+#include <csignal>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 namespace vn {
 
 namespace {
 
-constexpr int backupIntervalMs = 60 * 1000;
+// At most this long between a change and its backup.
+constexpr int backupDelayMs = 2000;
 constexpr char backupProperty[] = "vnBackup";
 
 QString &dataDirStorage()
@@ -75,6 +84,16 @@ bool hotExit()
 {
     return Settings::instance().flag(key::restoreUnsaved);
 }
+
+#ifdef Q_OS_UNIX
+int signalPipe[2] = {-1, -1};
+
+void onSignal(int)
+{
+    const char byte = 1;
+    [[maybe_unused]] const auto written = ::write(signalPipe[1], &byte, 1);
+}
+#endif
 
 } // namespace
 
@@ -124,13 +143,61 @@ void SessionManager::start()
         return;
     m_started = true;
     m_timer = new QTimer(this);
-    m_timer->setInterval(backupIntervalMs);
+    m_timer->setSingleShot(true);
+    m_timer->setInterval(backupDelayMs);
     connect(m_timer, &QTimer::timeout, this, &SessionManager::backupIfDirty);
-    m_timer->start();
+    if (m_dirty)
+        m_timer->start();
 #ifndef QT_NO_SESSIONMANAGER
     // Direct: the session manager is only valid during the emission.
     connect(qApp, &QGuiApplication::commitDataRequest, this, &SessionManager::onCommitData, Qt::DirectConnection);
 #endif
+#ifdef Q_OS_UNIX
+    // `reboot`, `kill` or a closed terminal: the handler only wakes the event
+    // loop, which does the work.
+    if (::pipe(signalPipe) == 0) {
+        for (int fd : signalPipe)
+            ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+        ::fcntl(signalPipe[1], F_SETFL, O_NONBLOCK);
+        auto *notifier = new QSocketNotifier(signalPipe[0], QSocketNotifier::Read, this);
+        connect(notifier, &QSocketNotifier::activated, this, [this] {
+            char byte;
+            [[maybe_unused]] const auto bytes = ::read(signalPipe[0], &byte, 1);
+            terminate();
+        });
+        struct sigaction action = {};
+        action.sa_handler = onSignal;
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = SA_RESTART;
+        for (int signal : {SIGTERM, SIGHUP, SIGINT})
+            ::sigaction(signal, &action, nullptr);
+    }
+#endif
+}
+
+void SessionManager::markDirty()
+{
+    m_dirty = true;
+    // Not restarted on every keystroke, so steady typing is still backed up.
+    if (m_timer && !m_timer->isActive())
+        m_timer->start();
+}
+
+void SessionManager::sync()
+{
+    if (!m_quitting && enabled())
+        saveSession();
+}
+
+void SessionManager::terminate()
+{
+    if (m_quitting)
+        return;
+    if (enabled() && !m_windows.isEmpty())
+        saveSession();
+    m_quitting = true;
+    QApplication::closeAllWindows();
+    QCoreApplication::quit();
 }
 
 void SessionManager::backupIfDirty()
@@ -142,8 +209,8 @@ void SessionManager::backupIfDirty()
 
 void SessionManager::onCommitData(QSessionManager &)
 {
-    // Never cancel the shutdown. With hot exit the work is safe in backups, so
-    // closing the windows must not ask about it.
+    // Never cancel the shutdown. The work is safe in backups and comes back
+    // on the next start, so closing the windows must not ask about it.
     if (!enabled() || m_windows.isEmpty())
         return;
     const bool safe = saveSession().isEmpty();
@@ -257,34 +324,17 @@ void SessionManager::removeStaleBackups(const QJsonArray &windows)
 
 bool SessionManager::prepareQuit()
 {
-    auto windowOf = [this](DocumentTab *tab) -> MainWindow * {
-        for (MainWindow *window : std::as_const(m_windows)) {
-            if (window->tabs().contains(tab))
-                return window;
+    // A normal quit asks; recovery is only for closes that could not.
+    QList<DocumentTab *> tabs;
+    for (MainWindow *window : QList<MainWindow *>(m_windows)) {
+        for (DocumentTab *tab : window->tabs()) {
+            if (!window->confirmDiscard(tab))
+                return false;
+            tabs.append(tab);
         }
-        return nullptr;
-    };
-
-    if (!hotExit()) {
-        for (MainWindow *window : QList<MainWindow *>(m_windows)) {
-            for (DocumentTab *tab : window->tabs()) {
-                if (!window->confirmDiscard(tab))
-                    return false;
-            }
-        }
-        saveSession();
-        return true;
     }
-
-    const QList<DocumentTab *> failed = saveSession();
-    if (failed.isEmpty())
-        return true;
-    for (DocumentTab *tab : failed) {
-        MainWindow *window = windowOf(tab);
-        if (window && !window->confirmDiscard(tab))
-            return false;
-    }
-    saveSession(failed);
+    // Everything was saved or deliberately discarded: no backups.
+    saveSession(tabs);
     return true;
 }
 

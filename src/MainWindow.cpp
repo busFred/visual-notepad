@@ -354,6 +354,7 @@ void MainWindow::createMenus()
     m_recentMenu = file->addMenu(tr("Open Recent"));
     add(file, {"-", "file.save", "file.saveAs", "-", "file.closeTab", "file.closeWindow", "-", "file.quit"});
     connect(m_recentMenu, &QMenu::aboutToShow, this, &MainWindow::fillRecentMenu);
+    m_recentMenu->menuAction()->setVisible(Settings::instance().flag(key::rememberRecent));
 
     QMenu *edit = menuBar()->addMenu(tr("&Edit"));
     add(edit, {"edit.undo", "edit.redo", "-", "edit.cut", "edit.copy", "edit.paste", "-", "edit.find", "edit.replace",
@@ -698,6 +699,8 @@ bool MainWindow::closeTab(EditorGroup *group, int index)
         return false;
     group->removeTab(group->indexOf(tab));
     tab->deleteLater();
+    // Its changes were saved or discarded; drop the backup now.
+    SessionManager::instance().sync();
     return true;
 }
 
@@ -947,9 +950,10 @@ void MainWindow::showLanguageMenu()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
-    // The final quit uses hot exit, which saves instead of asking; a single
-    // window among several closes normally.
+    // Closing the last window quits; a single window among several only asks
+    // about its own tabs.
     auto &session = SessionManager::instance();
+    bool sync = false;
     if (!session.isQuitting()) {
         if (session.isLastWindow(this)) {
             if (!session.prepareQuit()) {
@@ -963,9 +967,14 @@ void MainWindow::closeEvent(QCloseEvent *event)
                     return;
                 }
             }
+            sync = true;
         }
     }
     session.unregisterWindow(this);
+    // The other windows' session, without this one's discarded backups. Not
+    // for the last window: prepareQuit() already wrote the final session.
+    if (sync)
+        session.sync();
     event->accept();
 }
 
@@ -1158,6 +1167,8 @@ void MainWindow::onSettingChanged(const QString &changedKey)
         m_wrapAction->setChecked(settings.flag(key::wordWrap));
     } else if (changedKey == QLatin1String(key::autoSave)) {
         applyAutoSave();
+    } else if (changedKey == QLatin1String(key::rememberRecent)) {
+        m_recentMenu->menuAction()->setVisible(settings.flag(key::rememberRecent));
     } else if (changedKey == QLatin1String(key::statusBar)) {
         m_statusBarAction->setChecked(settings.flag(key::statusBar));
         statusBar()->setVisible(settings.flag(key::statusBar));

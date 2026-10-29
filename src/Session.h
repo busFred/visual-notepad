@@ -1,7 +1,9 @@
-// Session restore and hot exit. On the final quit the open windows and tabs
-// are written to session.json; with hot exit on, unsaved content goes to
-// backup files next to it instead of prompting. The next start without files
-// on the command line brings everything back.
+// Session restore and recovery of unsaved work. While the app runs, unsaved
+// content is backed up shortly after each change (restoreUnsaved), so a
+// crash, logout or kill loses at most a moment of typing. A normal quit asks
+// about every unsaved tab instead and leaves no backups behind; what the user
+// discarded never comes back. session.json also lists the open files for
+// restoreSession. The next start without files on the command line restores.
 #pragma once
 
 #include <QJsonArray>
@@ -38,9 +40,8 @@ public:
     // True while the final quit is closing windows: closeEvent must not prompt.
     bool isQuitting() const { return m_quitting; }
 
-    // File > Quit: handles unsaved changes (backup, or prompt when hot exit is
-    // off or a backup fails), saves the session, then closes every window.
-    // Returns false if the user cancelled.
+    // File > Quit: asks about unsaved changes, saves the session, then closes
+    // every window. Returns false if the user cancelled.
     bool quit();
     // The part of quit() that also runs when the last window is closed.
     bool prepareQuit();
@@ -57,13 +58,19 @@ public:
     // tabs whose content could not be saved.
     QList<DocumentTab *> saveSession(const QList<DocumentTab *> &skipBackup = {});
 
-    void markDirty() { m_dirty = true; }
-    // Periodic backup and the logout/shutdown hook.
+    // Something a session stores changed; backs up again soon.
+    void markDirty();
+    // Writes the session now, e.g. after a tab was closed so its discarded
+    // backup cannot be recovered.
+    void sync();
+    // Backups, the logout/shutdown hook and, on Unix, SIGTERM/SIGHUP/SIGINT.
     void start();
 
 private:
     SessionManager();
     void onCommitData(QSessionManager &manager);
+    // A forced close that cannot ask: back up and exit.
+    void terminate();
     void backupIfDirty();
     QString writeBackup(DocumentTab *tab);
     void removeStaleBackups(const QJsonArray &windows);

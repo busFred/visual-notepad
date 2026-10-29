@@ -35,7 +35,8 @@ const QHash<QString, QVariant> &defaults()
         {key::updateLinksOnPaste, true},
         {key::validateLinks, false},
         {key::restoreUnsaved, true},
-        {key::restoreSession, true},
+        {key::restoreSession, false},
+        {key::rememberRecent, true},
         {key::autoSave, QStringLiteral("off")},
         {key::newFileLanguage, QStringLiteral("markdown")},
         {key::encoding, QStringLiteral("utf8")},
@@ -97,6 +98,8 @@ void Settings::setValue(const char *key, const QVariant &value)
         m_store->remove(QLatin1String(key));
     else
         m_store->setValue(QLatin1String(key), value);
+    if (qstrcmp(key, key::rememberRecent) == 0 && !value.toBool())
+        clearRecentFiles();
     Q_EMIT changed(QLatin1String(key));
 }
 
@@ -151,6 +154,8 @@ QStringList Settings::recentFiles() const
 
 void Settings::addRecentFile(const QString &path)
 {
+    if (!flag(key::rememberRecent))
+        return;
     QStringList files = recentFiles();
     files.removeAll(path);
     files.prepend(path);

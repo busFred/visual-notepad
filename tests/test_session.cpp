@@ -1,4 +1,4 @@
-// Session restore, hot exit and auto save. Settings and the session data
+// Session restore, crash recovery, recent files and auto save. Settings and the session data
 // directory live in a temporary directory; modal prompts are watched by a
 // timer that answers Discard and counts them.
 #include "DocumentTab.h"
@@ -19,6 +19,10 @@
 #include <QTextDocument>
 #include <QTimer>
 
+#ifdef Q_OS_UNIX
+#include <csignal>
+#endif
+
 using namespace vn;
 using Mode = DocumentTab::ViewMode;
 
@@ -31,12 +35,19 @@ private Q_SLOTS:
     void init();
     void cleanup();
     void roundTrip();
-    void hotExit();
-    void hotExitOffPrompts();
+    void crashRecovery();
+    void discardedTabIsNotRecovered();
+    void quitPrompts();
+    void recoveryOff();
+    void recentFiles();
     void encodingNameIsRestored();
     void missingFileIsSkipped();
     void autoSaveAfterDelay();
     void autoSaveOnFocusChange();
+#ifdef Q_OS_UNIX
+    // Last: the session stays in its quitting state afterwards.
+    void sigtermBacksUp();
+#endif
 
 private:
     MainWindow *makeWindow();
@@ -57,6 +68,7 @@ void TestSession::initTestCase()
 {
     theme::apply(*qApp);
     QGuiApplication::setQuitOnLastWindowClosed(false);
+    SessionManager::instance().start();
     connect(&m_watcher, &QTimer::timeout, this, [this] {
         QWidget *modal = QApplication::activeModalWidget();
         if (!modal)
@@ -136,6 +148,7 @@ int TestSession::backupCount() const
 
 void TestSession::roundTrip()
 {
+    Settings::instance().setValue(key::restoreSession, true);
     const QString a = write("a.md", "one\ntwo\nthree\nfour\n");
     const QString b = write("b.txt", "x\ny\nz\n");
     const QString c = write("c.md", "# c\n\nlast\n");
@@ -179,24 +192,27 @@ void TestSession::roundTrip()
     QCOMPARE(cursorLine(second.at(0)), 2);
 }
 
-void TestSession::hotExit()
+void TestSession::crashRecovery()
 {
     const QString f = write("f.txt", "a\r\nb\r\n");
+    const QString clean = write("clean.txt", "c\n");
     MainWindow *window = makeWindow();
     QVERIFY(window->openFile(f));
+    QVERIFY(window->openFile(clean));
     DocumentTab *file = window->tabs().at(0);
     QCOMPARE(file->lineEnding(), DocumentTab::LineEnding::CRLF);
     append(file, QStringLiteral("edit"));
     window->newFile();
-    append(window->tabs().at(1), QStringLiteral("scratch"));
+    append(window->tabs().at(2), QStringLiteral("scratch"));
     window->newFile(); // Empty untitled: nothing to keep.
 
-    QVERIFY(SessionManager::instance().quit());
-    QCOMPARE(m_prompts, 0);
+    // Backed up shortly after the edits, without quitting.
+    QTRY_COMPARE_WITH_TIMEOUT(backupCount(), 2, 5000);
     QCOMPARE(read(f), QByteArray("a\r\nb\r\n"));
-    QCOMPARE(backupCount(), 2);
-    closeWindows();
+    closeWindows(); // A crash: no close events, no prompts.
+    QCOMPARE(m_prompts, 0);
 
+    // Only the unsaved work comes back while restoreSession is off.
     QVERIFY(SessionManager::instance().restore());
     const QList<MainWindow *> windows = SessionManager::instance().windows();
     QCOMPARE(windows.size(), 1);
@@ -212,10 +228,79 @@ void TestSession::hotExit()
 
     QVERIFY(tabs.at(0)->save(f));
     QCOMPARE(read(f), QByteArray("a\r\nb\r\nedit"));
-    QVERIFY(windows.at(0)->closeTabs(1, MainWindow::CloseScope::This)); // The watcher discards.
+}
+
+void TestSession::discardedTabIsNotRecovered()
+{
+    MainWindow *window = makeWindow();
+    window->newFile();
+    append(window->tabs().at(0), QStringLiteral("keep"));
+    window->newFile();
+    append(window->tabs().at(1), QStringLiteral("throw away"));
+    QTRY_COMPARE_WITH_TIMEOUT(backupCount(), 2, 5000);
+
+    QVERIFY(window->closeTabs(1, MainWindow::CloseScope::This)); // The watcher discards.
     QCOMPARE(m_prompts, 1);
-    SessionManager::instance().saveSession();
+    QCOMPARE(backupCount(), 1); // Gone at once, not at the next backup.
+    closeWindows();
+
+    QVERIFY(SessionManager::instance().restore());
+    const QList<DocumentTab *> tabs = SessionManager::instance().windows().at(0)->tabs();
+    QCOMPARE(tabs.size(), 1);
+    QCOMPARE(tabs.at(0)->text(), QStringLiteral("keep"));
+}
+
+void TestSession::quitPrompts()
+{
+    const QString f = write("f.txt", "a\n");
+    MainWindow *window = makeWindow();
+    QVERIFY(window->openFile(f));
+    append(window->tabs().at(0), QStringLiteral("edit"));
+    window->newFile();
+    append(window->tabs().at(1), QStringLiteral("scratch"));
+    window->newFile(); // Empty untitled never prompts.
+    QTRY_COMPARE_WITH_TIMEOUT(backupCount(), 2, 5000);
+
+    QVERIFY(SessionManager::instance().quit());
+    QCOMPARE(m_prompts, 2);
+    QCOMPARE(read(f), QByteArray("a\n"));
     QCOMPARE(backupCount(), 0);
+    closeWindows();
+    // Discarded on purpose: the next start opens a new file instead.
+    QVERIFY(!SessionManager::instance().restore());
+}
+
+void TestSession::recoveryOff()
+{
+    Settings::instance().setValue(key::restoreUnsaved, false);
+    MainWindow *window = makeWindow();
+    window->newFile();
+    append(window->tabs().at(0), QStringLiteral("scratch"));
+    QTest::qWait(2500);
+    QCOMPARE(backupCount(), 0);
+    closeWindows();
+    QVERIFY(!SessionManager::instance().restore());
+}
+
+void TestSession::recentFiles()
+{
+    Settings &settings = Settings::instance();
+    settings.clearRecentFiles();
+    const QString a = write("a.txt", "a\n");
+    const QString b = write("b.txt", "b\n");
+    MainWindow *window = makeWindow();
+    QVERIFY(window->openFile(a));
+    QCOMPARE(settings.recentFiles(), QStringList{a});
+
+    settings.setValue(key::rememberRecent, false);
+    QVERIFY(settings.recentFiles().isEmpty());
+    QVERIFY(window->openFile(b));
+    QVERIFY(settings.recentFiles().isEmpty());
+
+    settings.setValue(key::rememberRecent, true);
+    const QString c = write("c.txt", "c\n");
+    QVERIFY(window->openFile(c));
+    QCOMPARE(settings.recentFiles(), QStringList{c});
 }
 
 void TestSession::encodingNameIsRestored()
@@ -228,7 +313,7 @@ void TestSession::encodingNameIsRestored()
     append(window->tabs().at(1), QStringLiteral("abc"));
     window->tabs().at(1)->setEncoding(encoding::utf8Bom);
 
-    QVERIFY(SessionManager::instance().quit());
+    SessionManager::instance().saveSession();
     closeWindows();
     QVERIFY(SessionManager::instance().restore());
     const QList<DocumentTab *> tabs = SessionManager::instance().windows().at(0)->tabs();
@@ -239,23 +324,9 @@ void TestSession::encodingNameIsRestored()
     SessionManager::instance().saveSession();
 }
 
-void TestSession::hotExitOffPrompts()
-{
-    Settings::instance().setValue(key::restoreUnsaved, false);
-    const QString f = write("f.txt", "a\n");
-    MainWindow *window = makeWindow();
-    QVERIFY(window->openFile(f));
-    append(window->tabs().at(0), QStringLiteral("edit"));
-    window->newFile(); // Empty untitled never prompts.
-
-    QVERIFY(SessionManager::instance().quit());
-    QCOMPARE(m_prompts, 1);
-    QCOMPARE(read(f), QByteArray("a\n"));
-    QCOMPARE(backupCount(), 0);
-}
-
 void TestSession::missingFileIsSkipped()
 {
+    Settings::instance().setValue(key::restoreSession, true);
     const QString gone = write("gone.txt", "x\n");
     const QString kept = write("kept.txt", "y\n");
     MainWindow *window = makeWindow();
@@ -317,6 +388,21 @@ void TestSession::autoSaveOnFocusChange()
     QCOMPARE(read(b), QByteArray("b\n2"));
     QCOMPARE(m_prompts, 0);
 }
+
+#ifdef Q_OS_UNIX
+void TestSession::sigtermBacksUp()
+{
+    MainWindow *window = makeWindow();
+    window->newFile();
+    append(window->tabs().at(0), QStringLiteral("typed just now"));
+    QCOMPARE(backupCount(), 0); // Faster than the backup timer.
+
+    QVERIFY(::raise(SIGTERM) == 0);
+    QTRY_VERIFY_WITH_TIMEOUT(SessionManager::instance().windows().isEmpty(), 2000);
+    QCOMPARE(m_prompts, 0);
+    QCOMPARE(backupCount(), 1);
+}
+#endif
 
 QTEST_MAIN(TestSession)
 #include "test_session.moc"

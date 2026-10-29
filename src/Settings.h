@@ -40,6 +40,7 @@ inline constexpr char validateLinks[] = "markdown/validateLinks";
 // Files
 inline constexpr char restoreUnsaved[] = "files/restoreUnsaved";
 inline constexpr char restoreSession[] = "files/restoreSession";
+inline constexpr char rememberRecent[] = "files/rememberRecent";
 inline constexpr char autoSave[] = "files/autoSave"; // "off" | "afterDelay" | "onFocusChange"
 inline constexpr char newFileLanguage[] = "files/newFileLanguage"; // "markdown" | "plaintext"
 inline constexpr char encoding[] = "files/encoding"; // "utf8" | "utf8bom" | "utf16le"
@@ -78,7 +79,8 @@ public:
     void resetShortcut(const QString &commandId);
     void resetAllShortcuts();
 
-    // Most recently opened files, newest first.
+    // Most recently opened files, newest first. Nothing is recorded while
+    // rememberRecent is off, and turning it off clears the list.
     QStringList recentFiles() const;
     void addRecentFile(const QString &path);
     void removeRecentFile(const QString &path);

@@ -741,8 +741,9 @@ void PreferencesDialog::buildSavePage()
 {
     beginPage();
     addHeading(tr("Restore"));
-    addSwitch(tr("Restore unsaved changes after restart"), key::restoreUnsaved);
+    addSwitch(tr("Recover unsaved changes after a crash or forced shutdown"), key::restoreUnsaved);
     addSwitch(tr("Reopen last session's files"), key::restoreSession);
+    addSwitch(tr("Remember recently opened files"), key::rememberRecent);
     addHeading(tr("Auto save"));
     addCombo(tr("Auto save"), key::autoSave,
              {{tr("Off"), QStringLiteral("off")},
