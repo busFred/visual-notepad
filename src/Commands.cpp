@@ -139,14 +139,61 @@ QList<QKeySequence> shortcutsFor(const QString &id)
     return c ? c->defaults : QList<QKeySequence>();
 }
 
+// What Qt does when two commands clash (all commands are QActions in
+// MainWindow; QShortcutMap::find, qtbase src/gui/kernel/qshortcutmap.cpp):
+//  - Identical sequences: both entries land in "identicals" (find(), ~line
+//    430-445); dispatchEvent() (~line 561) sends the shortcut event to each
+//    in turn and QAction::event (qaction.cpp ~line 1046) sees
+//    QShortcutEvent::isAmbiguous(), logs "Ambiguous shortcut overload" and
+//    does not trigger. Neither command runs.
+//  - A single key equal to the first key(s) of another command's chord
+//    ("Ctrl+K" vs "Ctrl+K, V"): the single key is an ExactMatch and the chord
+//    only a PartialMatch. find() ignores partials once identicals exist
+//    ("We don't need partials, if we have identicals", ~line 438), so the
+//    exact one fires immediately and the chord can never be completed.
+//    Only the chord is lost, but the chord's owner is unusable all the same.
+//  - If the single key's command is disabled, find() keeps the partial and
+//    consumes the key (~line 456), so the chord works but the single-key
+//    command does not; commands are enabled and disabled at run time, so the
+//    outcome is not predictable and we report the clash either way.
+static bool clashes(const QKeySequence &a, const QKeySequence &b)
+{
+    if (a.isEmpty() || b.isEmpty())
+        return false;
+    // matches() is Exact for equal, Partial when a is a proper prefix of b.
+    return a.matches(b) != QKeySequence::NoMatch || b.matches(a) != QKeySequence::NoMatch;
+}
+
+QList<ShortcutConflict> shortcutConflicts(const QString &id)
+{
+    QList<ShortcutConflict> result;
+    const QList<QKeySequence> mine = shortcutsFor(id);
+    for (const Command &c : commands()) {
+        if (c.id == id)
+            continue;
+        const QList<QKeySequence> theirs = shortcutsFor(c.id);
+        for (const QKeySequence &a : mine) {
+            for (const QKeySequence &b : theirs) {
+                if (clashes(a, b))
+                    result.append({c.id, a, b});
+            }
+        }
+    }
+    return result;
+}
+
 QStringList conflictingCommands(const QKeySequence &sequence, const QString &id)
 {
     QStringList result;
-    if (sequence.isEmpty())
-        return result;
     for (const Command &c : commands()) {
-        if (c.id != id && shortcutsFor(c.id).contains(sequence))
-            result.append(c.id);
+        if (c.id == id || result.contains(c.id))
+            continue;
+        for (const QKeySequence &other : shortcutsFor(c.id)) {
+            if (clashes(sequence, other)) {
+                result.append(c.id);
+                break;
+            }
+        }
     }
     return result;
 }
