@@ -7,14 +7,22 @@
 // a caret) by overriding the row hooks.
 #pragma once
 
+#include "../markdown/MarkdownEditing.h"
+
 #include <QAbstractScrollArea>
 #include <QBasicTimer>
 #include <QTextCursor>
 #include <QTextLayout>
 
+#include <QString>
+
 #include <memory>
 #include <vector>
 
+class QDragEnterEvent;
+class QDragMoveEvent;
+class QDropEvent;
+class QImage;
 class QTextDocument;
 
 namespace vn {
@@ -43,6 +51,25 @@ public:
     void setReadOnly(bool on);
     // Modifier that adds a caret on click: Alt (default) or Ctrl.
     void setMultiCursorModifier(Qt::KeyboardModifier modifier) { m_multiCursorModifier = modifier; }
+
+    // Markdown documents get list continuation, link and image pasting and
+    // Ctrl+Click on links. Off for other languages.
+    void setMarkdownEditing(bool on);
+    bool markdownEditing() const { return m_markdown; }
+    // The file being edited; relative paths in pasted links and images are
+    // relative to its folder.
+    void setDocumentPath(const QString &path);
+
+    // A range drawn with a red wavy underline and a tooltip. Positions follow
+    // edits; a range whose text is deleted disappears.
+    struct Diagnostic
+    {
+        int start = 0;
+        int end = 0;
+        QString message;
+    };
+    void setDiagnostics(const QList<Diagnostic> &diagnostics);
+    QList<Diagnostic> diagnostics() const;
 
     // The primary caret.
     QTextCursor textCursor() const;
@@ -99,6 +126,10 @@ Q_SIGNALS:
     void cursorPositionChanged();
     void selectionChanged();
     void scrolled();
+    // Files dropped without Shift (Markdown views insert links with Shift).
+    void filesDropped(const QStringList &files);
+    // Ctrl+Click (Alt+Click when Ctrl adds carets) on a link in Markdown text.
+    void linkRequested(const QString &url);
 
 protected:
     struct Row
@@ -151,8 +182,17 @@ protected:
     void timerEvent(QTimerEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
     void scrollContentsBy(int dx, int dy) override;
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dragMoveEvent(QDragMoveEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
 
 private:
+    struct DiagnosticRange
+    {
+        QTextCursor start;
+        QTextCursor end;
+        QString message;
+    };
     struct Caret
     {
         QTextCursor cursor;
@@ -194,6 +234,13 @@ private:
     QList<int> caretLines() const;
     // Merged [first, last] line ranges covered by the carets.
     QList<std::pair<int, int>> caretLineRanges() const;
+    // Markdown helpers.
+    Qt::KeyboardModifier linkModifier() const;
+    QString linkAtPosition(int position);
+    bool continueList(Caret &caret);
+    void insertFileLinks(const QStringList &files);
+    void pasteImage(const QImage &image);
+    QString diagnosticAt(int position) const;
     void moveLines(int direction);
     void copyLines(int direction);
     QString indentUnit() const;
@@ -233,6 +280,11 @@ private:
     qreal m_rightMargin = 8;
     qreal m_topMargin = 0;
     Qt::KeyboardModifier m_multiCursorModifier = Qt::AltModifier;
+    bool m_markdown = false;
+    QString m_documentPath;
+    QList<DiagnosticRange> m_diagnostics;
+    QList<md::LinkTarget> m_linkSpans;
+    int m_linkRevision = -1;
 
     // Metrics.
     int m_lineHeight = 16;

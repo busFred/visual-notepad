@@ -50,6 +50,8 @@ add_library(vn_app STATIC
     src/editor/TextView.h
     src/markdown/BlockRenderer.cpp
     src/markdown/BlockRenderer.h
+    src/markdown/MarkdownEditing.cpp
+    src/markdown/MarkdownEditing.h
     src/markdown/MarkdownModel.cpp
     src/markdown/MarkdownModel.h
     src/markdown/MathRenderer.cpp

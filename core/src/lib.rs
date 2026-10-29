@@ -1,6 +1,8 @@
 //! Rust side of Visual Notepad: Markdown parsing and rendering (markdown-rs)
 //! and Mermaid diagrams. Exposed to C++ through the cxx bridge below.
 
+mod format;
+mod links;
 mod mermaid;
 mod render;
 
@@ -59,6 +61,16 @@ mod ffi {
         front_matter: u8,
     }
 
+    /// A link, image or definition destination in the source text.
+    struct LinkTarget {
+        /// UTF-16 offset of the destination's first character.
+        start: usize,
+        /// UTF-16 offset just past the destination's last character.
+        end: usize,
+        /// The destination as written (percent-encoding intact).
+        dest: String,
+    }
+
     extern "Rust" {
         fn outline(markdown: &str) -> Vec<Heading>;
         fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block>;
@@ -66,6 +78,14 @@ mod ffi {
         fn mermaid_png(code: &str, theme: &str, scale: f32) -> Result<Vec<u8>>;
         /// GitHub-style anchor for a heading's text.
         fn heading_slug(text: &str) -> String;
+        /// Canonical CommonMark form of a document (GFM, front matter, math).
+        fn format_markdown(markdown: &str) -> String;
+        /// Rewrites relative destinations so that a text copied from a
+        /// document in `from_dir` keeps pointing at the same files when pasted
+        /// into a document in `to_dir`.
+        fn rebase_links(text: &str, from_dir: &str, to_dir: &str) -> String;
+        /// Destinations of inline links, images and definitions, in order.
+        fn link_targets(markdown: &str) -> Vec<LinkTarget>;
     }
 }
 
@@ -81,9 +101,21 @@ fn heading_slug(text: &str) -> String {
     render::slug(text)
 }
 
+fn format_markdown(markdown: &str) -> String {
+    format::format(markdown)
+}
+
+fn rebase_links(text: &str, from_dir: &str, to_dir: &str) -> String {
+    links::rebase(text, from_dir, to_dir)
+}
+
+fn link_targets(markdown: &str) -> Vec<ffi::LinkTarget> {
+    links::targets(markdown)
+}
+
 /// GFM plus math and front matter, matching what the VS Code Markdown
 /// editor accepted.
-fn parse_options() -> ParseOptions {
+pub(crate) fn parse_options() -> ParseOptions {
     ParseOptions {
         constructs: Constructs {
             frontmatter: true,

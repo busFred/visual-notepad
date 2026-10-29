@@ -47,3 +47,8 @@ qt_add_executable(test_groups test_groups.cpp)
 target_link_libraries(test_groups PRIVATE vn_app Qt6::Test)
 add_test(NAME groups COMMAND test_groups)
 set_tests_properties(groups PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+qt_add_executable(test_markdown_editing test_markdown_editing.cpp)
+target_link_libraries(test_markdown_editing PRIVATE vn_app Qt6::Test)
+add_test(NAME markdown_editing COMMAND test_markdown_editing)
+set_tests_properties(markdown_editing PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

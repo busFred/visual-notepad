@@ -1,16 +1,28 @@
 #include "TextView.h"
 
+#include "../Settings.h"
 #include "../Theme.h"
 #include "DocumentLayout.h"
 
 #include <QApplication>
 #include <QClipboard>
 #include <QContextMenuEvent>
+#include <QDateTime>
+#include <QDir>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QFileInfo>
+#include <QHelpEvent>
+#include <QImage>
+#include <QMessageBox>
 #include <QMenu>
 #include <QMimeData>
 #include <QPainter>
+#include <QPen>
 #include <QScrollBar>
 #include <QStyleHints>
+#include <QToolTip>
+#include <QUrl>
 #include <QTextBlock>
 #include <QTextDocument>
 
@@ -29,6 +41,28 @@ constexpr int gutterRightPad = 14;
 constexpr qreal hugeWidth = 1e7;
 // Marks clipboard text copied as whole lines (copy with no selection).
 const QString wholeLinesMime = QStringLiteral("application/x-visnotepad-lines");
+// Carries the path of the Markdown file a text was copied from.
+const QString markdownSourceMime = QStringLiteral("application/x-visnotepad-markdown-source");
+
+QColor diagnosticColor()
+{
+    return QColor(0xCD, 0x31, 0x31);
+}
+
+// Local files in the mime data, if it holds nothing but local file URLs.
+QStringList localFiles(const QMimeData *mime)
+{
+    QStringList files;
+    if (!mime || !mime->hasUrls())
+        return files;
+    const QList<QUrl> urls = mime->urls();
+    for (const QUrl &url : urls) {
+        if (!url.isLocalFile())
+            return {};
+        files.append(url.toLocalFile());
+    }
+    return files;
+}
 
 QColor searchColor()
 {
@@ -122,6 +156,57 @@ void TextView::setTabWidth(int columns)
 {
     m_tabWidth = qMax(1, columns);
     relayout();
+}
+
+void TextView::setMarkdownEditing(bool on)
+{
+    if (m_markdown == on)
+        return;
+    m_markdown = on;
+    // Link hover needs moves without buttons; only Markdown accepts drops so
+    // the window keeps its "open dropped files" behaviour for other text.
+    viewport()->setMouseTracking(on);
+    viewport()->setAcceptDrops(on);
+    if (!on)
+        viewport()->setCursor(Qt::IBeamCursor);
+}
+
+void TextView::setDocumentPath(const QString &path)
+{
+    m_documentPath = path;
+}
+
+void TextView::setDiagnostics(const QList<Diagnostic> &diagnostics)
+{
+    // Cursors keep the ranges in place while the text is edited.
+    m_diagnostics.clear();
+    for (const Diagnostic &d : diagnostics) {
+        QTextCursor start(m_doc);
+        start.setPosition(d.start);
+        QTextCursor end(m_doc);
+        end.setPosition(d.end);
+        m_diagnostics.append({start, end, d.message});
+    }
+    viewport()->update();
+}
+
+QList<TextView::Diagnostic> TextView::diagnostics() const
+{
+    QList<Diagnostic> result;
+    for (const DiagnosticRange &d : m_diagnostics) {
+        if (d.start.position() < d.end.position())
+            result.append({d.start.position(), d.end.position(), d.message});
+    }
+    return result;
+}
+
+QString TextView::diagnosticAt(int position) const
+{
+    for (const DiagnosticRange &d : m_diagnostics) {
+        if (position >= d.start.position() && position < d.end.position())
+            return d.message;
+    }
+    return {};
 }
 
 void TextView::setInsertSpaces(bool on)
@@ -263,7 +348,6 @@ void TextView::restartBlink()
 
 void TextView::onDocumentChanged(int from, int charsRemoved, int charsAdded)
 {
-    Q_UNUSED(charsRemoved);
     // Splice the line cache: [first, first + oldAffected) is replaced by the
     // newAffected lines now covering the change.
     const int newCount = m_doc->blockCount();
@@ -758,6 +842,35 @@ void TextView::paintEvent(QPaintEvent *event)
         painter.setPen(theme::text);
         layout->draw(&painter, origin);
 
+        for (const DiagnosticRange &d : std::as_const(m_diagnostics)) {
+            const int rangeStart = d.start.position();
+            const int rangeEnd = d.end.position();
+            if (rangeEnd <= blockStart || rangeStart >= blockEnd)
+                continue;
+            painter.save();
+            painter.setPen(QPen(diagnosticColor(), 1));
+            painter.setRenderHint(QPainter::Antialiasing, true);
+            const int ds = qMax(rangeStart, blockStart) - blockStart;
+            const int de = qMin(rangeEnd, blockEnd - 1) - blockStart;
+            for (int i = 0; i < layout->lineCount(); ++i) {
+                const QTextLine textLine = layout->lineAt(i);
+                const int s = qMax(ds, textLine.textStart());
+                const int e = qMin(de, textLine.textStart() + textLine.textLength());
+                if (s >= e)
+                    continue;
+                const qreal x1 = origin.x() + textLine.cursorToX(s);
+                const qreal x2 = origin.x() + textLine.cursorToX(e);
+                const qreal base = y + textLine.y() + textLine.ascent() + 2.5;
+                QPolygonF wave;
+                bool up = false;
+                for (qreal x = x1; x < x2; x += 2, up = !up)
+                    wave << QPointF(x, base + (up ? -1.0 : 1.0));
+                wave << QPointF(x2, base);
+                painter.drawPolyline(wave);
+            }
+            painter.restore();
+        }
+
         if (hasFocus() && m_caretOn) {
             painter.setPen(m_readOnly ? theme::mutedText : theme::text);
             for (const Caret &caret : m_carets) {
@@ -810,6 +923,21 @@ bool TextView::event(QEvent *event)
             event->accept();
             return true;
         }
+    }
+    if (event->type() == QEvent::ToolTip && !m_diagnostics.isEmpty()) {
+        const auto *help = static_cast<QHelpEvent *>(event);
+        qreal top = 0;
+        const int index = rowAt(help->pos().y(), &top);
+        if (index >= 0 && !row(index).rendered) {
+            const QString message = diagnosticAt(positionAt(help->pos()));
+            if (!message.isEmpty()) {
+                QToolTip::showText(help->globalPos(), message, viewport());
+                return true;
+            }
+        }
+        QToolTip::hideText();
+        event->ignore();
+        return true;
     }
     return QAbstractScrollArea::event(event);
 }
@@ -1033,6 +1161,15 @@ void TextView::mousePressEvent(QMouseEvent *event)
     const int pos = positionAt(event->position());
     const auto mods = event->modifiers();
 
+    if (m_markdown && pressedRow >= 0 && !row(pressedRow).rendered
+        && (mods & ~Qt::KeypadModifier) == linkModifier()) {
+        const QString dest = linkAtPosition(pos);
+        if (!dest.isEmpty()) {
+            Q_EMIT linkRequested(dest);
+            return;
+        }
+    }
+
     if (mods & m_multiCursorModifier && !(mods & Qt::ShiftModifier)) {
         // Alt+click (or Ctrl+click) adds a caret, or removes one already there.
         for (int i = 0; i < int(m_carets.size()); ++i) {
@@ -1114,6 +1251,16 @@ void TextView::selectByUnit(const QPointF &point, bool extend)
 
 void TextView::mouseMoveEvent(QMouseEvent *event)
 {
+    if (m_markdown && !m_dragging && event->buttons() == Qt::NoButton) {
+        // Rendered rows are the subclass's business.
+        qreal top = 0;
+        const int index = rowAt(event->position().y(), &top);
+        if (index >= 0 && !row(index).rendered) {
+            const bool over = (event->modifiers() & ~Qt::KeypadModifier) == linkModifier()
+                              && !linkAtPosition(positionAt(event->position())).isEmpty();
+            viewport()->setCursor(over ? Qt::PointingHandCursor : Qt::IBeamCursor);
+        }
+    }
     if (!m_dragging || !(event->buttons() & Qt::LeftButton))
         return;
     m_lastMousePos = event->position();
@@ -1562,6 +1709,29 @@ QString TextView::indentUnit() const
     return m_insertSpaces ? QString(m_tabWidth, u' ') : QStringLiteral("\t");
 }
 
+bool TextView::continueList(Caret &caret)
+{
+    QTextCursor &c = caret.cursor;
+    if (c.hasSelection())
+        return false;
+    const QString text = c.block().text();
+    const md::ListLine item = md::parseListLine(text);
+    if (!item.valid || c.positionInBlock() < item.contentStart)
+        return false;
+    if (item.empty) {
+        // Enter on an empty item ends the list (or quote).
+        if (c.positionInBlock() != text.size())
+            return false;
+        c.setPosition(c.block().position());
+        c.setPosition(c.block().position() + text.size(), QTextCursor::KeepAnchor);
+        c.insertText(!item.isQuote && item.lead.contains(u'>') ? item.lead : QString());
+    } else {
+        c.insertText(QStringLiteral("\n") + item.nextPrefix());
+    }
+    caret.desiredX = -1;
+    return true;
+}
+
 void TextView::insertNewline()
 {
     if (!canEdit())
@@ -1569,6 +1739,8 @@ void TextView::insertNewline()
     beginEdit();
     for (Caret &caret : m_carets) {
         QTextCursor &c = caret.cursor;
+        if (m_markdown && continueList(caret))
+            continue;
         const QString text = c.block().text();
         const QString indent = text.left(qMin(leadingWhitespace(text), c.positionInBlock()));
         c.insertText(QStringLiteral("\n") + indent);
@@ -1590,8 +1762,24 @@ void TextView::insertTab()
         }
     }
     beginEdit();
+    QSet<int> indentedItems;
     for (Caret &caret : m_carets) {
         QTextCursor &c = caret.cursor;
+        const md::ListLine item = m_markdown ? md::parseListLine(c.block().text()) : md::ListLine();
+        if (item.valid && !item.isQuote) {
+            // Tab in a list item indents the whole item.
+            const QTextBlock block = c.block();
+            if (indentedItems.contains(block.blockNumber()))
+                continue;
+            indentedItems.insert(block.blockNumber());
+            const QString unit = indentUnit();
+            const int anchor = c.anchor() + unit.size();
+            const int position = c.position() + unit.size();
+            QTextCursor(block).insertText(unit);
+            c.setPosition(anchor);
+            c.setPosition(position, QTextCursor::KeepAnchor);
+            continue;
+        }
         if (m_insertSpaces) {
             c.removeSelectedText();
             const int column = c.positionInBlock();
@@ -1954,6 +2142,8 @@ void TextView::copy()
         mime->setText(lines.join(u'\n') + u'\n');
         mime->setData(wholeLinesMime, QByteArray("1"));
     }
+    if (m_markdown && !m_documentPath.isEmpty() && Settings::instance().flag(key::updateLinksOnPaste))
+        mime->setData(markdownSourceMime, m_documentPath.toUtf8());
     QApplication::clipboard()->setMimeData(mime);
 }
 
@@ -1983,10 +2173,31 @@ void TextView::paste()
     if (!canEdit())
         return;
     const QMimeData *mime = QApplication::clipboard()->mimeData();
-    if (!mime || !mime->hasText())
+    if (!mime)
+        return;
+    if (m_markdown) {
+        const QStringList files = localFiles(mime);
+        if (!files.isEmpty()) {
+            insertFileLinks(files);
+            return;
+        }
+        if (mime->hasImage() && !mime->hasText()) {
+            pasteImage(qvariant_cast<QImage>(mime->imageData()));
+            return;
+        }
+    }
+    if (!mime->hasText())
         return;
     QString text = mime->text();
     text.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    if (m_markdown && !m_documentPath.isEmpty() && mime->hasFormat(markdownSourceMime)
+        && Settings::instance().flag(key::updateLinksOnPaste)) {
+        // Relative links keep pointing at the same files from the new folder.
+        const QString from = QFileInfo(QString::fromUtf8(mime->data(markdownSourceMime))).absolutePath();
+        const QString to = QFileInfo(m_documentPath).absolutePath();
+        if (from != to)
+            text = md::rebaseLinks(text, from, to);
+    }
     const bool wholeLines = mime->hasFormat(wholeLinesMime);
 
     QStringList parts;
@@ -2020,6 +2231,99 @@ void TextView::paste()
     }
     endEdit();
     caretsChanged();
+}
+
+void TextView::insertFileLinks(const QStringList &files)
+{
+    const QString dir = m_documentPath.isEmpty() ? QString() : QFileInfo(m_documentPath).absolutePath();
+    QStringList links;
+    for (const QString &file : files)
+        links.append(md::linkForFile(file, dir));
+    insertTextAtCarets(links.join(u'\n'));
+}
+
+void TextView::pasteImage(const QImage &image)
+{
+    if (image.isNull())
+        return;
+    if (m_documentPath.isEmpty()) {
+        QMessageBox::information(this, QApplication::applicationDisplayName(),
+                                 tr("Save the document before pasting images."));
+        return;
+    }
+    const QString documentDir = QFileInfo(m_documentPath).absolutePath();
+    const QString folder = Settings::instance().text(key::pasteImageFolder).trimmed();
+    const QString targetDir = folder.isEmpty()             ? documentDir
+                              : QDir::isAbsolutePath(folder) ? folder
+                                                             : QDir(documentDir).filePath(folder);
+    if (!QDir().mkpath(targetDir)) {
+        QMessageBox::warning(this, QApplication::applicationDisplayName(),
+                             tr("Could not create the folder %1.").arg(QDir::toNativeSeparators(targetDir)));
+        return;
+    }
+    const QString base = QStringLiteral("image-") + QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
+    QString path = QDir(targetDir).filePath(base + QStringLiteral(".png"));
+    for (int n = 2; QFileInfo::exists(path); ++n)
+        path = QDir(targetDir).filePath(base + u'-' + QString::number(n) + QStringLiteral(".png"));
+    if (!image.save(path, "PNG")) {
+        QMessageBox::warning(this, QApplication::applicationDisplayName(),
+                             tr("Could not save the image to %1.").arg(QDir::toNativeSeparators(path)));
+        return;
+    }
+    insertTextAtCarets(md::linkForFile(path, documentDir));
+}
+
+Qt::KeyboardModifier TextView::linkModifier() const
+{
+    return m_multiCursorModifier == Qt::ControlModifier ? Qt::AltModifier : Qt::ControlModifier;
+}
+
+QString TextView::linkAtPosition(int position)
+{
+    if (m_linkRevision != m_doc->revision()) {
+        QString text = m_doc->toRawText();
+        text.replace(QChar::ParagraphSeparator, u'\n');
+        m_linkSpans = md::linkTargets(text);
+        m_linkRevision = m_doc->revision();
+    }
+    const QTextBlock block = m_doc->findBlock(position);
+    return md::linkAt(m_linkSpans, block.text(), block.position(), position);
+}
+
+void TextView::dragEnterEvent(QDragEnterEvent *event)
+{
+    if (m_markdown && canEdit() && !localFiles(event->mimeData()).isEmpty())
+        event->acceptProposedAction();
+    else
+        event->ignore();
+}
+
+void TextView::dragMoveEvent(QDragMoveEvent *event)
+{
+    if (m_markdown && canEdit() && !localFiles(event->mimeData()).isEmpty())
+        event->acceptProposedAction();
+    else
+        event->ignore();
+}
+
+void TextView::dropEvent(QDropEvent *event)
+{
+    const QStringList files = localFiles(event->mimeData());
+    if (!m_markdown || !canEdit() || files.isEmpty()) {
+        event->ignore();
+        return;
+    }
+    event->acceptProposedAction();
+    // Like VS Code: a plain drop opens the files, Shift+drop links them.
+    if (!(event->modifiers() & Qt::ShiftModifier)) {
+        Q_EMIT filesDropped(files);
+        return;
+    }
+    QTextCursor cursor(m_doc);
+    cursor.setPosition(positionAt(event->position()));
+    setTextCursor(cursor);
+    insertFileLinks(files);
+    setFocus(Qt::MouseFocusReason);
 }
 
 void TextView::undo()

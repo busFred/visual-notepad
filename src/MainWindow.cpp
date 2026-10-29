@@ -273,7 +273,7 @@ void MainWindow::createActions()
     });
     makeAction(QStringLiteral("edit.goToLine"), [this] { goToLine(); });
     makeAction(QStringLiteral("edit.toggleComment"), onEditor(&TextView::toggleLineComment));
-    makeAction(QStringLiteral("edit.format"))->setEnabled(false); // Planned formatter.
+    makeAction(QStringLiteral("edit.format"), onTab(&DocumentTab::formatDocument))->setEnabled(false);
     makeAction(QStringLiteral("edit.preferences"), [this] { showPreferences(QString()); });
 
     makeAction(QStringLiteral("selection.selectAll"), onEditor(&TextView::selectAll));
@@ -614,6 +614,10 @@ void MainWindow::addTab(DocumentTab *tab, EditorGroup *group, int index)
             saveTimer->start();
     });
     connect(tab, &DocumentTab::linkActivated, this, [this, tab](const QString &url) { openLink(tab, url); });
+    connect(tab, &DocumentTab::filesDropped, this, [this](const QStringList &files) {
+        for (const QString &file : files)
+            openFile(file);
+    });
     connect(tab, &DocumentTab::textChanged, this, [this, tab] {
         if (tab == currentTab() && tab->isMarkdown())
             m_outlineTimer->start();
@@ -1320,6 +1324,7 @@ void MainWindow::updateModeControls()
     }
     DocumentTab *tab = currentTab();
     const bool markdown = tab && tab->isMarkdown();
+    action(QStringLiteral("edit.format"))->setEnabled(markdown);
     for (QAction *action : m_modeGroup->actions())
         action->setEnabled(markdown);
     if (!markdown) {

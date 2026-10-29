@@ -1,11 +1,14 @@
 // One open file: the editor plus its floating lock/pencil pill.
 #pragma once
 
+#include "editor/TextView.h"
+
 #include <QByteArray>
 #include <QString>
 #include <QWidget>
 
 class QSplitter;
+class QTimer;
 class QTextDocument;
 
 namespace KSyntaxHighlighting {
@@ -79,9 +82,12 @@ public:
     void showFind(bool replace);
     void showGoToLine();
     void setZoom(int percent);
+    // Rewrites a Markdown document in canonical form as one undoable edit.
+    void formatDocument();
 
 Q_SIGNALS:
     void linkActivated(const QString &url);
+    void filesDropped(const QStringList &files);
     void viewModeChanged();
     void modificationChanged(bool modified);
     void cursorPositionChanged();
@@ -105,6 +111,10 @@ private:
     void updateViews();
     void syncScroll(TextView *from, TextView *to);
     void setActiveView(TextView *view);
+    void applyMarkdownState();
+    void scheduleLinkCheck();
+    void checkLinks();
+    QList<TextView::Diagnostic> brokenLinks() const;
 
     QTextDocument *m_doc;
     KSyntaxHighlighting::SyntaxHighlighter *m_highlighter;
@@ -117,6 +127,8 @@ private:
     EditorPill *m_pill;
     FindBar *m_findBar;
     QWidget *m_goToLine;
+    QTimer *m_linkTimer;
+    QList<TextView::Diagnostic> m_diagnostics;
     int m_zoom = 100;
     QString m_path;
     QString m_error;

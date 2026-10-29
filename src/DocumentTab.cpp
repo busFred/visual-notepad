@@ -5,6 +5,7 @@
 #include "editor/DocumentLayout.h"
 #include "editor/FindBar.h"
 #include "editor/TextView.h"
+#include "markdown/MarkdownEditing.h"
 #include "markdown/MarkdownModel.h"
 #include "markdown/VisualView.h"
 
@@ -13,6 +14,7 @@
 #include <KSyntaxHighlighting/SyntaxHighlighter>
 #include <KSyntaxHighlighting/Theme>
 
+#include <QDir>
 #include <QEvent>
 #include <QFile>
 #include <QGraphicsDropShadowEffect>
@@ -23,13 +25,16 @@
 #include <QLineEdit>
 #include <QPainter>
 #include <QPainterPath>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QSplitter>
 #include <QStringDecoder>
 #include <QStringEncoder>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QTimer>
 #include <QToolButton>
+#include <QUrl>
 #include <QVBoxLayout>
 
 namespace vn {
@@ -164,6 +169,11 @@ DocumentTab::DocumentTab(QWidget *parent)
     m_splitter = new QSplitter(Qt::Horizontal, this);
     m_splitter->setHandleWidth(1);
     m_splitter->setChildrenCollapsible(false);
+    // Link checking runs shortly after the last edit.
+    m_linkTimer = new QTimer(this);
+    m_linkTimer->setSingleShot(true);
+    m_linkTimer->setInterval(500);
+    connect(m_linkTimer, &QTimer::timeout, this, &DocumentTab::checkLinks);
     m_editor = new TextView(m_doc, m_splitter);
     m_splitter->addWidget(m_editor);
     m_active = m_editor;
@@ -196,6 +206,8 @@ DocumentTab::DocumentTab(QWidget *parent)
     connect(&Settings::instance(), &Settings::changed, this, [this](const QString &changedKey) {
         if (changedKey.startsWith(QLatin1String("editor/")) || changedKey == QLatin1String(key::highlightActiveBlock))
             applySettings();
+        if (changedKey == QLatin1String(key::validateLinks))
+            checkLinks();
     });
 
     auto *layout = new QVBoxLayout(this);
@@ -219,6 +231,9 @@ DocumentTab::DocumentTab(QWidget *parent)
             Q_EMIT cursorPositionChanged();
     });
     connect(m_doc, &QTextDocument::contentsChanged, this, &DocumentTab::textChanged);
+    connect(m_doc, &QTextDocument::contentsChanged, this, &DocumentTab::scheduleLinkCheck);
+    connect(m_editor, &TextView::linkRequested, this, &DocumentTab::linkActivated);
+    connect(m_editor, &TextView::filesDropped, this, &DocumentTab::filesDropped);
     updatePill();
 }
 
@@ -444,6 +459,9 @@ void DocumentTab::ensureVisualView()
     applyViewSettings(m_visual);
     m_visual->installEventFilter(this);
     connect(m_visual, &VisualView::linkActivated, this, &DocumentTab::linkActivated);
+    connect(m_visual, &TextView::linkRequested, this, &DocumentTab::linkActivated);
+    connect(m_visual, &TextView::filesDropped, this, &DocumentTab::filesDropped);
+    m_visual->setDiagnostics(m_diagnostics);
     connect(m_visual, &TextView::scrolled, this, [this] { syncScroll(m_visual, m_editor); });
     connect(m_visual, &TextView::cursorPositionChanged, this, [this] {
         if (m_active == m_visual)
@@ -478,6 +496,7 @@ void DocumentTab::updateViews()
         ensureVisualView();
         m_visual->setBaseDirectory(m_path.isEmpty() ? QString() : QFileInfo(m_path).absolutePath());
     }
+    applyMarkdownState();
     m_editor->setVisible(mode != ViewMode::Visual);
     if (m_visual)
         m_visual->setVisible(mode != ViewMode::Source);
@@ -494,6 +513,125 @@ void DocumentTab::updateViews()
         active->setTextCursor(m_active->textCursor());
     setActiveView(active);
     updatePill();
+}
+
+void DocumentTab::applyMarkdownState()
+{
+    const bool markdown = isMarkdown();
+    m_editor->setMarkdownEditing(markdown);
+    m_editor->setDocumentPath(m_path);
+    if (m_visual) {
+        m_visual->setMarkdownEditing(markdown);
+        m_visual->setDocumentPath(m_path);
+    }
+    scheduleLinkCheck();
+}
+
+void DocumentTab::scheduleLinkCheck()
+{
+    if (isMarkdown() && Settings::instance().flag(key::validateLinks))
+        m_linkTimer->start();
+    else if (!m_diagnostics.isEmpty())
+        checkLinks();
+}
+
+void DocumentTab::checkLinks()
+{
+    m_linkTimer->stop();
+    if (isMarkdown() && Settings::instance().flag(key::validateLinks))
+        m_diagnostics = brokenLinks();
+    else
+        m_diagnostics.clear();
+    m_editor->setDiagnostics(m_diagnostics);
+    if (m_visual)
+        m_visual->setDiagnostics(m_diagnostics);
+}
+
+QList<TextView::Diagnostic> DocumentTab::brokenLinks() const
+{
+    static const QRegularExpression scheme(QStringLiteral("^[A-Za-z][A-Za-z0-9+.-]+:"));
+    static const QRegularExpression lineAnchor(QStringLiteral("^L\\d+"), QRegularExpression::CaseInsensitiveOption);
+    const auto decode = [](const QString &s) { return QUrl::fromPercentEncoding(s.toUtf8()); };
+
+    const QDir dir = m_path.isEmpty() ? QDir() : QFileInfo(m_path).absoluteDir();
+    QStringList ownAnchors;
+    bool ownLoaded = false;
+    QHash<QString, QStringList> fileAnchors;
+    QList<TextView::Diagnostic> found;
+
+    for (const md::LinkTarget &target : md::linkTargets(text())) {
+        const QString &dest = target.dest;
+        if (dest.isEmpty() || scheme.match(dest).hasMatch())
+            continue;
+        QString path = dest.section(u'#', 0, 0);
+        const QString fragment = decode(dest.contains(u'#') ? dest.section(u'#', 1) : QString()).toLower();
+        path = decode(path.section(u'?', 0, 0));
+        const auto report = [&] {
+            found.append({target.start, target.end, tr("Link target not found: %1").arg(dest)});
+        };
+
+        if (path.isEmpty()) {
+            if (fragment.isEmpty() || lineAnchor.match(fragment, 0).hasMatch())
+                continue;
+            if (!ownLoaded) {
+                ownAnchors = md::anchorsOf(text());
+                ownLoaded = true;
+            }
+            if (!ownAnchors.contains(fragment))
+                report();
+            continue;
+        }
+        // "/x" is relative to a workspace root, which this app doesn't have.
+        if (path.startsWith(u'/'))
+            continue;
+        const QString file = QDir::isAbsolutePath(path) ? path : (m_path.isEmpty() ? QString() : dir.filePath(path));
+        if (file.isEmpty())
+            continue;
+        if (!QFileInfo::exists(file)) {
+            report();
+            continue;
+        }
+        const QString suffix = QFileInfo(file).suffix().toLower();
+        if (fragment.isEmpty() || lineAnchor.match(fragment, 0).hasMatch() || !QFileInfo(file).isFile()
+            || (suffix != QLatin1String("md") && suffix != QLatin1String("markdown") && suffix != QLatin1String("mdown")
+                && suffix != QLatin1String("mkd")))
+            continue;
+        auto it = fileAnchors.find(file);
+        if (it == fileAnchors.end()) {
+            QFile f(file);
+            QString content;
+            if (f.size() <= 8 * 1024 * 1024 && f.open(QIODevice::ReadOnly))
+                content = QString::fromUtf8(f.readAll());
+            it = fileAnchors.insert(file, md::anchorsOf(content));
+        }
+        if (!it->contains(fragment))
+            report();
+    }
+    return found;
+}
+
+void DocumentTab::formatDocument()
+{
+    if (!isMarkdown() || isReadOnly())
+        return;
+    const QString before = text();
+    const QString after = md::formatDocument(before);
+    if (after == before)
+        return;
+    TextView *view = editor();
+    const QTextCursor caret = view->textCursor();
+    const int line = caret.blockNumber();
+    const int column = caret.positionInBlock();
+    QTextCursor edit(m_doc);
+    edit.beginEditBlock();
+    edit.select(QTextCursor::Document);
+    edit.insertText(after);
+    edit.endEditBlock();
+    // Keep the caret on the same line and column where they still exist.
+    const QTextBlock block = m_doc->findBlockByNumber(qMin(line, m_doc->blockCount() - 1));
+    QTextCursor restored(m_doc);
+    restored.setPosition(block.position() + qMin(column, block.length() - 1));
+    view->setTextCursor(restored);
 }
 
 void DocumentTab::updateDefinition()
