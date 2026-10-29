@@ -46,7 +46,7 @@ protected:
             const bool display = name.startsWith(QLatin1String("vn-math-display:"));
             const int index = name.section(u':', 1).toInt();
             math::Style style;
-            style.pixelSize = QFontInfo(m_context.font).pixelSize() * (display ? 1.15 : 1.0);
+            style.pixelSize = QFontInfo(m_context.font).pixelSize() * (display ? 1.2 : 1.1);
             style.color = theme::text;
             style.devicePixelRatio = m_context.devicePixelRatio;
             style.display = display;

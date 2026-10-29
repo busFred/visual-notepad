@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 6.10 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 6.10 REQUIRED COMPONENTS Widgets Gui)
 find_package(KF6SyntaxHighlighting 6.31 REQUIRED)
 
 include(FetchContent)
@@ -16,6 +16,8 @@ FetchContent_Declare(
     GIT_TAG v0.6.1
 )
 FetchContent_MakeAvailable(Corrosion)
+
+include(cmake/MicroTeX.cmake)
 
 corrosion_import_crate(MANIFEST_PATH core/Cargo.toml CRATES vn-core CRATE_TYPES staticlib)
 corrosion_add_cxxbridge(vn_core_bridge CRATE vn_core FILES lib.rs)
@@ -62,10 +64,12 @@ qt_add_resources(vn_app vn_resources
     FILES resources/themes/light-grey-warm.theme ${vn_icons}
 )
 target_compile_definitions(vn_app PUBLIC VN_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(vn_app PRIVATE VN_MICROTEX_RES="${VN_MICROTEX_RES_BUILD}")
 target_link_libraries(vn_app PUBLIC
     Qt6::Widgets
     KF6::SyntaxHighlighting
     vn_core_bridge
+    microtex
 )
 
 qt_add_executable(visnotepad WIN32 src/main.cpp)
@@ -77,3 +81,4 @@ if(BUILD_TESTING)
 endif()
 
 install(TARGETS visnotepad RUNTIME DESTINATION bin)
+install(DIRECTORY ${VN_MICROTEX_RES_SOURCE}/ DESTINATION share/visnotepad/microtex/res)
