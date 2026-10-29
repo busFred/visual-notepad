@@ -42,13 +42,15 @@ public:
 const char *styleSheet = R"(
 QMainWindow::separator { background: @divider; width: 1px; height: 1px; }
 
-QMenuBar { background: @menuBar; border-bottom: 1px solid @divider; padding: 1px 0 1px 4px; spacing: 0px; }
-QMenuBar::item { padding: 3px 8px; margin: 0; border-radius: 2px; background: transparent; }
-QMenuBar::item:selected, QMenuBar::item:pressed { background: @selection; color: @accent; }
+/* Menus use the classic Windows 2000 grey of the surrounding chrome, with a
+   quiet grey hover instead of a navy highlight. */
+QMenuBar { background: @statusBar; border-bottom: 1px solid @divider; padding: 1px 0 1px 4px; spacing: 0px; }
+QMenuBar::item { padding: 3px 8px; margin: 0; border-radius: 2px; background: transparent; color: @text; }
+QMenuBar::item:selected, QMenuBar::item:pressed { background: @menuHover; color: @text; }
 
-QMenu { background: @menuBar; border: 1px solid @divider; padding: 3px 0; }
+QMenu { background: @statusBar; border: 1px solid @divider; padding: 3px 0; }
 QMenu::item { padding: 4px 24px 4px 26px; color: @text; }
-QMenu::item:selected { background: @selection; color: @accent; }
+QMenu::item:selected { background: @menuHover; color: @text; }
 QMenu::item:disabled { color: #aaa59b; }
 QMenu::item:disabled:selected { background: transparent; }
 QMenu::separator { height: 1px; background: @divider; margin: 3px 0; }
@@ -68,7 +70,7 @@ QTabBar QToolButton { background: @statusBar; border: none; }
 
 QToolButton#ModeButton { color: @text; padding: 2px 12px 2px 6px; border: 1px solid transparent; border-radius: 3px; }
 QToolButton#ModeButton:hover { background: @panelTitle; }
-QToolButton#ModeButton:open { background: @selection; color: @accent; border-color: @accentBorder; }
+QToolButton#ModeButton:open { background: @panelTitle; }
 QToolButton#ModeButton::menu-indicator { image: url(:/vn/icons/chevron-down.svg); subcontrol-origin: padding;
                                          subcontrol-position: right center; right: 3px; }
 QToolButton#IconButton { border: none; border-radius: 3px; }
@@ -138,11 +140,11 @@ QLabel[warning="true"] { color: #a33a1c; }
 #PreferencesDialog QComboBox:focus, #PreferencesDialog QComboBox:on { border-color: @switchOn; }
 #PreferencesDialog QComboBox::drop-down { border: none; width: 22px; }
 #PreferencesDialog QComboBox::down-arrow { image: url(:/vn/icons/chevron-down.svg); width: 8px; height: 8px; }
-#PreferencesDialog QComboBox QAbstractItemView { background: @menuBar; border: 1px solid @divider; outline: 0;
-                                                 selection-background-color: @selection; selection-color: @accent; }
+#PreferencesDialog QComboBox QAbstractItemView { background: @statusBar; border: 1px solid @divider; outline: 0;
+                                                 selection-background-color: @menuHover; selection-color: @text; }
 #PreferencesDialog QComboBox QAbstractItemView::item { min-height: 24px; padding: 0 8px; color: @text; }
 #PreferencesDialog QComboBox QAbstractItemView::item:hover,
-#PreferencesDialog QComboBox QAbstractItemView::item:selected { background: @selection; color: @accent; }
+#PreferencesDialog QComboBox QAbstractItemView::item:selected { background: @menuHover; color: @text; }
 
 #PreferencesDialog QPushButton { background: @editor; border: 1px solid @divider; border-radius: 3px; padding: 3px 14px; }
 #PreferencesDialog QPushButton:hover { background: @activeBlock; }
@@ -192,7 +194,7 @@ void apply(QApplication &app)
     app.setPalette(p);
 
     const std::pair<const char *, QColor> colors[] = {
-        {"@menuBar", menuBar},       {"@selection", selection},   {"@accentBorder", accentBorder},
+        {"@menuBar", menuBar},       {"@menuHover", menuHover},       {"@selection", selection},   {"@accentBorder", accentBorder},
         {"@accent", accent},         {"@divider", divider},       {"@statusBar", statusBar},
         {"@sideBarHover", sideBarHover}, {"@sideBar", sideBar},   {"@editor", editor},
         {"@text", text},             {"@panelTitle", panelTitle}, {"@mutedText", mutedText},

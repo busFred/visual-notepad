@@ -30,9 +30,10 @@ mkdir -p "$opt/bin" "$opt/lib" "$opt/plugins" "$opt/share/visnotepad" \
 install -m 755 "$build/visnotepad" "$opt/bin/visnotepad"
 cp -r "$build/microtex" "$opt/share/visnotepad/microtex"
 
-# Qt plugins the app needs: X11 and Wayland, input methods, images, icons.
+# Qt plugins the app needs: X11 and Wayland, the XDG portal (native file
+# dialogs), input methods, images, icons.
 qtplugins="$CONDA_PREFIX/lib/qt6/plugins"
-for dir in platforms platforminputcontexts imageformats iconengines xcbglintegrations \
+for dir in platforms platformthemes platforminputcontexts imageformats iconengines xcbglintegrations \
     wayland-shell-integration wayland-decoration-client wayland-graphics-integration-client; do
     [ -d "$qtplugins/$dir" ] || continue
     mkdir -p "$opt/plugins/$dir"
