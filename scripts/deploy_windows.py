@@ -62,7 +62,10 @@ def main():
 
     runenv = dict(os.environ)
     runenv["PATH"] = os.pathsep.join(search + [runenv["PATH"]])
-    subprocess.run([tool, "--release", "--no-translations", "--no-system-d3d-compiler", "--no-compiler-runtime",
+    qtpaths = next(iter(sorted(glob.glob(os.path.join(env, "Library", "**", "qtpaths*.exe"), recursive=True))), None)
+    print("windeployqt:", tool, "qtpaths:", qtpaths)
+    extra = ["--qtpaths", qtpaths] if qtpaths else []
+    subprocess.run([tool, *extra, "--release", "--no-translations", "--no-system-d3d-compiler", "--no-compiler-runtime",
                     "--dir", out, exe], check=True, env=runenv)
 
     # Everything windeployqt copied came from the env; record by name.
