@@ -80,6 +80,14 @@ WelcomeView::WelcomeView(QWidget *parent)
     outer->setColumnStretch(0, 1);
     outer->setColumnStretch(2, 1);
     outer->addLayout(column, 1, 1);
+
+    connect(&Settings::instance(), &Settings::changed, this, [this](const QString &changedKey) {
+        if (isVisible()
+            && (changedKey == QLatin1String(key::recentFiles) || changedKey.startsWith(QLatin1String(key::shortcutsGroup))))
+            // Queued: the change may come from one of our own links' clicks
+            // (a recent file that failed to open), and rebuild deletes them.
+            QMetaObject::invokeMethod(this, &WelcomeView::rebuild, Qt::QueuedConnection);
+    });
 }
 
 void WelcomeView::showEvent(QShowEvent *event)

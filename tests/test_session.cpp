@@ -6,10 +6,12 @@
 #include "Session.h"
 #include "Settings.h"
 #include "Theme.h"
+#include "WelcomeView.h"
 #include "editor/TextView.h"
 
 #include <QApplication>
 #include <QDir>
+#include <QLabel>
 #include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
@@ -40,6 +42,7 @@ private Q_SLOTS:
     void quitPrompts();
     void recoveryOff();
     void recentFiles();
+    void welcomeFollowsRecentFiles();
     void encodingNameIsRestored();
     void missingFileIsSkipped();
     void autoSaveAfterDelay();
@@ -301,6 +304,26 @@ void TestSession::recentFiles()
     const QString c = write("c.txt", "c\n");
     QVERIFY(window->openFile(c));
     QCOMPARE(settings.recentFiles(), QStringList{c});
+}
+
+void TestSession::welcomeFollowsRecentFiles()
+{
+    Settings &settings = Settings::instance();
+    settings.clearRecentFiles();
+    MainWindow *window = makeWindow(); // No tabs: the welcome page shows.
+    auto *welcome = window->findChild<WelcomeView *>();
+    QVERIFY(welcome && welcome->isVisible());
+    auto headings = [welcome] {
+        int count = 0;
+        for (QLabel *label : welcome->findChildren<QLabel *>(QStringLiteral("WelcomeHeading")))
+            count += label->text() == QLatin1String("Recent");
+        return count;
+    };
+    QCOMPARE(headings(), 0);
+    settings.addRecentFile(write("a.txt", "a\n"));
+    QTRY_COMPARE(headings(), 1);
+    settings.clearRecentFiles(); // File > Open Recent > Clear Recently Opened.
+    QTRY_COMPARE(headings(), 0);
 }
 
 void TestSession::encodingNameIsRestored()

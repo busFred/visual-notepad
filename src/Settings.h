@@ -51,6 +51,8 @@ inline constexpr char lineEnding[] = "files/lineEnding"; // "auto" | "lf" | "crl
 inline constexpr char statusBar[] = "view/statusBar";
 inline constexpr char outline[] = "view/outline";
 inline constexpr char zoom[] = "view/zoom"; // percent
+// Not a preference: announced through changed() when the list changes.
+inline constexpr char recentFiles[] = "state/recentFiles";
 // Shortcut overrides live under "shortcuts/<command id>".
 inline constexpr char shortcutsGroup[] = "shortcuts/";
 } // namespace key

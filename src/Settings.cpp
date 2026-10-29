@@ -149,7 +149,7 @@ void Settings::resetShortcut(const QString &commandId)
 
 QStringList Settings::recentFiles() const
 {
-    return m_store->value(QStringLiteral("state/recentFiles")).toStringList();
+    return m_store->value(QLatin1String(key::recentFiles)).toStringList();
 }
 
 void Settings::addRecentFile(const QString &path)
@@ -161,19 +161,23 @@ void Settings::addRecentFile(const QString &path)
     files.prepend(path);
     while (files.size() > 15)
         files.removeLast();
-    m_store->setValue(QStringLiteral("state/recentFiles"), files);
+    m_store->setValue(QLatin1String(key::recentFiles), files);
+    Q_EMIT changed(QLatin1String(key::recentFiles));
 }
 
 void Settings::removeRecentFile(const QString &path)
 {
     QStringList files = recentFiles();
-    if (files.removeAll(path) > 0)
-        m_store->setValue(QStringLiteral("state/recentFiles"), files);
+    if (files.removeAll(path) > 0) {
+        m_store->setValue(QLatin1String(key::recentFiles), files);
+        Q_EMIT changed(QLatin1String(key::recentFiles));
+    }
 }
 
 void Settings::clearRecentFiles()
 {
-    m_store->remove(QStringLiteral("state/recentFiles"));
+    m_store->remove(QLatin1String(key::recentFiles));
+    Q_EMIT changed(QLatin1String(key::recentFiles));
 }
 
 void Settings::resetAllShortcuts()
