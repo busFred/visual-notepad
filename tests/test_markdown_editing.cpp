@@ -394,14 +394,17 @@ void TestMarkdownEditing::dropFileUrlsInsertsLinks()
     QDragEnterEvent enter(pos, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
     QCoreApplication::sendEvent(view->viewport(), &enter);
     QVERIFY(enter.isAccepted());
-    // A plain drop asks to open the file; Shift+drop inserts a link.
+    // Shift+drop inserts a link; a plain drop asks to open the file (which
+    // switches tabs, so it goes last).
+    QDropEvent drop(pos, Qt::CopyAction, &mime, Qt::LeftButton, Qt::ShiftModifier);
+    QCoreApplication::sendEvent(view->viewport(), &drop);
+    QCOMPARE(plain(tab), QStringLiteral("x![](pic.gif)"));
     QSignalSpy opened(tab, &DocumentTab::filesDropped);
+    QDragEnterEvent again(pos, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(view->viewport(), &again); // Qt delivers drops only after an enter.
     QDropEvent plainDrop(pos, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
     QCoreApplication::sendEvent(view->viewport(), &plainDrop);
     QCOMPARE(opened.size(), 1);
-    QCOMPARE(plain(tab), QStringLiteral("x"));
-    QDropEvent drop(pos, Qt::CopyAction, &mime, Qt::LeftButton, Qt::ShiftModifier);
-    QCoreApplication::sendEvent(view->viewport(), &drop);
     QCOMPARE(plain(tab), QStringLiteral("x![](pic.gif)"));
 
     // Other languages leave drops to the window.
