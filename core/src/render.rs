@@ -740,8 +740,10 @@ mod tests {
             b.len()
         );
         assert_eq!(b.len(), 60_000);
+        // A guard against quadratic blowups, not a benchmark: shared CI
+        // runners took 3.3 s for a debug build that usually takes under 2 s.
         assert!(
-            elapsed < std::time::Duration::from_secs(2),
+            elapsed < std::time::Duration::from_secs(10),
             "took {elapsed:?}"
         );
     }
