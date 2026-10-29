@@ -32,7 +32,7 @@ jobs:
     env:
       KF6_PREFIX: ${{ github.workspace }}/kf6
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: System packages
         shell: bash
@@ -40,7 +40,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends fakeroot dpkg-dev fonts-dejavu-core libgl1 libegl1
 
-      - uses: mamba-org/setup-micromamba@v2
+      - uses: mamba-org/setup-micromamba@v3
         with:
           environment-file: ci/environment-linux.yml
           environment-name: visnotepad
@@ -53,7 +53,7 @@ jobs:
 
       - name: Cache KDE frameworks
         id: kf6
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: kf6
           key: kf6-${{ env.KF6_VERSION }}-linux-${{ matrix.arch }}-${{ hashFiles('ci/environment-linux.yml') }}
@@ -78,7 +78,7 @@ jobs:
           cp -r "$RUNNER_TEMP/syntax-highlighting/LICENSES" "$KF6_PREFIX/ksh-src/"
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -121,7 +121,7 @@ jobs:
           test -f "$dir/opt/visnotepad/share/visnotepad/microtex/res/fonts/fonts.json" || ls "$dir/opt/visnotepad/share/visnotepad/microtex/res"
           exit $fail
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: deb-${{ matrix.arch }}
           path: dist/visnotepad_*_${{ matrix.arch }}.deb
@@ -133,9 +133,9 @@ jobs:
     env:
       KF6_PREFIX: ${{ github.workspace }}\kf6
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: mamba-org/setup-micromamba@v2
+      - uses: mamba-org/setup-micromamba@v3
         with:
           environment-file: ci/environment-windows.yml
           environment-name: visnotepad
@@ -176,7 +176,7 @@ jobs:
 
       - name: Cache KDE frameworks
         id: kf6
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: kf6
           key: kf6-${{ env.KF6_VERSION }}-windows-${{ hashFiles('ci/environment-windows.yml') }}
@@ -204,7 +204,7 @@ jobs:
           cp -r "$T/syntax-highlighting/LICENSES" "$KF6_PREFIX/ksh-src/"
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -268,13 +268,13 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Get-ChildItem dist\out | Format-Table Name, Length
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-x64-portable
           path: dist/out/*.zip
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-x64-setup
           path: dist/out/*.exe
@@ -287,7 +287,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
