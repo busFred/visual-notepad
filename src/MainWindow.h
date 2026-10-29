@@ -1,19 +1,21 @@
 #pragma once
 
-#include <KSyntaxHighlighting/Repository>
+#include "DocumentTab.h"
 
 #include <QMainWindow>
 
 class QAction;
+class QActionGroup;
 class QDockWidget;
 class QLabel;
-class QTabWidget;
+class QSplitter;
 class QTimer;
+class QToolButton;
 class QTreeWidget;
 
 namespace vn {
 
-class DocumentTab;
+class EditorGroup;
 
 class MainWindow : public QMainWindow
 {
@@ -25,37 +27,58 @@ public:
 
     void newFile();
     bool openFile(const QString &path);
+    // Takes ownership of a tab from another window.
+    void adoptTab(DocumentTab *tab);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
 
 private:
+    void createActions();
     void createMenus();
+    void createTabActions();
     void createOutline();
     void createStatusBar();
 
     DocumentTab *currentTab() const;
-    DocumentTab *tabAt(int index) const;
     void addTab(DocumentTab *tab);
     void openWithDialog();
     bool save(DocumentTab *tab);
     bool saveAs(DocumentTab *tab);
     bool closeTab(int index);
     bool confirmDiscard(DocumentTab *tab);
+    void moveTabToNewWindow();
+    void toggleSplitEditor(bool on);
+    void setViewMode(DocumentTab::ViewMode mode);
     void zoom(int steps);
+    void applyZoom();
 
     void onCurrentTabChanged();
     void updateTabTitle(DocumentTab *tab);
     void updateStatus();
     void updateOutline();
     void updateOutlineVisibility();
+    void updateModeControls();
 
-    KSyntaxHighlighting::Repository m_repository;
-    QTabWidget *m_tabs;
+    QSplitter *m_groups;
+    EditorGroup *m_group;
+    EditorGroup *m_sideGroup = nullptr;
+
     QDockWidget *m_outlineDock;
     QTreeWidget *m_outline;
     QTimer *m_outlineTimer;
+
+    QToolButton *m_modeButton;
+    QActionGroup *m_modeGroup;
+    QAction *m_modeSource;
+    QAction *m_modeSourceVisual;
+    QAction *m_modeVisual;
     QAction *m_outlineAction;
+    QAction *m_splitAction;
+    QAction *m_wrapAction;
+    QAction *m_statusBarAction;
+    QAction *m_formatAction;
+
     QLabel *m_position;
     QLabel *m_zoom;
     QLabel *m_lineEnding;

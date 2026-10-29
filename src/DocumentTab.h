@@ -1,5 +1,4 @@
-// One open file. The editor widget is a QPlainTextEdit placeholder until the
-// custom multi-cursor editor core replaces it.
+// One open file: the editor plus its floating lock/pencil pill.
 #pragma once
 
 #include <QString>
@@ -8,11 +7,13 @@
 class QPlainTextEdit;
 
 namespace KSyntaxHighlighting {
-class Repository;
 class SyntaxHighlighter;
 } // namespace KSyntaxHighlighting
 
 namespace vn {
+
+class CodeEditor;
+class EditorPill;
 
 class DocumentTab : public QWidget
 {
@@ -20,8 +21,10 @@ class DocumentTab : public QWidget
 
 public:
     enum class LineEnding { LF, CRLF };
+    // How a Markdown document is shown. Only Source exists so far.
+    enum class ViewMode { Source, SourceVisual, Visual };
 
-    DocumentTab(KSyntaxHighlighting::Repository &repository, QWidget *parent = nullptr);
+    explicit DocumentTab(QWidget *parent = nullptr);
 
     // Returns false and sets errorString() on failure.
     bool load(const QString &path);
@@ -36,23 +39,31 @@ public:
     LineEnding lineEnding() const { return m_lineEnding; }
     QString text() const;
 
-    QPlainTextEdit *editor() const { return m_editor; }
+    ViewMode viewMode() const { return m_viewMode; }
+    void setViewMode(ViewMode mode);
+
+    QPlainTextEdit *editor() const;
     void goToLine(int line);
 
-signals:
+Q_SIGNALS:
     void modificationChanged(bool modified);
     void cursorPositionChanged();
     void textChanged();
 
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+
 private:
     void updateDefinition();
+    void updatePill();
 
-    KSyntaxHighlighting::Repository &m_repository;
     KSyntaxHighlighting::SyntaxHighlighter *m_highlighter;
-    QPlainTextEdit *m_editor;
+    CodeEditor *m_editor;
+    EditorPill *m_pill;
     QString m_path;
     QString m_error;
     LineEnding m_lineEnding = LineEnding::LF;
+    ViewMode m_viewMode = ViewMode::Source;
     bool m_hasBom = false;
 };
 

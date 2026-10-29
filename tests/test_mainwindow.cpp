@@ -4,6 +4,8 @@
 #include "Theme.h"
 
 #include <QDockWidget>
+#include <QMenu>
+#include <QMenuBar>
 #include <QPlainTextEdit>
 #include <QStatusBar>
 #include <QTabWidget>
@@ -57,11 +59,24 @@ void TestMainWindow::markdownShowsOutline()
     QCOMPARE(outline->topLevelItemCount(), 1);
     QCOMPARE(outline->topLevelItem(0)->text(0), QStringLiteral("Title"));
     QCOMPARE(outline->topLevelItem(0)->childCount(), 2);
-    QCOMPARE(window.windowTitle(), QStringLiteral("notes.md - Visual Notepad"));
+    QCOMPARE(window.windowTitle(), QStringLiteral("notes.md — Visual Notepad"));
 
     const QString shot = qEnvironmentVariable("VN_SCREENSHOT");
-    if (!shot.isEmpty())
+    if (!shot.isEmpty()) {
         QVERIFY(window.grab().save(shot));
+        // Also save each menu-bar menu, opened under its title.
+        auto *bar = window.menuBar();
+        const auto actions = bar->actions();
+        for (QAction *action : actions) {
+            QMenu *menu = action->menu();
+            menu->popup(window.mapToGlobal(bar->actionGeometry(action).bottomLeft()));
+            QVERIFY(QTest::qWaitForWindowExposed(menu));
+            QString name = action->text();
+            name.remove(u'&');
+            QVERIFY(menu->grab().save(QString(shot).replace(QStringLiteral(".png"), u'-' + name + u".png")));
+            menu->hide();
+        }
+    }
 }
 
 void TestMainWindow::textFileHidesOutline()

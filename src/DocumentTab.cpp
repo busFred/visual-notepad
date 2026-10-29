@@ -1,5 +1,6 @@
 #include "DocumentTab.h"
 
+#include "CodeEditor.h"
 #include "Theme.h"
 
 #include <KSyntaxHighlighting/Definition>
@@ -9,11 +10,14 @@
 
 #include <QFile>
 #include <QFileInfo>
-#include <QFontDatabase>
-#include <QPlainTextEdit>
+#include <QButtonGroup>
+#include <QHBoxLayout>
+#include <QPainter>
+#include <QPainterPath>
 #include <QSaveFile>
 #include <QStringDecoder>
 #include <QTextBlock>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 namespace vn {
@@ -21,28 +25,86 @@ namespace vn {
 namespace {
 
 const QByteArray utf8Bom("\xEF\xBB\xBF");
+constexpr int pillMarginRight = 12;
+constexpr int pillMarginTop = 8;
+
+QIcon pillIcon(const QString &name)
+{
+    QIcon icon;
+    icon.addFile(QStringLiteral(":/vn/icons/%1-off.svg").arg(name), {}, QIcon::Normal, QIcon::Off);
+    icon.addFile(QStringLiteral(":/vn/icons/%1-on.svg").arg(name), {}, QIcon::Normal, QIcon::On);
+    return icon;
+}
 
 } // namespace
 
-DocumentTab::DocumentTab(KSyntaxHighlighting::Repository &repository, QWidget *parent)
+// Floating read-only (lock) / editing (pencil) switch, top-right of the
+// editor, shown for Markdown in the visual modes.
+class EditorPill : public QWidget
+{
+public:
+    explicit EditorPill(QWidget *parent)
+        : QWidget(parent)
+        , m_lock(new QToolButton(this))
+        , m_pen(new QToolButton(this))
+    {
+        setObjectName(QStringLiteral("Pill"));
+        auto *layout = new QHBoxLayout(this);
+        layout->setContentsMargins(3, 3, 3, 3);
+        layout->setSpacing(2);
+        auto *group = new QButtonGroup(this);
+        for (auto [button, icon, tip] : {std::tuple{m_lock, "lock", QT_TR_NOOP("Read-only")},
+                                         std::tuple{m_pen, "pen", QT_TR_NOOP("Editing")}}) {
+            button->setIcon(pillIcon(QString::fromLatin1(icon)));
+            button->setIconSize({14, 14});
+            button->setFixedSize(24, 24);
+            button->setCheckable(true);
+            button->setToolTip(DocumentTab::tr(tip));
+            group->addButton(button);
+            layout->addWidget(button);
+        }
+        m_pen->setChecked(true);
+        adjustSize();
+    }
+
+    QToolButton *lockButton() const { return m_lock; }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QPainterPath path;
+        const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+        path.addRoundedRect(r, r.height() / 2, r.height() / 2);
+        painter.fillPath(path, theme::sideBar);
+        painter.setPen(theme::divider);
+        painter.drawPath(path);
+    }
+
+private:
+    QToolButton *m_lock;
+    QToolButton *m_pen;
+};
+
+DocumentTab::DocumentTab(QWidget *parent)
     : QWidget(parent)
-    , m_repository(repository)
-    , m_editor(new QPlainTextEdit(this))
+    , m_editor(new CodeEditor(this))
+    , m_pill(new EditorPill(this))
 {
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->addWidget(m_editor);
 
-    m_editor->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    m_editor->setLineWrapMode(QPlainTextEdit::NoWrap);
-
     m_highlighter = new KSyntaxHighlighting::SyntaxHighlighter(m_editor->document());
-    m_highlighter->setTheme(m_repository.defaultTheme(KSyntaxHighlighting::Repository::LightTheme));
+    m_highlighter->setTheme(theme::syntaxTheme());
     updateDefinition();
 
+    connect(m_pill->lockButton(), &QToolButton::toggled, m_editor, &QPlainTextEdit::setReadOnly);
     connect(m_editor, &QPlainTextEdit::modificationChanged, this, &DocumentTab::modificationChanged);
     connect(m_editor, &QPlainTextEdit::cursorPositionChanged, this, &DocumentTab::cursorPositionChanged);
     connect(m_editor, &QPlainTextEdit::textChanged, this, &DocumentTab::textChanged);
+    updatePill();
 }
 
 bool DocumentTab::load(const QString &path)
@@ -125,6 +187,11 @@ QString DocumentTab::languageName() const
     return def.isValid() ? def.translatedName() : tr("Plain Text");
 }
 
+QPlainTextEdit *DocumentTab::editor() const
+{
+    return m_editor;
+}
+
 QString DocumentTab::text() const
 {
     return m_editor->toPlainText();
@@ -144,9 +211,32 @@ void DocumentTab::goToLine(int line)
 void DocumentTab::updateDefinition()
 {
     // New documents default to Markdown, like the old app.
-    const auto def = m_path.isEmpty() ? m_repository.definitionForName(QStringLiteral("Markdown"))
-                                      : m_repository.definitionForFileName(m_path);
+    auto &repository = theme::syntaxRepository();
+    const auto def = m_path.isEmpty() ? repository.definitionForName(QStringLiteral("Markdown"))
+                                      : repository.definitionForFileName(m_path);
     m_highlighter->setDefinition(def);
+    updatePill();
+}
+
+void DocumentTab::setViewMode(ViewMode mode)
+{
+    // The visual modes arrive with the Markdown editor port.
+    if (mode != ViewMode::Source)
+        return;
+    m_viewMode = mode;
+    updatePill();
+}
+
+void DocumentTab::updatePill()
+{
+    m_pill->setVisible(isMarkdown() && m_viewMode != ViewMode::Source);
+    m_pill->raise();
+}
+
+void DocumentTab::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    m_pill->move(width() - m_pill->width() - pillMarginRight, pillMarginTop);
 }
 
 } // namespace vn

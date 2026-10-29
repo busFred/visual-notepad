@@ -22,14 +22,25 @@ corrosion_add_cxxbridge(vn_core_bridge CRATE vn_core FILES lib.rs)
 
 # Everything except main() lives in a static library so tests can link it.
 add_library(vn_app STATIC
+    src/CodeEditor.cpp
+    src/CodeEditor.h
     src/DocumentTab.cpp
     src/DocumentTab.h
+    src/EditorGroup.cpp
+    src/EditorGroup.h
     src/MainWindow.cpp
     src/MainWindow.h
     src/Theme.cpp
     src/Theme.h
 )
 target_include_directories(vn_app PUBLIC src)
+
+file(GLOB vn_icons RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS resources/icons/*.svg)
+qt_add_resources(vn_app vn_resources
+    PREFIX /vn
+    BASE resources
+    FILES resources/themes/light-grey-warm.theme ${vn_icons}
+)
 target_compile_definitions(vn_app PUBLIC VN_VERSION="${PROJECT_VERSION}")
 target_link_libraries(vn_app PUBLIC
     Qt6::Widgets
