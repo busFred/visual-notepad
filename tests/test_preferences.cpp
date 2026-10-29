@@ -364,7 +364,8 @@ void TestPreferences::prefixConflictBothDirections()
         QStringLiteral("%1 (%2)").arg(command(QStringLiteral("edit.findNext"))->text, single.toString(QKeySequence::NativeText))));
     QVERIFY(nextWarning->text().contains(
         QStringLiteral("%1 (%2)").arg(command(QStringLiteral("edit.find"))->text, chord.toString(QKeySequence::NativeText))));
-    QVERIFY(findWarning->text().contains(QStringLiteral("Neither shortcut will work")));
+    QVERIFY(findWarning->text().contains(QStringLiteral("can't be completed")));
+    QVERIFY(!findWarning->text().contains(QStringLiteral("Neither shortcut will work")));
 
     // A different chord on the same first key does not clash.
     settings.setShortcutOverride(QStringLiteral("edit.findNext"), {QKeySequence(QStringLiteral("Ctrl+Alt+Q, W"))});

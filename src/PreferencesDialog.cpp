@@ -951,17 +951,28 @@ void PreferencesDialog::refreshShortcuts()
         for (const QKeySequence &sequence : keys)
             names.append(sequence.toString(QKeySequence::NativeText));
         QStringList others;
+        bool identical = false;
+        bool prefix = false;
         for (const ShortcutConflict &conflict : shortcutConflicts(row.id)) {
             if (const Command *other = command(conflict.otherId))
                 others.append(QStringLiteral("%1 (%2)").arg(other->text, conflict.theirs.toString(QKeySequence::NativeText)));
+            (conflict.mine == conflict.theirs ? identical : prefix) = true;
         }
         others.removeDuplicates();
         const bool modified = settings.hasShortcutOverride(row.id);
         row.cell->setShortcut(names.join(QStringLiteral(", ")), modified);
         row.reset->setVisible(modified);
+        // What Qt does (see clashes() in Commands.cpp): identical keys trigger
+        // nothing; a key that starts another's chord wins, so the chord can't
+        // be completed.
+        QStringList consequences;
+        if (identical)
+            consequences.append(tr("Neither shortcut will work while the conflict remains."));
+        if (prefix)
+            consequences.append(tr("The two-key shortcut can't be completed while the conflict remains."));
         row.warning->setText(others.isEmpty() ? QString()
-                                              : tr("Conflicts with: %1. Neither shortcut will work while the conflict remains.")
-                                                    .arg(others.join(QStringLiteral(", "))));
+                                              : tr("Conflicts with: %1.").arg(others.join(QStringLiteral(", "))) + u' '
+                                                    + consequences.join(u' '));
         row.warning->setVisible(!others.isEmpty());
         row.resolve->setVisible(!others.isEmpty());
     }
