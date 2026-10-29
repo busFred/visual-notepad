@@ -9,6 +9,7 @@
 #include <QLineEdit>
 #include <QDialogButtonBox>
 #include <QFontInfo>
+#include <QFontMetricsF>
 #include <QPushButton>
 #include <QSettings>
 #include <QSignalSpy>
@@ -40,6 +41,7 @@ private Q_SLOTS:
     void dialogPickersFollowItem();
     void editorColorReachesFieldsAndLists();
     void uiFontIsSegoeOrBundledSelawik();
+    void editorFontIsConsolasOrBundledInconsolata();
 
 private:
     QTemporaryDir m_dir;
@@ -271,6 +273,28 @@ void TestTheme::uiFontIsSegoeOrBundledSelawik()
     QFont semibold = QApplication::font();
     semibold.setWeight(QFont::DemiBold);
     QCOMPARE(QFontInfo(semibold).family(), family);
+}
+
+// Without Consolas installed, the bundled Inconsolata SemiExpanded must be
+// used, at Consolas's character width, without stretching fallback glyphs.
+void TestTheme::editorFontIsConsolasOrBundledInconsolata()
+{
+    QFont font = theme::editorFont();
+    font.setPixelSize(100);
+    const QString family = QFontInfo(font).family();
+    QVERIFY2(family == QStringLiteral("Consolas") || family == QStringLiteral("Inconsolata"), qPrintable(family));
+    QVERIFY(QFontInfo(font).fixedPitch());
+    QCOMPARE(qRound(QFontMetricsF(font).horizontalAdvance(u'M')), 55);
+    font.setBold(true);
+    QCOMPARE(QFontInfo(font).family(), family);
+    QCOMPARE(qRound(QFontMetricsF(font).horizontalAdvance(u'M')), 55);
+
+    QFont plain = font;
+    plain.setStretch(QFont::AnyStretch);
+    plain.setBold(false);
+    font.setBold(false);
+    const QString cjk = QStringLiteral("中文");
+    QCOMPARE(QFontMetricsF(font).horizontalAdvance(cjk), QFontMetricsF(plain).horizontalAdvance(cjk));
 }
 
 QTEST_MAIN(TestTheme)
