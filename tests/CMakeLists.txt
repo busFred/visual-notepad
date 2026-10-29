@@ -57,6 +57,11 @@ target_link_libraries(test_markdown_editing PRIVATE vn_app Qt6::Test)
 add_test(NAME markdown_editing COMMAND test_markdown_editing)
 set_tests_properties(markdown_editing PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
 
+qt_add_executable(test_indentation test_indentation.cpp)
+target_link_libraries(test_indentation PRIVATE vn_app Qt6::Test)
+add_test(NAME indentation COMMAND test_indentation)
+set_tests_properties(indentation PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
+
 qt_add_executable(test_theme test_theme.cpp)
 target_link_libraries(test_theme PRIVATE vn_app Qt6::Test)
 add_test(NAME theme COMMAND test_theme)
@@ -68,3 +73,8 @@ target_link_options(perf_probe PRIVATE -rdynamic)
 
 qt_add_executable(screenshot_tour screenshot_tour.cpp)
 target_link_libraries(screenshot_tour PRIVATE vn_app Qt6::Test)
+
+qt_add_executable(test_formatting test_formatting.cpp)
+target_link_libraries(test_formatting PRIVATE vn_app Qt6::Test)
+add_test(NAME formatting COMMAND test_formatting)
+set_tests_properties(formatting PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")

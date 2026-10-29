@@ -2,6 +2,7 @@
 #pragma once
 
 #include "Encodings.h"
+#include "editor/Indentation.h"
 #include "editor/TextView.h"
 
 #include <QByteArray>
@@ -68,6 +69,19 @@ public:
     bool languageOverridden() const { return m_languageOverridden; }
     QString text() const;
 
+    // Indentation of this file: detected from the content when it arrives
+    // (if the detectIndentation setting is on), else the tab width / spaces
+    // settings. setIndentation overrides both until the tab is closed.
+    indentation::Settings indentation() const { return m_indentation; }
+    bool indentationOverridden() const { return m_indentationOverridden; }
+    void setIndentation(const indentation::Settings &indentation);
+    // Guesses from the content once, whatever the setting, and drops the
+    // override.
+    void detectIndentation();
+    // Rewrites the indentation as one undoable edit and uses the target
+    // style from now on. Does nothing when read-only.
+    void convertIndentation(bool toSpaces);
+
     ViewMode viewMode() const { return m_viewMode; }
     void setViewMode(ViewMode mode);
 
@@ -94,6 +108,8 @@ Q_SIGNALS:
     void textChanged();
     // Encoding, line ending or language changed.
     void formatChanged();
+    // Tab size or spaces/tabs changed.
+    void indentationChanged();
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -105,6 +121,10 @@ private:
     void updatePill();
     void placeOverlays();
     void applySettings();
+    // Recomputes the indentation of a tab without an override.
+    void refreshIndentation();
+    void setEffectiveIndentation(const indentation::Settings &indentation);
+    indentation::Settings defaultIndentation() const;
     void applyViewSettings(TextView *view);
     QWidget *createGoToLine();
     void ensureVisualView();
@@ -144,6 +164,8 @@ private:
     Encoding m_encoding = encoding::utf8;
     bool m_languageOverridden = false;
     QString m_languageOverride;
+    indentation::Settings m_indentation;
+    bool m_indentationOverridden = false;
 };
 
 } // namespace vn

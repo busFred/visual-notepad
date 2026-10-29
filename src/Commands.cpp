@@ -35,6 +35,7 @@ QList<Command> build()
     const QString file = tr("File");
     const QString edit = tr("Edit");
     const QString selection = tr("Selection");
+    const QString format = tr("Format");
     const QString view = tr("View");
     const QString help = tr("Help");
     return {
@@ -56,8 +57,14 @@ QList<Command> build()
         {QStringLiteral("edit.replace"), edit, tr("Replace"), {k("Ctrl+H")}},
         {QStringLiteral("edit.findNext"), edit, tr("Find Next"), {k("F3")}},
         {QStringLiteral("edit.findPrevious"), edit, tr("Find Previous"), {k("Shift+F3")}},
+        {QStringLiteral("edit.findNextSelection"), edit, tr("Find Next Selection"), {k("Ctrl+F3")}},
+        {QStringLiteral("edit.findPreviousSelection"), edit, tr("Find Previous Selection"), {k("Ctrl+Shift+F3")}},
         {QStringLiteral("edit.goToLine"), edit, tr("Go to Line…"), {k("Ctrl+G")}},
         {QStringLiteral("edit.toggleComment"), edit, tr("Toggle Line Comment"), {k("Ctrl+/")}},
+        {QStringLiteral("edit.indentLines"), edit, tr("Indent Line"), {k("Ctrl+]")}},
+        {QStringLiteral("edit.outdentLines"), edit, tr("Outdent Line"), {k("Ctrl+[")}},
+        {QStringLiteral("edit.trimTrailingWhitespace"), edit, tr("Trim Trailing Whitespace"),
+         {k("Ctrl+K, Ctrl+X")}},
         {QStringLiteral("edit.format"), edit, tr("Format Document"), {pk("Shift+Alt+F", "Ctrl+Shift+I")}},
         {QStringLiteral("edit.preferences"), edit, tr("Preferences…"), {k("Ctrl+,")}},
 
@@ -71,6 +78,13 @@ QList<Command> build()
         {QStringLiteral("selection.addNextOccurrence"), selection, tr("Add Next Occurrence"), {k("Ctrl+D")}},
         {QStringLiteral("selection.selectAllOccurrences"), selection, tr("Select All Occurrences"),
          {k("Ctrl+Shift+L")}},
+        {QStringLiteral("selection.addCursorsToLineEnds"), selection, tr("Add Cursors to Line Ends"),
+         {k("Shift+Alt+I")}},
+        {QStringLiteral("selection.moveLastToNextMatch"), selection, tr("Move Last Selection to Next Find Match"),
+         {k("Ctrl+K, Ctrl+D")}},
+        {QStringLiteral("selection.expandLine"), selection, tr("Expand Line Selection"), {k("Ctrl+L")}},
+        {QStringLiteral("selection.cursorUndo"), selection, tr("Cursor Undo"), {}},
+        {QStringLiteral("selection.cursorRedo"), selection, tr("Cursor Redo"), {}},
         {QStringLiteral("selection.copyLineUp"), selection, tr("Copy Line Up"),
          {pk("Shift+Alt+Up", "Ctrl+Shift+Alt+Up")}},
         {QStringLiteral("selection.copyLineDown"), selection, tr("Copy Line Down"),
@@ -79,12 +93,34 @@ QList<Command> build()
         {QStringLiteral("selection.moveLineDown"), selection, tr("Move Line Down"), {k("Alt+Down")}},
         {QStringLiteral("selection.deleteLine"), selection, tr("Delete Line"), {k("Ctrl+Shift+K")}},
 
-        {QStringLiteral("view.outline"), view, tr("Outline"), {k("Ctrl+B")}},
+        {QStringLiteral("format.bold"), format, tr("Bold"), {k("Ctrl+B")}},
+        {QStringLiteral("format.italic"), format, tr("Italic"), {k("Ctrl+I")}},
+        {QStringLiteral("format.underline"), format, tr("Underline"), {k("Ctrl+U")}},
+        {QStringLiteral("format.strikethrough"), format, tr("Strikethrough"), {k("Alt+Shift+5")}},
+        {QStringLiteral("format.inlineCode"), format, tr("Inline Code"), {k("Ctrl+Shift+`")}},
+        {QStringLiteral("format.heading1"), format, tr("Heading 1"), {k("Ctrl+1")}},
+        {QStringLiteral("format.heading2"), format, tr("Heading 2"), {k("Ctrl+2")}},
+        {QStringLiteral("format.heading3"), format, tr("Heading 3"), {k("Ctrl+3")}},
+        {QStringLiteral("format.heading4"), format, tr("Heading 4"), {k("Ctrl+4")}},
+        {QStringLiteral("format.heading5"), format, tr("Heading 5"), {k("Ctrl+5")}},
+        {QStringLiteral("format.heading6"), format, tr("Heading 6"), {k("Ctrl+6")}},
+        {QStringLiteral("format.headingUp"), format, tr("Promote Heading"), {}},
+        {QStringLiteral("format.headingDown"), format, tr("Demote Heading"), {}},
+        {QStringLiteral("format.quote"), format, tr("Quote"), {k("Ctrl+Shift+Q")}},
+        {QStringLiteral("format.orderedList"), format, tr("Numbered List"), {k("Ctrl+Shift+[")}},
+        {QStringLiteral("format.bulletList"), format, tr("Bulleted List"), {k("Ctrl+Shift+]")}},
+        {QStringLiteral("format.taskList"), format, tr("Task List"), {k("Alt+C")}},
+        {QStringLiteral("format.link"), format, tr("Link"), {}},
+        {QStringLiteral("format.codeBlock"), format, tr("Code Block"), {}},
+
+        {QStringLiteral("view.outline"), view, tr("Outline"), {k("Ctrl+Shift+B")}},
         {QStringLiteral("view.modeSource"), view, tr("Source"), {}},
         {QStringLiteral("view.modeSplit"), view, tr("Source / Visual"), {k("Ctrl+K, V")}},
         {QStringLiteral("view.modeVisual"), view, tr("Visual Editor"), {}},
         {QStringLiteral("view.splitEditor"), view, tr("Split Editor"), {k("Ctrl+\\")}},
         {QStringLiteral("view.moveToNewWindow"), view, tr("Move Tab to New Window"), {k("Ctrl+K, O")}},
+        {QStringLiteral("view.scrollPageUp"), view, tr("Scroll Page Up"), {k("Alt+PgUp")}},
+        {QStringLiteral("view.scrollPageDown"), view, tr("Scroll Page Down"), {k("Alt+PgDown")}},
         {QStringLiteral("view.wordWrap"), view, tr("Word Wrap"), {k("Alt+Z")}},
         {QStringLiteral("view.statusBar"), view, tr("Status Bar"), {}},
         {QStringLiteral("edit.changeLanguage"), view, tr("Change Language Mode…"), {k("Ctrl+K, M")}},
@@ -124,14 +160,61 @@ QList<QKeySequence> shortcutsFor(const QString &id)
     return c ? c->defaults : QList<QKeySequence>();
 }
 
+// What Qt does when two commands clash (all commands are QActions in
+// MainWindow; QShortcutMap::find, qtbase src/gui/kernel/qshortcutmap.cpp):
+//  - Identical sequences: both entries land in "identicals" (find(), ~line
+//    430-445); dispatchEvent() (~line 561) sends the shortcut event to each
+//    in turn and QAction::event (qaction.cpp ~line 1046) sees
+//    QShortcutEvent::isAmbiguous(), logs "Ambiguous shortcut overload" and
+//    does not trigger. Neither command runs.
+//  - A single key equal to the first key(s) of another command's chord
+//    ("Ctrl+K" vs "Ctrl+K, V"): the single key is an ExactMatch and the chord
+//    only a PartialMatch. find() ignores partials once identicals exist
+//    ("We don't need partials, if we have identicals", ~line 438), so the
+//    exact one fires immediately and the chord can never be completed.
+//    Only the chord is lost, but the chord's owner is unusable all the same.
+//  - If the single key's command is disabled, find() keeps the partial and
+//    consumes the key (~line 456), so the chord works but the single-key
+//    command does not; commands are enabled and disabled at run time, so the
+//    outcome is not predictable and we report the clash either way.
+static bool clashes(const QKeySequence &a, const QKeySequence &b)
+{
+    if (a.isEmpty() || b.isEmpty())
+        return false;
+    // matches() is Exact for equal, Partial when a is a proper prefix of b.
+    return a.matches(b) != QKeySequence::NoMatch || b.matches(a) != QKeySequence::NoMatch;
+}
+
+QList<ShortcutConflict> shortcutConflicts(const QString &id)
+{
+    QList<ShortcutConflict> result;
+    const QList<QKeySequence> mine = shortcutsFor(id);
+    for (const Command &c : commands()) {
+        if (c.id == id)
+            continue;
+        const QList<QKeySequence> theirs = shortcutsFor(c.id);
+        for (const QKeySequence &a : mine) {
+            for (const QKeySequence &b : theirs) {
+                if (clashes(a, b))
+                    result.append({c.id, a, b});
+            }
+        }
+    }
+    return result;
+}
+
 QStringList conflictingCommands(const QKeySequence &sequence, const QString &id)
 {
     QStringList result;
-    if (sequence.isEmpty())
-        return result;
     for (const Command &c : commands()) {
-        if (c.id != id && shortcutsFor(c.id).contains(sequence))
-            result.append(c.id);
+        if (c.id == id || result.contains(c.id))
+            continue;
+        for (const QKeySequence &other : shortcutsFor(c.id)) {
+            if (clashes(sequence, other)) {
+                result.append(c.id);
+                break;
+            }
+        }
     }
     return result;
 }

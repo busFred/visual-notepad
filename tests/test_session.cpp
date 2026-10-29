@@ -44,6 +44,7 @@ private Q_SLOTS:
     void recentFiles();
     void welcomeFollowsRecentFiles();
     void encodingNameIsRestored();
+    void indentationIsRestored();
     void missingFileIsSkipped();
     void autoSaveAfterDelay();
     void autoSaveOnFocusChange();
@@ -344,6 +345,28 @@ void TestSession::encodingNameIsRestored()
     QCOMPARE(tabs.at(0)->encoding(), QStringLiteral("Shift_JIS"));
     QCOMPARE(tabs.at(0)->text(), QStringLiteral("日本語"));
     QCOMPARE(tabs.at(1)->encoding(), encoding::utf8Bom);
+    SessionManager::instance().saveSession();
+}
+
+void TestSession::indentationIsRestored()
+{
+    MainWindow *window = makeWindow();
+    window->newFile();
+    append(window->tabs().at(0), QStringLiteral("a\n  b\n  c\n"));
+    window->tabs().at(0)->setIndentation({3, false}); // chosen by the user
+    window->newFile();
+    append(window->tabs().at(1), QStringLiteral("a\n\tb\n\tc\n")); // detected, not saved as an override
+
+    SessionManager::instance().saveSession();
+    closeWindows();
+    QVERIFY(SessionManager::instance().restore());
+    const QList<DocumentTab *> tabs = SessionManager::instance().windows().at(0)->tabs();
+    QCOMPARE(tabs.size(), 2);
+    QVERIFY(tabs.at(0)->indentationOverridden());
+    QCOMPARE(tabs.at(0)->indentation(), (indentation::Settings{3, false}));
+    // Content arrives with the restore, so a tab without an override detects.
+    QVERIFY(!tabs.at(1)->indentationOverridden());
+    QCOMPARE(tabs.at(1)->indentation().insertSpaces, false);
     SessionManager::instance().saveSession();
 }
 

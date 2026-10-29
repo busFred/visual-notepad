@@ -14,6 +14,8 @@
 #include <KSyntaxHighlighting/SyntaxHighlighter>
 #include <KSyntaxHighlighting/Theme>
 
+#include <algorithm>
+
 #include <QDir>
 #include <QEvent>
 #include <QFile>
@@ -143,8 +145,12 @@ DocumentTab::DocumentTab(QWidget *parent)
     m_viewMode = defaultMode == QLatin1String("source")  ? ViewMode::Source
                  : defaultMode == QLatin1String("split") ? ViewMode::SourceVisual
                                                          : ViewMode::Visual;
+    m_indentation = defaultIndentation();
     applySettings();
     connect(&Settings::instance(), &Settings::changed, this, [this](const QString &changedKey) {
+        if (changedKey == QLatin1String(key::tabWidth) || changedKey == QLatin1String(key::insertSpaces)
+            || changedKey == QLatin1String(key::detectIndentation))
+            refreshIndentation();
         if (changedKey.startsWith(QLatin1String("editor/")) || changedKey == QLatin1String(key::highlightActiveBlock))
             applySettings();
         if (changedKey == QLatin1String(key::validateLinks))
@@ -223,6 +229,8 @@ bool DocumentTab::applyBytes(const QString &path, const QByteArray &bytes, const
     m_editor->setTextCursor(QTextCursor(m_doc));
     if (m_visual)
         m_visual->setTextCursor(QTextCursor(m_doc));
+    m_indentationOverridden = false;
+    refreshIndentation();
     Q_EMIT formatChanged();
     return true;
 }
@@ -240,6 +248,8 @@ void DocumentTab::loadBackup(const QString &path, const QString &content, const 
     if (m_visual)
         m_visual->setTextCursor(QTextCursor(m_doc));
     m_doc->setModified(true);
+    m_indentationOverridden = false;
+    refreshIndentation();
     Q_EMIT formatChanged();
 }
 
@@ -293,6 +303,52 @@ void DocumentTab::setEncoding(const Encoding &encoding)
     m_encoding = encoding;
     m_doc->setModified(true);
     Q_EMIT formatChanged();
+}
+
+indentation::Settings DocumentTab::defaultIndentation() const
+{
+    const Settings &s = Settings::instance();
+    return {std::max(1, s.number(key::tabWidth)), s.flag(key::insertSpaces)};
+}
+
+void DocumentTab::setEffectiveIndentation(const indentation::Settings &indentation)
+{
+    if (m_indentation == indentation)
+        return;
+    m_indentation = indentation;
+    applySettings();
+    Q_EMIT indentationChanged();
+}
+
+void DocumentTab::refreshIndentation()
+{
+    if (m_indentationOverridden)
+        return;
+    const indentation::Settings defaults = defaultIndentation();
+    setEffectiveIndentation(Settings::instance().flag(key::detectIndentation)
+                                ? indentation::guess(m_doc, defaults.tabSize, defaults.insertSpaces)
+                                : defaults);
+}
+
+void DocumentTab::setIndentation(const indentation::Settings &indentation)
+{
+    m_indentationOverridden = true;
+    setEffectiveIndentation({std::max(1, indentation.tabSize), indentation.insertSpaces});
+}
+
+void DocumentTab::detectIndentation()
+{
+    m_indentationOverridden = false;
+    const indentation::Settings defaults = defaultIndentation();
+    setEffectiveIndentation(indentation::guess(m_doc, defaults.tabSize, defaults.insertSpaces));
+}
+
+void DocumentTab::convertIndentation(bool toSpaces)
+{
+    if (isReadOnly())
+        return;
+    indentation::convert(m_doc, m_indentation.tabSize, toSpaces);
+    setIndentation({m_indentation.tabSize, toSpaces});
 }
 
 QString DocumentTab::definitionName() const
@@ -594,6 +650,7 @@ void DocumentTab::updateDefinition()
                                       : repository.definitionForFileName(m_path);
     m_highlighter->setDefinition(def);
     m_editor->setCommentMarker(def.singleLineCommentMarker());
+    m_editor->setCodeEditing(def.isValid() && def.name() != QLatin1String("Markdown"));
     updateViews();
     Q_EMIT formatChanged();
 }
@@ -669,8 +726,8 @@ void DocumentTab::applyViewSettings(TextView *view)
     font.setPointSizeF(font.pointSizeF() * m_zoom / 100.0);
     view->setFont(font);
     view->setShowWhitespace(s.flag(key::drawWhitespace));
-    view->setTabWidth(s.number(key::tabWidth));
-    view->setInsertSpaces(s.flag(key::insertSpaces));
+    view->setTabWidth(m_indentation.tabSize);
+    view->setInsertSpaces(m_indentation.insertSpaces);
     view->setLineSpacing(s.value(key::lineSpacing).toDouble());
     view->setMultiCursorModifier(s.text(key::multiCursorModifier) == QLatin1String("ctrl") ? Qt::ControlModifier
                                                                                             : Qt::AltModifier);

@@ -17,6 +17,7 @@
 
 #include <QString>
 
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -57,6 +58,10 @@ public:
     // Ctrl+Click on links. Off for other languages.
     void setMarkdownEditing(bool on);
     bool markdownEditing() const { return m_markdown; }
+    // Documents with a syntax definition other than Markdown auto-close
+    // quotes and backticks too; plain text auto-closes nothing.
+    void setCodeEditing(bool on) { m_codeEditing = on; }
+    bool codeEditing() const { return m_codeEditing; }
     // The file being edited; relative paths in pasted links and images are
     // relative to its folder.
     void setDocumentPath(const QString &path);
@@ -113,6 +118,16 @@ public:
     // Walks every row above, so it is meant for tests.
     qreal scrollPixels();
 
+    // The text a "find selection" command searches for: the primary caret's
+    // one-line selection, or else the word at the caret. Empty if neither.
+    QString searchSeedText() const;
+    // Scrolls by a viewport height without moving the carets (down when
+    // forward).
+    void scrollPage(bool forward);
+    // Inserts text at a document position and puts the only caret after it;
+    // what a middle click does with the X11 primary selection.
+    void pasteTextAt(int position, const QString &text);
+
     // Background highlights for find results; current is an index or -1.
     void setSearchHighlights(const QList<QTextCursor> &ranges, int current);
 
@@ -132,6 +147,16 @@ public Q_SLOTS:
     void expandSelection();
     void shrinkSelection();
     void selectLine();
+    // Selects whole lines for each caret; again, one more line.
+    void expandLineSelection();
+    // One caret at the end of each line of each selection.
+    void addCursorsToLineEnds();
+    // Like addNextOccurrence(), but the last added selection moves.
+    void moveLastSelectionToNextMatch();
+    // Steps back and forth through earlier caret and selection states.
+    void cursorUndo();
+    void cursorRedo();
+    void trimTrailingWhitespace();
 
     void moveLinesUp();
     void moveLinesDown();
@@ -143,6 +168,17 @@ public Q_SLOTS:
     void indent();
     void outdent();
     void toggleLineComment();
+
+public:
+    // Markdown formatting commands (no-ops while read-only).
+    enum class MarkdownFormat {
+        Bold, Italic, Underline, Strikethrough, InlineCode,
+        Heading1, Heading2, Heading3, Heading4, Heading5, Heading6,
+        HeadingUp, HeadingDown,
+        Quote, OrderedList, BulletList, TaskList,
+        Link, CodeBlock
+    };
+    void formatMarkdown(MarkdownFormat format);
 
 Q_SIGNALS:
     void cursorPositionChanged();
@@ -220,6 +256,7 @@ protected:
     void timerEvent(QTimerEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
     void scrollContentsBy(int dx, int dy) override;
+    bool focusNextPrevChild(bool next) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dragMoveEvent(QDragMoveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
@@ -274,6 +311,14 @@ private:
     void deleteAtCarets(QTextCursor::MoveOperation op);
     void insertNewline();
     void insertTab();
+    // Auto-closing, overtyping and surrounding for one typed ASCII character.
+    // Returns false when it should be inserted normally.
+    bool typeCharacter(const QString &text);
+    bool surroundSelections(QChar open);
+    bool overtypeClosers(QChar ch);
+    bool autoCloseBrackets(QChar open);
+    bool deleteAutoClosedPair(Caret &caret);
+    void pruneAutoClosed();
     // Distinct line numbers covered by the carets, ascending.
     QList<int> caretLines() const;
     // Merged [first, last] line ranges covered by the carets.
@@ -288,6 +333,14 @@ private:
     void moveLines(int direction);
     void copyLines(int direction);
     QString indentUnit() const;
+    // Markdown formatting (TextViewFormat.cpp).
+    void replaceRange(int from, int to, const QString &text);
+    void toggleInline(const QString &open, const QString &close);
+    void setHeading(int level);
+    void shiftHeading(int direction);
+    void toggleLinePrefix(MarkdownFormat kind);
+    void insertLink();
+    void wrapInCodeBlock();
 
     // Caret helpers.
     void moveCarets(QTextCursor::MoveOperation op, bool select);
@@ -295,17 +348,73 @@ private:
     bool moveVertically(Caret &caret, int direction, QTextCursor::MoveMode mode);
     void moveCaretsHome(bool select);
     void normalizeCarets();
+    void undoRedo(bool undo);
     void caretsChanged();
     QTextCursor wordAt(const QTextCursor &cursor) const;
     QTextCursor findNext(const QString &text, int from) const;
     void restartBlink();
     void selectByUnit(const QPointF &point, bool extend);
+    // Box selection from the anchor to the point.
+    bool columnSelectTo(const QPointF &point);
+    // Block and wrapped line under a viewport point; false for rendered rows.
+    bool sourceLineAt(const QPointF &point, int *block, int *subLine);
+    void recordCursorHistory();
+    void resetCursorHistory();
+    void applyCursorHistory(int index, bool undo);
 
     QTextDocument *m_doc;
     std::vector<LineCache> m_lines;
     std::vector<Caret> m_carets;
     int m_primary = 0;
+
+    // Caret state around each undo step made through beginEdit()/endEdit(),
+    // indexed by undo step, so undo/redo can restore every caret.
+    struct CaretState
+    {
+        QList<std::pair<int, int>> ranges; // anchor, position
+        int primary = 0;
+        bool operator==(const CaretState &other) const { return ranges == other.ranges && primary == other.primary; }
+    };
+    struct UndoEntry
+    {
+        CaretState before;
+        CaretState after; // Filled in when the step is undone, for redo.
+    };
+    CaretState captureCarets() const;
+    void restoreCarets(const CaretState &state);
+    std::map<int, UndoEntry> m_undoEntries; // Keyed by undo position after the step.
+    CaretState m_editStart;
+    int m_editStartRevision = -1;
+    int m_editStartSteps = 0;
+    int m_syncedRevision = -1; // Document revision our entries are valid for.
+    int m_editDepth = 0;
     QList<QList<QTextCursor>> m_expandHistory;
+
+    // Earlier caret states for cursorUndo(), cleared by document changes.
+    struct CursorHistoryEntry
+    {
+        CaretState state;
+        int topRow = 0;
+        qreal topOffset = 0;
+        int scrollX = 0;
+    };
+    QList<CursorHistoryEntry> m_cursorUndo;
+    QList<CursorHistoryEntry> m_cursorRedo;
+    CaretState m_cursorLast;
+    int m_cursorLastRevision = -1;
+    bool m_cursorHistoryPaused = false;
+
+    // Box selection: where it started (block, wrapped line, x in the line).
+    struct ColumnAnchor
+    {
+        int block = 0;
+        int subLine = 0;
+        qreal x = 0;
+    };
+    ColumnAnchor m_columnAnchor;
+    CaretState m_columnResult; // Carets the last box selection produced.
+    bool m_columnAnchorValid = false;
+    bool m_columnDragging = false;
 
     QList<QTextCursor> m_searchRanges;
     int m_searchCurrent = -1;
@@ -325,6 +434,16 @@ private:
     qreal m_topMargin = 0;
     Qt::KeyboardModifier m_multiCursorModifier = Qt::AltModifier;
     bool m_markdown = false;
+    bool m_codeEditing = false;
+    // Closers inserted by auto-closing that may still be typed over or
+    // deleted with their opener. closer selects the closer; inner marks where
+    // the text between the pair starts.
+    struct AutoClosed
+    {
+        QTextCursor inner;
+        QTextCursor closer;
+    };
+    QList<AutoClosed> m_autoClosed;
     QString m_documentPath;
     QList<DiagnosticRange> m_diagnostics;
     QList<md::LinkTarget> m_linkSpans;

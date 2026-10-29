@@ -29,6 +29,11 @@ public:
     void close();
     void findNext();
     void findPrevious();
+    // Searches for the selected text (or the word at the caret) without
+    // showing the bar, and moves to the next or previous match.
+    void findSelection(bool forward);
+    // Turns every match into a selection and focuses the editor.
+    void selectAllMatches();
     void replaceOne();
     void replaceAll();
 
@@ -53,6 +58,7 @@ private:
     void setReplaceVisible(bool on);
     void research();
     void selectMatch(int index);
+    void step(bool forward);
     void updateCount();
     void remember(QLineEdit *edit);
     void recall(QLineEdit *edit, int direction);

@@ -56,6 +56,7 @@ private Q_SLOTS:
     void cleanup();
 
     void switchWritesSetting();
+    void typingSwitchesDefaultOn();
     void externalChangeUpdatesSwitch();
     void spaceTogglesSwitch();
     void comboWritesValue();
@@ -68,6 +69,9 @@ private Q_SLOTS:
     void escapeCancels();
     void modifierAloneIsIgnored();
     void conflictWarning();
+    void defaultShortcutsDoNotCollide();
+    void prefixConflictBothDirections();
+    void removeFromOther();
     void resetButtonAndResetAll();
     void codeFontRow();
     void textFontPickerWritesKeys();
@@ -91,7 +95,7 @@ void TestPreferences::init()
     Settings::instance().resetAllShortcuts();
     for (const char *k : {key::lineNumbers, key::tabWidth, key::autoSave, key::mathMacros, key::zoom, key::fontFamily,
                           key::fontSize, key::textFontFamily, key::textFontSize, key::textLineHeight,
-                          key::guessEncoding, key::legacyEncoding, key::encoding})
+                          key::guessEncoding, key::legacyEncoding, key::encoding, key::autoClose, key::autoSurround})
         Settings::instance().reset(k);
     PreferencesDialog::showPage(nullptr, QStringLiteral("editor"));
     QVERIFY(prefsWindow());
@@ -115,6 +119,18 @@ void TestPreferences::switchWritesSetting()
     QCOMPARE(Settings::instance().flag(key::lineNumbers), !before);
     toggle->click();
     QCOMPARE(Settings::instance().flag(key::lineNumbers), before);
+}
+
+void TestPreferences::typingSwitchesDefaultOn()
+{
+    for (const char *k : {key::autoClose, key::autoSurround}) {
+        auto *toggle = find<QAbstractButton>(k);
+        QVERIFY(toggle);
+        QVERIFY(toggle->isChecked());
+        toggle->click();
+        QVERIFY(!Settings::instance().flag(k));
+        Settings::instance().reset(k);
+    }
 }
 
 void TestPreferences::externalChangeUpdatesSwitch()
@@ -317,10 +333,105 @@ void TestPreferences::conflictWarning()
     // Assignment still happens.
     QCOMPARE(Settings::instance().shortcutOverride(QStringLiteral("edit.findNext")).size(), 1);
     QVERIFY(warning->isVisible());
-    QCOMPARE(warning->text(), QStringLiteral("Also used by: %1").arg(command(QStringLiteral("edit.find"))->text));
+    const QString expected = QStringLiteral("Conflicts with: %1 (%2). Neither shortcut will work while the conflict remains.")
+                                 .arg(command(QStringLiteral("edit.find"))->text,
+                                      QKeySequence(Qt::CTRL | Qt::Key_F).toString(QKeySequence::NativeText));
+    QCOMPARE(warning->text(), expected);
+    // Drawn in the warning colour of the style sheet, not the plain text colour.
+    QVERIFY(warning->property("warning").toBool());
+    QVERIFY(qApp->styleSheet().contains(QStringLiteral("QLabel[warning=\"true\"] { color: #")));
 
     Settings::instance().resetShortcut(QStringLiteral("edit.findNext"));
     QVERIFY(!warning->isVisible());
+    QVERIFY(!find<QAbstractButton>(QStringLiteral("shortcut-resolve-edit.findNext"))->isVisible());
+}
+
+void TestPreferences::prefixConflictBothDirections()
+{
+    auto &settings = Settings::instance();
+    const QKeySequence chord(QStringLiteral("Ctrl+Alt+Q, V"));
+    const QKeySequence single(QStringLiteral("Ctrl+Alt+Q"));
+    auto *findWarning = find<QLabel>(QStringLiteral("shortcut-warning-edit.find"));
+    auto *nextWarning = find<QLabel>(QStringLiteral("shortcut-warning-edit.findNext"));
+    QVERIFY(findWarning && nextWarning);
+
+    settings.setShortcutOverride(QStringLiteral("edit.find"), {chord});
+    settings.setShortcutOverride(QStringLiteral("edit.findNext"), {single});
+    // The single key is a prefix of the other command's chord, and vice versa.
+    // isHidden(): the page may not have been shown yet in this test.
+    QVERIFY(!findWarning->isHidden() && !nextWarning->isHidden());
+    QVERIFY(findWarning->text().contains(
+        QStringLiteral("%1 (%2)").arg(command(QStringLiteral("edit.findNext"))->text, single.toString(QKeySequence::NativeText))));
+    QVERIFY(nextWarning->text().contains(
+        QStringLiteral("%1 (%2)").arg(command(QStringLiteral("edit.find"))->text, chord.toString(QKeySequence::NativeText))));
+    QVERIFY(findWarning->text().contains(QStringLiteral("can't be completed")));
+    QVERIFY(!findWarning->text().contains(QStringLiteral("Neither shortcut will work")));
+
+    // A different chord on the same first key does not clash.
+    settings.setShortcutOverride(QStringLiteral("edit.findNext"), {QKeySequence(QStringLiteral("Ctrl+Alt+Q, W"))});
+    QVERIFY(findWarning->isHidden() && nextWarning->isHidden());
+
+    settings.resetShortcut(QStringLiteral("edit.find"));
+    settings.resetShortcut(QStringLiteral("edit.findNext"));
+}
+
+void TestPreferences::removeFromOther()
+{
+    auto &settings = Settings::instance();
+    const QKeySequence ctrlF(Qt::CTRL | Qt::Key_F);
+    // edit.find keeps Ctrl+F2 besides the Ctrl+F that findNext is about to take.
+    const QKeySequence other(Qt::CTRL | Qt::Key_F2);
+    settings.setShortcutOverride(QStringLiteral("edit.find"), {ctrlF, other});
+    auto *cell = cellFor(QStringLiteral("edit.findNext"));
+    auto *warning = find<QLabel>(QStringLiteral("shortcut-warning-edit.findNext"));
+    auto *resolve = find<QAbstractButton>(QStringLiteral("shortcut-resolve-edit.findNext"));
+    QVERIFY(cell && warning && resolve);
+    cell->click();
+    QTest::keyClick(cell, Qt::Key_F, Qt::ControlModifier);
+    QVERIFY(warning->isVisible() && resolve->isVisible());
+
+    resolve->click();
+    QVERIFY(!warning->isVisible());
+    QVERIFY(!resolve->isVisible());
+    QCOMPARE(shortcutsFor(QStringLiteral("edit.find")), QList<QKeySequence>{other});
+    QCOMPARE(shortcutsFor(QStringLiteral("edit.findNext")), QList<QKeySequence>{ctrlF});
+    QVERIFY(conflictingCommands(ctrlF, QStringLiteral("edit.findNext")).isEmpty());
+
+    settings.resetShortcut(QStringLiteral("edit.find"));
+    settings.resetShortcut(QStringLiteral("edit.findNext"));
+}
+
+void TestPreferences::defaultShortcutsDoNotCollide()
+{
+    QMap<QString, QString> owner;
+    for (const Command &c : commands()) {
+        for (const QKeySequence &sequence : c.defaults) {
+            const QString key = sequence.toString(QKeySequence::PortableText);
+            QVERIFY2(!key.isEmpty(), qPrintable(c.id + QStringLiteral(" has an unparsable default")));
+            QVERIFY2(!owner.contains(key), qPrintable(key + QStringLiteral(" is used by ") + owner.value(key)
+                                                      + QStringLiteral(" and ") + c.id));
+            owner.insert(key, c.id);
+        }
+    }
+    // No single-key shortcut may also begin a chord (Ctrl+K, ...).
+    for (auto it = owner.cbegin(); it != owner.cend(); ++it) {
+        if (it.key().contains(QLatin1String(", ")))
+            QVERIFY2(!owner.contains(it.key().section(QLatin1String(", "), 0, 0)), qPrintable(it.key()));
+    }
+    const auto defaultOf = [](const char *id) { return command(QLatin1String(id))->defaults; };
+    const auto k = [](const char *text) { return QKeySequence(QString::fromLatin1(text), QKeySequence::PortableText); };
+    QCOMPARE(defaultOf("selection.addCursorsToLineEnds"), QList<QKeySequence>{k("Shift+Alt+I")});
+    QCOMPARE(defaultOf("selection.expandLine"), QList<QKeySequence>{k("Ctrl+L")});
+    QCOMPARE(defaultOf("selection.moveLastToNextMatch"), QList<QKeySequence>{k("Ctrl+K, Ctrl+D")});
+    QCOMPARE(defaultOf("edit.indentLines"), QList<QKeySequence>{k("Ctrl+]")});
+    QCOMPARE(defaultOf("edit.outdentLines"), QList<QKeySequence>{k("Ctrl+[")});
+    QCOMPARE(defaultOf("edit.trimTrailingWhitespace"), QList<QKeySequence>{k("Ctrl+K, Ctrl+X")});
+    QCOMPARE(defaultOf("edit.findNextSelection"), QList<QKeySequence>{k("Ctrl+F3")});
+    QCOMPARE(defaultOf("edit.findPreviousSelection"), QList<QKeySequence>{k("Ctrl+Shift+F3")});
+    QCOMPARE(defaultOf("view.scrollPageUp"), QList<QKeySequence>{k("Alt+PgUp")});
+    QCOMPARE(defaultOf("view.scrollPageDown"), QList<QKeySequence>{k("Alt+PgDown")});
+    QVERIFY(defaultOf("selection.cursorUndo").isEmpty());
+    QVERIFY(defaultOf("selection.cursorRedo").isEmpty());
 }
 
 void TestPreferences::resetButtonAndResetAll()

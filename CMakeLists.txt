@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(visnotepad VERSION 0.0.2 LANGUAGES CXX)
+project(visnotepad VERSION 0.0.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -53,10 +53,13 @@ add_library(vn_app STATIC
     src/editor/DocumentLayout.cpp
     src/editor/DocumentLayout.h
     src/editor/FindBar.cpp
+    src/editor/Indentation.cpp
+    src/editor/Indentation.h
     src/editor/FindBar.h
     src/editor/Search.cpp
     src/editor/Search.h
     src/editor/TextView.cpp
+    src/editor/TextViewFormat.cpp
     src/editor/TextView.h
     src/markdown/BlockRenderer.cpp
     src/markdown/BlockRenderer.h

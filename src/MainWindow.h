@@ -106,6 +106,7 @@ private:
     void revealInFileManager(const QString &path);
     // Pops the menu up just above a status bar cell.
     void popupAboveCell(QMenu *menu, QWidget *cell);
+    void showIndentationMenu();
     void showLineEndingMenu();
     void showEncodingMenu();
     void showLanguageMenu();
@@ -157,6 +158,7 @@ private:
     QMenu *m_recentMenu = nullptr;
 
     QLabel *m_position;
+    QLabel *m_indentation;
     QLabel *m_zoom;
     QLabel *m_lineEnding;
     QLabel *m_encoding;

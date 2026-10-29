@@ -1,5 +1,6 @@
 // Offscreen checks of the main window. Set VN_SCREENSHOT=<file.png> to also
 // save a rendering of the window.
+#include "Commands.h"
 #include "MainWindow.h"
 #include "Theme.h"
 
@@ -33,6 +34,7 @@ private Q_SLOTS:
     void crlfIsPreserved();
     void fileDropOnEmptyWindowOpensIt();
     void fileDropOnTextTabOpensIt();
+    void vscodeEditorShortcuts();
 
 private:
     QString write(const QString &name, const QByteArray &content);
@@ -193,6 +195,59 @@ void TestMainWindow::fileDropOnTextTabOpensIt()
     QVERIFY(drop.isAccepted());
     QCOMPARE(window.tabCount(), 2);
     QCOMPARE(window.windowTitle(), QStringLiteral("dropped2.md — Visual Notepad"));
+}
+
+// The VS Code editor commands are reachable through their default keys.
+void TestMainWindow::vscodeEditorShortcuts()
+{
+    const QString path = write(QStringLiteral("keys.txt"), "alpha  \nbeta\ngamma\n");
+    vn::MainWindow window;
+    window.resize(800, 500);
+    QVERIFY(window.openFile(path));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    window.activateWindow();
+    vn::TextView *editor = window.currentTab()->editor();
+    editor->setFocus();
+    QVERIFY(QTest::qWaitFor([&] { return editor->hasFocus(); }));
+    const auto actionFor = [&window](const QString &id) -> QAction * {
+        const QString text = vn::command(id)->text;
+        for (QAction *action : window.actions()) {
+            if (action->text() == text)
+                return action;
+        }
+        return nullptr;
+    };
+
+    for (const char *id : {"selection.addCursorsToLineEnds", "selection.expandLine", "selection.cursorUndo",
+                           "selection.cursorRedo", "selection.moveLastToNextMatch", "edit.indentLines",
+                           "edit.outdentLines", "edit.trimTrailingWhitespace", "edit.findNextSelection",
+                           "edit.findPreviousSelection", "view.scrollPageUp", "view.scrollPageDown"})
+        QVERIFY2(actionFor(QLatin1String(id)), id);
+    QVERIFY(actionFor(QStringLiteral("selection.cursorUndo"))->shortcuts().isEmpty());
+
+    // Ctrl+L selects the line, again adds one.
+    QTest::keyClick(editor, Qt::Key_L, Qt::ControlModifier);
+    QCOMPARE(editor->textCursor().selectedText().replace(QChar::ParagraphSeparator, u'|'), QStringLiteral("alpha  |"));
+    QTest::keyClick(editor, Qt::Key_L, Qt::ControlModifier);
+    QCOMPARE(editor->textCursor().selectedText().replace(QChar::ParagraphSeparator, u'|'),
+             QStringLiteral("alpha  |beta|"));
+
+    // Shift+Alt+I: a caret at the end of each selected line.
+    QTest::keyClick(editor, Qt::Key_I, Qt::ShiftModifier | Qt::AltModifier);
+    QCOMPARE(editor->cursorCount(), 2);
+
+    // Ctrl+] / Ctrl+[ indent and outdent.
+    editor->setTextCursor(QTextCursor(editor->document()));
+    QTest::keyClick(editor, Qt::Key_BracketRight, Qt::ControlModifier);
+    QVERIFY(editor->document()->toPlainText().startsWith(u' '));
+    QTest::keyClick(editor, Qt::Key_BracketLeft, Qt::ControlModifier);
+    QVERIFY(editor->document()->toPlainText().startsWith(QStringLiteral("alpha")));
+
+    // Ctrl+K Ctrl+X trims trailing whitespace.
+    QTest::keyClick(editor, Qt::Key_K, Qt::ControlModifier);
+    QTest::keyClick(editor, Qt::Key_X, Qt::ControlModifier);
+    QVERIFY(editor->document()->toPlainText().startsWith(QStringLiteral("alpha\nbeta")));
 }
 
 QTEST_MAIN(TestMainWindow)

@@ -308,39 +308,68 @@ void FindBar::findNext()
 {
     if (!isVisible())
         open(false);
-    remember(m_find);
-    if (m_matches.isEmpty())
-        return;
-    const QTextCursor caret = m_view->textCursor();
-    // Next match after the caret; wraps to the first.
-    int next = 0;
-    for (int i = 0; i < m_matches.size(); ++i) {
-        if (m_matches[i].selectionStart() > caret.selectionStart()
-            || (m_matches[i].selectionStart() == caret.selectionStart() && !caret.hasSelection())) {
-            next = i;
-            break;
-        }
-        next = 0;
-    }
-    selectMatch(next);
+    step(true);
 }
 
 void FindBar::findPrevious()
 {
     if (!isVisible())
         open(false);
+    step(false);
+}
+
+void FindBar::step(bool forward)
+{
     remember(m_find);
     if (m_matches.isEmpty())
         return;
     const QTextCursor caret = m_view->textCursor();
-    int previous = int(m_matches.size()) - 1;
-    for (int i = int(m_matches.size()) - 1; i >= 0; --i) {
-        if (m_matches[i].selectionStart() < caret.selectionStart()) {
-            previous = i;
-            break;
+    const int count = int(m_matches.size());
+    int target = forward ? 0 : count - 1;
+    if (forward) {
+        // Next match after the caret; wraps to the first.
+        for (int i = 0; i < count; ++i) {
+            if (m_matches[i].selectionStart() > caret.selectionStart()
+                || (m_matches[i].selectionStart() == caret.selectionStart() && !caret.hasSelection())) {
+                target = i;
+                break;
+            }
+        }
+    } else {
+        for (int i = count - 1; i >= 0; --i) {
+            if (m_matches[i].selectionStart() < caret.selectionStart()) {
+                target = i;
+                break;
+            }
         }
     }
-    selectMatch(previous);
+    selectMatch(target);
+}
+
+void FindBar::findSelection(bool forward)
+{
+    const QString seed = m_view->searchSeedText();
+    if (!seed.isEmpty())
+        m_find->setText(seed);
+    if (m_find->text().isEmpty()) {
+        // Nothing to search for: show the bar to type a query.
+        open(false);
+        return;
+    }
+    const bool shown = isVisible();
+    research();
+    step(forward);
+    if (!shown)
+        m_view->setSearchHighlights({}, -1);
+}
+
+void FindBar::selectAllMatches()
+{
+    if (m_matches.isEmpty())
+        return;
+    remember(m_find);
+    m_view->setCursors(m_matches, qMax(0, m_current));
+    m_view->setFocus();
 }
 
 void FindBar::replaceOne()
@@ -421,6 +450,18 @@ bool FindBar::eventFilter(QObject *watched, QEvent *event)
         field->style()->polish(field);
         return false;
     }
+    if (event->type() == QEvent::ShortcutOverride) {
+        // The option toggles (Alt+C ...) win over window shortcuts such as
+        // Format > Task List.
+        auto *key = static_cast<QKeyEvent *>(event);
+        if ((key->modifiers() & ~Qt::KeypadModifier) == Qt::AltModifier
+            && (key->key() == Qt::Key_C || key->key() == Qt::Key_W || key->key() == Qt::Key_R
+                || key->key() == Qt::Key_P)) {
+            event->accept();
+            return true;
+        }
+        return false;
+    }
     if (event->type() != QEvent::KeyPress)
         return false;
 
@@ -450,7 +491,9 @@ bool FindBar::eventFilter(QObject *watched, QEvent *event)
         return true;
     case Qt::Key_Return:
     case Qt::Key_Enter:
-        if (edit == m_replace) {
+        if (mods == Qt::AltModifier) {
+            selectAllMatches();
+        } else if (edit == m_replace) {
             if (mods == (Qt::ControlModifier | Qt::AltModifier))
                 replaceAll();
             else
