@@ -165,6 +165,7 @@ DocumentTab::DocumentTab(QWidget *parent)
             m_visual->setReadOnly(locked);
     });
     connect(m_editor, &TextView::scrolled, this, [this] { syncScroll(m_editor, m_visual); });
+    connect(m_editor, &TextView::selectionChanged, this, [this] { mirrorSelection(m_editor, m_visual); });
     m_editor->installEventFilter(this);
     connect(m_doc, &QTextDocument::modificationChanged, this, &DocumentTab::modificationChanged);
     connect(m_editor, &TextView::cursorPositionChanged, this, [this] {
@@ -374,6 +375,7 @@ void DocumentTab::ensureVisualView()
     connect(m_visual, &TextView::filesDropped, this, &DocumentTab::filesDropped);
     m_visual->setDiagnostics(m_diagnostics);
     connect(m_visual, &TextView::scrolled, this, [this] { syncScroll(m_visual, m_editor); });
+    connect(m_visual, &TextView::selectionChanged, this, [this] { mirrorSelection(m_visual, m_editor); });
     connect(m_visual, &TextView::cursorPositionChanged, this, [this] {
         if (m_active == m_visual)
             Q_EMIT cursorPositionChanged();
@@ -388,6 +390,26 @@ void DocumentTab::syncScroll(TextView *from, TextView *to)
     m_syncingScroll = true;
     to->scrollToLine(from->topLine());
     m_syncingScroll = false;
+}
+
+void DocumentTab::mirrorSelection(TextView *from, TextView *to)
+{
+    // Only in a split, never onto the view the user is working in, and only
+    // when there is a selection to show or an old one to clear.
+    if (m_mirroringSelection || !from || !to || !to->isVisible() || !from->isVisible() || to->hasFocus())
+        return;
+    const bool selecting = from->hasSelection();
+    if (!selecting && !to->hasSelection())
+        return;
+    // mirrorCursorsFrom emits nothing, so the views cannot echo each other;
+    // the flag also keeps scrolling the revealed range from dragging the
+    // other half back through syncScroll.
+    m_mirroringSelection = true;
+    const bool wasSyncing = m_syncingScroll;
+    m_syncingScroll = true;
+    to->mirrorCursorsFrom(from, selecting);
+    m_syncingScroll = wasSyncing;
+    m_mirroringSelection = false;
 }
 
 void DocumentTab::setActiveView(TextView *view)
@@ -435,6 +457,8 @@ void DocumentTab::updateViews()
     if (active != m_active && m_active)
         active->setTextCursor(m_active->textCursor());
     setActiveView(active);
+    if (mode == ViewMode::SourceVisual)
+        mirrorSelection(active, active == m_editor ? static_cast<TextView *>(m_visual) : m_editor);
     updatePill();
 }
 

@@ -110,6 +110,8 @@ private:
     void ensureVisualView();
     void updateViews();
     void syncScroll(TextView *from, TextView *to);
+    // Shows from's selection in the other half of a split (see mirrorCursorsFrom).
+    void mirrorSelection(TextView *from, TextView *to);
     void setActiveView(TextView *view);
     void applyMarkdownState();
     void scheduleLinkCheck();
@@ -124,6 +126,7 @@ private:
     QSplitter *m_splitter;
     TextView *m_active = nullptr;
     bool m_syncingScroll = false;
+    bool m_mirroringSelection = false;
     EditorPill *m_pill;
     FindBar *m_findBar;
     QWidget *m_goToLine;

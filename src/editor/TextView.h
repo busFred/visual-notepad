@@ -11,6 +11,7 @@
 
 #include <QAbstractScrollArea>
 #include <QBasicTimer>
+#include <QElapsedTimer>
 #include <QTextCursor>
 #include <QTextLayout>
 
@@ -81,6 +82,13 @@ public:
     int cursorCount() const { return int(m_carets.size()); }
     // Selected text of every caret, joined by newlines, in document order.
     QString selectedText() const;
+
+    bool hasSelection() const;
+    // Shows another view's carets and selections (same document) without
+    // emitting signals, taking focus or changing this view's own mouse state;
+    // used to mirror the selection between the views of a split. The primary
+    // caret is scrolled into view when reveal is set.
+    void mirrorCursorsFrom(const TextView *other, bool reveal);
 
     void ensureCursorVisible();
     void centerCursor();
@@ -154,6 +162,12 @@ protected:
     virtual void rowsMayHaveChanged() {}
     // A press on a rendered row; return true to consume it (e.g. a link).
     virtual bool renderedRowPressed(const Row &row, const QPointF &point, QMouseEvent *event);
+
+    // The "line" a triple click selects around a position (a block, or for
+    // views that merge lines into rows, the whole row). Includes the line break.
+    virtual QTextCursor lineUnitAt(int position) const;
+    // True while the left button is down after a click or drag selection.
+    bool isMouseSelecting() const { return m_dragging; }
 
     // The row at viewport y and its top, or -1 past the end.
     int rowAt(qreal y, qreal *top);
@@ -303,6 +317,9 @@ private:
     QTextCursor m_dragOrigin;
     QBasicTimer m_autoScroll;
     QPointF m_lastMousePos;
+    // Double click time and place, for detecting the triple click.
+    QElapsedTimer m_doubleClickTime;
+    QPointF m_doubleClickPos;
 
     // Caret blink and input method.
     QBasicTimer m_blink;
