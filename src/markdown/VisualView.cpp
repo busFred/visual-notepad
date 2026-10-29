@@ -57,7 +57,7 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
         m_cache.clear();
         relayout();
     });
-    rebuildRows();
+    // Rows are built when the view is first shown (see showEvent).
 }
 
 void VisualView::setBaseDirectory(const QString &directory)
@@ -80,7 +80,22 @@ void VisualView::setHighlightActiveBlock(bool on)
 
 void VisualView::rowsMayHaveChanged()
 {
+    // A hidden view (Source mode) waits until it is shown, so edits don't
+    // re-parse the document for nothing.
+    if (!isVisible()) {
+        m_rowsStale = true;
+        return;
+    }
     rebuildRows();
+}
+
+void VisualView::showEvent(QShowEvent *event)
+{
+    TextView::showEvent(event);
+    if (m_rowsStale) {
+        m_rowsStale = false;
+        relayout();
+    }
 }
 
 void VisualView::rebuildRows()

@@ -42,6 +42,7 @@ protected:
     void mouseMoveEvent(QMouseEvent *event) override;
     void changeEvent(QEvent *event) override;
     void focusInEvent(QFocusEvent *event) override;
+    void showEvent(QShowEvent *event) override;
     void focusOutEvent(QFocusEvent *event) override;
 
 private:
@@ -64,6 +65,7 @@ private:
     std::vector<RowInfo> m_rows;
     std::vector<int> m_lineToRow;
     QSet<int> m_expandedBlocks;
+    bool m_rowsStale = true;
     QHash<QString, std::shared_ptr<RenderedBlock>> m_cache;
 };
 

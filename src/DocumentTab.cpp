@@ -492,6 +492,18 @@ void DocumentTab::updateViews()
 {
     const bool markdown = isMarkdown();
     const ViewMode mode = markdown ? m_viewMode : ViewMode::Source;
+    if (!markdown && m_visual) {
+        // Not Markdown any more: drop the visual view and its parser so
+        // edits don't pay for Markdown parsing.
+        if (m_active == m_visual) {
+            m_editor->setTextCursor(m_visual->textCursor());
+            setActiveView(m_editor);
+        }
+        delete m_visual;
+        m_visual = nullptr;
+        delete m_model;
+        m_model = nullptr;
+    }
     if (mode != ViewMode::Source) {
         ensureVisualView();
         m_visual->setBaseDirectory(m_path.isEmpty() ? QString() : QFileInfo(m_path).absolutePath());
