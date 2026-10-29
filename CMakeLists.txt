@@ -91,7 +91,11 @@ if(ICU_FOUND)
     target_link_libraries(vn_app PUBLIC ICU::i18n ICU::uc)
 endif()
 
-qt_add_executable(visnotepad WIN32 src/main.cpp)
+if(WIN32)
+    enable_language(RC)
+    set(VN_WIN_RC packaging/windows/visnotepad.rc)
+endif()
+qt_add_executable(visnotepad WIN32 src/main.cpp ${VN_WIN_RC})
 target_link_libraries(visnotepad PRIVATE vn_app)
 
 include(CTest)

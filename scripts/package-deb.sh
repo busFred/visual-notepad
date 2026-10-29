@@ -1,25 +1,38 @@
 #!/usr/bin/env bash
 # Builds a self-contained .deb from a Release build made with the project
-# toolchain (scripts/dev-env.sh). Qt and the other libraries from the conda
-# environment are bundled under /opt/visnotepad; glibc and the OpenGL
-# driver libraries come from the system.
+# toolchain (scripts/dev-env.sh) or an activated conda environment (CI). Qt
+# and the other libraries from the conda environment are bundled under
+# /opt/visnotepad; glibc and the OpenGL driver libraries come from the system.
 #
 #   scripts/package-deb.sh            # builds build-rel, writes dist/*.deb
+#
+# Environment variables (all optional; defaults match the local toolchain):
+#   VN_ENV_PREFIX     conda env with Qt (default .toolchain/env, else $CONDA_PREFIX)
+#   VN_KF6_PREFIX     prefix holding KSyntaxHighlighting (default .toolchain/kf6)
+#   VN_KSH_SRC        KSyntaxHighlighting source tree, for its license files
+#   VN_BUILD_DIR      CMake build directory (default build-rel)
+#   VN_BUILD_TESTING  ON/OFF for that build directory (default OFF)
+#   VN_NO_DEV_ENV=1   do not source scripts/dev-env.sh; use the current environment
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
-# shellcheck disable=SC1091
-source scripts/dev-env.sh
+if [ -z "${VN_NO_DEV_ENV:-}" ] && [ -z "${VN_ENV_PREFIX:-}" ] && [ -d "$root/.toolchain/env" ]; then
+    # shellcheck disable=SC1091
+    source scripts/dev-env.sh
+fi
+env_prefix="${VN_ENV_PREFIX:-${CONDA_PREFIX:-$root/.toolchain/env}}"
+kf6_prefix="${VN_KF6_PREFIX:-$root/.toolchain/kf6}"
+ksh_src="${VN_KSH_SRC:-$root/.toolchain/src/syntax-highlighting}"
+export CONDA_PREFIX="$env_prefix"
 
 version="$(sed -n 's/^project(visnotepad VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
 arch="$(dpkg --print-architecture)"
-build="$root/build-rel"
+build="${VN_BUILD_DIR:-$root/build-rel}"
 stage="$root/build-deb/visnotepad_${version}_${arch}"
 opt="$stage/opt/visnotepad"
-toolchain="$root/.toolchain"
 
-cmake -S . -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF >/dev/null
+cmake -S . -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING="${VN_BUILD_TESTING:-OFF}" >/dev/null
 cmake --build "$build" --target visnotepad microtex_res
 
 rm -rf "$stage"
@@ -32,7 +45,7 @@ cp -r "$build/microtex" "$opt/share/visnotepad/microtex"
 
 # Qt plugins the app needs: X11 and Wayland, the XDG portal (native file
 # dialogs), input methods, images, icons.
-qtplugins="$CONDA_PREFIX/lib/qt6/plugins"
+qtplugins="$env_prefix/lib/qt6/plugins"
 for dir in platforms platformthemes platforminputcontexts imageformats iconengines xcbglintegrations \
     wayland-shell-integration wayland-decoration-client wayland-graphics-integration-client; do
     [ -d "$qtplugins/$dir" ] || continue
@@ -54,20 +67,30 @@ system_only='^(ld-linux.*|libc|libm|libdl|libpthread|librt|libresolv|libutil|lib
 queue=("$opt/bin/visnotepad")
 while IFS= read -r -d '' plugin; do queue+=("$plugin"); done < <(find "$opt/plugins" -name '*.so' -print0)
 declare -A seen
+copied="$root/build-deb/copied-from-env.txt"
+: >"$copied"
 while [ "${#queue[@]}" -gt 0 ]; do
     elf="${queue[0]}"
     queue=("${queue[@]:1}")
     while read -r name path; do
         [ -n "$path" ] || continue
         [[ "$name" =~ $system_only ]] && continue
-        case "$path" in "$toolchain"/*) ;; *) continue ;; esac
+        case "$path" in "$env_prefix"/*|"$kf6_prefix"/*) ;; *) continue ;; esac
         [ -n "${seen[$name]:-}" ] && continue
         seen[$name]=1
+        echo "$path" >>"$copied"
         cp -L "$path" "$opt/lib/$name"
         chmod 644 "$opt/lib/$name"
         queue+=("$opt/lib/$name")
-    done < <(LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$toolchain/kf6/lib" ldd "$elf" 2>/dev/null | awk '/=>/ {print $1, $3}')
+    done < <(LD_LIBRARY_PATH="$env_prefix/lib:$kf6_prefix/lib" ldd "$elf" 2>/dev/null | awk '/=>/ {print $1, $3}')
 done
+
+# License texts of the app and of every bundled library.
+find "$opt/plugins" -name '*.so' | sed "s#^$opt/plugins#$qtplugins#" >>"$copied"
+licargs=(--out "$opt/licenses" --env "$env_prefix" --libs "$copied"
+    --microtex-src "$build/_deps/microtex_src-src" --tinyxml2-src "$build/_deps/tinyxml2_src-src")
+[ -d "$ksh_src/LICENSES" ] && licargs+=(--ksh-src "$ksh_src")
+python3 "$root/scripts/collect_licenses.py" "${licargs[@]}"
 
 # Relative library paths so nothing depends on the build machine.
 patchelf --set-rpath '$ORIGIN/../lib' "$opt/bin/visnotepad"

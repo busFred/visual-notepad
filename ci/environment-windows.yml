@@ -1,0 +1,9 @@
+name: visnotepad-windows
+channels:
+  - conda-forge
+dependencies:
+  - qt6-main 6.12.*
+  - rust
+  - cmake
+  - ninja
+  - icu

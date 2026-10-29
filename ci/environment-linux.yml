@@ -1,0 +1,17 @@
+name: visnotepad-linux
+channels:
+  - conda-forge
+dependencies:
+  - qt6-main 6.12.*
+  - rust
+  - cmake
+  - ninja
+  - cxx-compiler
+  - c-compiler
+  - libgl-devel
+  - libegl-devel
+  - pkg-config
+  - git
+  - perl
+  - patchelf
+  - icu

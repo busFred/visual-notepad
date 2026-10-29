@@ -1,0 +1,289 @@
+name: build
+
+on:
+  push:
+    branches: [main, ci]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KF6_VERSION: v6.31.0
+
+jobs:
+  linux:
+    name: deb (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    defaults:
+      run:
+        shell: bash -el {0}
+    env:
+      KF6_PREFIX: ${{ github.workspace }}/kf6
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fakeroot dpkg-dev fonts-dejavu-core libgl1 libegl1
+
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: ci/environment-linux.yml
+          environment-name: visnotepad
+          cache-environment: true
+          cache-environment-key: env-${{ matrix.arch }}-${{ hashFiles('ci/environment-linux.yml') }}
+          cache-downloads: true
+          init-shell: bash
+
+      - name: Cache KDE frameworks
+        id: kf6
+        uses: actions/cache@v4
+        with:
+          path: kf6
+          key: kf6-${{ env.KF6_VERSION }}-linux-${{ matrix.arch }}-${{ hashFiles('ci/environment-linux.yml') }}
+
+      - name: Build ECM and KSyntaxHighlighting
+        if: steps.kf6.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          for repo in extra-cmake-modules syntax-highlighting; do
+            git clone --depth 1 -b "$KF6_VERSION" "https://invent.kde.org/frameworks/$repo.git" "$RUNNER_TEMP/$repo"
+          done
+          cmake -S "$RUNNER_TEMP/extra-cmake-modules" -B "$RUNNER_TEMP/build-ecm" -G Ninja \
+            -DCMAKE_INSTALL_PREFIX="$KF6_PREFIX" -DBUILD_TESTING=OFF
+          cmake --build "$RUNNER_TEMP/build-ecm"
+          cmake --install "$RUNNER_TEMP/build-ecm"
+          cmake -S "$RUNNER_TEMP/syntax-highlighting" -B "$RUNNER_TEMP/build-ksh" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$KF6_PREFIX" \
+            -DCMAKE_INSTALL_PREFIX="$KF6_PREFIX" -DBUILD_TESTING=OFF
+          cmake --build "$RUNNER_TEMP/build-ksh"
+          cmake --install "$RUNNER_TEMP/build-ksh"
+          mkdir -p "$KF6_PREFIX/ksh-src"
+          cp -r "$RUNNER_TEMP/syntax-highlighting/LICENSES" "$KF6_PREFIX/ksh-src/"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-linux-${{ matrix.arch }}-${{ hashFiles('core/Cargo.lock') }}
+
+      - name: Configure and build
+        run: |
+          export CMAKE_PREFIX_PATH="$KF6_PREFIX:$CONDA_PREFIX"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+          FONTCONFIG_FILE: /etc/fonts/fonts.conf
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package
+        run: |
+          export CMAKE_PREFIX_PATH="$KF6_PREFIX:$CONDA_PREFIX"
+          VN_NO_DEV_ENV=1 VN_ENV_PREFIX="$CONDA_PREFIX" VN_KF6_PREFIX="$KF6_PREFIX" \
+            VN_KSH_SRC="$KF6_PREFIX/ksh-src" VN_BUILD_DIR="$PWD/build" VN_BUILD_TESTING=ON \
+            scripts/package-deb.sh
+          ls -l dist
+
+      - name: Check the package
+        shell: bash
+        run: |
+          set -eu
+          deb=$(ls dist/visnotepad_*_${{ matrix.arch }}.deb)
+          dpkg-deb -I "$deb"
+          dir=$(mktemp -d)
+          dpkg-deb -x "$deb" "$dir"
+          fail=0
+          for f in "$dir/opt/visnotepad/bin/visnotepad" $(find "$dir/opt/visnotepad/plugins" -name '*.so'); do
+            if ldd "$f" | grep 'not found'; then echo "unresolved libraries in $f"; fail=1; fi
+          done
+          test -d "$dir/opt/visnotepad/licenses/conda" || { echo "no conda licenses"; fail=1; }
+          test -f "$dir/opt/visnotepad/share/visnotepad/microtex/res/fonts/fonts.json" || ls "$dir/opt/visnotepad/share/visnotepad/microtex/res"
+          exit $fail
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: dist/visnotepad_*_${{ matrix.arch }}.deb
+          if-no-files-found: error
+
+  windows:
+    name: windows-x64
+    runs-on: windows-2022
+    env:
+      KF6_PREFIX: ${{ github.workspace }}\kf6
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: ci/environment-windows.yml
+          environment-name: visnotepad
+          cache-environment: true
+          cache-environment-key: env-win-${{ hashFiles('ci/environment-windows.yml') }}
+          cache-downloads: true
+          init-shell: none
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Environment paths
+        shell: pwsh
+        run: |
+          $prefix = Join-Path $env:MAMBA_ROOT_PREFIX 'envs\visnotepad'
+          if (-not (Test-Path $prefix)) { throw "conda env not found at $prefix" }
+          "ENV_PREFIX=$prefix" >> $env:GITHUB_ENV
+          "CMAKE_PREFIX_PATH=$env:KF6_PREFIX;$prefix\Library" >> $env:GITHUB_ENV
+          # Tools from the env (cmake, ninja, rust) come after the MSVC tools.
+          foreach ($d in "$prefix\Library\bin", "$prefix\Scripts", "$prefix\bin", $prefix) { if (Test-Path $d) { $d >> $env:GITHUB_PATH } }
+          $v = (Select-String -Path CMakeLists.txt -Pattern '^project\(visnotepad VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          "VN_VERSION=$v" >> $env:GITHUB_ENV
+
+      - name: Tool versions
+        shell: pwsh
+        run: |
+          Get-Command cl, link, cmake, ninja, cargo, rustc, iscc -ErrorAction Continue | Format-Table Name, Source
+          rustc -vV
+          cmake --version
+
+      - name: Cache KDE frameworks
+        id: kf6
+        uses: actions/cache@v4
+        with:
+          path: kf6
+          key: kf6-${{ env.KF6_VERSION }}-windows-${{ hashFiles('ci/environment-windows.yml') }}
+
+      - name: Build ECM and KSyntaxHighlighting
+        if: steps.kf6.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          T=$(cygpath -m "$RUNNER_TEMP")
+          KF6_PREFIX=$(cygpath -m "$KF6_PREFIX")
+          for repo in extra-cmake-modules syntax-highlighting; do
+            git clone --depth 1 -b "$KF6_VERSION" "https://invent.kde.org/frameworks/$repo.git" "$T/$repo"
+          done
+          common=(-G Ninja -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+            "-DCMAKE_IGNORE_PREFIX_PATH=C:/Strawberry/c;C:/Strawberry/perl"
+            -DCMAKE_INSTALL_PREFIX="$KF6_PREFIX" -DBUILD_TESTING=OFF)
+          cmake -S "$T/extra-cmake-modules" -B "$T/build-ecm" "${common[@]}"
+          cmake --build "$T/build-ecm"
+          cmake --install "$T/build-ecm"
+          cmake -S "$T/syntax-highlighting" -B "$T/build-ksh" "${common[@]}" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$T/build-ksh"
+          cmake --install "$T/build-ksh"
+          mkdir -p "$KF6_PREFIX/ksh-src"
+          cp -r "$T/syntax-highlighting/LICENSES" "$KF6_PREFIX/ksh-src/"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-windows-${{ hashFiles('core/Cargo.lock') }}
+
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+            "-DCMAKE_IGNORE_PREFIX_PATH=C:/Strawberry/c;C:/Strawberry/perl"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Test
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Deploy
+        shell: pwsh
+        run: |
+          python scripts/deploy_windows.py --build-dir build --env $env:ENV_PREFIX `
+            --kf6 $env:KF6_PREFIX --ksh-src "$env:KF6_PREFIX\ksh-src" --out "dist\visnotepad"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-ChildItem dist\visnotepad | Format-Table Name, Length
+
+      - name: Smoke test (only System32 on PATH)
+        shell: cmd
+        run: |
+          set "PATH=C:\Windows\System32"
+          set "QT_QPA_PLATFORM=offscreen"
+          start "" /wait "%GITHUB_WORKSPACE%\dist\visnotepad\visnotepad.exe" --version
+          echo exit code %ERRORLEVEL%
+          if not "%ERRORLEVEL%"=="0" exit /b 1
+
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist\out | Out-Null
+          Compress-Archive -Path dist\visnotepad -DestinationPath "dist\out\visnotepad-$env:VN_VERSION-windows-x64-portable.zip"
+
+      - name: Installer
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            if (-not (Test-Path $iscc)) {
+              choco install innosetup -y --no-progress
+              $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            }
+          }
+          & $iscc "/DAppVersion=$env:VN_VERSION" "/DSourceDir=$env:GITHUB_WORKSPACE\dist\visnotepad" `
+            "/DOutputDir=$env:GITHUB_WORKSPACE\dist\out" packaging\windows\visnotepad.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-ChildItem dist\out | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-portable
+          path: dist/out/*.zip
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-setup
+          path: dist/out/*.exe
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l artifacts
+          gh release create "$GITHUB_REF_NAME" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

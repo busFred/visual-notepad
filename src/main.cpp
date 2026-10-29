@@ -6,6 +6,15 @@
 #include <QIcon>
 #include <QCommandLineParser>
 
+#ifdef Q_OS_WIN
+#include <cstdio>
+#include <cstring>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 int main(int argc, char *argv[])
 {
 #ifdef Q_OS_LINUX
@@ -19,6 +28,20 @@ int main(int argc, char *argv[])
         qputenv("XCURSOR_PATH", "~/.local/share/icons:~/.icons:/usr/local/share/icons:/usr/share/icons:/usr/share/pixmaps");
 #endif
     QApplication app(argc, argv);
+#ifdef Q_OS_WIN
+    // QCommandLineParser reports --version in a message box in a GUI program,
+    // which blocks scripts and smoke tests. Answer (after the
+    // platform plugin loaded, so that a smoke test covers it) on the parent's console.
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--version") == 0 || std::strcmp(argv[i], "-v") == 0) {
+            if (AttachConsole(ATTACH_PARENT_PROCESS))
+                std::freopen("CONOUT$", "w", stdout);
+            std::printf("visnotepad %s\n", VN_VERSION);
+            std::fflush(stdout);
+            return 0;
+        }
+    }
+#endif
     QApplication::setApplicationName(QStringLiteral("visnotepad"));
     QApplication::setApplicationDisplayName(QStringLiteral("Visual Notepad"));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/vn/app/visnotepad.svg")));
