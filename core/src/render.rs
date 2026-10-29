@@ -368,7 +368,15 @@ impl Html<'_> {
                     escape(&slug(&id)),
                     self.footnote_number(&id)
                 ));
-                self.children(node);
+                // The first paragraph's text follows the number on the same
+                // line; Qt would start a new block for a <p>.
+                for (i, child) in node.children().enumerate() {
+                    if i == 0 && matches!(child.data().value, NodeValue::Paragraph) {
+                        self.children(child);
+                    } else {
+                        self.node(child);
+                    }
+                }
                 self.out.push_str("</div>");
             }
             NodeValue::BlockQuote => self.wrap(node, "blockquote"),

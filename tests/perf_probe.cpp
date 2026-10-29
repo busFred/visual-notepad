@@ -14,7 +14,7 @@ int main(int argc, char **argv)
         tab.resize(900, 700);
         tab.load(QString::fromLocal8Bit(argv[i]));
         tab.show();
-        QTest::qWaitForWindowExposed(&tab);
+        (void)QTest::qWaitForWindowExposed(&tab);
         tab.editor()->grab();
         qInfo() << argv[i] << "open+paint ms" << t.restart();
         vn::TextView *view = tab.editor();

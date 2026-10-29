@@ -56,3 +56,6 @@ set_tests_properties(markdown_editing PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=of
 qt_add_executable(perf_probe perf_probe.cpp)
 target_link_libraries(perf_probe PRIVATE vn_app Qt6::Test)
 target_link_options(perf_probe PRIVATE -rdynamic)
+
+qt_add_executable(screenshot_tour screenshot_tour.cpp)
+target_link_libraries(screenshot_tour PRIVATE vn_app Qt6::Test)
