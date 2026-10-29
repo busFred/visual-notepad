@@ -28,7 +28,8 @@ enum class Role {
     sideBarHover,
     panelTitle,
     divider,
-    surface, // Preferences page, buttons and tooltips
+    surface, // Preferences page and tooltips
+    button, // Push buttons
     // Content
     editor,
     text,

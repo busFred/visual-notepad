@@ -46,6 +46,7 @@ enum ItemIndex {
     AccentItem,
     MutedTextItem,
     LineNumbersItem,
+    ButtonsItem, // Not in the preview; chosen from the list.
     ItemCount
 };
 
@@ -409,6 +410,7 @@ QList<CustomizeColorsDialog::Item> CustomizeColorsDialog::items()
         {tr("Links and accent"), Role::accent, std::nullopt},
         {tr("Muted text"), Role::mutedText, std::nullopt},
         {tr("Line numbers"), Role::gutterText, std::nullopt},
+        {tr("Buttons"), Role::button, Role::text},
     };
 }
 
