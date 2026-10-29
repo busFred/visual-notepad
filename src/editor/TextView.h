@@ -169,6 +169,17 @@ public Q_SLOTS:
     void outdent();
     void toggleLineComment();
 
+public:
+    // Markdown formatting commands (no-ops while read-only).
+    enum class MarkdownFormat {
+        Bold, Italic, Underline, Strikethrough, InlineCode,
+        Heading1, Heading2, Heading3, Heading4, Heading5, Heading6,
+        HeadingUp, HeadingDown,
+        Quote, OrderedList, BulletList, TaskList,
+        Link, CodeBlock
+    };
+    void formatMarkdown(MarkdownFormat format);
+
 Q_SIGNALS:
     void cursorPositionChanged();
     void selectionChanged();
@@ -321,6 +332,14 @@ private:
     void moveLines(int direction);
     void copyLines(int direction);
     QString indentUnit() const;
+    // Markdown formatting (TextViewFormat.cpp).
+    void replaceRange(int from, int to, const QString &text);
+    void toggleInline(const QString &open, const QString &close);
+    void setHeading(int level);
+    void shiftHeading(int direction);
+    void toggleLinePrefix(MarkdownFormat kind);
+    void insertLink();
+    void wrapInCodeBlock();
 
     // Caret helpers.
     void moveCarets(QTextCursor::MoveOperation op, bool select);

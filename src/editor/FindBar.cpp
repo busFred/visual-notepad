@@ -450,6 +450,18 @@ bool FindBar::eventFilter(QObject *watched, QEvent *event)
         field->style()->polish(field);
         return false;
     }
+    if (event->type() == QEvent::ShortcutOverride) {
+        // The option toggles (Alt+C ...) win over window shortcuts such as
+        // Format > Task List.
+        auto *key = static_cast<QKeyEvent *>(event);
+        if ((key->modifiers() & ~Qt::KeypadModifier) == Qt::AltModifier
+            && (key->key() == Qt::Key_C || key->key() == Qt::Key_W || key->key() == Qt::Key_R
+                || key->key() == Qt::Key_P)) {
+            event->accept();
+            return true;
+        }
+        return false;
+    }
     if (event->type() != QEvent::KeyPress)
         return false;
 

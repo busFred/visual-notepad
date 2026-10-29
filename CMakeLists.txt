@@ -59,6 +59,7 @@ add_library(vn_app STATIC
     src/editor/Search.cpp
     src/editor/Search.h
     src/editor/TextView.cpp
+    src/editor/TextViewFormat.cpp
     src/editor/TextView.h
     src/markdown/BlockRenderer.cpp
     src/markdown/BlockRenderer.h
