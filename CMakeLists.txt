@@ -46,6 +46,8 @@ add_library(vn_app STATIC
     src/Session.h
     src/Settings.cpp
     src/Settings.h
+    src/TextFile.cpp
+    src/TextFile.h
     src/Theme.cpp
     src/Theme.h
     src/WelcomeView.cpp

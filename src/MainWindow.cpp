@@ -26,6 +26,7 @@
 #include <QGuiApplication>
 #include <QMimeDatabase>
 #include <QPushButton>
+#include <QSet>
 #include <QUrl>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -619,15 +620,18 @@ bool MainWindow::openFile(const QString &path)
         }
     }
 
-    auto *tab = new DocumentTab;
-    if (!tab->load(path)) {
-        Settings::instance().removeRecentFile(path);
-        QMessageBox::warning(this, tr("Open File"),
-                             tr("Could not open %1:\n%2").arg(QDir::toNativeSeparators(path), tab->errorString()));
-        delete tab;
-        return false;
+    // Open in another window: a new tab on the same document.
+    std::shared_ptr<TextFile> file = TextFile::find(path);
+    if (!file) {
+        file = TextFile::create();
+        if (!file->load(path)) {
+            Settings::instance().removeRecentFile(path);
+            QMessageBox::warning(this, tr("Open File"),
+                                 tr("Could not open %1:\n%2").arg(QDir::toNativeSeparators(path), file->errorString()));
+            return false;
+        }
     }
-    addTab(tab);
+    addTab(new DocumentTab(file));
     Settings::instance().addRecentFile(QFileInfo(path).absoluteFilePath());
     return true;
 }
@@ -644,6 +648,7 @@ void MainWindow::addTab(DocumentTab *tab, EditorGroup *group, int index)
     activateGroup(group);
 
     connect(tab, &DocumentTab::modificationChanged, this, [this, tab] { updateTabTitle(tab); });
+    connect(tab, &DocumentTab::titleChanged, this, [this, tab] { updateTabTitle(tab); });
     connect(tab, &DocumentTab::cursorPositionChanged, this, [this, tab] {
         if (tab == currentTab())
             updateStatus();
@@ -708,11 +713,70 @@ void MainWindow::openWithDialog()
         openFile(path);
 }
 
+namespace {
+
+std::function<MainWindow::SaveConflictChoice(DocumentTab *)> &saveConflictHandler()
+{
+    static std::function<MainWindow::SaveConflictChoice(DocumentTab *)> handler;
+    return handler;
+}
+
+} // namespace
+
+void MainWindow::setSaveConflictHandler(std::function<SaveConflictChoice(DocumentTab *)> handler)
+{
+    saveConflictHandler() = std::move(handler);
+}
+
+MainWindow::SaveConflictChoice MainWindow::askSaveConflict(DocumentTab *tab)
+{
+    if (const auto &handler = saveConflictHandler())
+        return handler(tab);
+    // VS Code's save conflict notification, without Compare (not yet).
+    QMessageBox box(QMessageBox::Warning, productName(),
+                    tr("%1 has been changed on disk since you opened or last saved it.").arg(tab->displayName()),
+                    QMessageBox::NoButton, this);
+    box.setInformativeText(tr("Overwrite it with your version, or revert to the version on disk and lose your changes?"));
+    QPushButton *overwrite = box.addButton(tr("Overwrite"), QMessageBox::AcceptRole);
+    QPushButton *revert = box.addButton(tr("Revert"), QMessageBox::DestructiveRole);
+    box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::Cancel);
+    box.exec();
+    if (box.clickedButton() == overwrite)
+        return SaveConflictChoice::Overwrite;
+    if (box.clickedButton() == revert)
+        return SaveConflictChoice::Revert;
+    return SaveConflictChoice::Cancel;
+}
+
+bool MainWindow::resolveSaveConflict(DocumentTab *tab)
+{
+    TextFile *file = tab->file();
+    bool ok = false;
+    switch (askSaveConflict(tab)) {
+    case SaveConflictChoice::Overwrite:
+        ok = file->save(file->path(), true);
+        break;
+    case SaveConflictChoice::Revert:
+        // Nothing is left unsaved afterwards, which is what callers ask.
+        ok = file->revert();
+        break;
+    case SaveConflictChoice::Cancel:
+        return false;
+    }
+    if (!ok)
+        QMessageBox::warning(this, tr("Save"), tr("Could not save %1:\n%2")
+                                                   .arg(QDir::toNativeSeparators(file->path()), file->errorString()));
+    return ok;
+}
+
 bool MainWindow::save(DocumentTab *tab)
 {
     if (tab->path().isEmpty())
         return saveAs(tab);
     if (!tab->save(tab->path())) {
+        if (tab->file()->hasSaveConflict())
+            return resolveSaveConflict(tab);
         QMessageBox::warning(this, tr("Save"), tr("Could not save %1:\n%2")
                                                    .arg(QDir::toNativeSeparators(tab->path()), tab->errorString()));
         return false;
@@ -769,8 +833,10 @@ bool MainWindow::confirmDiscard(DocumentTab *tab)
 bool MainWindow::closeTab(EditorGroup *group, int index)
 {
     DocumentTab *tab = group->tab(index);
-    if (!tab || !confirmDiscard(tab))
+    // Only the last tab of a document asks; the others just go.
+    if (!tab || (tab->otherViews().isEmpty() && !confirmDiscard(tab)))
         return false;
+    tab->setClosing();
     group->removeTab(group->indexOf(tab));
     tab->deleteLater();
     // Its changes were saved or discarded; drop the backup now.
@@ -1067,12 +1133,23 @@ void MainWindow::closeEvent(QCloseEvent *event)
                 return;
             }
         } else {
-            for (DocumentTab *tab : tabs()) {
+            // Once per document, and not for one still shown in another window.
+            const QList<DocumentTab *> closing = tabs();
+            QSet<const TextFile *> asked;
+            for (DocumentTab *tab : closing) {
+                const QList<DocumentTab *> others = tab->otherViews();
+                const bool elsewhere = std::any_of(others.begin(), others.end(),
+                                                   [&](DocumentTab *other) { return !closing.contains(other); });
+                if (elsewhere || asked.contains(tab->file()))
+                    continue;
+                asked.insert(tab->file());
                 if (!confirmDiscard(tab)) {
                     event->ignore();
                     return;
                 }
             }
+            for (DocumentTab *tab : closing)
+                tab->setClosing();
             sync = true;
         }
     }
@@ -1088,6 +1165,10 @@ bool MainWindow::event(QEvent *event)
 {
     if (event->type() == QEvent::WindowDeactivate && Settings::instance().text(key::autoSave) == QLatin1String("onFocusChange"))
         autoSaveAll();
+    // Like VS Code's TextFileEditorTracker: look at the disk again on return,
+    // in case a change notification was missed.
+    if (event->type() == QEvent::WindowActivate)
+        TextFile::checkAllOnDisk();
     return QMainWindow::event(event);
 }
 
@@ -1101,6 +1182,13 @@ void MainWindow::autoSave(DocumentTab *tab)
     if (!tab->isModified() || tab->path().isEmpty())
         return;
     if (!tab->save(tab->path())) {
+        // Never overwrite a file changed on disk without asking.
+        if (tab->file()->hasSaveConflict()) {
+            statusBar()->showMessage(tr("Auto save skipped: %1 changed on disk. Save it to choose which version to keep.")
+                                         .arg(QDir::toNativeSeparators(tab->path())),
+                                     5000);
+            return;
+        }
         statusBar()->showMessage(
             tr("Auto save failed for %1: %2").arg(QDir::toNativeSeparators(tab->path()), tab->errorString()), 5000);
         return;
@@ -1304,7 +1392,10 @@ void MainWindow::onCurrentTabChanged()
         && Settings::instance().text(key::autoSave) == QLatin1String("onFocusChange"))
         autoSave(m_previousTab);
     m_previousTab = tab;
-    setWindowTitle(tab ? tr("%1 — %2").arg(tab->displayName(), productName()) : productName());
+    if (tab)
+        updateTabTitle(tab);
+    else
+        setWindowTitle(productName());
     updateStatus();
     updateOutline();
     updateOutlineVisibility();
@@ -1317,10 +1408,12 @@ void MainWindow::updateTabTitle(DocumentTab *tab)
     if (!group)
         return;
     const int index = group->indexOf(tab);
-    group->setTabText(index, tab->isModified() ? QStringLiteral("● ") + tab->displayName() : tab->displayName());
+    // VS Code marks an editor whose file was deleted on disk.
+    const QString name = tab->file()->isOrphaned() ? tr("%1 (deleted)").arg(tab->displayName()) : tab->displayName();
+    group->setTabText(index, tab->isModified() ? QStringLiteral("● ") + name : name);
     group->setTabToolTip(index, QDir::toNativeSeparators(tab->path()));
     if (tab == currentTab())
-        setWindowTitle(tr("%1 — %2").arg(tab->displayName(), productName()));
+        setWindowTitle(tr("%1 — %2").arg(name, productName()));
 }
 
 void MainWindow::updateStatus()

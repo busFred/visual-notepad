@@ -3,6 +3,7 @@
 #include "DocumentTab.h"
 #include "MainWindow.h"
 #include "Settings.h"
+#include "TextFile.h"
 #include "editor/TextView.h"
 #include "markdown/VisualView.h"
 
@@ -10,6 +11,7 @@
 #include <QDir>
 #include <QFile>
 #include <QGuiApplication>
+#include <QHash>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPointer>
@@ -38,7 +40,6 @@ namespace {
 
 // At most this long between a change and its backup.
 constexpr int backupDelayMs = 2000;
-constexpr char backupProperty[] = "vnBackup";
 
 QString &dataDirStorage()
 {
@@ -220,7 +221,9 @@ void SessionManager::onCommitData(QSessionManager &)
 
 QString SessionManager::writeBackup(DocumentTab *tab)
 {
-    QString name = tab->property(backupProperty).toString();
+    // One backup per document, however many tabs show it.
+    TextFile *document = tab->file();
+    QString name = document->backupName();
     if (name.isEmpty())
         name = QUuid::createUuid().toString(QUuid::WithoutBraces);
     if (!QDir().mkpath(backupsDir()))
@@ -231,7 +234,7 @@ QString SessionManager::writeBackup(DocumentTab *tab)
     const QByteArray bytes = tab->text().toUtf8();
     if (file.write(bytes) != bytes.size() || !file.commit())
         return {};
-    tab->setProperty(backupProperty, name);
+    document->setBackupName(name);
     return name;
 }
 
@@ -242,6 +245,8 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
 
     QList<DocumentTab *> failed;
     QJsonArray windows;
+    // Tabs sharing a document share its backup, written once.
+    QHash<const TextFile *, QString> written;
     for (MainWindow *window : std::as_const(m_windows)) {
         QJsonArray tabs;
         int current = 0;
@@ -250,9 +255,12 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
             const bool unsaved = tab->isModified() || (untitled && !tab->text().isEmpty());
             QString backup;
             if (unsaved && hotExit() && !skipBackup.contains(tab)) {
-                backup = writeBackup(tab);
+                const auto it = written.constFind(tab->file());
+                backup = it != written.constEnd() ? *it : writeBackup(tab);
                 if (backup.isEmpty())
                     failed.append(tab);
+                else
+                    written.insert(tab->file(), backup);
             }
             if (untitled && backup.isEmpty())
                 continue;
@@ -262,6 +270,14 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
             if (!backup.isEmpty()) {
                 entry[QStringLiteral("backup")] = backup;
                 entry[QStringLiteral("modified")] = tab->isModified();
+                // What the edits were based on, to notice disk changes made
+                // while the app was not running.
+                const TextFile::DiskState disk = tab->file()->diskBaseline();
+                if (!untitled && disk.known) {
+                    entry[QStringLiteral("diskModified")] = disk.modified.toMSecsSinceEpoch();
+                    entry[QStringLiteral("diskSize")] = disk.size;
+                    entry[QStringLiteral("diskHash")] = QString::fromLatin1(disk.hash.toHex());
+                }
             }
             entry[QStringLiteral("encoding")] = tab->encoding();
             entry[QStringLiteral("crlf")] = tab->lineEnding() == DocumentTab::LineEnding::CRLF;
@@ -330,10 +346,13 @@ bool SessionManager::prepareQuit()
 {
     // A normal quit asks; recovery is only for closes that could not.
     QList<DocumentTab *> tabs;
+    QSet<const TextFile *> asked;
     for (MainWindow *window : QList<MainWindow *>(m_windows)) {
         for (DocumentTab *tab : window->tabs()) {
-            if (!window->confirmDiscard(tab))
+            // Once per document, whichever tabs show it.
+            if (!asked.contains(tab->file()) && !window->confirmDiscard(tab))
                 return false;
+            asked.insert(tab->file());
             tabs.append(tab);
         }
     }
@@ -380,6 +399,8 @@ bool SessionManager::restore()
     m_carried = {};
 
     int created = 0;
+    // Entries for one document (several tabs on it) restore into one.
+    QHash<QString, std::shared_ptr<TextFile>> restoredBackups;
     for (const QJsonValue &windowValue : windows) {
         const QJsonObject windowObject = windowValue.toObject();
         auto *window = new MainWindow;
@@ -396,29 +417,48 @@ bool SessionManager::restore()
             const auto lineEnding = entry.value(QStringLiteral("crlf")).toBool() ? DocumentTab::LineEnding::CRLF
                                                                                  : DocumentTab::LineEnding::LF;
 
-            auto *tab = new DocumentTab;
-            bool ok = false;
-            if (!backupName.isEmpty()) {
-                QFile backup(backupsDir() + u'/' + backupName);
-                if (backup.open(QIODevice::ReadOnly)) {
-                    tab->loadBackup(path, QString::fromUtf8(backup.readAll()), encoding, lineEnding);
-                    if (!entry.value(QStringLiteral("modified")).toBool(true))
-                        tab->document()->setModified(false);
-                    ok = true;
+            std::shared_ptr<TextFile> shared = !backupName.isEmpty() ? restoredBackups.value(backupName) : nullptr;
+            if (!shared && !path.isEmpty() && (!backupName.isEmpty() || wholeSession))
+                shared = TextFile::find(path);
+            DocumentTab *tab = nullptr;
+            if (shared) {
+                tab = new DocumentTab(shared);
+            } else {
+                tab = new DocumentTab;
+                bool ok = false;
+                if (!backupName.isEmpty()) {
+                    QFile backup(backupsDir() + u'/' + backupName);
+                    if (backup.open(QIODevice::ReadOnly)) {
+                        tab->loadBackup(path, QString::fromUtf8(backup.readAll()), encoding, lineEnding);
+                        if (!entry.value(QStringLiteral("modified")).toBool(true))
+                            tab->document()->setModified(false);
+                        if (entry.contains(QStringLiteral("diskHash"))) {
+                            TextFile::DiskState disk;
+                            disk.known = true;
+                            disk.modified = QDateTime::fromMSecsSinceEpoch(
+                                qint64(entry.value(QStringLiteral("diskModified")).toDouble()));
+                            disk.size = qint64(entry.value(QStringLiteral("diskSize")).toDouble());
+                            disk.hash = QByteArray::fromHex(entry.value(QStringLiteral("diskHash")).toString().toLatin1());
+                            tab->file()->setDiskBaseline(disk);
+                            tab->file()->scheduleDiskCheck();
+                        }
+                        restoredBackups.insert(backupName, tab->sharedFile());
+                        ok = true;
+                    }
                 }
+                // Only unsaved tabs come back when the session itself is not restored.
+                if (!ok && wholeSession && !path.isEmpty())
+                    ok = tab->load(path);
+                if (!ok) {
+                    delete tab;
+                    continue;
+                }
+                if (entry.contains(QStringLiteral("language")))
+                    tab->setLanguage(entry.value(QStringLiteral("language")).toString());
+                if (entry.contains(QStringLiteral("tabSize")) && entry.contains(QStringLiteral("insertSpaces")))
+                    tab->setIndentation({qBound(1, entry.value(QStringLiteral("tabSize")).toInt(), 16),
+                                         entry.value(QStringLiteral("insertSpaces")).toBool()});
             }
-            // Only unsaved tabs come back when the session itself is not restored.
-            if (!ok && wholeSession && !path.isEmpty())
-                ok = tab->load(path);
-            if (!ok) {
-                delete tab;
-                continue;
-            }
-            if (entry.contains(QStringLiteral("language")))
-                tab->setLanguage(entry.value(QStringLiteral("language")).toString());
-            if (entry.contains(QStringLiteral("tabSize")) && entry.contains(QStringLiteral("insertSpaces")))
-                tab->setIndentation({qBound(1, entry.value(QStringLiteral("tabSize")).toInt(), 16),
-                                     entry.value(QStringLiteral("insertSpaces")).toBool()});
             tab->setViewMode(modeFromString(entry.value(QStringLiteral("mode")).toString()));
             window->adoptTab(tab);
 

@@ -72,6 +72,12 @@ public:
     // Asks to save a modified tab; false if the user cancelled.
     bool confirmDiscard(DocumentTab *tab);
 
+    // A save found the file changed on disk since it was loaded or saved.
+    enum class SaveConflictChoice { Overwrite, Revert, Cancel };
+    // Tests answer the conflict prompt through this instead of a dialog;
+    // an empty function restores the dialog.
+    static void setSaveConflictHandler(std::function<SaveConflictChoice(DocumentTab *)> handler);
+
 protected:
     bool event(QEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
@@ -100,6 +106,9 @@ private:
     void openWithDialog();
     bool save(DocumentTab *tab);
     bool saveAs(DocumentTab *tab);
+    SaveConflictChoice askSaveConflict(DocumentTab *tab);
+    // Asks and acts; true when nothing is left unsaved.
+    bool resolveSaveConflict(DocumentTab *tab);
     bool closeTab(EditorGroup *group, int index);
     bool closeTabs(EditorGroup *group, int index, CloseScope scope);
     void showTabContextMenu(EditorGroup *group, int index, const QPoint &globalPos);
