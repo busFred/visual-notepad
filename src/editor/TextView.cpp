@@ -676,6 +676,17 @@ void TextView::updateScrollBars()
     QScrollBar *v = verticalScrollBar();
     const int rows = rowCount();
     const int pageRows = qMax(1, viewport()->height() / qMax(1, m_lineHeight));
+    // Like VS Code (editor.scrollBeyondLastLine), the last line can scroll
+    // to the top, so even a short document has a scroll range. Show the bar
+    // only when the document doesn't fit; the wheel still scrolls past the end.
+    // Rows differ in height in the rendered view, so measure until full.
+    bool fits = true;
+    qreal contentHeight = m_topMargin;
+    for (int i = 0; i < rows && fits; ++i) {
+        contentHeight += rowHeight(i);
+        fits = contentHeight <= viewport()->height();
+    }
+    const Qt::ScrollBarPolicy policy = fits ? Qt::ScrollBarAlwaysOff : Qt::ScrollBarAsNeeded;
     v->setRange(0, qMax(0, rows - 1));
     v->setPageStep(pageRows);
     v->setSingleStep(1);
@@ -690,6 +701,9 @@ void TextView::updateScrollBars()
         h->setSingleStep(int(m_charWidth * 2));
     }
     m_updatingScrollBars = false;
+    // Last: a policy change resizes the viewport, which re-enters here.
+    if (verticalScrollBarPolicy() != policy)
+        setVerticalScrollBarPolicy(policy);
 }
 
 // Tab and Shift+Tab indent and outdent; they never move focus out of the

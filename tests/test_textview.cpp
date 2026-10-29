@@ -9,6 +9,7 @@
 #include <QVBoxLayout>
 #include <QClipboard>
 #include <QTemporaryDir>
+#include <QScrollBar>
 #include <QTest>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -58,6 +59,7 @@ private Q_SLOTS:
     void autoCloseSettingsOff();
     void autoCloseIsOneUndoStep();
     void tabIndentsSingleLineSelection();
+    void scrollBarOnlyWhenDocumentOverflows();
     void tabStaysInEditorBesideOtherWidgets();
     void addCursorsToLineEnds();
     void columnSelectWithMouse();
@@ -877,6 +879,21 @@ void TestTextView::tabIndentsSingleLineSelection()
     QCOMPARE(text(), QStringLiteral("    abc def"));
     QTest::keyClick(m_view, Qt::Key_Backtab);
     QCOMPARE(text(), QStringLiteral("abc def"));
+}
+
+void TestTextView::scrollBarOnlyWhenDocumentOverflows()
+{
+    setText(QStringLiteral("one\ntwo\nthree"));
+    QCOMPARE(m_view->verticalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);
+    // The last line can still scroll to the top, like VS Code.
+    QVERIFY(m_view->verticalScrollBar()->maximum() > 0);
+    QStringList lines;
+    for (int i = 0; i < 200; ++i)
+        lines << QString::number(i);
+    setText(lines.join(QLatin1Char('\n')));
+    QCOMPARE(m_view->verticalScrollBarPolicy(), Qt::ScrollBarAsNeeded);
+    setText(QStringLiteral("short"));
+    QCOMPARE(m_view->verticalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);
 }
 
 QTEST_MAIN(TestTextView)
