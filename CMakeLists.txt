@@ -65,7 +65,7 @@ file(GLOB vn_icons RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS resources/ic
 qt_add_resources(vn_app vn_resources
     PREFIX /vn
     BASE resources
-    FILES resources/themes/light-grey-warm.theme ${vn_icons}
+    FILES resources/themes/light-grey-warm.theme resources/app/visnotepad.svg ${vn_icons}
 )
 target_compile_definitions(vn_app PUBLIC VN_VERSION="${PROJECT_VERSION}")
 target_compile_definitions(vn_app PRIVATE VN_MICROTEX_RES="${VN_MICROTEX_RES_BUILD}")

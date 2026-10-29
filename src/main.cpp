@@ -3,6 +3,7 @@
 #include "Theme.h"
 
 #include <QApplication>
+#include <QIcon>
 #include <QCommandLineParser>
 
 int main(int argc, char *argv[])
@@ -10,6 +11,7 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("visnotepad"));
     QApplication::setApplicationDisplayName(QStringLiteral("Visual Notepad"));
+    QApplication::setWindowIcon(QIcon(QStringLiteral(":/vn/app/visnotepad.svg")));
     QApplication::setApplicationVersion(QStringLiteral(VN_VERSION));
     QApplication::setOrganizationName(QStringLiteral("visnotepad"));
 

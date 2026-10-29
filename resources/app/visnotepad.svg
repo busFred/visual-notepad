@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Page with a folded corner -->
+  <path d="M40 20h132l44 44v166a8 8 0 0 1-8 8H40a8 8 0 0 1-8-8V28a8 8 0 0 1 8-8z" fill="#EFEEEB" stroke="#7C766A" stroke-width="6"/>
+  <path d="M172 20v36a8 8 0 0 0 8 8h36" fill="#D4D0C8" stroke="#7C766A" stroke-width="6" stroke-linejoin="round"/>
+  <!-- Navy header bar -->
+  <rect x="35" y="23" width="134" height="30" fill="#0A246A"/>
+  <!-- Divider between source (left) and visual (right) -->
+  <path d="M124 72v148" stroke="#BAB5AB" stroke-width="5"/>
+  <!-- Source side: markup brackets and lines -->
+  <path d="M62 84l-12 12 12 12M86 84l12 12-12 12" fill="none" stroke="#0A246A" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M52 132h56M52 152h44M52 172h56M52 192h34" stroke="#7C766A" stroke-width="7" stroke-linecap="round"/>
+  <!-- Visual side: heading and text lines -->
+  <path d="M142 94h56" stroke="#222222" stroke-width="12" stroke-linecap="round"/>
+  <path d="M142 132h58M142 152h46M142 172h58M142 192h38" stroke="#6F82AD" stroke-width="7" stroke-linecap="round"/>
+</svg>
