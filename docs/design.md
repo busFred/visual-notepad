@@ -26,10 +26,10 @@ servers, completion, diagnostics and other IDE features.
 |---|---|---|
 | UI | Qt 6 Widgets (C++20), Fusion style | Qt shipped as shared libraries (LGPLv3) |
 | Highlighting | KSyntaxHighlighting (KDE Frameworks 6) | Code blocks and text files |
-| Markdown parsing | markdown-rs, in the Rust `vn-core` crate | GFM, math, front matter, source positions |
-| Mermaid | mermaid-rs-renderer (Rust, SVG via resvg) | Planned |
-| Math | MicroTeX, Qt backend | Planned; supports `\newcommand` |
-| Formatter | comrak | Optional, planned |
+| Markdown parsing | comrak, in the Rust `vn-core` crate | GFM, math, front matter, source positions |
+| Mermaid | mermaid-rs-renderer (Rust, rasterized with resvg) | |
+| Math | MicroTeX, Qt backend | User macros via `\newcommand` |
+| Formatter | comrak | Edit > Format Document |
 | C++/Rust glue | cxx, built by Corrosion | `src/` includes `vn_core_bridge/lib.h` |
 
 The hybrid editor is a port of `@vscode/markdown-editor` 0.0.2-119 (MIT),
@@ -104,11 +104,16 @@ Above/Below is Shift+Alt+Up/Down, Copy Line is Ctrl+Shift+Alt+Up/Down.
 
 ## Milestones
 
-1. Window, menus, tabs, status bar; text editor core with multiple cursors
-   and highlighting. *(Shell done; editor core is a QPlainTextEdit
-   placeholder.)*
-2. Find bar, Preferences.
-3. Markdown parse bridge and hybrid editor port.
-4. Preview modes, then math and Mermaid.
-5. Link features.
-6. Packaging for Windows and Linux, x86-64 and ARM64.
+1. Window, menus, tabs, status bar; multi-cursor editor core with
+   highlighting. *Done.*
+2. Find/replace bar, Preferences with custom shortcuts. *Done.*
+3. Visual Editor and Source / Visual modes. *Done.*
+4. Math (MicroTeX) and Mermaid (mermaid-rs-renderer). *Done.*
+5. Links, encodings, session restore, editor groups and tab dragging,
+   Markdown conveniences. *Done; needs testing on a real desktop.*
+6. Packaging for Windows and Linux, x86-64 and ARM64. *Deferred until
+   the user is satisfied with the app.*
+
+The Markdown parser is comrak (markdown-rs was 170x slower on large
+files). MicroTeX's res/greek and res/cyrillic fonts are GPLv3; review
+before distribution.
