@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "Session.h"
 #include "Theme.h"
 
 #include <QApplication>
@@ -21,13 +22,26 @@ int main(int argc, char *argv[])
 
     vn::theme::apply(app);
 
-    vn::MainWindow window;
+    auto &session = vn::SessionManager::instance();
+    session.start();
     const QStringList files = parser.positionalArguments();
-    for (const QString &file : files)
-        window.openFile(file);
-    if (files.isEmpty())
-        window.newFile();
-    window.show();
+    if (files.isEmpty()) {
+        if (!session.restore()) {
+            auto *window = new vn::MainWindow;
+            window->setAttribute(Qt::WA_DeleteOnClose);
+            window->newFile();
+            window->show();
+        }
+    } else {
+        // Only the given files open; unsaved work from the last session stays
+        // in its backups for the next start without arguments.
+        session.carryOverUnsaved();
+        auto *window = new vn::MainWindow;
+        window->setAttribute(Qt::WA_DeleteOnClose);
+        for (const QString &file : files)
+            window->openFile(file);
+        window->show();
+    }
 
     return app.exec();
 }

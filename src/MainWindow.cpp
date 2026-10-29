@@ -3,6 +3,7 @@
 #include "Commands.h"
 #include "EditorGroup.h"
 #include "PreferencesDialog.h"
+#include "Session.h"
 #include "Settings.h"
 #include "Theme.h"
 #include "editor/FindBar.h"
@@ -168,10 +169,12 @@ MainWindow::MainWindow(QWidget *parent)
     createStatusBar();
     statusBar()->setVisible(m_statusBarAction->isChecked());
     onCurrentTabChanged();
+    SessionManager::instance().registerWindow(this);
 }
 
 MainWindow::~MainWindow()
 {
+    SessionManager::instance().unregisterWindow(this);
     // Child widgets are destroyed after this destructor; stop them signalling
     // back into a half-destroyed window (e.g. a tab bar's currentChanged).
     const auto children = findChildren<QObject *>();
@@ -238,7 +241,7 @@ void MainWindow::createActions()
     });
     makeAction(QStringLiteral("file.closeTab"), [this] { closeTab(m_group->currentIndex()); });
     makeAction(QStringLiteral("file.closeWindow"), [this] { close(); });
-    makeAction(QStringLiteral("file.quit"), [] { QApplication::closeAllWindows(); });
+    makeAction(QStringLiteral("file.quit"), [] { SessionManager::instance().quit(); });
 
     makeAction(QStringLiteral("edit.undo"), onEditor(&TextView::undo));
     makeAction(QStringLiteral("edit.redo"), onEditor(&TextView::redo));
@@ -507,6 +510,27 @@ void MainWindow::addTab(DocumentTab *tab)
         if (tab->isMarkdown())
             m_outlineTimer->start();
     });
+    // Anything that changes what a session would store.
+    auto &session = SessionManager::instance();
+    connect(tab, &DocumentTab::textChanged, &session, &SessionManager::markDirty);
+    connect(tab, &DocumentTab::modificationChanged, &session, &SessionManager::markDirty);
+    connect(tab, &DocumentTab::formatChanged, &session, &SessionManager::markDirty);
+    session.markDirty();
+
+    // One timer per tab, restarted on each edit; it travels with the tab.
+    QTimer *saveTimer = autoSaveTimer(tab);
+    if (!saveTimer) {
+        saveTimer = new QTimer(tab);
+        saveTimer->setObjectName(QStringLiteral("autoSave"));
+        saveTimer->setSingleShot(true);
+        saveTimer->setInterval(1000);
+    }
+    connect(saveTimer, &QTimer::timeout, this, [this, tab] { autoSave(tab); });
+    connect(tab, &DocumentTab::textChanged, this, [this, tab, saveTimer] {
+        if (Settings::instance().text(key::autoSave) == QLatin1String("afterDelay") && tab->isModified()
+            && !tab->path().isEmpty())
+            saveTimer->start();
+    });
     connect(tab, &DocumentTab::linkActivated, this, [this, tab](const QString &url) { openLink(tab, url); });
     connect(tab, &DocumentTab::textChanged, this, [this, tab] {
         if (tab == currentTab() && tab->isMarkdown())
@@ -582,6 +606,25 @@ bool MainWindow::closeTab(int index)
 int MainWindow::tabCount() const
 {
     return m_group->count();
+}
+
+QList<DocumentTab *> MainWindow::tabs() const
+{
+    QList<DocumentTab *> result;
+    for (int i = 0; i < m_group->count(); ++i)
+        result.append(m_group->tab(i));
+    return result;
+}
+
+int MainWindow::currentTabIndex() const
+{
+    return m_group->currentIndex();
+}
+
+void MainWindow::setCurrentTabIndex(int index)
+{
+    if (index >= 0 && index < m_group->count())
+        m_group->setCurrentIndex(index);
 }
 
 bool MainWindow::closeTabs(int index, CloseScope scope)
@@ -759,13 +802,70 @@ void MainWindow::showLanguageMenu()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
-    for (int i = 0; i < m_group->count(); ++i) {
-        if (!confirmDiscard(m_group->tab(i))) {
-            event->ignore();
-            return;
+    // The final quit uses hot exit, which saves instead of asking; a single
+    // window among several closes normally.
+    auto &session = SessionManager::instance();
+    if (!session.isQuitting()) {
+        if (session.isLastWindow(this)) {
+            if (!session.prepareQuit()) {
+                event->ignore();
+                return;
+            }
+        } else {
+            for (int i = 0; i < m_group->count(); ++i) {
+                if (!confirmDiscard(m_group->tab(i))) {
+                    event->ignore();
+                    return;
+                }
+            }
         }
     }
+    session.unregisterWindow(this);
     event->accept();
+}
+
+bool MainWindow::event(QEvent *event)
+{
+    if (event->type() == QEvent::WindowDeactivate && Settings::instance().text(key::autoSave) == QLatin1String("onFocusChange"))
+        autoSaveAll();
+    return QMainWindow::event(event);
+}
+
+QTimer *MainWindow::autoSaveTimer(DocumentTab *tab) const
+{
+    return tab->findChild<QTimer *>(QStringLiteral("autoSave"), Qt::FindDirectChildrenOnly);
+}
+
+void MainWindow::autoSave(DocumentTab *tab)
+{
+    if (!tab->isModified() || tab->path().isEmpty())
+        return;
+    if (!tab->save(tab->path())) {
+        statusBar()->showMessage(
+            tr("Auto save failed for %1: %2").arg(QDir::toNativeSeparators(tab->path()), tab->errorString()), 5000);
+        return;
+    }
+    updateTabTitle(tab);
+}
+
+void MainWindow::autoSaveAll()
+{
+    for (DocumentTab *tab : tabs())
+        autoSave(tab);
+}
+
+void MainWindow::applyAutoSave()
+{
+    const QString mode = Settings::instance().text(key::autoSave);
+    for (DocumentTab *tab : tabs()) {
+        QTimer *timer = autoSaveTimer(tab);
+        if (!timer)
+            continue;
+        if (mode != QLatin1String("afterDelay"))
+            timer->stop();
+        else if (tab->isModified() && !tab->path().isEmpty())
+            timer->start();
+    }
 }
 
 void MainWindow::moveTabToNewWindow(DocumentTab *tab)
@@ -773,6 +873,8 @@ void MainWindow::moveTabToNewWindow(DocumentTab *tab)
     if (!tab)
         return;
     tab->disconnect(this);
+    if (QTimer *timer = autoSaveTimer(tab))
+        timer->disconnect(this);
     m_group->removeTab(m_group->indexOf(tab));
 
     auto *window = new MainWindow;
@@ -841,6 +943,8 @@ void MainWindow::onSettingChanged(const QString &changedKey)
         updateOutlineVisibility();
     } else if (changedKey == QLatin1String(key::wordWrap)) {
         m_wrapAction->setChecked(settings.flag(key::wordWrap));
+    } else if (changedKey == QLatin1String(key::autoSave)) {
+        applyAutoSave();
     } else if (changedKey == QLatin1String(key::statusBar)) {
         m_statusBarAction->setChecked(settings.flag(key::statusBar));
         statusBar()->setVisible(settings.flag(key::statusBar));
@@ -865,6 +969,11 @@ void MainWindow::fillRecentMenu()
 void MainWindow::onCurrentTabChanged()
 {
     DocumentTab *tab = currentTab();
+    // Not for a tab that was just closed or moved away: its changes were discarded.
+    if (m_previousTab && m_previousTab != tab && m_group->indexOf(m_previousTab) >= 0
+        && Settings::instance().text(key::autoSave) == QLatin1String("onFocusChange"))
+        autoSave(m_previousTab);
+    m_previousTab = tab;
     setWindowTitle(tab ? tr("%1 — %2").arg(tab->displayName(), productName()) : productName());
     updateStatus();
     updateOutline();

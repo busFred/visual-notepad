@@ -37,3 +37,8 @@ qt_add_executable(test_files test_files.cpp)
 target_link_libraries(test_files PRIVATE vn_app Qt6::Test)
 add_test(NAME files COMMAND test_files)
 set_tests_properties(files PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+qt_add_executable(test_session test_session.cpp)
+target_link_libraries(test_session PRIVATE vn_app Qt6::Test)
+add_test(NAME session COMMAND test_session)
+set_tests_properties(session PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

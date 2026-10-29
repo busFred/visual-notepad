@@ -34,6 +34,8 @@ add_library(vn_app STATIC
     src/MainWindow.h
     src/PreferencesDialog.cpp
     src/PreferencesDialog.h
+    src/Session.cpp
+    src/Session.h
     src/Settings.cpp
     src/Settings.h
     src/Theme.cpp

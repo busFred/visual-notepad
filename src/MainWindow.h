@@ -4,6 +4,7 @@
 
 #include <QHash>
 #include <QMainWindow>
+#include <QPointer>
 
 #include <functional>
 
@@ -39,8 +40,15 @@ public:
     // Stops at the first tab whose unsaved-changes prompt is cancelled.
     bool closeTabs(int index, CloseScope scope);
     int tabCount() const;
+    // Tabs in strip order, for the session.
+    QList<DocumentTab *> tabs() const;
+    int currentTabIndex() const;
+    void setCurrentTabIndex(int index);
+    // Asks to save a modified tab; false if the user cancelled.
+    bool confirmDiscard(DocumentTab *tab);
 
 protected:
+    bool event(QEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
@@ -61,7 +69,6 @@ private:
     bool save(DocumentTab *tab);
     bool saveAs(DocumentTab *tab);
     bool closeTab(int index);
-    bool confirmDiscard(DocumentTab *tab);
     void moveTabToNewWindow(DocumentTab *tab);
     void showTabContextMenu(int index, const QPoint &globalPos);
     void revealInFileManager(const QString &path);
@@ -81,6 +88,13 @@ private:
     void fillRecentMenu();
     void openLink(DocumentTab *tab, const QString &url);
 
+    // Auto save: writes a modified tab that has a path; failures only reach
+    // the status bar.
+    QTimer *autoSaveTimer(DocumentTab *tab) const;
+    void autoSave(DocumentTab *tab);
+    void autoSaveAll();
+    void applyAutoSave();
+
     void onCurrentTabChanged();
     void updateTabTitle(DocumentTab *tab);
     void updateStatus();
@@ -88,6 +102,7 @@ private:
     void updateOutlineVisibility();
     void updateModeControls();
 
+    QPointer<DocumentTab> m_previousTab;
     QSplitter *m_groups;
     EditorGroup *m_group;
     EditorGroup *m_sideGroup = nullptr;

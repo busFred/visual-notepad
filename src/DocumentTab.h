@@ -38,6 +38,9 @@ public:
     // Returns false and sets errorString() on failure.
     bool load(const QString &path);
     bool save(const QString &path);
+    // Restores unsaved content saved by hot exit: the tab keeps `path` (empty
+    // for untitled), shows `content` and is marked modified.
+    void loadBackup(const QString &path, const QString &content, Encoding encoding, LineEnding lineEnding);
 
     QString path() const { return m_path; }
     QString displayName() const;
@@ -59,6 +62,7 @@ public:
     // text. An override lasts until the file is saved under a new name.
     QString definitionName() const;
     void setLanguage(const QString &definitionName);
+    bool languageOverridden() const { return m_languageOverridden; }
     QString text() const;
 
     ViewMode viewMode() const { return m_viewMode; }

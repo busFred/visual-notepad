@@ -295,6 +295,21 @@ bool DocumentTab::applyBytes(const QString &path, QByteArray bytes, Encoding enc
     return true;
 }
 
+void DocumentTab::loadBackup(const QString &path, const QString &content, Encoding encoding, LineEnding lineEnding)
+{
+    m_encoding = encoding;
+    m_lineEnding = lineEnding;
+    m_path = path;
+    m_languageOverridden = false;
+    updateDefinition();
+    m_doc->setPlainText(content);
+    m_editor->setTextCursor(QTextCursor(m_doc));
+    if (m_visual)
+        m_visual->setTextCursor(QTextCursor(m_doc));
+    m_doc->setModified(true);
+    Q_EMIT formatChanged();
+}
+
 bool DocumentTab::save(const QString &path)
 {
     QString content = text();
