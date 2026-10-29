@@ -83,7 +83,15 @@ QTreeWidget::item:hover, QTreeWidget::branch:hover { background: @sideBarHover; 
 QTreeWidget::item:selected, QTreeWidget::branch:selected { background: @selection; color: @text; }
 
 QLabel#EmptyGroup { background: @editor; color: @mutedText; }
-QPlainTextEdit { background: @editor; border: none; selection-background-color: @selection; selection-color: @text; }
+
+QScrollBar:vertical { background: @editor; width: 12px; margin: 0; border-left: 1px solid @sideBar; }
+QScrollBar:horizontal { background: @editor; height: 12px; margin: 0; border-top: 1px solid @sideBar; }
+QScrollBar::handle { background: @panelTitle; border-radius: 0; }
+QScrollBar::handle:hover { background: @divider; }
+QScrollBar::handle:vertical { min-height: 24px; margin: 0 2px; }
+QScrollBar::handle:horizontal { min-width: 24px; margin: 2px 0; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; border: none; }
+QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 
 QStatusBar { background: @statusBar; border-top: 1px solid @divider; min-height: 22px; }
 QStatusBar::item { border: none; }

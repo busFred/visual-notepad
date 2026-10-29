@@ -1,7 +1,8 @@
 #include "DocumentTab.h"
 
-#include "CodeEditor.h"
 #include "Theme.h"
+#include "editor/DocumentLayout.h"
+#include "editor/TextView.h"
 
 #include <KSyntaxHighlighting/Definition>
 #include <KSyntaxHighlighting/Repository>
@@ -17,6 +18,7 @@
 #include <QSaveFile>
 #include <QStringDecoder>
 #include <QTextBlock>
+#include <QTextDocument>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -89,21 +91,25 @@ private:
 
 DocumentTab::DocumentTab(QWidget *parent)
     : QWidget(parent)
-    , m_editor(new CodeEditor(this))
-    , m_pill(new EditorPill(this))
+    , m_doc(new QTextDocument(this))
 {
+    m_doc->setDocumentLayout(new DocumentLayout(m_doc));
+    m_doc->setUndoRedoEnabled(true);
+    m_editor = new TextView(m_doc, this);
+    m_pill = new EditorPill(this);
+
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->addWidget(m_editor);
 
-    m_highlighter = new KSyntaxHighlighting::SyntaxHighlighter(m_editor->document());
+    m_highlighter = new KSyntaxHighlighting::SyntaxHighlighter(m_doc);
     m_highlighter->setTheme(theme::syntaxTheme());
     updateDefinition();
 
-    connect(m_pill->lockButton(), &QToolButton::toggled, m_editor, &QPlainTextEdit::setReadOnly);
-    connect(m_editor, &QPlainTextEdit::modificationChanged, this, &DocumentTab::modificationChanged);
-    connect(m_editor, &QPlainTextEdit::cursorPositionChanged, this, &DocumentTab::cursorPositionChanged);
-    connect(m_editor, &QPlainTextEdit::textChanged, this, &DocumentTab::textChanged);
+    connect(m_pill->lockButton(), &QToolButton::toggled, m_editor, &TextView::setReadOnly);
+    connect(m_doc, &QTextDocument::modificationChanged, this, &DocumentTab::modificationChanged);
+    connect(m_editor, &TextView::cursorPositionChanged, this, &DocumentTab::cursorPositionChanged);
+    connect(m_doc, &QTextDocument::contentsChanged, this, &DocumentTab::textChanged);
     updatePill();
 }
 
@@ -134,8 +140,9 @@ bool DocumentTab::load(const QString &path)
 
     m_path = path;
     updateDefinition();
-    m_editor->setPlainText(content);
-    m_editor->document()->setModified(false);
+    m_doc->setPlainText(content);
+    m_doc->setModified(false);
+    m_editor->setTextCursor(QTextCursor(m_doc));
     return true;
 }
 
@@ -162,7 +169,7 @@ bool DocumentTab::save(const QString &path)
     m_path = path;
     if (renamed)
         updateDefinition();
-    m_editor->document()->setModified(false);
+    m_doc->setModified(false);
     return true;
 }
 
@@ -173,7 +180,7 @@ QString DocumentTab::displayName() const
 
 bool DocumentTab::isModified() const
 {
-    return m_editor->document()->isModified();
+    return m_doc->isModified();
 }
 
 bool DocumentTab::isMarkdown() const
@@ -187,23 +194,20 @@ QString DocumentTab::languageName() const
     return def.isValid() ? def.translatedName() : tr("Plain Text");
 }
 
-QPlainTextEdit *DocumentTab::editor() const
-{
-    return m_editor;
-}
-
 QString DocumentTab::text() const
 {
-    return m_editor->toPlainText();
+    // toPlainText() would turn non-breaking spaces into spaces.
+    QString text = m_doc->toRawText();
+    text.replace(QChar::ParagraphSeparator, u'\n');
+    return text;
 }
 
 void DocumentTab::goToLine(int line)
 {
-    const QTextBlock block = m_editor->document()->findBlockByNumber(line - 1);
+    const QTextBlock block = m_doc->findBlockByNumber(line - 1);
     if (!block.isValid())
         return;
-    QTextCursor cursor(block);
-    m_editor->setTextCursor(cursor);
+    m_editor->setTextCursor(QTextCursor(block));
     m_editor->centerCursor();
     m_editor->setFocus();
 }
@@ -215,6 +219,7 @@ void DocumentTab::updateDefinition()
     const auto def = m_path.isEmpty() ? repository.definitionForName(QStringLiteral("Markdown"))
                                       : repository.definitionForFileName(m_path);
     m_highlighter->setDefinition(def);
+    m_editor->setCommentMarker(def.singleLineCommentMarker());
     updatePill();
 }
 

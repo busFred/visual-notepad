@@ -6,7 +6,9 @@
 #include <QDockWidget>
 #include <QMenu>
 #include <QMenuBar>
-#include <QPlainTextEdit>
+#include "editor/TextView.h"
+
+#include <QTextDocument>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTemporaryDir>
@@ -97,10 +99,12 @@ void TestMainWindow::crlfIsPreserved()
     window.show();
     window.activateWindow();
     QVERIFY(QTest::qWaitForWindowActive(&window));
-    auto *editor = window.findChild<QPlainTextEdit *>();
+    auto *editor = window.findChild<vn::TextView *>();
     QVERIFY(editor);
-    QCOMPARE(editor->toPlainText(), QStringLiteral("a\nb\n"));
-    editor->appendPlainText(QStringLiteral("c"));
+    QCOMPARE(editor->document()->toPlainText(), QStringLiteral("a\nb\n"));
+    QTextCursor end(editor->document());
+    end.movePosition(QTextCursor::End);
+    end.insertText(QStringLiteral("\nc"));
 
     QTest::keySequence(editor, QKeySequence::Save);
     QFile file(path);

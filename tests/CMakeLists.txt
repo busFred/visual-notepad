@@ -7,3 +7,8 @@ set_tests_properties(mainwindow PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscree
 
 add_test(NAME core COMMAND cargo test --manifest-path ${PROJECT_SOURCE_DIR}/core/Cargo.toml
                            --target-dir ${CMAKE_BINARY_DIR}/cargo-test)
+
+qt_add_executable(test_textview test_textview.cpp)
+target_link_libraries(test_textview PRIVATE vn_app Qt6::Test)
+add_test(NAME textview COMMAND test_textview)
+set_tests_properties(textview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

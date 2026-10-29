@@ -4,7 +4,7 @@
 #include <QString>
 #include <QWidget>
 
-class QPlainTextEdit;
+class QTextDocument;
 
 namespace KSyntaxHighlighting {
 class SyntaxHighlighter;
@@ -12,8 +12,8 @@ class SyntaxHighlighter;
 
 namespace vn {
 
-class CodeEditor;
 class EditorPill;
+class TextView;
 
 class DocumentTab : public QWidget
 {
@@ -42,7 +42,8 @@ public:
     ViewMode viewMode() const { return m_viewMode; }
     void setViewMode(ViewMode mode);
 
-    QPlainTextEdit *editor() const;
+    QTextDocument *document() const { return m_doc; }
+    TextView *editor() const { return m_editor; }
     void goToLine(int line);
 
 Q_SIGNALS:
@@ -57,8 +58,9 @@ private:
     void updateDefinition();
     void updatePill();
 
+    QTextDocument *m_doc;
     KSyntaxHighlighting::SyntaxHighlighter *m_highlighter;
-    CodeEditor *m_editor;
+    TextView *m_editor;
     EditorPill *m_pill;
     QString m_path;
     QString m_error;

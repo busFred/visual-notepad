@@ -22,8 +22,6 @@ corrosion_add_cxxbridge(vn_core_bridge CRATE vn_core FILES lib.rs)
 
 # Everything except main() lives in a static library so tests can link it.
 add_library(vn_app STATIC
-    src/CodeEditor.cpp
-    src/CodeEditor.h
     src/DocumentTab.cpp
     src/DocumentTab.h
     src/EditorGroup.cpp
@@ -32,6 +30,10 @@ add_library(vn_app STATIC
     src/MainWindow.h
     src/Theme.cpp
     src/Theme.h
+    src/editor/DocumentLayout.cpp
+    src/editor/DocumentLayout.h
+    src/editor/TextView.cpp
+    src/editor/TextView.h
 )
 target_include_directories(vn_app PUBLIC src)
 

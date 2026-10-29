@@ -2,6 +2,7 @@
 
 #include "EditorGroup.h"
 #include "Theme.h"
+#include "editor/TextView.h"
 #include "vn_core_bridge/lib.h"
 
 #include <QAction>
@@ -17,7 +18,6 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPainter>
-#include <QPlainTextEdit>
 #include <QSizeGrip>
 #include <QSplitter>
 #include <QStatusBar>
@@ -173,8 +173,8 @@ void MainWindow::createActions()
     m_wrapAction->setChecked(true);
     m_wrapAction->setShortcut(keys("Alt+Z"));
     connect(m_wrapAction, &QAction::toggled, this, [this](bool on) {
-        for (auto *editor : findChildren<QPlainTextEdit *>())
-            editor->setLineWrapMode(on ? QPlainTextEdit::WidgetWidth : QPlainTextEdit::NoWrap);
+        for (auto *editor : findChildren<TextView *>())
+            editor->setWordWrap(on);
     });
 
     m_statusBarAction = new QAction(tr("Status Bar"), this);
@@ -195,7 +195,7 @@ void MainWindow::createMenus()
 
     // Items whose feature is not built yet are listed but disabled.
     const auto todo = [](QAction *action) { action->setEnabled(false); };
-    const auto forward = [this](void (QPlainTextEdit::*slot)()) {
+    const auto forward = [this](void (TextView::*slot)()) {
         return [this, slot] {
             if (auto *tab = currentTab())
                 (tab->editor()->*slot)();
@@ -228,36 +228,43 @@ void MainWindow::createMenus()
     file->addAction(tr("Quit"), keys("Ctrl+Q"), qApp, &QApplication::closeAllWindows);
 
     QMenu *edit = menuBar()->addMenu(tr("&Edit"));
-    edit->addAction(tr("Undo"), QKeySequence::Undo, this, forward(&QPlainTextEdit::undo));
-    QAction *redo = edit->addAction(tr("Redo"), this, forward(&QPlainTextEdit::redo));
+    edit->addAction(tr("Undo"), QKeySequence::Undo, this, forward(&TextView::undo));
+    QAction *redo = edit->addAction(tr("Redo"), this, forward(&TextView::redo));
     redo->setShortcuts({keys("Ctrl+Y"), keys("Ctrl+Shift+Z")});
     edit->addSeparator();
-    edit->addAction(tr("Cut"), QKeySequence::Cut, this, forward(&QPlainTextEdit::cut));
-    edit->addAction(tr("Copy"), QKeySequence::Copy, this, forward(&QPlainTextEdit::copy));
-    edit->addAction(tr("Paste"), QKeySequence::Paste, this, forward(&QPlainTextEdit::paste));
+    edit->addAction(tr("Cut"), QKeySequence::Cut, this, forward(&TextView::cut));
+    edit->addAction(tr("Copy"), QKeySequence::Copy, this, forward(&TextView::copy));
+    edit->addAction(tr("Paste"), QKeySequence::Paste, this, forward(&TextView::paste));
     edit->addSeparator();
     todo(edit->addAction(tr("Find"), keys("Ctrl+F"), this, [] {}));
     todo(edit->addAction(tr("Replace"), keys("Ctrl+H"), this, [] {}));
     todo(edit->addAction(tr("Go to Line…"), keys("Ctrl+G"), this, [] {}));
     edit->addSeparator();
+    edit->addAction(tr("Toggle Line Comment"), keys("Ctrl+/"), this, forward(&TextView::toggleLineComment));
     edit->addAction(m_formatAction);
     edit->addSeparator();
     todo(edit->addAction(tr("Preferences…"), keys("Ctrl+,"), this, [] {}));
 
     QMenu *selection = menuBar()->addMenu(tr("&Selection"));
-    selection->addAction(tr("Select All"), QKeySequence::SelectAll, this, forward(&QPlainTextEdit::selectAll));
-    todo(selection->addAction(tr("Expand Selection"), keys("Shift+Alt+Right"), this, [] {}));
-    todo(selection->addAction(tr("Shrink Selection"), keys("Shift+Alt+Left"), this, [] {}));
+    selection->addAction(tr("Select All"), QKeySequence::SelectAll, this, forward(&TextView::selectAll));
+    selection->addAction(tr("Expand Selection"), keys("Shift+Alt+Right"), this, forward(&TextView::expandSelection));
+    selection->addAction(tr("Shrink Selection"), keys("Shift+Alt+Left"), this, forward(&TextView::shrinkSelection));
     selection->addSeparator();
-    todo(selection->addAction(tr("Add Cursor Above"), platformKeys("Ctrl+Alt+Up", "Shift+Alt+Up"), this, [] {}));
-    todo(selection->addAction(tr("Add Cursor Below"), platformKeys("Ctrl+Alt+Down", "Shift+Alt+Down"), this,
-                              [] {}));
-    todo(selection->addAction(tr("Add Next Occurrence"), keys("Ctrl+D"), this, [] {}));
-    todo(selection->addAction(tr("Select All Occurrences"), keys("Ctrl+Shift+L"), this, [] {}));
+    selection->addAction(tr("Add Cursor Above"), platformKeys("Ctrl+Alt+Up", "Shift+Alt+Up"), this,
+                         forward(&TextView::addCursorAbove));
+    selection->addAction(tr("Add Cursor Below"), platformKeys("Ctrl+Alt+Down", "Shift+Alt+Down"), this,
+                         forward(&TextView::addCursorBelow));
+    selection->addAction(tr("Add Next Occurrence"), keys("Ctrl+D"), this, forward(&TextView::addNextOccurrence));
+    selection->addAction(tr("Select All Occurrences"), keys("Ctrl+Shift+L"), this,
+                         forward(&TextView::selectAllOccurrences));
     selection->addSeparator();
-    todo(selection->addAction(tr("Copy Line Up"), platformKeys("Shift+Alt+Up", "Ctrl+Shift+Alt+Up"), this, [] {}));
-    todo(selection->addAction(tr("Move Line Up"), keys("Alt+Up"), this, [] {}));
-    todo(selection->addAction(tr("Move Line Down"), keys("Alt+Down"), this, [] {}));
+    selection->addAction(tr("Copy Line Up"), platformKeys("Shift+Alt+Up", "Ctrl+Shift+Alt+Up"), this,
+                         forward(&TextView::copyLinesUp));
+    selection->addAction(tr("Copy Line Down"), platformKeys("Shift+Alt+Down", "Ctrl+Shift+Alt+Down"), this,
+                         forward(&TextView::copyLinesDown));
+    selection->addAction(tr("Move Line Up"), keys("Alt+Up"), this, forward(&TextView::moveLinesUp));
+    selection->addAction(tr("Move Line Down"), keys("Alt+Down"), this, forward(&TextView::moveLinesDown));
+    selection->addAction(tr("Delete Line"), keys("Ctrl+Shift+K"), this, forward(&TextView::deleteLines));
 
     QMenu *view = menuBar()->addMenu(tr("&View"));
     view->addAction(m_outlineAction);
@@ -402,8 +409,7 @@ void MainWindow::adoptTab(DocumentTab *tab)
 
 void MainWindow::addTab(DocumentTab *tab)
 {
-    tab->editor()->setLineWrapMode(m_wrapAction->isChecked() ? QPlainTextEdit::WidgetWidth
-                                                             : QPlainTextEdit::NoWrap);
+    tab->editor()->setWordWrap(m_wrapAction->isChecked());
     connect(tab, &DocumentTab::modificationChanged, this, [this, tab] { updateTabTitle(tab); });
     connect(tab, &DocumentTab::cursorPositionChanged, this, [this, tab] {
         if (tab == currentTab())
@@ -571,8 +577,14 @@ void MainWindow::updateStatus()
             label->clear();
         return;
     }
-    const QTextCursor cursor = tab->editor()->textCursor();
-    m_position->setText(tr("Ln %1, Col %2").arg(cursor.blockNumber() + 1).arg(cursor.positionInBlock() + 1));
+    const TextView *editor = tab->editor();
+    const QTextCursor cursor = editor->textCursor();
+    QString position = tr("Ln %1, Col %2").arg(cursor.blockNumber() + 1).arg(cursor.positionInBlock() + 1);
+    if (editor->cursorCount() > 1)
+        position += u' ' + tr("(%1 selections)").arg(editor->cursorCount());
+    else if (cursor.hasSelection())
+        position += u' ' + tr("(%1 selected)").arg(cursor.selectionEnd() - cursor.selectionStart());
+    m_position->setText(position);
     m_zoom->setText(QStringLiteral("%1%").arg(m_zoomPercent));
     m_lineEnding->setText(tab->lineEnding() == DocumentTab::LineEnding::CRLF ? tr("Windows (CRLF)")
                                                                              : tr("Unix (LF)"));
