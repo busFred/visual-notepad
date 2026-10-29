@@ -315,13 +315,14 @@ void TestMarkdownEditing::lineSpacingSetting()
         view->setTextCursor(c);
         return static_cast<QWidget *>(view)->inputMethodQuery(Qt::ImCursorRectangle).toRect().top() - first;
     };
-    const int fontHeight = QFontMetrics(view->font()).height();
+    // As TextView::updateMetrics: the fractional font height, rounded up.
+    const qreal fontHeight = QFontMetricsF(view->font()).height();
     Settings::instance().reset(key::lineSpacing);
     QCOMPARE(Settings::instance().value(key::lineSpacing).toDouble(), 1.4);
     const int normal = lineStep();
-    QVERIFY2(qAbs(normal - fontHeight * 1.4) <= 1, qPrintable(QStringLiteral("%1 vs %2").arg(normal).arg(fontHeight)));
+    QVERIFY2(normal == qCeil(fontHeight * 1.4), qPrintable(QStringLiteral("%1 vs %2").arg(normal).arg(fontHeight)));
     Settings::instance().setValue(key::lineSpacing, 2.0);
-    QVERIFY2(qAbs(lineStep() - fontHeight * 2.0) <= 1, qPrintable(QString::number(lineStep())));
+    QVERIFY2(lineStep() == qCeil(fontHeight * 2.0), qPrintable(QStringLiteral("%1 vs %2").arg(lineStep()).arg(fontHeight)));
     Settings::instance().reset(key::lineSpacing);
 }
 
