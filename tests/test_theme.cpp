@@ -1,8 +1,12 @@
 #include "CustomizeColorsDialog.h"
+#include "PreferencesDialog.h"
 #include "Settings.h"
 #include "Theme.h"
 
+#include <QAbstractItemView>
 #include <QApplication>
+#include <QComboBox>
+#include <QLineEdit>
 #include <QDialogButtonBox>
 #include <QPushButton>
 #include <QSignalSpy>
@@ -29,6 +33,7 @@ private Q_SLOTS:
     void dialogApplyWritesOverride();
     void dialogResetAndDefaults();
     void dialogHitTest();
+    void editorColorReachesFieldsAndLists();
 
 private:
     QTemporaryDir m_dir;
@@ -190,3 +195,40 @@ void TestTheme::dialogHitTest()
 
 QTEST_MAIN(TestTheme)
 #include "test_theme.moc"
+
+// Like the classic Window colour: the Editor background also fills text boxes
+// and the lists of drop-downs.
+void TestTheme::editorColorReachesFieldsAndLists()
+{
+    const QColor cream(0xEFEEEB);
+    Settings::instance().setValue(key::theme, QStringLiteral("legacy"));
+    Settings::instance().setColorOverride(QStringLiteral("legacy"), QStringLiteral("editor"), cream);
+    PreferencesDialog::showPage(nullptr, QStringLiteral("editor"));
+    QWidget *prefs = nullptr;
+    for (QWidget *w : QApplication::topLevelWidgets()) {
+        if (w->objectName() == QLatin1String("PreferencesDialog") && w->isVisible())
+            prefs = w;
+    }
+    QVERIFY(prefs);
+    QVERIFY(QTest::qWaitForWindowExposed(prefs));
+
+    auto *edit = prefs->findChild<QLineEdit *>();
+    QVERIFY(edit);
+    const QImage field = edit->grab().toImage();
+    QCOMPARE(QColor(field.pixel(field.width() - 6, field.height() / 2)), cream);
+
+    auto *combo = prefs->findChild<QComboBox *>();
+    QVERIFY(combo);
+    const QImage closed = combo->grab().toImage();
+    QCOMPARE(QColor(closed.pixel(6, closed.height() / 2)), cream);
+    combo->showPopup();
+    QAbstractItemView *view = combo->view();
+    QTRY_VERIFY(view->isVisible());
+    // An item that is neither hovered nor current, at its right end.
+    const int row = combo->currentIndex() == 0 ? 1 : 0;
+    const QRect item = view->visualRect(view->model()->index(row, 0));
+    const QImage list = view->viewport()->grab().toImage();
+    QCOMPARE(QColor(list.pixel(item.right() - 4, item.center().y())), cream);
+    combo->hidePopup();
+    prefs->close();
+}
