@@ -58,6 +58,10 @@ def main():
     for name in ("LICENSE", "THIRD-PARTY-NOTICES.md"):
         if not copy_if_exists(os.path.join(root, name), os.path.join(out, name)):
             sys.exit("missing " + name)
+    # Fonts embedded in the executable.
+    for name in ("Selawik-OFL.txt", "Inconsolata-OFL.txt"):
+        if not copy_if_exists(os.path.join(root, "resources", "fonts", name), os.path.join(out, "fonts", name)):
+            sys.exit("missing resources/fonts/" + name)
 
     if a.ksh_src:
         if not copy_tree_files(os.path.join(a.ksh_src, "LICENSES"), os.path.join(out, "KSyntaxHighlighting")):
