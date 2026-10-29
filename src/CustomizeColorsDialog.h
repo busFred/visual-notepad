@@ -72,8 +72,8 @@ private:
     QPushButton *m_foregroundButton = nullptr;
     QLabel *m_backgroundLabel = nullptr;
     QLabel *m_foregroundLabel = nullptr;
-    QLabel *m_backgroundDefault = nullptr;
-    QLabel *m_foregroundDefault = nullptr;
+    QWidget *m_backgroundDefault = nullptr; // "Changed · theme default ■ #HEX"
+    QWidget *m_foregroundDefault = nullptr;
     QDialogButtonBox *m_buttons = nullptr;
 };
 

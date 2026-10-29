@@ -63,11 +63,41 @@ QPixmap swatch(const QColor &color)
     return pixmap;
 }
 
-QString swatchHtml(const QColor &color)
+// Beside a picker whose colour differs from the theme's: the default, with
+// the same bordered swatch as the picker so it shows on any background.
+class DefaultNote : public QWidget
 {
-    return QStringLiteral("<span style=\"background-color:%1\">&nbsp;&nbsp;&nbsp;&nbsp;</span> %1")
-        .arg(color.name(QColor::HexRgb).toUpper());
-}
+public:
+    DefaultNote()
+        : m_swatch(new QLabel)
+        , m_hex(new QLabel)
+    {
+        auto *layout = new QHBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(6);
+        layout->addWidget(new QLabel(CustomizeColorsDialog::tr("Changed · theme default")));
+        layout->addWidget(m_swatch);
+        layout->addWidget(m_hex);
+        layout->addStretch(1);
+        // Fixed sizes: the note is hidden and shown again as items change.
+        m_swatch->setFixedSize(swatch(Qt::white).size());
+        m_hex->setMinimumWidth(m_hex->fontMetrics().horizontalAdvance(QStringLiteral("#WWWWWW")));
+    }
+
+    // Shows the default, or nothing when the colour is the default.
+    void setDefault(const std::optional<QColor> &color)
+    {
+        setVisible(color.has_value());
+        if (color) {
+            m_swatch->setPixmap(swatch(*color));
+            m_hex->setText(color->name(QColor::HexRgb).toUpper());
+        }
+    }
+
+private:
+    QLabel *m_swatch;
+    QLabel *m_hex;
+};
 
 // A colour picker button like the classic Windows one: swatch, hex code and
 // a drop arrow on the right (the style sheet leaves room for it).
@@ -455,11 +485,6 @@ CustomizeColorsDialog::CustomizeColorsDialog(QWidget *parent)
     m_preview = new ColorPreview(this);
     layout->addWidget(m_preview, 0, Qt::AlignHCenter);
 
-    auto *hint = new QLabel(tr("Click part of the preview, or choose an item below. "
-                               "Changes apply to the selected theme only."));
-    hint->setObjectName(QStringLiteral("MutedHint"));
-    hint->setWordWrap(true);
-    layout->addWidget(hint);
 
     // Item, then its two colours underneath, each with its theme default
     // beside it when changed.
@@ -480,12 +505,8 @@ CustomizeColorsDialog::CustomizeColorsDialog(QWidget *parent)
     m_backgroundLabel->setBuddy(m_backgroundButton);
     m_foregroundLabel = new QLabel(tr("Foreground:"));
     m_foregroundLabel->setBuddy(m_foregroundButton);
-    m_backgroundDefault = new QLabel;
-    m_foregroundDefault = new QLabel;
-    for (QLabel *label : {m_backgroundDefault, m_foregroundDefault}) {
-        label->setObjectName(QStringLiteral("MutedHint"));
-        label->setTextFormat(Qt::RichText);
-    }
+    m_backgroundDefault = new DefaultNote;
+    m_foregroundDefault = new DefaultNote;
 
     auto *grid = new QGridLayout;
     grid->setHorizontalSpacing(8);
@@ -638,18 +659,19 @@ void CustomizeColorsDialog::refresh()
 
     // A colour the item does not have is greyed out, as in Windows.
     const Item &item = m_items.at(currentItem());
-    const auto show = [this](const std::optional<Role> &role, QLabel *label, QPushButton *button, QLabel *note) {
+    const auto show = [this](const std::optional<Role> &role, QLabel *label, QPushButton *button, QWidget *note) {
         label->setEnabled(role.has_value());
         button->setEnabled(role.has_value());
+        auto *defaultNote = static_cast<DefaultNote *>(note);
         if (!role) {
             button->setIcon({});
             button->setText(QString());
-            note->clear();
+            defaultNote->setDefault(std::nullopt);
             return;
         }
         showColor(button, color(*role));
         const QColor original = defaultColor(*role);
-        note->setText(color(*role) == original ? QString() : tr("Changed · theme default %1").arg(swatchHtml(original)));
+        defaultNote->setDefault(color(*role) == original ? std::nullopt : std::optional<QColor>(original));
     };
     show(item.background, m_backgroundLabel, m_backgroundButton, m_backgroundDefault);
     show(item.foreground, m_foregroundLabel, m_foregroundButton, m_foregroundDefault);

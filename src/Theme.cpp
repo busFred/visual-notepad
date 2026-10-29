@@ -10,6 +10,7 @@
 #include <QDialogButtonBox>
 #include <QFontDatabase>
 #include <QIcon>
+#include <QPainter>
 #include <QPalette>
 #include <QProxyStyle>
 #include <QStyleFactory>
@@ -127,7 +128,24 @@ public:
         // Windows button order everywhere: Save, Don't Save, Cancel; OK, Cancel.
         if (hint == SH_DialogButtonLayout)
             return QDialogButtonBox::WinLayout;
+        // Classic Windows draws disabled text etched (grey with a white
+        // shadow), which stays legible on the grey faces.
+        if (hint == SH_EtchDisabledText)
+            return currentThemeId() != QLatin1String("modern");
         return QProxyStyle::styleHint(hint, option, widget, returnData);
+    }
+
+    // Fusion's drawItemText ignores SH_EtchDisabledText, so draw the etch here.
+    void drawItemText(QPainter *painter, const QRect &rect, int flags, const QPalette &palette, bool enabled,
+                      const QString &text, QPalette::ColorRole textRole) const override
+    {
+        if (!enabled && styleHint(SH_EtchDisabledText, nullptr, nullptr, nullptr)) {
+            painter->save();
+            painter->setPen(palette.color(QPalette::Light));
+            painter->drawText(rect.translated(1, 1), flags, text);
+            painter->restore();
+        }
+        QProxyStyle::drawItemText(painter, rect, flags, palette, enabled, text, textRole);
     }
 
     // Fusion's message box icons are pale on a grey dialog; ours have outlines.
@@ -274,7 +292,6 @@ QLabel[warning="true"] { color: #a33a1c; }
 /* Customize Colors */
 #CustomizeColorsDialog { background: @statusBar; }
 #CustomizeColorsDialog QLabel { color: @text; }
-#CustomizeColorsDialog QLabel#MutedHint { color: @mutedText; }
 #CustomizeColorsDialog QLabel:disabled { color: @mutedText; }
 #CustomizeColorsDialog QComboBox { background: @editor; border: 1px solid @divider; border-radius: 3px; padding: 0 8px;
                                    min-height: 24px; color: @text; }
@@ -387,6 +404,7 @@ void apply(QApplication &app)
     p.setColor(QPalette::ToolTipBase, color(Role::surface));
     p.setColor(QPalette::ToolTipText, color(Role::text));
     p.setColor(QPalette::Mid, color(Role::divider));
+    p.setColor(QPalette::Light, Qt::white); // The etch under disabled text.
     p.setColor(QPalette::Dark, color(Role::divider));
     p.setColor(QPalette::Disabled, QPalette::Text, color(Role::mutedText));
     p.setColor(QPalette::Disabled, QPalette::WindowText, color(Role::mutedText));
