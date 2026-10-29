@@ -15,7 +15,10 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QTextBlock>
+#include <QTextLayout>
 #include <QUrl>
+
+#include <algorithm>
 
 namespace vn {
 
@@ -213,6 +216,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
             end.insertText(QStringLiteral("\n") + QObject::tr("Diagram error: %1").arg(r.m_error), errorFormat);
         }
         r.m_height = r.m_doc->size().height() + 2 * codePadY + blockGap;
+        r.collectLineAnchors(int(source.count(u'\n')) + 1);
         return result;
     }
     case core::BlockKind::Html:
@@ -226,9 +230,45 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         doc->setTextWidth(context.width);
         r.m_height = doc->size().height() + blockGap;
         r.m_doc = std::move(doc);
+        r.collectLineAnchors(0);
         return result;
     }
     }
+}
+
+void RenderedBlock::collectLineAnchors(int sourceLines)
+{
+    QAbstractTextDocumentLayout *layout = m_doc->documentLayout();
+    const qreal top = contentOffset().y();
+    if (m_kind == Kind::Code) {
+        // One paragraph per source line (wrapped lines are interpolated);
+        // a diagram error appended after the source is not a source line.
+        QTextBlock block = m_doc->begin().next();
+        for (int line = 1; line < sourceLines && block.isValid(); ++line, block = block.next())
+            m_lineAnchors.push_back({line, top + layout->blockBoundingRect(block).top()});
+        return;
+    }
+    // Empty named anchors attach their names to the next character; its
+    // line's top is where the source line starts. blockBoundingRect is in
+    // document coordinates, table cells included.
+    static const QLatin1String prefix("vn-line:");
+    for (QTextBlock block = m_doc->begin(); block.isValid(); block = block.next()) {
+        for (auto it = block.begin(); !it.atEnd(); ++it) {
+            const QTextFragment fragment = it.fragment();
+            const QStringList names = fragment.charFormat().anchorNames();
+            for (const QString &name : names) {
+                if (!name.startsWith(prefix))
+                    continue;
+                const int line = QStringView(name).mid(prefix.size()).toInt();
+                const QTextLine textLine = block.layout()->lineForTextPosition(fragment.position() - block.position());
+                const qreal y = layout->blockBoundingRect(block).top() + (textLine.isValid() ? textLine.y() : 0);
+                if (line > 0)
+                    m_lineAnchors.push_back({line, top + y});
+            }
+        }
+    }
+    std::stable_sort(m_lineAnchors.begin(), m_lineAnchors.end(),
+                     [](const LineAnchor &a, const LineAnchor &b) { return a.first < b.first; });
 }
 
 QPointF RenderedBlock::contentOffset() const

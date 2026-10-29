@@ -38,6 +38,7 @@ pub fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block> {
         out: String::new(),
         inline_math: Vec::new(),
         slugs: HashMap::new(),
+        base_line: 0,
     };
 
     let mut result = Vec::new();
@@ -77,6 +78,7 @@ pub fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block> {
                 } else {
                     renderer.out.clear();
                     renderer.inline_math.clear();
+                    renderer.base_line = first_line;
                     renderer.node(node);
                     block.html = std::mem::take(&mut renderer.out);
                     block.inline_math = std::mem::take(&mut renderer.inline_math);
@@ -146,7 +148,13 @@ fn front_matter(block: &mut Block, value: &str, options: &RenderOptions) {
             // Simple "key: value" lines become a table; anything nested is
             // shown as code instead.
             let mut rows = String::new();
-            for line in value.lines().filter(|l| !l.trim().is_empty()) {
+            // The body starts on the line after the opening `---`.
+            for (offset, line) in value
+                .lines()
+                .enumerate()
+                .map(|(i, l)| (i + 1, l))
+                .filter(|(_, l)| !l.trim().is_empty())
+            {
                 let Some((key, val)) = line.split_once(':') else {
                     block.kind = BlockKind::FrontMatter;
                     return;
@@ -156,7 +164,8 @@ fn front_matter(block: &mut Block, value: &str, options: &RenderOptions) {
                     return;
                 }
                 rows.push_str(&format!(
-                    "<tr><th>{}</th><td>{}</td></tr>",
+                    "<tr><th>{}{}</th><td>{}</td></tr>",
+                    line_marker(offset),
                     escape(key.trim()),
                     escape(val.trim().trim_matches('"'))
                 ));
@@ -168,6 +177,16 @@ fn front_matter(block: &mut Block, value: &str, options: &RenderOptions) {
         }
         _ => block.kind = BlockKind::FrontMatter,
     }
+}
+
+/// An empty named anchor recording that the rendered text after it starts
+/// source line `offset` (relative to the block's first line). The C++ side
+/// reads these positions back from the laid-out document to keep the source
+/// and preview scrolled to the same line. Empty anchors take no space, add no
+/// text and have no href, so they are invisible and are not links. The colon
+/// keeps them apart from heading slugs.
+fn line_marker(offset: usize) -> String {
+    format!("<a name=\"vn-line:{offset}\"></a>")
 }
 
 pub fn escape(text: &str) -> String {
@@ -227,6 +246,8 @@ struct Html<'a> {
     out: String,
     inline_math: Vec<String>,
     slugs: HashMap<String, usize>,
+    /// First source line of the block being rendered.
+    base_line: usize,
 }
 
 impl Html<'_> {
@@ -277,6 +298,18 @@ impl Html<'_> {
         self.out.push_str(&format!("</{tag}>"));
     }
 
+    /// Marks where the node's first source line starts in the output; the
+    /// block's own first line needs no marker.
+    fn marker<'a>(&mut self, node: &'a AstNode<'a>) {
+        self.marker_at(node.data().sourcepos.start.line.saturating_sub(1));
+    }
+
+    fn marker_at(&mut self, line: usize) {
+        if line > self.base_line {
+            self.out.push_str(&line_marker(line - self.base_line));
+        }
+    }
+
     fn footnote_number(&self, id: &str) -> usize {
         self.footnotes
             .iter()
@@ -290,13 +323,18 @@ impl Html<'_> {
             NodeValue::Paragraph => {
                 if let Some(tex) = display_math(node) {
                     // Display math nested in a list or quote.
+                    self.out.push_str("<p align=\"center\">");
+                    self.marker(node);
                     self.out.push_str(&format!(
-                        "<p align=\"center\"><img src=\"vn-math-display:{}\" /></p>",
+                        "<img src=\"vn-math-display:{}\" /></p>",
                         self.inline_math.len()
                     ));
                     self.inline_math.push(tex);
                 } else {
-                    self.wrap(node, "p");
+                    self.out.push_str("<p>");
+                    self.marker(node);
+                    self.children(node);
+                    self.out.push_str("</p>");
                 }
             }
             NodeValue::Heading(h) => {
@@ -313,6 +351,7 @@ impl Html<'_> {
                     escape(&slug),
                     d = h.level
                 ));
+                self.marker(node);
                 self.children(node);
                 self.out.push_str(&format!("</h{}>", h.level));
             }
@@ -403,10 +442,10 @@ impl Html<'_> {
             }
             NodeValue::Item(_) | NodeValue::TaskItem(_) => self.item(node, false),
             NodeValue::CodeBlock(c) => {
-                self.out.push_str(&format!(
-                    "<pre>{}</pre>",
-                    escape(c.literal.trim_end_matches('\n'))
-                ));
+                self.out.push_str("<pre>");
+                self.marker(node);
+                self.out.push_str(&escape(c.literal.trim_end_matches('\n')));
+                self.out.push_str("</pre>");
             }
             NodeValue::HtmlBlock(h) => self.out.push_str(h.literal.trim_end_matches(['\n', '\r'])),
             NodeValue::HtmlInline(h) => self.out.push_str(h),
@@ -425,6 +464,11 @@ impl Html<'_> {
                             _ => "",
                         };
                         self.out.push_str(&format!("<{tag}{align}>"));
+                        // The header row also stands for the delimiter line
+                        // below it, which is not rendered.
+                        if c == 0 {
+                            self.marker(row);
+                        }
                         self.children(cell);
                         self.out.push_str(&format!("</{tag}>"));
                     }
@@ -439,6 +483,7 @@ impl Html<'_> {
 
     fn item<'a>(&mut self, node: &'a AstNode<'a>, tight: bool) {
         self.out.push_str("<li>");
+        self.marker(node);
         if let NodeValue::TaskItem(task) = &node.data().value {
             let line = node.data().sourcepos.start.line.saturating_sub(1);
             self.out.push_str(&format!(
@@ -529,7 +574,14 @@ mod tests {
         let mut o = opts();
         let b = blocks(doc, &o);
         assert_eq!(b[0].kind, BlockKind::Html);
-        assert!(b[0].html.contains("<th>title</th><td>Notes</td>"));
+        assert!(
+            b[0].html
+                .contains("<th><a name=\"vn-line:1\"></a>title</th><td>Notes</td>")
+        );
+        assert!(
+            b[0].html
+                .contains("<th><a name=\"vn-line:2\"></a>tags</th>")
+        );
         assert_eq!((b[0].first_line, b[0].last_line), (0, 3));
         o.front_matter = 1;
         assert_eq!(blocks(doc, &o)[0].kind, BlockKind::FrontMatter);
@@ -558,7 +610,10 @@ mod tests {
     fn table_alignment_and_escaping() {
         let b = blocks("| a | b |\n|:--|--:|\n| 1 < 2 | 2 |\n", &opts());
         assert!(b[0].html.contains("<th align=\"left\">a</th>"));
-        assert!(b[0].html.contains("<td align=\"left\">1 &lt; 2</td>"));
+        assert!(
+            b[0].html
+                .contains("<td align=\"left\"><a name=\"vn-line:2\"></a>1 &lt; 2</td>")
+        );
         assert!(b[0].html.contains("<td align=\"right\">2</td>"));
     }
 
@@ -612,9 +667,36 @@ mod tests {
     #[test]
     fn nested_display_math_and_tight_lists() {
         let b = blocks("- a\n- b\n\n> $$\n> x\n> $$\n", &opts());
-        assert_eq!(b[0].html, "<ul><li>a</li><li>b</li></ul>");
+        assert_eq!(
+            b[0].html,
+            "<ul><li>a</li><li><a name=\"vn-line:1\"></a>b</li></ul>"
+        );
         assert!(b[1].html.contains("vn-math-display:0"));
         assert_eq!(b[1].inline_math, vec!["x".to_string()]);
+    }
+
+    fn markers(html: &str) -> Vec<usize> {
+        html.split("<a name=\"vn-line:")
+            .skip(1)
+            .map(|s| s[..s.find('"').unwrap()].parse().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn line_markers_are_relative_to_the_block() {
+        // Table: body rows, after the header (0) and delimiter (1) lines.
+        let b = blocks("intro\n\n| h |\n|---|\n| r1 |\n| r2 |\n", &opts());
+        assert_eq!(markers(&b[1].html), vec![2, 3]);
+        assert!(
+            b[1].html
+                .starts_with("<table cellspacing=\"0\" cellpadding=\"5\"><tr><th>h</th>")
+        );
+        // Lists, nested items and paragraphs in a quote.
+        let b = blocks("x\n\n- a\n  - b\n- c\n\n> p\n>\n> q\n", &opts());
+        assert_eq!(markers(&b[1].html), vec![1, 2]);
+        assert_eq!(markers(&b[2].html), vec![2]);
+        // A one-line block has none.
+        assert!(markers(&blocks("# T\n", &opts())[0].html).is_empty());
     }
 
     #[test]

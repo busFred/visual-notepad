@@ -403,6 +403,20 @@ bool VisualView::renderedRowPressed(const Row &r, const QPointF &point, QMouseEv
     return true;
 }
 
+std::vector<TextView::LineAnchor> VisualView::rowLineAnchors(const Row &r, qreal)
+{
+    // Gap and source rows are one line each; rendered blocks know where
+    // their table rows, list items and code lines are.
+    std::vector<LineAnchor> anchors;
+    if (!r.rendered || r.lastLine == r.firstLine)
+        return anchors;
+    if (const RenderedBlock *block = renderedForRow(r)) {
+        for (const auto &[offset, y] : block->lineAnchors())
+            anchors.push_back({qreal(r.firstLine + offset), y});
+    }
+    return anchors;
+}
+
 void VisualView::toggleTask(int line)
 {
     if (isReadOnly())

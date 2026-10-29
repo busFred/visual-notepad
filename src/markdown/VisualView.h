@@ -48,6 +48,7 @@ protected:
     void paintRenderedRow(QPainter &painter, const Row &row, const QRectF &rect) override;
     int hitTestRenderedRow(const Row &row, const QPointF &point) override;
     bool renderedRowPressed(const Row &row, const QPointF &point, QMouseEvent *event) override;
+    std::vector<LineAnchor> rowLineAnchors(const Row &row, qreal height) override;
     void paintLineBackground(QPainter &painter, int line, const QRectF &rect) override;
     void rowsMayHaveChanged() override;
     void mouseMoveEvent(QMouseEvent *event) override;
