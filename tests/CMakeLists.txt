@@ -83,3 +83,8 @@ qt_add_executable(test_shared_docs test_shared_docs.cpp)
 target_link_libraries(test_shared_docs PRIVATE vn_app Qt6::Test)
 add_test(NAME shared_docs COMMAND test_shared_docs)
 set_tests_properties(shared_docs PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
+
+qt_add_executable(test_editor_grid test_editor_grid.cpp)
+target_link_libraries(test_editor_grid PRIVATE vn_app Qt6::Test)
+add_test(NAME editor_grid COMMAND test_editor_grid)
+set_tests_properties(editor_grid PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
