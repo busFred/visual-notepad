@@ -112,6 +112,49 @@ QScrollBar::handle:horizontal { min-width: 24px; margin: 2px 0; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; border: none; }
 QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 
+/* Preferences */
+#PreferencesDialog { background: @statusBar; }
+#PrefFrame { background: @menuBar; border: 1px solid @divider; }
+#PrefCategories { background: @sideBar; border: none; border-right: 1px solid @divider; outline: 0; }
+#PrefCategories::item { padding: 8px 14px; color: @text; }
+#PrefCategories::item:hover { background: @sideBarHover; }
+#PrefCategories::item:selected { background: @selection; color: @accent; font-weight: bold; }
+#PrefScroll { background: @menuBar; border: none; }
+#PrefPage { background: @menuBar; }
+#PrefPage QLabel, #PrefRow QLabel { background: transparent; color: @text; }
+QLabel#PrefHeading { font-size: 14px; font-weight: bold; }
+QLabel#PrefMuted { color: @mutedText; }
+QLabel[warning="true"] { color: #a33a1c; }
+
+#PreferencesDialog QLineEdit { background: @editor; border: 1px solid @divider; border-radius: 3px; padding: 0 8px;
+                               min-height: 24px; selection-background-color: @selection; selection-color: @accent; }
+#PreferencesDialog QLineEdit:focus { border-color: @switchOn; }
+#PreferencesDialog QComboBox { combobox-popup: 0; background: @editor; border: 1px solid @divider; border-radius: 3px;
+                               padding: 0 8px; min-height: 24px; color: @text; }
+#PreferencesDialog QComboBox:focus, #PreferencesDialog QComboBox:on { border-color: @switchOn; }
+#PreferencesDialog QComboBox::drop-down { border: none; width: 22px; }
+#PreferencesDialog QComboBox::down-arrow { image: url(:/vn/icons/chevron-down.svg); width: 8px; height: 8px; }
+#PreferencesDialog QComboBox QAbstractItemView { background: @menuBar; border: 1px solid @divider; outline: 0;
+                                                 selection-background-color: @selection; selection-color: @accent; }
+#PreferencesDialog QComboBox QAbstractItemView::item { min-height: 24px; padding: 0 8px; color: @text; }
+#PreferencesDialog QComboBox QAbstractItemView::item:hover,
+#PreferencesDialog QComboBox QAbstractItemView::item:selected { background: @selection; color: @accent; }
+
+#PreferencesDialog QPushButton { background: @editor; border: 1px solid @divider; border-radius: 3px; padding: 3px 14px; }
+#PreferencesDialog QPushButton:hover { background: @activeBlock; }
+#PreferencesDialog QPushButton:pressed { background: @selection; }
+#PreferencesDialog QPushButton:focus { border-color: @switchOn; }
+#PreferencesDialog QPushButton[link="true"] { background: transparent; border: none; color: @accent; padding: 3px 0; }
+#PreferencesDialog QPushButton[link="true"]:hover { text-decoration: underline; }
+#PreferencesDialog QToolButton[prefSmall="true"] { background: @editor; border: 1px solid @divider; border-radius: 3px; color: @text; }
+#PreferencesDialog QToolButton[prefSmall="true"]:hover { background: @activeBlock; }
+#PreferencesDialog QToolButton[prefSmall="true"]:pressed { background: @selection; }
+#PreferencesDialog QPushButton[shortcutCell="true"] { background: @editor; border: 1px solid @divider; border-radius: 3px;
+                                                       padding: 1px 6px; text-align: left; }
+#PreferencesDialog QPushButton[shortcutCell="true"][empty="true"] { color: @mutedText; }
+#PreferencesDialog QPushButton[shortcutCell="true"][modified="true"] { color: @accent; font-weight: bold; }
+#PreferencesDialog QPushButton[shortcutCell="true"][capturing="true"] { border-color: @switchOn; color: @text; font-weight: normal; }
+
 QStatusBar { background: @statusBar; border-top: 1px solid @divider; min-height: 22px; }
 QStatusBar::item { border: none; }
 QStatusBar QLabel { color: @text; }
