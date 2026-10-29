@@ -16,7 +16,7 @@ source "$(dirname "$_vn_conda")/../etc/profile.d/conda.sh"
 conda activate "$_vn_tc/env"
 
 export CARGO_HOME="$_vn_tc/cargo"
-export CMAKE_PREFIX_PATH="$_vn_tc/kf6;$CONDA_PREFIX"
+export CMAKE_PREFIX_PATH="$_vn_tc/kf6:$CONDA_PREFIX"
 export PATH="$CARGO_HOME/bin:$PATH"
 
 unset _vn_root _vn_tc _vn_conda
