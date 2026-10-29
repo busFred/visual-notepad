@@ -22,3 +22,8 @@ qt_add_executable(test_preferences test_preferences.cpp)
 target_link_libraries(test_preferences PRIVATE vn_app Qt6::Test)
 add_test(NAME preferences COMMAND test_preferences)
 set_tests_properties(preferences PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+qt_add_executable(test_visualview test_visualview.cpp)
+target_link_libraries(test_visualview PRIVATE vn_app Qt6::Test)
+add_test(NAME visualview COMMAND test_visualview)
+set_tests_properties(visualview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

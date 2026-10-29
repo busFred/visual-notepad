@@ -4,6 +4,7 @@
 #include <QString>
 #include <QWidget>
 
+class QSplitter;
 class QTextDocument;
 
 namespace KSyntaxHighlighting {
@@ -14,7 +15,9 @@ namespace vn {
 
 class EditorPill;
 class FindBar;
+class MarkdownModel;
 class TextView;
+class VisualView;
 
 class DocumentTab : public QWidget
 {
@@ -22,7 +25,7 @@ class DocumentTab : public QWidget
 
 public:
     enum class LineEnding { LF, CRLF };
-    // How a Markdown document is shown. Only Source exists so far.
+    // How a Markdown document is shown.
     enum class ViewMode { Source, SourceVisual, Visual };
 
     explicit DocumentTab(QWidget *parent = nullptr);
@@ -44,7 +47,11 @@ public:
     void setViewMode(ViewMode mode);
 
     QTextDocument *document() const { return m_doc; }
-    TextView *editor() const { return m_editor; }
+    // The view that has (or last had) focus; for plain text the source view.
+    TextView *editor() const;
+    TextView *sourceView() const { return m_editor; }
+    VisualView *visualView() const { return m_visual; }
+    bool isReadOnly() const;
     void goToLine(int line);
     FindBar *findBar() const { return m_findBar; }
     void showFind(bool replace);
@@ -52,6 +59,8 @@ public:
     void setZoom(int percent);
 
 Q_SIGNALS:
+    void linkActivated(const QString &url);
+    void viewModeChanged();
     void modificationChanged(bool modified);
     void cursorPositionChanged();
     void textChanged();
@@ -65,11 +74,21 @@ private:
     void updatePill();
     void placeOverlays();
     void applySettings();
+    void applyViewSettings(TextView *view);
     QWidget *createGoToLine();
+    void ensureVisualView();
+    void updateViews();
+    void syncScroll(TextView *from, TextView *to);
+    void setActiveView(TextView *view);
 
     QTextDocument *m_doc;
     KSyntaxHighlighting::SyntaxHighlighter *m_highlighter;
-    TextView *m_editor;
+    TextView *m_editor; // Source view.
+    MarkdownModel *m_model = nullptr;
+    VisualView *m_visual = nullptr;
+    QSplitter *m_splitter;
+    TextView *m_active = nullptr;
+    bool m_syncingScroll = false;
     EditorPill *m_pill;
     FindBar *m_findBar;
     QWidget *m_goToLine;

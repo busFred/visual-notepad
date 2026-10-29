@@ -57,6 +57,12 @@ public:
 
     void ensureCursorVisible();
     void centerCursor();
+    // Space left and right of the text (the gutter is extra).
+    void setTextMargins(qreal left, qreal right);
+
+    // First line at the top of the viewport, and scrolling to put a line there.
+    int topLine() const;
+    void scrollToLine(int line);
 
     // Background highlights for find results; current is an index or -1.
     void setSearchHighlights(const QList<QTextCursor> &ranges, int current);
@@ -92,6 +98,7 @@ public Q_SLOTS:
 Q_SIGNALS:
     void cursorPositionChanged();
     void selectionChanged();
+    void scrolled();
 
 protected:
     struct Row
@@ -114,6 +121,11 @@ protected:
     virtual void paintLineBackground(QPainter &painter, int line, const QRectF &rect);
     // Called after the carets or the document change, before repainting.
     virtual void rowsMayHaveChanged() {}
+    // A press on a rendered row; return true to consume it (e.g. a link).
+    virtual bool renderedRowPressed(const Row &row, const QPointF &point, QMouseEvent *event);
+
+    // The row at viewport y and its top, or -1 past the end.
+    int rowAt(qreal y, qreal *top);
 
     // Left edge of text in viewport coordinates.
     qreal textLeft() const;
@@ -215,6 +227,8 @@ private:
     int m_tabWidth = 4;
     qreal m_lineSpacing = 1.5;
     QString m_commentMarker;
+    qreal m_leftMargin = 4;
+    qreal m_rightMargin = 8;
     Qt::KeyboardModifier m_multiCursorModifier = Qt::AltModifier;
 
     // Metrics.

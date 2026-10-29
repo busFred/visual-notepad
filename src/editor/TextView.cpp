@@ -26,8 +26,6 @@ namespace {
 
 constexpr int gutterLeftPad = 6;
 constexpr int gutterRightPad = 14;
-constexpr int textLeftPad = 4;
-constexpr int textRightPad = 8;
 constexpr qreal hugeWidth = 1e7;
 // Marks clipboard text copied as whole lines (copy with no selection).
 const QString wholeLinesMime = QStringLiteral("application/x-visnotepad-lines");
@@ -82,6 +80,7 @@ TextView::TextView(QTextDocument *document, QWidget *parent)
         m_topRow = qBound(0, value, qMax(0, rowCount() - 1));
         m_topOffset = 0;
         viewport()->update();
+        Q_EMIT scrolled();
     });
     connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this] { viewport()->update(); });
     updateScrollBars();
@@ -145,6 +144,8 @@ void TextView::setCommentMarker(const QString &marker)
 void TextView::setReadOnly(bool on)
 {
     m_readOnly = on;
+    rowsMayHaveChanged();
+    updateScrollBars();
     viewport()->update();
 }
 
@@ -322,12 +323,55 @@ QTextOption TextView::textOption() const
 
 qreal TextView::textLeft() const
 {
-    return gutterWidth() + textLeftPad;
+    return gutterWidth() + m_leftMargin;
 }
 
 qreal TextView::textWidth() const
 {
-    return qMax<qreal>(m_charWidth * 4, viewport()->width() - textLeft() - textRightPad);
+    return qMax<qreal>(m_charWidth * 4, viewport()->width() - textLeft() - m_rightMargin);
+}
+
+void TextView::setTextMargins(qreal left, qreal right)
+{
+    m_leftMargin = left;
+    m_rightMargin = right;
+    relayout();
+}
+
+int TextView::topLine() const
+{
+    return row(m_topRow).firstLine;
+}
+
+void TextView::scrollToLine(int line)
+{
+    const int target = qBound(0, rowOfLine(qBound(0, line, m_doc->blockCount() - 1)), qMax(0, rowCount() - 1));
+    if (target == m_topRow && m_topOffset == 0)
+        return;
+    m_topRow = target;
+    m_topOffset = 0;
+    updateScrollBars();
+    viewport()->update();
+}
+
+int TextView::rowAt(qreal y, qreal *top)
+{
+    qreal rowY = -m_topOffset;
+    const int rows = rowCount();
+    for (int r = m_topRow; r < rows; ++r) {
+        const qreal h = rowHeight(r);
+        if (y < rowY + h) {
+            *top = rowY;
+            return r;
+        }
+        rowY += h;
+    }
+    return -1;
+}
+
+bool TextView::renderedRowPressed(const Row &, const QPointF &, QMouseEvent *)
+{
+    return false;
 }
 
 QTextLayout *TextView::layoutForLine(int line)
@@ -577,6 +621,7 @@ void TextView::ensureCursorVisible()
             m_topOffset = qMax<qreal>(0, offset);
         }
         updateScrollBars();
+        Q_EMIT scrolled();
     }
 
     if (!m_wordWrap) {
@@ -976,6 +1021,14 @@ void TextView::mousePressEvent(QMouseEvent *event)
         return;
     }
     setFocus(Qt::MouseFocusReason);
+    qreal top = 0;
+    const int pressedRow = rowAt(event->position().y(), &top);
+    if (pressedRow >= 0) {
+        const Row info = row(pressedRow);
+        if (info.rendered
+            && renderedRowPressed(info, QPointF(event->position().x() - textLeft(), event->position().y() - top), event))
+            return;
+    }
     const int pos = positionAt(event->position());
     const auto mods = event->modifiers();
 
@@ -1121,6 +1174,7 @@ void TextView::wheelEvent(QWheelEvent *event)
     updateScrollBars();
     viewport()->update();
     event->accept();
+    Q_EMIT scrolled();
 }
 
 void TextView::focusInEvent(QFocusEvent *event)

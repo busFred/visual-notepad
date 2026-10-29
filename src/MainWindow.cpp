@@ -14,7 +14,13 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDir>
+#include <QClipboard>
+#include <QDesktopServices>
 #include <QDockWidget>
+#include <QGuiApplication>
+#include <QMimeDatabase>
+#include <QPushButton>
+#include <QUrl>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -433,6 +439,11 @@ void MainWindow::addTab(DocumentTab *tab)
         if (tab == currentTab())
             updateStatus();
     });
+    connect(tab, &DocumentTab::viewModeChanged, this, [this, tab] {
+        if (tab == currentTab())
+            updateModeControls();
+    });
+    connect(tab, &DocumentTab::linkActivated, this, [this, tab](const QString &url) { openLink(tab, url); });
     connect(tab, &DocumentTab::textChanged, this, [this, tab] {
         if (tab == currentTab() && tab->isMarkdown())
             m_outlineTimer->start();
@@ -684,12 +695,91 @@ void MainWindow::updateOutlineVisibility()
     m_outlineDock->setVisible(m_outlineAction->isChecked() && tab && tab->isMarkdown());
 }
 
+void MainWindow::openLink(DocumentTab *tab, const QString &url)
+{
+    if (url.startsWith(u'#')) {
+        // In-document anchors: headings by GitHub slug, footnotes by label.
+        const QString anchor = QUrl::fromPercentEncoding(url.mid(1).toUtf8());
+        const auto slugOf = [](const QString &text) {
+            const QByteArray utf8 = text.toUtf8();
+            const rust::String slug = core::heading_slug(rust::Str(utf8.constData(), utf8.size()));
+            return QString::fromUtf8(slug.data(), slug.size());
+        };
+        const QString text = tab->text();
+        int line = -1;
+        if (anchor.startsWith(QLatin1String("fn-"))) {
+            const QStringList lines = text.split(u'\n');
+            for (int i = 0; i < lines.size() && line < 0; ++i) {
+                if (lines[i].startsWith(QLatin1String("[^"))
+                    && slugOf(lines[i].section(u']', 0, 0).mid(2).toLower()) == anchor.mid(3))
+                    line = i + 1;
+            }
+        } else {
+            const QByteArray utf8 = text.toUtf8();
+            QHash<QString, int> seen;
+            for (const auto &heading : core::outline(rust::Str(utf8.constData(), utf8.size()))) {
+                QString slug = slugOf(QString::fromUtf8(heading.text.data(), heading.text.size()));
+                const int n = seen[slug]++;
+                if (n > 0)
+                    slug += u'-' + QString::number(n);
+                if (slug == anchor) {
+                    line = int(heading.line);
+                    break;
+                }
+            }
+        }
+        if (line > 0)
+            tab->editor()->scrollToLine(line - 1);
+        return;
+    }
+
+    const QUrl target(url);
+    const QString scheme = target.scheme().toLower();
+    if (scheme == QLatin1String("http") || scheme == QLatin1String("https") || scheme == QLatin1String("mailto")
+        || scheme == QLatin1String("ftp")) {
+        // Always ask before leaving the app, like VS Code's trusted-domain prompt.
+        QMessageBox box(QMessageBox::Information, productName(),
+                        tr("Do you want %1 to open the external website?").arg(productName()), QMessageBox::NoButton,
+                        this);
+        box.setInformativeText(url);
+        QPushButton *open = box.addButton(tr("Open"), QMessageBox::AcceptRole);
+        QPushButton *copy = box.addButton(tr("Copy"), QMessageBox::ActionRole);
+        box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(open);
+        box.exec();
+        if (box.clickedButton() == open)
+            QDesktopServices::openUrl(target);
+        else if (box.clickedButton() == copy)
+            QGuiApplication::clipboard()->setText(url);
+        return;
+    }
+
+    // Local files, relative to the document.
+    QString path = scheme == QLatin1String("file") ? target.toLocalFile()
+                                                   : QUrl::fromPercentEncoding(url.section(u'#', 0, 0).toUtf8());
+    const QString fragment = url.contains(u'#') ? url.section(u'#', 1) : QString();
+    if (QFileInfo(path).isRelative() && !tab->path().isEmpty())
+        path = QFileInfo(tab->path()).absoluteDir().filePath(path);
+    if (!QFileInfo::exists(path)) {
+        QMessageBox::warning(this, productName(), tr("The file %1 does not exist.").arg(QDir::toNativeSeparators(path)));
+        return;
+    }
+    const QMimeType mime = QMimeDatabase().mimeTypeForFile(path);
+    if (!mime.inherits(QStringLiteral("text/plain"))) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+        return;
+    }
+    if (openFile(path) && !fragment.isEmpty())
+        openLink(currentTab(), u'#' + fragment);
+}
+
 void MainWindow::updateModeControls()
 {
     DocumentTab *tab = currentTab();
     const bool markdown = tab && tab->isMarkdown();
     m_modeButton->setVisible(markdown);
-    m_modeSource->setEnabled(markdown);
+    for (QAction *action : m_modeGroup->actions())
+        action->setEnabled(markdown);
     if (!markdown) {
         // An exclusive group cannot be fully unchecked; drop exclusivity briefly.
         m_modeGroup->setExclusionPolicy(QActionGroup::ExclusionPolicy::None);

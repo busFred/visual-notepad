@@ -63,6 +63,7 @@ private:
     void showPreferences(const QString &page);
     void onSettingChanged(const QString &key);
     void fillRecentMenu();
+    void openLink(DocumentTab *tab, const QString &url);
 
     void onCurrentTabChanged();
     void updateTabTitle(DocumentTab *tab);

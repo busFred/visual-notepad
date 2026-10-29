@@ -21,6 +21,8 @@ class FindBar : public QFrame
 
 public:
     FindBar(TextView *view, QWidget *parent);
+    // Searches another view of the same document from now on.
+    void setView(TextView *view);
 
     // Shows the bar, seeding the query from a one-line selection.
     void open(bool replace);

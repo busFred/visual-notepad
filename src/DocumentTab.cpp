@@ -5,6 +5,8 @@
 #include "editor/DocumentLayout.h"
 #include "editor/FindBar.h"
 #include "editor/TextView.h"
+#include "markdown/MarkdownModel.h"
+#include "markdown/VisualView.h"
 
 #include <KSyntaxHighlighting/Definition>
 #include <KSyntaxHighlighting/Repository>
@@ -22,6 +24,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QSaveFile>
+#include <QSplitter>
 #include <QStringDecoder>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -102,7 +105,12 @@ DocumentTab::DocumentTab(QWidget *parent)
 {
     m_doc->setDocumentLayout(new DocumentLayout(m_doc));
     m_doc->setUndoRedoEnabled(true);
-    m_editor = new TextView(m_doc, this);
+    m_splitter = new QSplitter(Qt::Horizontal, this);
+    m_splitter->setHandleWidth(1);
+    m_splitter->setChildrenCollapsible(false);
+    m_editor = new TextView(m_doc, m_splitter);
+    m_splitter->addWidget(m_editor);
+    m_active = m_editor;
     m_pill = new EditorPill(this);
     m_findBar = new FindBar(m_editor, this);
     auto *shadow = new QGraphicsDropShadowEffect(m_findBar);
@@ -121,23 +129,36 @@ DocumentTab::DocumentTab(QWidget *parent)
     m_lineEnding = eol == QLatin1String("crlf") ? LineEnding::CRLF : LineEnding::LF;
 #endif
     m_hasBom = Settings::instance().text(key::encoding) == QLatin1String("utf8bom");
+    const QString defaultMode = Settings::instance().text(key::defaultMode);
+    m_viewMode = defaultMode == QLatin1String("source")  ? ViewMode::Source
+                 : defaultMode == QLatin1String("split") ? ViewMode::SourceVisual
+                                                         : ViewMode::Visual;
     applySettings();
     connect(&Settings::instance(), &Settings::changed, this, [this](const QString &changedKey) {
-        if (changedKey.startsWith(QLatin1String("editor/")))
+        if (changedKey.startsWith(QLatin1String("editor/")) || changedKey == QLatin1String(key::highlightActiveBlock))
             applySettings();
     });
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->addWidget(m_editor);
+    layout->addWidget(m_splitter);
 
     m_highlighter = new KSyntaxHighlighting::SyntaxHighlighter(m_doc);
     m_highlighter->setTheme(theme::syntaxTheme());
     updateDefinition();
 
-    connect(m_pill->lockButton(), &QToolButton::toggled, m_editor, &TextView::setReadOnly);
+    connect(m_pill->lockButton(), &QToolButton::toggled, this, [this](bool locked) {
+        m_editor->setReadOnly(locked);
+        if (m_visual)
+            m_visual->setReadOnly(locked);
+    });
+    connect(m_editor, &TextView::scrolled, this, [this] { syncScroll(m_editor, m_visual); });
+    m_editor->installEventFilter(this);
     connect(m_doc, &QTextDocument::modificationChanged, this, &DocumentTab::modificationChanged);
-    connect(m_editor, &TextView::cursorPositionChanged, this, &DocumentTab::cursorPositionChanged);
+    connect(m_editor, &TextView::cursorPositionChanged, this, [this] {
+        if (m_active == m_editor)
+            Q_EMIT cursorPositionChanged();
+    });
     connect(m_doc, &QTextDocument::contentsChanged, this, &DocumentTab::textChanged);
     updatePill();
 }
@@ -172,6 +193,8 @@ bool DocumentTab::load(const QString &path)
     m_doc->setPlainText(content);
     m_doc->setModified(false);
     m_editor->setTextCursor(QTextCursor(m_doc));
+    if (m_visual)
+        m_visual->setTextCursor(QTextCursor(m_doc));
     return true;
 }
 
@@ -236,9 +259,84 @@ void DocumentTab::goToLine(int line)
     const QTextBlock block = m_doc->findBlockByNumber(line - 1);
     if (!block.isValid())
         return;
-    m_editor->setTextCursor(QTextCursor(block));
-    m_editor->centerCursor();
-    m_editor->setFocus();
+    TextView *view = editor();
+    view->setTextCursor(QTextCursor(block));
+    view->centerCursor();
+    view->setFocus();
+}
+
+TextView *DocumentTab::editor() const
+{
+    return m_active ? m_active : m_editor;
+}
+
+bool DocumentTab::isReadOnly() const
+{
+    return m_pill->lockButton()->isChecked();
+}
+
+void DocumentTab::ensureVisualView()
+{
+    if (m_visual)
+        return;
+    m_model = new MarkdownModel(m_doc);
+    m_visual = new VisualView(m_model, m_splitter);
+    m_splitter->addWidget(m_visual);
+    m_visual->setReadOnly(isReadOnly());
+    m_visual->setTextCursor(QTextCursor(m_doc));
+    applyViewSettings(m_visual);
+    m_visual->installEventFilter(this);
+    connect(m_visual, &VisualView::linkActivated, this, &DocumentTab::linkActivated);
+    connect(m_visual, &TextView::scrolled, this, [this] { syncScroll(m_visual, m_editor); });
+    connect(m_visual, &TextView::cursorPositionChanged, this, [this] {
+        if (m_active == m_visual)
+            Q_EMIT cursorPositionChanged();
+    });
+}
+
+void DocumentTab::syncScroll(TextView *from, TextView *to)
+{
+    // Keep both halves of Source / Visual on the same line.
+    if (m_syncingScroll || !to || !to->isVisible() || !from->isVisible())
+        return;
+    m_syncingScroll = true;
+    to->scrollToLine(from->topLine());
+    m_syncingScroll = false;
+}
+
+void DocumentTab::setActiveView(TextView *view)
+{
+    if (m_active == view)
+        return;
+    m_active = view;
+    m_findBar->setView(view);
+    Q_EMIT cursorPositionChanged();
+}
+
+void DocumentTab::updateViews()
+{
+    const bool markdown = isMarkdown();
+    const ViewMode mode = markdown ? m_viewMode : ViewMode::Source;
+    if (mode != ViewMode::Source) {
+        ensureVisualView();
+        m_visual->setBaseDirectory(m_path.isEmpty() ? QString() : QFileInfo(m_path).absolutePath());
+    }
+    m_editor->setVisible(mode != ViewMode::Visual);
+    if (m_visual)
+        m_visual->setVisible(mode != ViewMode::Source);
+    if (mode == ViewMode::SourceVisual) {
+        const int half = qMax(1, m_splitter->width() / 2);
+        m_splitter->setSizes({half, half});
+        syncScroll(m_editor, m_visual);
+    }
+    TextView *active = mode == ViewMode::Visual ? static_cast<TextView *>(m_visual) : m_editor;
+    if (m_active && m_active->isVisible() && mode == ViewMode::SourceVisual)
+        active = m_active;
+    // Carry the caret across when switching between source and visual.
+    if (active != m_active && m_active)
+        active->setTextCursor(m_active->textCursor());
+    setActiveView(active);
+    updatePill();
 }
 
 void DocumentTab::updateDefinition()
@@ -251,22 +349,24 @@ void DocumentTab::updateDefinition()
                                       : repository.definitionForFileName(m_path);
     m_highlighter->setDefinition(def);
     m_editor->setCommentMarker(def.singleLineCommentMarker());
-    updatePill();
+    updateViews();
 }
 
 void DocumentTab::setViewMode(ViewMode mode)
 {
-    // The visual modes arrive with the Markdown editor port.
-    if (mode != ViewMode::Source)
+    if (m_viewMode == mode)
         return;
     m_viewMode = mode;
-    updatePill();
+    updateViews();
+    editor()->setFocus();
+    Q_EMIT viewModeChanged();
 }
 
 void DocumentTab::updatePill()
 {
     m_pill->setVisible(isMarkdown() && m_viewMode != ViewMode::Source);
     m_pill->raise();
+    placeOverlays();
 }
 
 void DocumentTab::resizeEvent(QResizeEvent *event)
@@ -279,12 +379,14 @@ bool DocumentTab::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == m_findBar && (event->type() == QEvent::Resize || event->type() == QEvent::Show))
         placeOverlays();
+    if ((watched == m_editor || watched == m_visual) && event->type() == QEvent::FocusIn)
+        setActiveView(static_cast<TextView *>(watched));
     if (watched->objectName() == QLatin1String("GoToLineEdit")) {
         if (event->type() == QEvent::FocusOut
             || (event->type() == QEvent::KeyPress && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape)) {
             m_goToLine->hide();
             if (event->type() == QEvent::KeyPress) {
-                m_editor->setFocus();
+                editor()->setFocus();
                 return true;
             }
         }
@@ -305,18 +407,31 @@ void DocumentTab::placeOverlays()
 
 void DocumentTab::applySettings()
 {
+    applyViewSettings(m_editor);
+    if (m_visual)
+        applyViewSettings(m_visual);
+}
+
+void DocumentTab::applyViewSettings(TextView *view)
+{
     Settings &s = Settings::instance();
     QFont font = theme::editorFont();
     font.setPointSizeF(font.pointSizeF() * m_zoom / 100.0);
-    m_editor->setFont(font);
-    m_editor->setLineNumbersVisible(s.flag(key::lineNumbers));
-    m_editor->setHighlightCurrentLine(s.flag(key::highlightCurrentLine));
-    m_editor->setShowWhitespace(s.flag(key::drawWhitespace));
-    m_editor->setTabWidth(s.number(key::tabWidth));
-    m_editor->setInsertSpaces(s.flag(key::insertSpaces));
-    m_editor->setWordWrap(s.flag(key::wordWrap));
-    m_editor->setMultiCursorModifier(s.text(key::multiCursorModifier) == QLatin1String("ctrl") ? Qt::ControlModifier
-                                                                                                : Qt::AltModifier);
+    view->setFont(font);
+    view->setShowWhitespace(s.flag(key::drawWhitespace));
+    view->setTabWidth(s.number(key::tabWidth));
+    view->setInsertSpaces(s.flag(key::insertSpaces));
+    view->setMultiCursorModifier(s.text(key::multiCursorModifier) == QLatin1String("ctrl") ? Qt::ControlModifier
+                                                                                            : Qt::AltModifier);
+    if (view == m_visual) {
+        // The visual editor always wraps and has no gutter.
+        view->setWordWrap(true);
+        m_visual->setHighlightActiveBlock(s.flag(key::highlightActiveBlock));
+    } else {
+        view->setLineNumbersVisible(s.flag(key::lineNumbers));
+        view->setHighlightCurrentLine(s.flag(key::highlightCurrentLine));
+        view->setWordWrap(s.flag(key::wordWrap));
+    }
 }
 
 void DocumentTab::setZoom(int percent)

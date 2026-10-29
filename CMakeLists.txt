@@ -44,6 +44,14 @@ add_library(vn_app STATIC
     src/editor/Search.h
     src/editor/TextView.cpp
     src/editor/TextView.h
+    src/markdown/BlockRenderer.cpp
+    src/markdown/BlockRenderer.h
+    src/markdown/MarkdownModel.cpp
+    src/markdown/MarkdownModel.h
+    src/markdown/MathRenderer.cpp
+    src/markdown/MathRenderer.h
+    src/markdown/VisualView.cpp
+    src/markdown/VisualView.h
 )
 target_include_directories(vn_app PUBLIC src)
 

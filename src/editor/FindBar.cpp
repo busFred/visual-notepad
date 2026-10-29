@@ -147,6 +147,16 @@ FindBar::FindBar(TextView *view, QWidget *parent)
     hide();
 }
 
+void FindBar::setView(TextView *view)
+{
+    if (m_view == view)
+        return;
+    m_view->setSearchHighlights({}, -1);
+    m_view = view;
+    if (isVisible())
+        research();
+}
+
 QWidget *FindBar::makeField(QLineEdit *edit, const QList<QToolButton *> &options)
 {
     auto *field = new QWidget(this);
