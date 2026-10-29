@@ -979,8 +979,8 @@ void TextView::mousePressEvent(QMouseEvent *event)
     const int pos = positionAt(event->position());
     const auto mods = event->modifiers();
 
-    if (mods & Qt::AltModifier && !(mods & Qt::ShiftModifier)) {
-        // Alt+click adds a caret, or removes one already there.
+    if (mods & m_multiCursorModifier && !(mods & Qt::ShiftModifier)) {
+        // Alt+click (or Ctrl+click) adds a caret, or removes one already there.
         for (int i = 0; i < int(m_carets.size()); ++i) {
             if (m_carets[i].cursor.position() == pos && m_carets.size() > 1) {
                 m_carets.erase(m_carets.begin() + i);

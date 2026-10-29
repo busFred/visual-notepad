@@ -1,10 +1,12 @@
 // Find/replace engine and the find bar.
+#include "Settings.h"
 #include "editor/DocumentLayout.h"
 #include "editor/FindBar.h"
 #include "editor/Search.h"
 #include "editor/TextView.h"
 
 #include <QLineEdit>
+#include <QTemporaryDir>
 #include <QTest>
 #include <QTextDocument>
 
@@ -174,6 +176,14 @@ void TestFind::invalidRegexFlagsField()
     QCOMPARE(m_bar->matchCount(), 0);
     QCOMPARE(m_bar->findField()->parentWidget()->property("error").toBool(), true);
 }
+
+// Keep tests away from the user's settings file.
+static void useTestSettings()
+{
+    static QTemporaryDir dir;
+    vn::Settings::instance().useFile(dir.filePath(QStringLiteral("settings.ini")));
+}
+Q_COREAPP_STARTUP_FUNCTION(useTestSettings)
 
 QTEST_MAIN(TestFind)
 #include "test_find.moc"

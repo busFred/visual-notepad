@@ -2,12 +2,16 @@
 
 #include "DocumentTab.h"
 
+#include <QHash>
 #include <QMainWindow>
+
+#include <functional>
 
 class QAction;
 class QActionGroup;
 class QDockWidget;
 class QLabel;
+class QMenu;
 class QSplitter;
 class QTimer;
 class QToolButton;
@@ -34,6 +38,9 @@ protected:
     void closeEvent(QCloseEvent *event) override;
 
 private:
+    QAction *makeAction(const QString &id);
+    QAction *makeAction(const QString &id, std::function<void()> slot);
+    QAction *action(const QString &id) const;
     void createActions();
     void createMenus();
     void createTabActions();
@@ -52,6 +59,10 @@ private:
     void setViewMode(DocumentTab::ViewMode mode);
     void zoom(int steps);
     void applyZoom();
+    void goToLine();
+    void showPreferences(const QString &page);
+    void onSettingChanged(const QString &key);
+    void fillRecentMenu();
 
     void onCurrentTabChanged();
     void updateTabTitle(DocumentTab *tab);
@@ -77,7 +88,8 @@ private:
     QAction *m_splitAction;
     QAction *m_wrapAction;
     QAction *m_statusBarAction;
-    QAction *m_formatAction;
+    QHash<QString, QAction *> m_actions;
+    QMenu *m_recentMenu = nullptr;
 
     QLabel *m_position;
     QLabel *m_zoom;

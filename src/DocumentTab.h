@@ -48,6 +48,8 @@ public:
     void goToLine(int line);
     FindBar *findBar() const { return m_findBar; }
     void showFind(bool replace);
+    void showGoToLine();
+    void setZoom(int percent);
 
 Q_SIGNALS:
     void modificationChanged(bool modified);
@@ -62,12 +64,16 @@ private:
     void updateDefinition();
     void updatePill();
     void placeOverlays();
+    void applySettings();
+    QWidget *createGoToLine();
 
     QTextDocument *m_doc;
     KSyntaxHighlighting::SyntaxHighlighter *m_highlighter;
     TextView *m_editor;
     EditorPill *m_pill;
     FindBar *m_findBar;
+    QWidget *m_goToLine;
+    int m_zoom = 100;
     QString m_path;
     QString m_error;
     LineEnding m_lineEnding = LineEnding::LF;

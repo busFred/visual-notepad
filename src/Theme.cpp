@@ -1,5 +1,7 @@
 #include "Theme.h"
 
+#include "Settings.h"
+
 #include <KSyntaxHighlighting/Repository>
 #include <KSyntaxHighlighting/Theme>
 
@@ -158,9 +160,16 @@ void apply(QApplication &app)
 QFont editorFont()
 {
     QFont font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    font.setFamilies({QStringLiteral("Cascadia Mono"), QStringLiteral("DejaVu Sans Mono"), QStringLiteral("Consolas"),
-                      font.family()});
+    const QString family = Settings::instance().text(key::fontFamily);
+    if (family.isEmpty()) {
+        font.setFamilies({QStringLiteral("Cascadia Mono"), QStringLiteral("DejaVu Sans Mono"),
+                          QStringLiteral("Consolas"), font.family()});
+    } else {
+        font.setFamilies({family, font.family()});
+    }
     font.setStyleHint(QFont::Monospace);
+    if (const int size = Settings::instance().number(key::fontSize); size > 0)
+        font.setPointSize(size);
     return font;
 }
 

@@ -7,6 +7,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include "DocumentTab.h"
+#include "Settings.h"
 #include "editor/FindBar.h"
 #include "editor/TextView.h"
 
@@ -121,6 +122,14 @@ void TestMainWindow::crlfIsPreserved()
     QVERIFY(file.open(QIODevice::ReadOnly));
     QCOMPARE(file.readAll(), QByteArray("a\r\nb\r\n\r\nc"));
 }
+
+// Keep tests away from the user's settings file.
+static void useTestSettings()
+{
+    static QTemporaryDir dir;
+    vn::Settings::instance().useFile(dir.filePath(QStringLiteral("settings.ini")));
+}
+Q_COREAPP_STARTUP_FUNCTION(useTestSettings)
 
 QTEST_MAIN(TestMainWindow)
 #include "test_mainwindow.moc"

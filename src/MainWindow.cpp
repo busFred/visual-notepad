@@ -1,6 +1,9 @@
 #include "MainWindow.h"
 
+#include "Commands.h"
 #include "EditorGroup.h"
+#include "PreferencesDialog.h"
+#include "Settings.h"
 #include "Theme.h"
 #include "editor/FindBar.h"
 #include "editor/TextView.h"
@@ -37,23 +40,6 @@ constexpr int zoomStepPercent = 10;
 QString productName()
 {
     return QStringLiteral("Visual Notepad");
-}
-
-QKeySequence keys(const char *sequence)
-{
-    return QKeySequence(QString::fromLatin1(sequence));
-}
-
-// Platform-specific default, following VS Code's Windows and Linux keymaps.
-QKeySequence platformKeys(const char *windows, const char *other)
-{
-#ifdef Q_OS_WIN
-    Q_UNUSED(other);
-    return keys(windows);
-#else
-    Q_UNUSED(windows);
-    return keys(other);
-#endif
 }
 
 // Size grip drawn as the dotted triangle from the mockup.
@@ -117,6 +103,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_group, &EditorGroup::currentChanged, this, &MainWindow::onCurrentTabChanged);
     connect(m_group, &EditorGroup::tabCloseRequested, this, &MainWindow::closeTab);
 
+    m_zoomPercent = Settings::instance().number(key::zoom);
     m_outlineTimer->setSingleShot(true);
     m_outlineTimer->setInterval(250);
     connect(m_outlineTimer, &QTimer::timeout, this, &MainWindow::updateOutline);
@@ -126,6 +113,7 @@ MainWindow::MainWindow(QWidget *parent)
     createMenus();
     createTabActions();
     createStatusBar();
+    statusBar()->setVisible(m_statusBarAction->isChecked());
     onCurrentTabChanged();
 }
 
@@ -138,54 +126,149 @@ MainWindow::~MainWindow()
         child->disconnect(this);
 }
 
+QAction *MainWindow::makeAction(const QString &id)
+{
+    const Command *cmd = command(id);
+    Q_ASSERT(cmd);
+    auto *action = new QAction(cmd->text, this);
+    action->setShortcuts(shortcutsFor(id));
+    action->setShortcutContext(Qt::WindowShortcut);
+    action->setIconVisibleInMenu(false);
+    addAction(action); // Keeps shortcuts working while the menu bar is hidden.
+    m_actions.insert(id, action);
+    return action;
+}
+
+QAction *MainWindow::makeAction(const QString &id, std::function<void()> slot)
+{
+    QAction *action = makeAction(id);
+    connect(action, &QAction::triggered, this, [slot = std::move(slot)] { slot(); });
+    return action;
+}
+
+QAction *MainWindow::action(const QString &id) const
+{
+    return m_actions.value(id);
+}
+
 void MainWindow::createActions()
 {
-    m_modeGroup = new QActionGroup(this);
-    const auto addMode = [this](const QString &text, const char *icon, DocumentTab::ViewMode mode) {
-        auto *action = new QAction(QIcon(QStringLiteral(":/vn/icons/%1.svg").arg(QLatin1String(icon))), text, this);
-        action->setCheckable(true);
-        action->setIconVisibleInMenu(false);
-        m_modeGroup->addAction(action);
-        connect(action, &QAction::triggered, this, [this, mode] { setViewMode(mode); });
-        return action;
+    // Calls a TextView slot on the current tab's editor.
+    const auto onEditor = [this](void (TextView::*slot)()) {
+        return [this, slot] {
+            if (auto *tab = currentTab())
+                (tab->editor()->*slot)();
+        };
     };
-    m_modeSource = addMode(tr("Source"), "source", DocumentTab::ViewMode::Source);
-    m_modeSourceVisual = addMode(tr("Source / Visual"), "source-visual", DocumentTab::ViewMode::SourceVisual);
-    m_modeSourceVisual->setShortcut(keys("Ctrl+K, V"));
-    m_modeVisual = addMode(tr("Visual Editor"), "visual", DocumentTab::ViewMode::Visual);
-    // Milestone 3: the visual modes need the Markdown editor port.
-    m_modeSourceVisual->setEnabled(false);
-    m_modeVisual->setEnabled(false);
+    const auto onTab = [this](void (DocumentTab::*slot)()) {
+        return [this, slot] {
+            if (auto *tab = currentTab())
+                (tab->*slot)();
+        };
+    };
 
-    m_outlineAction = new QAction(tr("Outline"), this);
-    m_outlineAction->setCheckable(true);
-    m_outlineAction->setChecked(true);
-    m_outlineAction->setShortcut(keys("Ctrl+B"));
-    connect(m_outlineAction, &QAction::toggled, this, &MainWindow::updateOutlineVisibility);
+    makeAction(QStringLiteral("file.new"), [this] { newFile(); });
+    makeAction(QStringLiteral("file.newWindow"), [] {
+        auto *window = new MainWindow;
+        window->setAttribute(Qt::WA_DeleteOnClose);
+        window->newFile();
+        window->show();
+    });
+    makeAction(QStringLiteral("file.open"), [this] { openWithDialog(); });
+    makeAction(QStringLiteral("file.save"), [this] {
+        if (auto *tab = currentTab())
+            save(tab);
+    });
+    makeAction(QStringLiteral("file.saveAs"), [this] {
+        if (auto *tab = currentTab())
+            saveAs(tab);
+    });
+    makeAction(QStringLiteral("file.closeTab"), [this] { closeTab(m_group->currentIndex()); });
+    makeAction(QStringLiteral("file.closeWindow"), [this] { close(); });
+    makeAction(QStringLiteral("file.quit"), [] { QApplication::closeAllWindows(); });
 
-    m_splitAction = new QAction(QIcon(QStringLiteral(":/vn/icons/split-editor.svg")), tr("Split Editor"), this);
+    makeAction(QStringLiteral("edit.undo"), onEditor(&TextView::undo));
+    makeAction(QStringLiteral("edit.redo"), onEditor(&TextView::redo));
+    makeAction(QStringLiteral("edit.cut"), onEditor(&TextView::cut));
+    makeAction(QStringLiteral("edit.copy"), onEditor(&TextView::copy));
+    makeAction(QStringLiteral("edit.paste"), onEditor(&TextView::paste));
+    makeAction(QStringLiteral("edit.find"), [this] {
+        if (auto *tab = currentTab())
+            tab->showFind(false);
+    });
+    makeAction(QStringLiteral("edit.replace"), [this] {
+        if (auto *tab = currentTab())
+            tab->showFind(true);
+    });
+    makeAction(QStringLiteral("edit.findNext"), [this] {
+        if (auto *tab = currentTab())
+            tab->findBar()->findNext();
+    });
+    makeAction(QStringLiteral("edit.findPrevious"), [this] {
+        if (auto *tab = currentTab())
+            tab->findBar()->findPrevious();
+    });
+    makeAction(QStringLiteral("edit.goToLine"), [this] { goToLine(); });
+    makeAction(QStringLiteral("edit.toggleComment"), onEditor(&TextView::toggleLineComment));
+    makeAction(QStringLiteral("edit.format"))->setEnabled(false); // Planned formatter.
+    makeAction(QStringLiteral("edit.preferences"), [this] { showPreferences(QString()); });
+
+    makeAction(QStringLiteral("selection.selectAll"), onEditor(&TextView::selectAll));
+    makeAction(QStringLiteral("selection.expand"), onEditor(&TextView::expandSelection));
+    makeAction(QStringLiteral("selection.shrink"), onEditor(&TextView::shrinkSelection));
+    makeAction(QStringLiteral("selection.addCursorAbove"), onEditor(&TextView::addCursorAbove));
+    makeAction(QStringLiteral("selection.addCursorBelow"), onEditor(&TextView::addCursorBelow));
+    makeAction(QStringLiteral("selection.addNextOccurrence"), onEditor(&TextView::addNextOccurrence));
+    makeAction(QStringLiteral("selection.selectAllOccurrences"), onEditor(&TextView::selectAllOccurrences));
+    makeAction(QStringLiteral("selection.copyLineUp"), onEditor(&TextView::copyLinesUp));
+    makeAction(QStringLiteral("selection.copyLineDown"), onEditor(&TextView::copyLinesDown));
+    makeAction(QStringLiteral("selection.moveLineUp"), onEditor(&TextView::moveLinesUp));
+    makeAction(QStringLiteral("selection.moveLineDown"), onEditor(&TextView::moveLinesDown));
+    makeAction(QStringLiteral("selection.deleteLine"), onEditor(&TextView::deleteLines));
+    Q_UNUSED(onTab);
+
+    // View toggles mirror settings, so every window stays in step.
+    const auto bindSetting = [this](const QString &id, const char *settingKey) {
+        QAction *a = makeAction(id);
+        a->setCheckable(true);
+        a->setChecked(Settings::instance().flag(settingKey));
+        connect(a, &QAction::triggered, this,
+                [settingKey](bool on) { Settings::instance().setValue(settingKey, on); });
+        return a;
+    };
+    m_outlineAction = bindSetting(QStringLiteral("view.outline"), key::outline);
+    m_wrapAction = bindSetting(QStringLiteral("view.wordWrap"), key::wordWrap);
+    m_statusBarAction = bindSetting(QStringLiteral("view.statusBar"), key::statusBar);
+
+    m_modeGroup = new QActionGroup(this);
+    const auto addMode = [this](const QString &id, const char *icon, DocumentTab::ViewMode mode) {
+        QAction *a = makeAction(id, [this, mode] { setViewMode(mode); });
+        a->setIcon(QIcon(QStringLiteral(":/vn/icons/%1.svg").arg(QLatin1String(icon))));
+        a->setCheckable(true);
+        m_modeGroup->addAction(a);
+        return a;
+    };
+    m_modeSource = addMode(QStringLiteral("view.modeSource"), "source", DocumentTab::ViewMode::Source);
+    m_modeSourceVisual = addMode(QStringLiteral("view.modeSplit"), "source-visual", DocumentTab::ViewMode::SourceVisual);
+    m_modeVisual = addMode(QStringLiteral("view.modeVisual"), "visual", DocumentTab::ViewMode::Visual);
+
+    m_splitAction = makeAction(QStringLiteral("view.splitEditor"));
+    m_splitAction->setIcon(QIcon(QStringLiteral(":/vn/icons/split-editor.svg")));
     m_splitAction->setCheckable(true);
-    m_splitAction->setIconVisibleInMenu(false);
-    m_splitAction->setShortcut(keys("Ctrl+\\"));
     connect(m_splitAction, &QAction::toggled, this, &MainWindow::toggleSplitEditor);
+    makeAction(QStringLiteral("view.moveToNewWindow"), [this] { moveTabToNewWindow(); });
+    makeAction(QStringLiteral("view.zoomIn"), [this] { zoom(1); });
+    makeAction(QStringLiteral("view.zoomOut"), [this] { zoom(-1); });
+    makeAction(QStringLiteral("view.zoomReset"), [this] { zoom(0); });
+    makeAction(QStringLiteral("view.fullScreen"), [this] { setWindowState(windowState() ^ Qt::WindowFullScreen); });
 
-    m_wrapAction = new QAction(tr("Word Wrap"), this);
-    m_wrapAction->setCheckable(true);
-    m_wrapAction->setChecked(true);
-    m_wrapAction->setShortcut(keys("Alt+Z"));
-    connect(m_wrapAction, &QAction::toggled, this, [this](bool on) {
-        for (auto *editor : findChildren<TextView *>())
-            editor->setWordWrap(on);
+    makeAction(QStringLiteral("help.shortcuts"), [this] { showPreferences(QStringLiteral("shortcuts")); });
+    makeAction(QStringLiteral("help.about"), [this] {
+        QMessageBox::about(this, tr("About Visual Notepad"),
+                           tr("Visual Notepad %1").arg(QApplication::applicationVersion()));
     });
 
-    m_statusBarAction = new QAction(tr("Status Bar"), this);
-    m_statusBarAction->setCheckable(true);
-    m_statusBarAction->setChecked(true);
-    connect(m_statusBarAction, &QAction::toggled, this, [this](bool on) { statusBar()->setVisible(on); });
-
-    m_formatAction = new QAction(tr("Format Document"), this);
-    m_formatAction->setShortcut(platformKeys("Shift+Alt+F", "Ctrl+Shift+I"));
-    m_formatAction->setEnabled(false); // Planned formatter.
+    connect(&Settings::instance(), &Settings::changed, this, &MainWindow::onSettingChanged);
 }
 
 void MainWindow::createMenus()
@@ -193,120 +276,39 @@ void MainWindow::createMenus()
     // Keep the menu bar inside the window on every desktop rather than a
     // global/dbus menu.
     menuBar()->setNativeMenuBar(false);
-
-    // Items whose feature is not built yet are listed but disabled.
-    const auto todo = [](QAction *action) { action->setEnabled(false); };
-    const auto forward = [this](void (TextView::*slot)()) {
-        return [this, slot] {
-            if (auto *tab = currentTab())
-                (tab->editor()->*slot)();
-        };
+    const auto add = [this](QMenu *menu, std::initializer_list<const char *> ids) {
+        for (const char *id : ids) {
+            if (qstrcmp(id, "-") == 0)
+                menu->addSeparator();
+            else
+                menu->addAction(action(QLatin1String(id)));
+        }
     };
 
     QMenu *file = menuBar()->addMenu(tr("&File"));
-    file->addAction(tr("New File"), QKeySequence::New, this, &MainWindow::newFile);
-    file->addAction(tr("New Window"), keys("Ctrl+Shift+N"), this, [] {
-        auto *window = new MainWindow;
-        window->setAttribute(Qt::WA_DeleteOnClose);
-        window->newFile();
-        window->show();
-    });
-    file->addAction(tr("Open…"), QKeySequence::Open, this, &MainWindow::openWithDialog);
-    file->addMenu(tr("Open Recent"))->setEnabled(false);
-    file->addSeparator();
-    file->addAction(tr("Save"), QKeySequence::Save, this, [this] {
-        if (auto *tab = currentTab())
-            save(tab);
-    });
-    file->addAction(tr("Save As…"), keys("Ctrl+Shift+S"), this, [this] {
-        if (auto *tab = currentTab())
-            saveAs(tab);
-    });
-    file->addSeparator();
-    file->addAction(tr("Close Tab"), keys("Ctrl+W"), this, [this] { closeTab(m_group->currentIndex()); });
-    file->addAction(tr("Close Window"), keys("Ctrl+Shift+W"), this, &QWidget::close);
-    file->addSeparator();
-    file->addAction(tr("Quit"), keys("Ctrl+Q"), qApp, &QApplication::closeAllWindows);
+    add(file, {"file.new", "file.newWindow", "file.open"});
+    m_recentMenu = file->addMenu(tr("Open Recent"));
+    add(file, {"-", "file.save", "file.saveAs", "-", "file.closeTab", "file.closeWindow", "-", "file.quit"});
+    connect(m_recentMenu, &QMenu::aboutToShow, this, &MainWindow::fillRecentMenu);
 
     QMenu *edit = menuBar()->addMenu(tr("&Edit"));
-    edit->addAction(tr("Undo"), QKeySequence::Undo, this, forward(&TextView::undo));
-    QAction *redo = edit->addAction(tr("Redo"), this, forward(&TextView::redo));
-    redo->setShortcuts({keys("Ctrl+Y"), keys("Ctrl+Shift+Z")});
-    edit->addSeparator();
-    edit->addAction(tr("Cut"), QKeySequence::Cut, this, forward(&TextView::cut));
-    edit->addAction(tr("Copy"), QKeySequence::Copy, this, forward(&TextView::copy));
-    edit->addAction(tr("Paste"), QKeySequence::Paste, this, forward(&TextView::paste));
-    edit->addSeparator();
-    edit->addAction(tr("Find"), keys("Ctrl+F"), this, [this] {
-        if (auto *tab = currentTab())
-            tab->showFind(false);
-    });
-    edit->addAction(tr("Replace"), keys("Ctrl+H"), this, [this] {
-        if (auto *tab = currentTab())
-            tab->showFind(true);
-    });
-    edit->addAction(tr("Find Next"), keys("F3"), this, [this] {
-        if (auto *tab = currentTab())
-            tab->findBar()->findNext();
-    });
-    edit->addAction(tr("Find Previous"), keys("Shift+F3"), this, [this] {
-        if (auto *tab = currentTab())
-            tab->findBar()->findPrevious();
-    });
-    todo(edit->addAction(tr("Go to Line…"), keys("Ctrl+G"), this, [] {}));
-    edit->addSeparator();
-    edit->addAction(tr("Toggle Line Comment"), keys("Ctrl+/"), this, forward(&TextView::toggleLineComment));
-    edit->addAction(m_formatAction);
-    edit->addSeparator();
-    todo(edit->addAction(tr("Preferences…"), keys("Ctrl+,"), this, [] {}));
+    add(edit, {"edit.undo", "edit.redo", "-", "edit.cut", "edit.copy", "edit.paste", "-", "edit.find", "edit.replace",
+               "edit.findNext", "edit.findPrevious", "edit.goToLine", "-", "edit.toggleComment", "edit.format", "-",
+               "edit.preferences"});
 
     QMenu *selection = menuBar()->addMenu(tr("&Selection"));
-    selection->addAction(tr("Select All"), QKeySequence::SelectAll, this, forward(&TextView::selectAll));
-    selection->addAction(tr("Expand Selection"), keys("Shift+Alt+Right"), this, forward(&TextView::expandSelection));
-    selection->addAction(tr("Shrink Selection"), keys("Shift+Alt+Left"), this, forward(&TextView::shrinkSelection));
-    selection->addSeparator();
-    selection->addAction(tr("Add Cursor Above"), platformKeys("Ctrl+Alt+Up", "Shift+Alt+Up"), this,
-                         forward(&TextView::addCursorAbove));
-    selection->addAction(tr("Add Cursor Below"), platformKeys("Ctrl+Alt+Down", "Shift+Alt+Down"), this,
-                         forward(&TextView::addCursorBelow));
-    selection->addAction(tr("Add Next Occurrence"), keys("Ctrl+D"), this, forward(&TextView::addNextOccurrence));
-    selection->addAction(tr("Select All Occurrences"), keys("Ctrl+Shift+L"), this,
-                         forward(&TextView::selectAllOccurrences));
-    selection->addSeparator();
-    selection->addAction(tr("Copy Line Up"), platformKeys("Shift+Alt+Up", "Ctrl+Shift+Alt+Up"), this,
-                         forward(&TextView::copyLinesUp));
-    selection->addAction(tr("Copy Line Down"), platformKeys("Shift+Alt+Down", "Ctrl+Shift+Alt+Down"), this,
-                         forward(&TextView::copyLinesDown));
-    selection->addAction(tr("Move Line Up"), keys("Alt+Up"), this, forward(&TextView::moveLinesUp));
-    selection->addAction(tr("Move Line Down"), keys("Alt+Down"), this, forward(&TextView::moveLinesDown));
-    selection->addAction(tr("Delete Line"), keys("Ctrl+Shift+K"), this, forward(&TextView::deleteLines));
+    add(selection, {"selection.selectAll", "selection.expand", "selection.shrink", "-", "selection.addCursorAbove",
+                    "selection.addCursorBelow", "selection.addNextOccurrence", "selection.selectAllOccurrences", "-",
+                    "selection.copyLineUp", "selection.copyLineDown", "selection.moveLineUp",
+                    "selection.moveLineDown", "selection.deleteLine"});
 
     QMenu *view = menuBar()->addMenu(tr("&View"));
-    view->addAction(m_outlineAction);
-    view->addSeparator();
-    view->addAction(m_modeSource);
-    view->addAction(m_modeSourceVisual);
-    view->addAction(m_modeVisual);
-    view->addSeparator();
-    view->addAction(m_splitAction);
-    view->addAction(tr("Move Tab to New Window"), keys("Ctrl+K, O"), this, &MainWindow::moveTabToNewWindow);
-    view->addSeparator();
-    view->addAction(m_wrapAction);
-    view->addAction(m_statusBarAction);
-    view->addSeparator();
-    view->addAction(tr("Zoom In"), keys("Ctrl+="), this, [this] { zoom(1); });
-    view->addAction(tr("Zoom Out"), keys("Ctrl+-"), this, [this] { zoom(-1); });
-    view->addAction(tr("Reset Zoom"), keys("Ctrl+0"), this, [this] { zoom(0); });
-    view->addAction(tr("Full Screen"), keys("F11"), this,
-                    [this] { setWindowState(windowState() ^ Qt::WindowFullScreen); });
+    add(view, {"view.outline", "-", "view.modeSource", "view.modeSplit", "view.modeVisual", "-", "view.splitEditor",
+               "view.moveToNewWindow", "-", "view.wordWrap", "view.statusBar", "-", "view.zoomIn", "view.zoomOut",
+               "view.zoomReset", "view.fullScreen"});
 
     QMenu *help = menuBar()->addMenu(tr("&Help"));
-    todo(help->addAction(tr("Keyboard Shortcuts"), keys("Ctrl+K, Ctrl+S"), this, [] {}));
-    help->addSeparator();
-    help->addAction(tr("About Visual Notepad"), this, [this] {
-        QMessageBox::about(this, tr("About Visual Notepad"),
-                           tr("Visual Notepad %1").arg(QApplication::applicationVersion()));
-    });
+    add(help, {"help.shortcuts", "-", "help.about"});
 }
 
 void MainWindow::createTabActions()
@@ -357,7 +359,7 @@ void MainWindow::createOutline()
     close->setIcon(QIcon(QStringLiteral(":/vn/icons/close-hover.svg")));
     close->setIconSize({14, 14});
     close->setFixedSize(18, 18);
-    close->setToolTip(tr("Hide Outline (%1)").arg(keys("Ctrl+B").toString(QKeySequence::NativeText)));
+    close->setToolTip(tr("Hide Outline (%1)").arg(m_outlineAction->shortcut().toString(QKeySequence::NativeText)));
     connect(close, &QToolButton::clicked, this, [this] { m_outlineAction->setChecked(false); });
     titleLayout->addWidget(label);
     titleLayout->addStretch(1);
@@ -408,12 +410,14 @@ bool MainWindow::openFile(const QString &path)
 
     auto *tab = new DocumentTab;
     if (!tab->load(path)) {
+        Settings::instance().removeRecentFile(path);
         QMessageBox::warning(this, tr("Open File"),
                              tr("Could not open %1:\n%2").arg(QDir::toNativeSeparators(path), tab->errorString()));
         delete tab;
         return false;
     }
     addTab(tab);
+    Settings::instance().addRecentFile(QFileInfo(path).absoluteFilePath());
     return true;
 }
 
@@ -424,7 +428,6 @@ void MainWindow::adoptTab(DocumentTab *tab)
 
 void MainWindow::addTab(DocumentTab *tab)
 {
-    tab->editor()->setWordWrap(m_wrapAction->isChecked());
     connect(tab, &DocumentTab::modificationChanged, this, [this, tab] { updateTabTitle(tab); });
     connect(tab, &DocumentTab::cursorPositionChanged, this, [this, tab] {
         if (tab == currentTab())
@@ -556,11 +559,55 @@ void MainWindow::zoom(int steps)
 
 void MainWindow::applyZoom()
 {
-    QFont font = theme::editorFont();
-    font.setPointSizeF(font.pointSizeF() * m_zoomPercent / 100.0);
     for (int i = 0; i < m_group->count(); ++i)
-        m_group->tab(i)->editor()->setFont(font);
+        m_group->tab(i)->setZoom(m_zoomPercent);
     updateStatus();
+}
+
+void MainWindow::goToLine()
+{
+    if (auto *tab = currentTab())
+        tab->showGoToLine();
+}
+
+void MainWindow::showPreferences(const QString &page)
+{
+    PreferencesDialog::showPage(this, page);
+}
+
+void MainWindow::onSettingChanged(const QString &changedKey)
+{
+    if (changedKey.startsWith(QLatin1String(key::shortcutsGroup))) {
+        const QString id = changedKey.mid(int(qstrlen(key::shortcutsGroup)));
+        if (QAction *a = action(id))
+            a->setShortcuts(shortcutsFor(id));
+        return;
+    }
+    Settings &settings = Settings::instance();
+    if (changedKey == QLatin1String(key::outline)) {
+        m_outlineAction->setChecked(settings.flag(key::outline));
+        updateOutlineVisibility();
+    } else if (changedKey == QLatin1String(key::wordWrap)) {
+        m_wrapAction->setChecked(settings.flag(key::wordWrap));
+    } else if (changedKey == QLatin1String(key::statusBar)) {
+        m_statusBarAction->setChecked(settings.flag(key::statusBar));
+        statusBar()->setVisible(settings.flag(key::statusBar));
+    }
+}
+
+void MainWindow::fillRecentMenu()
+{
+    m_recentMenu->clear();
+    const QStringList files = Settings::instance().recentFiles();
+    for (const QString &path : files) {
+        m_recentMenu->addAction(QDir::toNativeSeparators(path), this, [this, path] { openFile(path); });
+    }
+    if (files.isEmpty()) {
+        m_recentMenu->addAction(tr("No Recent Files"))->setEnabled(false);
+        return;
+    }
+    m_recentMenu->addSeparator();
+    m_recentMenu->addAction(tr("Clear Recently Opened"), this, [] { Settings::instance().clearRecentFiles(); });
 }
 
 void MainWindow::onCurrentTabChanged()

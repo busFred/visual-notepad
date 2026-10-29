@@ -1,5 +1,6 @@
 #include "DocumentTab.h"
 
+#include "Settings.h"
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
 #include "editor/FindBar.h"
@@ -16,6 +17,8 @@
 #include <QFileInfo>
 #include <QButtonGroup>
 #include <QHBoxLayout>
+#include <QKeyEvent>
+#include <QLineEdit>
 #include <QPainter>
 #include <QPainterPath>
 #include <QSaveFile>
@@ -108,6 +111,21 @@ DocumentTab::DocumentTab(QWidget *parent)
     shadow->setColor(QColor(0, 0, 0, 40));
     m_findBar->setGraphicsEffect(shadow);
     m_findBar->installEventFilter(this);
+    m_goToLine = createGoToLine();
+
+    // New files take their line ending from the settings.
+    const QString eol = Settings::instance().text(key::lineEnding);
+#ifdef Q_OS_WIN
+    m_lineEnding = eol == QLatin1String("lf") ? LineEnding::LF : LineEnding::CRLF;
+#else
+    m_lineEnding = eol == QLatin1String("crlf") ? LineEnding::CRLF : LineEnding::LF;
+#endif
+    m_hasBom = Settings::instance().text(key::encoding) == QLatin1String("utf8bom");
+    applySettings();
+    connect(&Settings::instance(), &Settings::changed, this, [this](const QString &changedKey) {
+        if (changedKey.startsWith(QLatin1String("editor/")))
+            applySettings();
+    });
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -225,9 +243,11 @@ void DocumentTab::goToLine(int line)
 
 void DocumentTab::updateDefinition()
 {
-    // New documents default to Markdown, like the old app.
+    // New documents default to Markdown, like the old app, unless set otherwise.
     auto &repository = theme::syntaxRepository();
-    const auto def = m_path.isEmpty() ? repository.definitionForName(QStringLiteral("Markdown"))
+    const bool markdownByDefault = Settings::instance().text(key::newFileLanguage) != QLatin1String("plaintext");
+    const auto def = m_path.isEmpty() ? (markdownByDefault ? repository.definitionForName(QStringLiteral("Markdown"))
+                                                           : KSyntaxHighlighting::Definition())
                                       : repository.definitionForFileName(m_path);
     m_highlighter->setDefinition(def);
     m_editor->setCommentMarker(def.singleLineCommentMarker());
@@ -259,6 +279,16 @@ bool DocumentTab::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == m_findBar && (event->type() == QEvent::Resize || event->type() == QEvent::Show))
         placeOverlays();
+    if (watched->objectName() == QLatin1String("GoToLineEdit")) {
+        if (event->type() == QEvent::FocusOut
+            || (event->type() == QEvent::KeyPress && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape)) {
+            m_goToLine->hide();
+            if (event->type() == QEvent::KeyPress) {
+                m_editor->setFocus();
+                return true;
+            }
+        }
+    }
     return QWidget::eventFilter(watched, event);
 }
 
@@ -269,6 +299,93 @@ void DocumentTab::placeOverlays()
     const int right = m_pill->isVisible() ? m_pill->width() + pillMarginRight * 2 : findBarMarginRight;
     m_findBar->adjustSize();
     m_findBar->move(qMax(0, width() - m_findBar->width() - right), 0);
+    m_goToLine->adjustSize();
+    m_goToLine->move((width() - m_goToLine->width()) / 2, 0);
+}
+
+void DocumentTab::applySettings()
+{
+    Settings &s = Settings::instance();
+    QFont font = theme::editorFont();
+    font.setPointSizeF(font.pointSizeF() * m_zoom / 100.0);
+    m_editor->setFont(font);
+    m_editor->setLineNumbersVisible(s.flag(key::lineNumbers));
+    m_editor->setHighlightCurrentLine(s.flag(key::highlightCurrentLine));
+    m_editor->setShowWhitespace(s.flag(key::drawWhitespace));
+    m_editor->setTabWidth(s.number(key::tabWidth));
+    m_editor->setInsertSpaces(s.flag(key::insertSpaces));
+    m_editor->setWordWrap(s.flag(key::wordWrap));
+    m_editor->setMultiCursorModifier(s.text(key::multiCursorModifier) == QLatin1String("ctrl") ? Qt::ControlModifier
+                                                                                                : Qt::AltModifier);
+}
+
+void DocumentTab::setZoom(int percent)
+{
+    if (m_zoom == percent)
+        return;
+    m_zoom = percent;
+    applySettings();
+}
+
+QWidget *DocumentTab::createGoToLine()
+{
+    // VS Code's quick input, reduced to "Go to Line": a field hanging from
+    // the top edge. Accepts "line" or "line:column".
+    auto *frame = new QFrame(this);
+    frame->setObjectName(QStringLiteral("FindBar"));
+    frame->setAttribute(Qt::WA_StyledBackground);
+    auto *layout = new QHBoxLayout(frame);
+    layout->setContentsMargins(6, 5, 6, 5);
+    auto *field = new QWidget(frame);
+    field->setObjectName(QStringLiteral("FindInput"));
+    field->setAttribute(Qt::WA_StyledBackground);
+    field->setProperty("focused", true);
+    auto *fieldLayout = new QHBoxLayout(field);
+    fieldLayout->setContentsMargins(4, 1, 4, 1);
+    auto *edit = new QLineEdit(field);
+    edit->setFrame(false);
+    edit->setMinimumWidth(320);
+    fieldLayout->addWidget(edit);
+    layout->addWidget(field);
+    auto *shadow = new QGraphicsDropShadowEffect(frame);
+    shadow->setBlurRadius(8);
+    shadow->setOffset(0, 3);
+    shadow->setColor(QColor(0, 0, 0, 40));
+    frame->setGraphicsEffect(shadow);
+    frame->hide();
+
+    connect(edit, &QLineEdit::returnPressed, this, [this, frame, edit] {
+        const QStringList parts = edit->text().trimmed().split(u':');
+        bool ok = false;
+        const int line = parts.value(0).toInt(&ok);
+        frame->hide();
+        if (!ok)
+            return;
+        const int column = parts.value(1).toInt();
+        const QTextBlock block = m_doc->findBlockByNumber(qBound(1, line, m_doc->blockCount()) - 1);
+        QTextCursor cursor(block);
+        cursor.setPosition(block.position() + qBound(0, column - 1, block.length() - 1));
+        m_editor->setTextCursor(cursor);
+        m_editor->centerCursor();
+        m_editor->setFocus();
+    });
+    edit->installEventFilter(this);
+    edit->setObjectName(QStringLiteral("GoToLineEdit"));
+    return frame;
+}
+
+void DocumentTab::showGoToLine()
+{
+    auto *edit = m_goToLine->findChild<QLineEdit *>();
+    const QTextCursor cursor = m_editor->textCursor();
+    edit->clear();
+    edit->setPlaceholderText(tr("Current line: %1. Type a line number between 1 and %2.")
+                                 .arg(cursor.blockNumber() + 1)
+                                 .arg(m_doc->blockCount()));
+    m_goToLine->show();
+    m_goToLine->raise();
+    placeOverlays();
+    edit->setFocus();
 }
 
 void DocumentTab::showFind(bool replace)

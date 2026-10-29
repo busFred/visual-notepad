@@ -41,6 +41,8 @@ public:
     void setCommentMarker(const QString &marker);
     bool isReadOnly() const { return m_readOnly; }
     void setReadOnly(bool on);
+    // Modifier that adds a caret on click: Alt (default) or Ctrl.
+    void setMultiCursorModifier(Qt::KeyboardModifier modifier) { m_multiCursorModifier = modifier; }
 
     // The primary caret.
     QTextCursor textCursor() const;
@@ -213,6 +215,7 @@ private:
     int m_tabWidth = 4;
     qreal m_lineSpacing = 1.5;
     QString m_commentMarker;
+    Qt::KeyboardModifier m_multiCursorModifier = Qt::AltModifier;
 
     // Metrics.
     int m_lineHeight = 16;
