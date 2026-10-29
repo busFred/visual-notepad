@@ -227,6 +227,19 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: ctest --test-dir build --output-on-failure
 
+      - name: Failed test details
+        if: failure()
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          foreach ($t in 'preferences','files','theme') {
+            $exe = "build\tests\test_$t.exe"
+            & $exe -o "$t.log,txt"
+            "== $t exit $LASTEXITCODE"
+            if (Test-Path "$t.log") { Get-Content "$t.log" | Select-String -NotMatch 'QWARN|PASS' }
+          }
+
       - name: Deploy
         shell: pwsh
         run: |
