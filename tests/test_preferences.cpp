@@ -18,6 +18,10 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextDocument>
+#include <QScreen>
+#include <QStackedWidget>
+#include <QScrollBar>
+#include <QScrollArea>
 #include <QToolButton>
 
 using namespace vn;
@@ -72,6 +76,7 @@ private Q_SLOTS:
     void lineSpacingChangesRenderedHeight();
     void encodingRows();
     void showPageSelectsCategory();
+    void markdownPageFitsWithoutScrolling();
     void singleInstance();
     void screenshots();
 };
@@ -486,6 +491,21 @@ void TestPreferences::showPageSelectsCategory()
     QCOMPARE(list->currentItem()->text(), QStringLiteral("Markdown"));
     PreferencesDialog::showPage(nullptr, QString());
     QCOMPARE(list->currentItem()->text(), QStringLiteral("Markdown"));
+}
+
+void TestPreferences::markdownPageFitsWithoutScrolling()
+{
+    PreferencesDialog::showPage(nullptr, QStringLiteral("markdown"));
+    QWidget *window = prefsWindow();
+    QVERIFY(window);
+    auto *stack = window->findChild<QStackedWidget *>();
+    auto *scroll = qobject_cast<QScrollArea *>(stack->currentWidget());
+    QVERIFY(scroll);
+    QTRY_VERIFY(scroll->viewport()->height() > 0);
+    if (scroll->viewport()->height() < scroll->widget()->sizeHint().height()
+        && window->height() >= window->screen()->availableGeometry().height() - 80)
+        QSKIP("The screen is too short for the whole page.");
+    QCOMPARE(scroll->verticalScrollBar()->maximum(), 0);
 }
 
 void TestPreferences::singleInstance()
