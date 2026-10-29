@@ -268,6 +268,10 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
             entry[QStringLiteral("mode")] = modeToString(tab->viewMode());
             if (tab->languageOverridden())
                 entry[QStringLiteral("language")] = tab->definitionName();
+            if (tab->indentationOverridden()) {
+                entry[QStringLiteral("tabSize")] = tab->indentation().tabSize;
+                entry[QStringLiteral("insertSpaces")] = tab->indentation().insertSpaces;
+            }
             entry[QStringLiteral("caret")] = tab->editor()->textCursor().position();
             entry[QStringLiteral("topLine")] = tab->sourceView()->topLine();
             if (tab == window->tabs().value(window->currentTabIndex()))
@@ -412,6 +416,9 @@ bool SessionManager::restore()
             }
             if (entry.contains(QStringLiteral("language")))
                 tab->setLanguage(entry.value(QStringLiteral("language")).toString());
+            if (entry.contains(QStringLiteral("tabSize")) && entry.contains(QStringLiteral("insertSpaces")))
+                tab->setIndentation({qBound(1, entry.value(QStringLiteral("tabSize")).toInt(), 16),
+                                     entry.value(QStringLiteral("insertSpaces")).toBool()});
             tab->setViewMode(modeFromString(entry.value(QStringLiteral("mode")).toString()));
             window->adoptTab(tab);
 

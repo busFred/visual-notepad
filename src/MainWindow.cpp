@@ -500,7 +500,7 @@ void MainWindow::createStatusBar()
     statusBar()->setSizeGripEnabled(false);
     statusBar()->setContentsMargins(0, 0, 0, 0);
     bool first = true;
-    for (QLabel **label : {&m_position, &m_zoom, &m_lineEnding, &m_encoding, &m_language}) {
+    for (QLabel **label : {&m_position, &m_indentation, &m_zoom, &m_lineEnding, &m_encoding, &m_language}) {
         *label = new StatusCell(!first, this);
         statusBar()->addPermanentWidget(*label);
         first = false;
@@ -508,6 +508,8 @@ void MainWindow::createStatusBar()
     const auto clickable = [](QLabel *label, std::function<void()> handler) {
         static_cast<StatusCell *>(label)->setClickHandler(std::move(handler));
     };
+    m_indentation->setObjectName(QStringLiteral("IndentationStatus"));
+    clickable(m_indentation, [this] { showIndentationMenu(); });
     clickable(m_zoom, [this] { zoom(0); });
     clickable(m_lineEnding, [this] { showLineEndingMenu(); });
     clickable(m_encoding, [this] { showEncodingMenu(); });
@@ -593,6 +595,10 @@ void MainWindow::addTab(DocumentTab *tab, EditorGroup *group, int index)
             updateStatus();
     });
     connect(tab, &DocumentTab::viewModeChanged, this, [this] { updateModeControls(); });
+    connect(tab, &DocumentTab::indentationChanged, this, [this, tab] {
+        if (tab == currentTab())
+            updateStatus();
+    });
     connect(tab, &DocumentTab::formatChanged, this, [this, tab] {
         if (tab != currentTab())
             return;
@@ -607,6 +613,7 @@ void MainWindow::addTab(DocumentTab *tab, EditorGroup *group, int index)
     connect(tab, &DocumentTab::textChanged, &session, &SessionManager::markDirty);
     connect(tab, &DocumentTab::modificationChanged, &session, &SessionManager::markDirty);
     connect(tab, &DocumentTab::formatChanged, &session, &SessionManager::markDirty);
+    connect(tab, &DocumentTab::indentationChanged, &session, &SessionManager::markDirty);
     session.markDirty();
 
     // One timer per tab, restarted on each edit; it travels with the tab.
@@ -859,6 +866,33 @@ void MainWindow::popupAboveCell(QMenu *menu, QWidget *cell)
         pos = m_activeGroup->mapToGlobal(QPoint((m_activeGroup->width() - menu->sizeHint().width()) / 2, 32));
     }
     menu->exec(pos);
+}
+
+void MainWindow::showIndentationMenu()
+{
+    DocumentTab *tab = currentTab();
+    if (!tab)
+        return;
+    QMenu menu(this);
+    const indentation::Settings current = tab->indentation();
+    // VS Code's "Indent Using Spaces / Tabs": sizes 1 to 8, for this file only.
+    for (const bool spaces : {true, false}) {
+        QMenu *submenu = menu.addMenu(spaces ? tr("Indent Using Spaces") : tr("Indent Using Tabs"));
+        for (int size = 1; size <= 8; ++size) {
+            QAction *a = submenu->addAction(QString::number(size), this,
+                                            [tab, size, spaces] { tab->setIndentation({size, spaces}); });
+            a->setCheckable(true);
+            a->setChecked(current.insertSpaces == spaces && current.tabSize == size);
+        }
+    }
+    menu.addSeparator();
+    menu.addAction(tr("Detect Indentation from Content"), this, [tab] { tab->detectIndentation(); });
+    for (const bool spaces : {true, false}) {
+        QAction *a = menu.addAction(spaces ? tr("Convert Indentation to Spaces") : tr("Convert Indentation to Tabs"),
+                                    this, [tab, spaces] { tab->convertIndentation(spaces); });
+        a->setEnabled(!tab->isReadOnly());
+    }
+    popupAboveCell(&menu, m_indentation);
 }
 
 void MainWindow::showLineEndingMenu()
@@ -1239,7 +1273,7 @@ void MainWindow::updateStatus()
 {
     DocumentTab *tab = currentTab();
     // With no file open the columns (and their dividers) are hidden.
-    for (QLabel *label : {m_position, m_zoom, m_lineEnding, m_encoding, m_language})
+    for (QLabel *label : {m_position, m_indentation, m_zoom, m_lineEnding, m_encoding, m_language})
         label->setVisible(tab != nullptr);
     if (!tab)
         return;
@@ -1251,6 +1285,8 @@ void MainWindow::updateStatus()
     else if (cursor.hasSelection())
         position += u' ' + tr("(%1 selected)").arg(cursor.selectionEnd() - cursor.selectionStart());
     m_position->setText(position);
+    m_indentation->setText(tab->indentation().insertSpaces ? tr("Spaces: %1").arg(tab->indentation().tabSize)
+                                                           : tr("Tab Size: %1").arg(tab->indentation().tabSize));
     m_zoom->setText(QStringLiteral("%1%").arg(m_zoomPercent));
     m_lineEnding->setText(tab->lineEnding() == DocumentTab::LineEnding::CRLF ? tr("Windows (CRLF)")
                                                                              : tr("Unix (LF)"));
