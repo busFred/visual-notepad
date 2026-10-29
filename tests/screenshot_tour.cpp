@@ -93,5 +93,15 @@ int main(int argc, char **argv)
         if (auto *dialog = qobject_cast<QDialog *>(w); dialog && dialog->isVisible())
             dialog->grab().save(out + QStringLiteral("/4-preferences.png"));
     }
+    // 6. Every tab closed: the welcome page.
+    for (QWidget *w : QApplication::topLevelWidgets()) {
+        if (auto *dialog = qobject_cast<QDialog *>(w))
+            dialog->close();
+    }
+    vn::Settings::instance().addRecentFile(docs + QStringLiteral("/notes.md"));
+    vn::Settings::instance().addRecentFile(docs + QStringLiteral("/build.py"));
+    window->closeTabs(0, vn::MainWindow::CloseScope::All);
+    settle();
+    window->grab().save(out + QStringLiteral("/6-welcome.png"));
     return 0;
 }

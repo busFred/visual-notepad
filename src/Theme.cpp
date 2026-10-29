@@ -107,7 +107,12 @@ QPushButton#FindButton { background: @editor; border: 1px solid @divider; border
 QPushButton#FindButton:hover { background: @activeBlock; }
 QPushButton#FindButton:pressed { background: @selection; }
 
-QLabel#EmptyGroup { background: @editor; color: @mutedText; }
+#Welcome { background: @editor; }
+#Welcome QLabel#WelcomeTitle { color: @mutedText; }
+#Welcome QLabel#WelcomeHeading { color: @mutedText; font-weight: 600; padding-top: 4px; }
+#Welcome QLabel#WelcomeKey { color: @mutedText; }
+#Welcome QPushButton#WelcomeLink { color: @accent; background: transparent; border: none; padding: 2px 0; text-align: left; }
+#Welcome QPushButton#WelcomeLink:hover { text-decoration: underline; }
 
 QScrollBar:vertical { background: @editor; width: 12px; margin: 0; border-left: 1px solid @sideBar; }
 QScrollBar:horizontal { background: @editor; height: 12px; margin: 0; border-top: 1px solid @sideBar; }

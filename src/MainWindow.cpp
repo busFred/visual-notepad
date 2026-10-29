@@ -428,6 +428,15 @@ void MainWindow::wireGroup(EditorGroup *group)
             updateModeControls();
     });
     connect(group, &EditorGroup::tabCloseRequested, this, [this, group](int index) { closeTab(group, index); });
+    connect(group, &EditorGroup::commandRequested, this, [this, group](const QString &id) {
+        activateGroup(group);
+        if (QAction *a = action(id))
+            a->trigger();
+    });
+    connect(group, &EditorGroup::recentFileRequested, this, [this, group](const QString &path) {
+        activateGroup(group);
+        openFile(path);
+    });
     connect(group, &EditorGroup::tabContextMenuRequested, this,
             [this, group](int index, const QPoint &pos) { showTabContextMenu(group, index, pos); });
     connect(group, &EditorGroup::newTabRequested, this, [this, group] {
@@ -1181,11 +1190,11 @@ void MainWindow::updateTabTitle(DocumentTab *tab)
 void MainWindow::updateStatus()
 {
     DocumentTab *tab = currentTab();
-    if (!tab) {
-        for (QLabel *label : {m_position, m_zoom, m_lineEnding, m_encoding, m_language})
-            label->clear();
+    // With no file open the columns (and their dividers) are hidden.
+    for (QLabel *label : {m_position, m_zoom, m_lineEnding, m_encoding, m_language})
+        label->setVisible(tab != nullptr);
+    if (!tab)
         return;
-    }
     const TextView *editor = tab->editor();
     const QTextCursor cursor = editor->textCursor();
     QString position = tr("Ln %1, Col %2").arg(cursor.blockNumber() + 1).arg(cursor.positionInBlock() + 1);

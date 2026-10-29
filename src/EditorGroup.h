@@ -20,6 +20,7 @@ class QTabBar;
 namespace vn {
 
 class DocumentTab;
+class WelcomeView;
 
 class EditorGroup : public QWidget
 {
@@ -72,6 +73,9 @@ Q_SIGNALS:
     void tabContextMenuRequested(int index, const QPoint &globalPos);
     // Double-click on the empty part of the strip.
     void newTabRequested();
+    // From the welcome page shown when the group has no tabs.
+    void commandRequested(const QString &id);
+    void recentFileRequested(const QString &path);
     // The user clicked or focused into this group.
     void activated();
     // A tab from this or another group was dropped; insertIndex is -1 for the
@@ -97,7 +101,7 @@ private:
     QHBoxLayout *m_actions;
     QStackedWidget *m_body;
     QStackedWidget *m_tabs;
-    QLabel *m_empty;
+    WelcomeView *m_empty;
     QWidget *m_dropOverlay;
     QWidget *m_dropMarker;
     QPointer<DocumentTab> m_pressedTab;

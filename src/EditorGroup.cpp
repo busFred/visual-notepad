@@ -2,6 +2,7 @@
 
 #include "DocumentTab.h"
 #include "Theme.h"
+#include "WelcomeView.h"
 
 #include <QApplication>
 #include <QCursor>
@@ -10,6 +11,7 @@
 #include <QDragLeaveEvent>
 #include <QDragMoveEvent>
 #include <QDropEvent>
+#include <QLoggingCategory>
 #include <QHBoxLayout>
 #include <QHash>
 #include <QLabel>
@@ -21,6 +23,14 @@
 #include <QVBoxLayout>
 
 namespace vn {
+
+// QT_LOGGING_RULES="vn.drag.debug=true" traces tab drags.
+Q_LOGGING_CATEGORY(lcDrag, "vn.drag", QtWarningMsg)
+
+// Set when one of our groups takes a dragged tab. Other applications may
+// report a drop of our private format as accepted (Chromium-based windows
+// do), so QDrag's result alone can't tell "dropped outside our windows".
+static bool s_tabDropTaken = false;
 
 namespace {
 
@@ -154,7 +164,7 @@ EditorGroup::EditorGroup(QWidget *parent)
     , m_actions(new QHBoxLayout)
     , m_body(new QStackedWidget(this))
     , m_tabs(new QStackedWidget(m_body))
-    , m_empty(new QLabel(tr("Empty. Drag a tab here or open a file"), m_body))
+    , m_empty(new WelcomeView(m_body))
     , m_dropOverlay(new DropOverlay(this))
     , m_dropMarker(new DropMarker(m_strip))
 {
@@ -187,8 +197,8 @@ EditorGroup::EditorGroup(QWidget *parent)
     stripLayout->addStretch(1);
     stripLayout->addLayout(m_actions);
 
-    m_empty->setObjectName(QStringLiteral("EmptyGroup"));
-    m_empty->setAlignment(Qt::AlignCenter);
+    connect(m_empty, &WelcomeView::commandRequested, this, &EditorGroup::commandRequested);
+    connect(m_empty, &WelcomeView::recentFileRequested, this, &EditorGroup::recentFileRequested);
     m_body->addWidget(m_tabs);
     m_body->addWidget(m_empty);
 
@@ -255,6 +265,7 @@ int EditorGroup::addTab(DocumentTab *tab, const QString &text, int index)
     // Insert the page first so currentChanged sees it.
     m_tabs->insertWidget(index, tab);
     m_tabBar->insertTab(index, text);
+    updateEmpty();
     return index;
 }
 
@@ -285,6 +296,7 @@ void EditorGroup::setCurrentIndex(int index)
 void EditorGroup::setTabText(int index, const QString &text)
 {
     m_tabBar->setTabText(index, text);
+    m_tabBar->updateGeometry();
 }
 
 void EditorGroup::setTabToolTip(int index, const QString &toolTip)
@@ -302,6 +314,7 @@ bool EditorGroup::eventFilter(QObject *watched, QEvent *event)
     if (watched == m_tabBar || watched == m_strip) {
         const auto type = event->type();
         if (type == QEvent::MouseButtonPress) {
+            qCDebug(lcDrag) << "press on" << watched;
             Q_EMIT activated();
             auto *mouse = static_cast<QMouseEvent *>(event);
             m_pressedTab = nullptr;
@@ -309,7 +322,10 @@ bool EditorGroup::eventFilter(QObject *watched, QEvent *event)
                 m_pressedTab = tab(m_tabBar->tabAt(mouse->position().toPoint()));
         } else if (type == QEvent::MouseButtonRelease) {
             m_pressedTab = nullptr;
-        } else if (type == QEvent::MouseMove && m_pressedTab && watched == m_tabBar) {
+        } else if (type == QEvent::MouseMove && watched == m_tabBar) {
+            qCDebug(lcDrag) << "move" << static_cast<QMouseEvent *>(event)->globalPosition() << "pressed tab" << m_pressedTab;
+        }
+        if (type == QEvent::MouseMove && m_pressedTab && watched == m_tabBar) {
             // Leaving the strip turns the tab move into a drag to another group
             // or window.
             auto *mouse = static_cast<QMouseEvent *>(event);
@@ -360,8 +376,16 @@ void EditorGroup::startDrag(DocumentTab *tab)
     // The drop may close this group's window, so keep guarded handles.
     QPointer<EditorGroup> self(this);
     QPointer<DocumentTab> guarded(tab);
+    qCDebug(lcDrag) << "start drag of tab" << index;
+    s_tabDropTaken = false;
     const Qt::DropAction result = drag->exec(Qt::MoveAction);
-    if (result == Qt::IgnoreAction && self && guarded && self->indexOf(guarded) >= 0)
+    qCDebug(lcDrag) << "drag finished" << result << "taken by us" << s_tabDropTaken;
+    // Not taken by any of our windows: like VS Code, the tab opens in a new
+    // window wherever it was released, even over another application.
+    // Released over one of our own windows (or cancelled there with Escape):
+    // nothing happens.
+    const bool overOurWindow = QApplication::topLevelAt(QCursor::pos()) != nullptr;
+    if (!s_tabDropTaken && !overOurWindow && self && guarded && self->indexOf(guarded) >= 0)
         Q_EMIT self->tabDroppedOutside(guarded, QCursor::pos());
 }
 
@@ -390,8 +414,10 @@ void EditorGroup::handleTabDrag(QDropEvent *event, const QPoint &pos)
         event->accept();
         bool ok = false;
         const quint64 id = event->mimeData()->data(tabMimeType()).toULongLong(&ok);
-        if (ok)
+        if (ok) {
+            s_tabDropTaken = true;
             Q_EMIT tabDropped(id, index);
+        }
         return;
     }
 
@@ -460,7 +486,14 @@ void EditorGroup::mousePressEvent(QMouseEvent *event)
 
 void EditorGroup::updateEmpty()
 {
-    m_body->setCurrentWidget(m_tabBar->count() > 0 ? static_cast<QWidget *>(m_tabs) : m_empty);
+    const bool empty = m_tabBar->count() == 0;
+    m_body->setCurrentWidget(empty ? static_cast<QWidget *>(m_empty) : m_tabs);
+    // Like VS Code, an empty group shows only its welcome page, no tab strip.
+    m_strip->setVisible(!empty);
+    // QTabBar does not always re-announce its size when tabs change before
+    // the window is shown, which left the layout's cached hint at zero height
+    // and the tabs invisible.
+    m_tabBar->updateGeometry();
 }
 
 } // namespace vn
