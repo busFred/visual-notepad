@@ -2,6 +2,9 @@
 // holds the tabs on the left and optional action buttons on the right.
 #pragma once
 
+#include "DragGeometry.h"
+
+#include <QList>
 #include <QPoint>
 #include <QPointer>
 #include <QWidget>
@@ -33,8 +36,12 @@ public:
     // is looked up through a registry of guarded pointers, never dereferenced
     // blindly. The caller owns the result (or passes it to QDrag).
     static QMimeData *mimeForTab(DocumentTab *tab);
+    // Several tabs, dragged together; tabsForMime() reads either.
+    static QMimeData *mimeForTabs(const QList<DocumentTab *> &tabs);
     // Null if the tab was destroyed since the id was issued.
     static DocumentTab *tabForId(quint64 id);
+    // The tabs of a drag that still exist, in drag order.
+    static QList<DocumentTab *> tabsForMime(const QMimeData *mime);
 
     explicit EditorGroup(QWidget *parent = nullptr);
 
@@ -54,6 +61,18 @@ public:
     void setTabText(int index, const QString &text);
     void setTabToolTip(int index, const QString &toolTip);
 
+    // VS Code's selected editors: the current tab and any others picked with
+    // Ctrl+click or Shift+click, in strip order. Making another tab current
+    // any other way clears it.
+    QList<DocumentTab *> selectedTabs() const;
+    bool isSelected(DocumentTab *tab) const;
+    // A left click on the tab at `index` with `modifiers`
+    // (multiEditorTabsControl.ts handleClickOrTouch()); plain clicks on a
+    // selected tab keep the selection until releaseTab() so it can be dragged.
+    void clickTab(int index, Qt::KeyboardModifiers modifiers);
+    void releaseTab();
+    void clearSelection();
+
     // Widgets shown at the right end of the tab strip.
     void addAction(QWidget *widget);
 
@@ -61,6 +80,10 @@ public:
     // Index a tab dropped at `pos` (group coordinates) would take: the slot
     // under the cursor on the strip, the end elsewhere.
     int insertIndexAt(const QPoint &pos) const;
+    // Where tabs dragged to `pos` (group coordinates) with `modifiers` would
+    // go: a split of the body's edge, or None to merge into the group. For
+    // the strip always None.
+    dragGeometry::SplitDirection dropZoneAt(const QPoint &pos, Qt::KeyboardModifiers modifiers) const;
     // Handles the drag events of a tab drag; `pos` is in group coordinates.
     // Called for the group itself and for editor children that would
     // otherwise swallow the drag.
@@ -78,11 +101,12 @@ Q_SIGNALS:
     void recentFileRequested(const QString &path);
     // The user clicked or focused into this group.
     void activated();
-    // A tab from this or another group was dropped; insertIndex is -1 for the
-    // body (append).
-    void tabDropped(quint64 tabId, int insertIndex);
+    // Tabs from this or another group were dropped: on the strip at
+    // insertIndex, else (-1) on the body, into a new group beside this one
+    // unless split is None. With copy (Ctrl held) the sources stay.
+    void tabsDropped(const QList<DocumentTab *> &tabs, int insertIndex, dragGeometry::SplitDirection split, bool copy);
     // A drag started here ended on no drop target.
-    void tabDroppedOutside(DocumentTab *tab, const QPoint &globalPos);
+    void tabsDroppedOutside(const QList<DocumentTab *> &tabs, const QPoint &globalPos, bool copy);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -95,6 +119,10 @@ protected:
 private:
     void updateEmpty();
     void startDrag(DocumentTab *tab);
+    // Makes `active` current with `others` selected besides it.
+    void setSelection(DocumentTab *active, const QList<DocumentTab *> &others);
+    void selectBetween(DocumentTab *target, DocumentTab *anchor);
+    void unselect(DocumentTab *tab);
 
     QWidget *m_strip;
     QTabBar *m_tabBar;
@@ -106,6 +134,14 @@ private:
     QWidget *m_dropMarker;
     QPointer<DocumentTab> m_pressedTab;
     QPoint m_pressPos; // In tab bar coordinates, where m_pressedTab was pressed.
+    // Selected tabs besides the current one.
+    QList<QPointer<DocumentTab>> m_selection;
+    // The anchor of Shift+click ranges (lastSingleSelectSelectedEditor).
+    QPointer<DocumentTab> m_anchor;
+    // Tabs in the order they were last current, most recent first.
+    QList<QPointer<DocumentTab>> m_recent;
+    bool m_selecting = false;
+    bool m_clearSelectionOnRelease = false;
 };
 
 } // namespace vn

@@ -6,12 +6,12 @@
 
 #include <QApplication>
 #include <QCursor>
-#include "DragGeometry.h"
 #include <QDrag>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
 #include <QDragMoveEvent>
 #include <QDropEvent>
+#include <QGuiApplication>
 #include <QLoggingCategory>
 #include <QHBoxLayout>
 #include <QHash>
@@ -88,6 +88,34 @@ protected:
     void paintEvent(QPaintEvent *) override { QPainter(this).fillRect(rect(), theme::color(theme::Role::accent)); }
 };
 
+// Marks the selected tabs besides the current one, as VS Code paints them
+// with tab.selectedBackground (by default the inactive list selection).
+class TabBar : public QTabBar
+{
+public:
+    TabBar(const EditorGroup *group, QWidget *parent)
+        : QTabBar(parent)
+        , m_group(group)
+    {
+    }
+
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        QTabBar::paintEvent(event);
+        QColor color = theme::color(theme::Role::selection);
+        color.setAlphaF(0.35);
+        QPainter painter(this);
+        for (int i = 0; i < count(); ++i) {
+            if (i != currentIndex() && m_group->isSelected(m_group->tab(i)))
+                painter.fillRect(tabRect(i), color);
+        }
+    }
+
+private:
+    const EditorGroup *m_group;
+};
+
 EditorGroup *groupAround(QWidget *widget)
 {
     for (; widget; widget = widget->parentWidget()) {
@@ -142,14 +170,23 @@ QString EditorGroup::tabMimeType()
 
 QMimeData *EditorGroup::mimeForTab(DocumentTab *tab)
 {
+    return mimeForTabs({tab});
+}
+
+QMimeData *EditorGroup::mimeForTabs(const QList<DocumentTab *> &tabs)
+{
     static quint64 lastId = 0;
     auto &registry = tabRegistry();
     // Forget tabs that were destroyed since earlier drags.
     registry.removeIf([](auto it) { return it.value().isNull(); });
-    const quint64 id = ++lastId;
-    registry.insert(id, tab);
+    QByteArrayList ids;
+    for (DocumentTab *tab : tabs) {
+        const quint64 id = ++lastId;
+        registry.insert(id, tab);
+        ids.append(QByteArray::number(id));
+    }
     auto *mime = new QMimeData;
-    mime->setData(tabMimeType(), QByteArray::number(id));
+    mime->setData(tabMimeType(), ids.join(','));
     return mime;
 }
 
@@ -158,10 +195,25 @@ DocumentTab *EditorGroup::tabForId(quint64 id)
     return tabRegistry().value(id).data();
 }
 
+QList<DocumentTab *> EditorGroup::tabsForMime(const QMimeData *mime)
+{
+    QList<DocumentTab *> result;
+    if (!mime)
+        return result;
+    const QByteArrayList ids = mime->data(tabMimeType()).split(',');
+    for (const QByteArray &text : ids) {
+        bool ok = false;
+        const quint64 id = text.toULongLong(&ok);
+        if (DocumentTab *tab = ok ? tabForId(id) : nullptr; tab && !result.contains(tab))
+            result.append(tab);
+    }
+    return result;
+}
+
 EditorGroup::EditorGroup(QWidget *parent)
     : QWidget(parent)
     , m_strip(new TabStrip(this))
-    , m_tabBar(new QTabBar(m_strip))
+    , m_tabBar(new TabBar(this, m_strip))
     , m_actions(new QHBoxLayout)
     , m_body(new QStackedWidget(this))
     , m_tabs(new QStackedWidget(m_body))
@@ -212,6 +264,14 @@ EditorGroup::EditorGroup(QWidget *parent)
     connect(m_tabBar, &QTabBar::currentChanged, this, [this](int index) {
         if (index >= 0)
             m_tabs->setCurrentIndex(index);
+        // Any other way of changing tabs drops the selection
+        // (editorGroupView.ts doOpenEditor() without inactiveSelection).
+        if (!m_selecting)
+            m_selection.clear();
+        if (DocumentTab *current = tab(index)) {
+            m_recent.removeAll(current);
+            m_recent.prepend(current);
+        }
         updateEmpty();
         Q_EMIT currentChanged(index);
     });
@@ -286,6 +346,11 @@ void EditorGroup::removeTab(int index)
     m_tabs->removeWidget(widget);
     widget->setParent(nullptr);
     m_tabBar->removeTab(index);
+    auto *removed = static_cast<DocumentTab *>(widget);
+    m_selection.removeAll(removed);
+    m_recent.removeAll(removed);
+    if (m_anchor == removed)
+        m_anchor = nullptr;
     updateEmpty();
 }
 
@@ -305,6 +370,128 @@ void EditorGroup::setTabToolTip(int index, const QString &toolTip)
     m_tabBar->setTabToolTip(index, toolTip);
 }
 
+QList<DocumentTab *> EditorGroup::selectedTabs() const
+{
+    QList<DocumentTab *> result;
+    for (int i = 0; i < count(); ++i) {
+        if (isSelected(tab(i)))
+            result.append(tab(i));
+    }
+    return result;
+}
+
+bool EditorGroup::isSelected(DocumentTab *tab) const
+{
+    return tab && indexOf(tab) >= 0 && (tab == currentTab() || m_selection.contains(tab));
+}
+
+void EditorGroup::setSelection(DocumentTab *active, const QList<DocumentTab *> &others)
+{
+    m_selecting = true;
+    m_selection.clear();
+    for (DocumentTab *other : others) {
+        if (other != active && indexOf(other) >= 0)
+            m_selection.append(other);
+    }
+    setCurrentIndex(indexOf(active));
+    m_selecting = false;
+    m_tabBar->update();
+}
+
+void EditorGroup::clearSelection()
+{
+    m_selection.clear();
+    m_tabBar->update();
+}
+
+void EditorGroup::clickTab(int index, Qt::KeyboardModifiers modifiers)
+{
+    DocumentTab *clicked = tab(index);
+    if (!clicked)
+        return;
+    m_clearSelectionOnRelease = false;
+    // multiEditorTabsControl.ts handleClickOrTouch(). Qt reports macOS's
+    // Command key as Control.
+    if (modifiers & Qt::ShiftModifier) {
+        DocumentTab *anchor = m_anchor && isSelected(m_anchor) ? m_anchor.data() : currentTab();
+        m_anchor = anchor;
+        selectBetween(clicked, anchor);
+    } else if (modifiers & Qt::ControlModifier) {
+        if (isSelected(clicked)) {
+            unselect(clicked);
+        } else {
+            setSelection(clicked, selectedTabs());
+            m_anchor = clicked;
+        }
+    } else if (isSelected(clicked) && selectedTabs().size() > 1) {
+        // Kept while the button is down so the selection can be dragged;
+        // the release clears it.
+        setSelection(clicked, selectedTabs());
+        m_clearSelectionOnRelease = true;
+    } else {
+        setSelection(clicked, {});
+    }
+}
+
+void EditorGroup::releaseTab()
+{
+    if (!m_clearSelectionOnRelease)
+        return;
+    m_clearSelectionOnRelease = false;
+    clearSelection();
+}
+
+void EditorGroup::selectBetween(DocumentTab *target, DocumentTab *anchor)
+{
+    // multiEditorTabsControl.ts selectEditorsBetween().
+    const int to = indexOf(target);
+    const int from = indexOf(anchor);
+    if (to < 0 || from < 0)
+        return;
+    QList<DocumentTab *> selection = selectedTabs();
+    // Unselect the run of selected tabs on the anchor's other side.
+    for (int i = from;;) {
+        i += from < to ? -1 : 1;
+        if (i < 0 || i >= count() || !isSelected(tab(i)))
+            break;
+        selection.removeAll(tab(i));
+    }
+    for (int i = qMin(from, to); i <= qMax(from, to); ++i) {
+        if (!selection.contains(tab(i)))
+            selection.append(tab(i));
+    }
+    selection.removeAll(target);
+    setSelection(target, selection);
+}
+
+void EditorGroup::unselect(DocumentTab *tab)
+{
+    // multiEditorTabsControl.ts unselectEditor(): the current tab stays if
+    // it is the only one; otherwise the most recent other selected tab
+    // takes over.
+    DocumentTab *current = currentTab();
+    const QList<DocumentTab *> selected = selectedTabs();
+    if (tab == current && selected.size() == 1)
+        return;
+    DocumentTab *next = current;
+    if (tab == current) {
+        next = nullptr;
+        for (const QPointer<DocumentTab> &recent : std::as_const(m_recent)) {
+            if (recent && recent != tab && selected.contains(recent.data())) {
+                next = recent;
+                break;
+            }
+        }
+        for (DocumentTab *other : selected) {
+            if (!next && other != tab)
+                next = other;
+        }
+    }
+    QList<DocumentTab *> others = selected;
+    others.removeAll(tab);
+    setSelection(next, others);
+}
+
 void EditorGroup::addAction(QWidget *widget)
 {
     m_actions->addWidget(widget);
@@ -319,12 +506,22 @@ bool EditorGroup::eventFilter(QObject *watched, QEvent *event)
             Q_EMIT activated();
             auto *mouse = static_cast<QMouseEvent *>(event);
             m_pressedTab = nullptr;
-            if (watched == m_tabBar && mouse->button() == Qt::LeftButton)
-                m_pressedTab = tab(m_tabBar->tabAt(mouse->position().toPoint()));
-            if (m_pressedTab)
-                m_pressPos = mouse->position().toPoint();
+            if (watched == m_tabBar && mouse->button() == Qt::LeftButton) {
+                const int index = m_tabBar->tabAt(mouse->position().toPoint());
+                m_pressedTab = tab(index);
+                if (m_pressedTab) {
+                    m_pressPos = mouse->position().toPoint();
+                    clickTab(index, mouse->modifiers());
+                    // The bar would make the clicked tab current; the
+                    // selection already decided which tab is.
+                    if (mouse->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier))
+                        return true;
+                }
+            }
         } else if (type == QEvent::MouseButtonRelease) {
             m_pressedTab = nullptr;
+            if (watched == m_tabBar && static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton)
+                releaseTab();
         } else if (type == QEvent::MouseMove && watched == m_tabBar) {
             qCDebug(lcDrag) << "move" << static_cast<QMouseEvent *>(event)->globalPosition() << "pressed tab" << m_pressedTab;
         }
@@ -364,6 +561,10 @@ void EditorGroup::startDrag(DocumentTab *tab)
     const int index = indexOf(tab);
     if (index < 0)
         return;
+    // A selected tab takes the whole selection along
+    // (multiEditorTabsControl.ts onDragStart).
+    const QList<DocumentTab *> dragged = isSelected(tab) ? selectedTabs() : QList<DocumentTab *>{tab};
+    m_clearSelectionOnRelease = false;
     // End QTabBar's own tab move first; the drag takes over from here.
     const QPoint local = m_tabBar->mapFromGlobal(QCursor::pos());
     QMouseEvent release(QEvent::MouseButtonRelease, local, QCursor::pos(), Qt::LeftButton, Qt::NoButton,
@@ -372,24 +573,34 @@ void EditorGroup::startDrag(DocumentTab *tab)
 
     const QRect rect = m_tabBar->tabRect(indexOf(tab));
     auto *drag = new QDrag(m_tabBar);
-    drag->setMimeData(mimeForTab(tab));
+    drag->setMimeData(mimeForTabs(dragged));
     drag->setPixmap(m_tabBar->grab(rect));
     drag->setHotSpot(dragGeometry::hotSpot(m_pressPos, rect));
 
     // The drop may close this group's window, so keep guarded handles.
     QPointer<EditorGroup> self(this);
-    QPointer<DocumentTab> guarded(tab);
-    qCDebug(lcDrag) << "start drag of tab" << index;
+    QList<QPointer<DocumentTab>> guarded(dragged.cbegin(), dragged.cend());
+    qCDebug(lcDrag) << "start drag of tab" << index << "with" << dragged.size() - 1 << "more";
     s_tabDropTaken = false;
-    const Qt::DropAction result = drag->exec(Qt::MoveAction);
-    qCDebug(lcDrag) << "drag finished" << result << "taken by us" << s_tabDropTaken;
-    // Not taken by any of our windows: like VS Code, the tab opens in a new
-    // window wherever it was released, even over another application.
+    // Copy too, so the cursor shows a copy while Ctrl is held
+    // (effectAllowed = 'copyMove').
+    const Qt::DropAction result = drag->exec(Qt::MoveAction | Qt::CopyAction, Qt::MoveAction);
+    const bool copy = dragGeometry::isCopyOperation(QGuiApplication::queryKeyboardModifiers());
+    qCDebug(lcDrag) << "drag finished" << result << "taken by us" << s_tabDropTaken << "copy" << copy;
+    // Not taken by any of our windows: like VS Code, the tabs open in a new
+    // window wherever they were released, even over another application.
     // Released over one of our own windows (or cancelled there with Escape):
     // nothing happens.
     const bool overOurWindow = QApplication::topLevelAt(QCursor::pos()) != nullptr;
-    if (!s_tabDropTaken && !overOurWindow && self && guarded && self->indexOf(guarded) >= 0)
-        Q_EMIT self->tabDroppedOutside(guarded, QCursor::pos());
+    if (s_tabDropTaken || overOurWindow || !self)
+        return;
+    QList<DocumentTab *> remaining;
+    for (const QPointer<DocumentTab> &one : std::as_const(guarded)) {
+        if (one && self->indexOf(one) >= 0)
+            remaining.append(one);
+    }
+    if (!remaining.isEmpty())
+        Q_EMIT self->tabsDroppedOutside(remaining, QCursor::pos(), copy);
 }
 
 int EditorGroup::insertIndexAt(const QPoint &pos) const
@@ -405,29 +616,54 @@ int EditorGroup::insertIndexAt(const QPoint &pos) const
     return count();
 }
 
+dragGeometry::SplitDirection EditorGroup::dropZoneAt(const QPoint &pos, Qt::KeyboardModifiers modifiers) const
+{
+    if (!m_strip->isHidden() && m_strip->geometry().contains(pos))
+        return dragGeometry::SplitDirection::None;
+    const QRect body = m_body->geometry();
+    // Splitting on drop is on (workbench.editor.splitOnDragAndDrop); Alt
+    // turns it off.
+    return dragGeometry::dropZone(pos - body.topLeft(), body.size(),
+                                  !dragGeometry::isToggleSplitOperation(modifiers));
+}
+
 void EditorGroup::handleTabDrag(QDropEvent *event, const QPoint &pos)
 {
-    const bool onStrip = m_strip->geometry().contains(pos);
+    const bool onStrip = !m_strip->isHidden() && m_strip->geometry().contains(pos);
     // On the strip -1 from insertIndexAt only means an empty group: append.
     const int index = onStrip ? insertIndexAt(pos) : -1;
+    const Qt::KeyboardModifiers modifiers = event->modifiers();
+    const bool copy = dragGeometry::isCopyOperation(modifiers);
+    const dragGeometry::SplitDirection zone = dropZoneAt(pos, modifiers);
+    const QList<DocumentTab *> dragged = tabsForMime(event->mimeData());
+    // editorDropTarget.ts onDragOver(): moving a group's only tab onto its
+    // own body would leave the group empty, so it is not a drop target.
+    const bool refused = dragged.isEmpty()
+                         || (!onStrip && !copy && indexOf(dragged.constFirst()) >= 0 && count() < 2);
 
     if (event->type() == QEvent::Drop) {
         hideDropHints();
-        event->setDropAction(Qt::MoveAction);
-        event->accept();
-        bool ok = false;
-        const quint64 id = event->mimeData()->data(tabMimeType()).toULongLong(&ok);
-        if (ok) {
-            s_tabDropTaken = true;
-            Q_EMIT tabDropped(id, index);
+        if (refused) {
+            event->ignore();
+            return;
         }
+        event->setDropAction(copy ? Qt::CopyAction : Qt::MoveAction);
+        event->accept();
+        s_tabDropTaken = true;
+        Q_EMIT tabsDropped(dragged, index, zone, copy);
         return;
     }
 
-    event->setDropAction(Qt::MoveAction);
+    // Entering is always accepted so the moves keep coming here.
+    if (refused && event->type() != QEvent::DragEnter) {
+        hideDropHints();
+        event->ignore();
+        return;
+    }
+    event->setDropAction(copy ? Qt::CopyAction : Qt::MoveAction);
     event->accept();
-    m_dropOverlay->setGeometry(m_body->geometry());
-    m_dropOverlay->setVisible(!onStrip);
+    m_dropOverlay->setGeometry(dragGeometry::overlayRect(zone, m_body->geometry()));
+    m_dropOverlay->setVisible(!onStrip && !refused);
     m_dropOverlay->raise();
     if (onStrip) {
         const int slot = index < 0 ? 0 : index;

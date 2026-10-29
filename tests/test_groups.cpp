@@ -32,7 +32,6 @@ class TestGroups : public QObject
 
 private Q_SLOTS:
     void initTestCase();
-    void splitStartsEmpty();
     void newFileFollowsActiveGroup();
     void tabClickActivatesGroup();
     void dropMovesTabBetweenGroups();
@@ -40,9 +39,6 @@ private Q_SLOTS:
     void moveToOtherWindow();
     void lastTabDraggedOutClosesWindow();
     void droppedNowhereOpensWindow();
-    void splitOffMovesTabsBack();
-    void lastTabClosedKeepsRightGroup();
-    void contextMenuMovesToOtherGroup();
     void tabsListBothGroups();
     void doubleClickingHandleEvensGroups();
     void doubleClickingHandleEvensSourceAndVisual();
@@ -54,7 +50,12 @@ private:
     // Sends a tab drop to `group` at `pos` (group coordinates).
     static void drop(EditorGroup *group, DocumentTab *tab, const QPoint &pos);
     static QPoint stripPos(EditorGroup *group, int x) { return QPoint(group->tabBar()->mapTo(group, QPoint(x, 0)).x(), 10); }
-    static QPoint bodyPos(EditorGroup *group) { return QPoint(group->width() / 2, group->height() - 40); }
+    // The middle of the body: a merge, not a split.
+    static QPoint bodyPos(EditorGroup *group) { return QPoint(group->width() / 2, group->height() / 2 + 16); }
+    static EditorGroup *split(MainWindow &window)
+    {
+        return window.addGroup(window.mainGroup(), vn::dragGeometry::SplitDirection::Right);
+    }
     static void show(MainWindow &window)
     {
         window.show();
@@ -90,38 +91,25 @@ void TestGroups::drop(EditorGroup *group, DocumentTab *tab, const QPoint &pos)
     QVERIFY(event.isAccepted());
 }
 
-void TestGroups::splitStartsEmpty()
-{
-    MainWindow window;
-    window.newFile();
-    show(window);
-    QVERIFY(!window.sideGroup());
-    window.setSplit(true);
-    QVERIFY(window.sideGroup());
-    QCOMPARE(window.sideGroup()->count(), 0);
-    QCOMPARE(window.activeGroup(), window.mainGroup());
-    QCOMPARE(window.currentTab(), window.mainGroup()->tab(0));
-}
-
 void TestGroups::newFileFollowsActiveGroup()
 {
     const QString path = write(QStringLiteral("a.txt"), "alpha\n");
     MainWindow window;
     window.newFile();
-    window.setSplit(true);
+    split(window);
     show(window);
 
-    window.activateGroup(window.sideGroup());
+    window.activateGroup(window.groups().value(1));
     QVERIFY(window.openFile(path));
-    QCOMPARE(window.sideGroup()->count(), 1);
+    QCOMPARE(window.groups().value(1)->count(), 1);
     QCOMPARE(window.mainGroup()->count(), 1);
-    QCOMPARE(window.currentTab(), window.sideGroup()->tab(0));
+    QCOMPARE(window.currentTab(), window.groups().value(1)->tab(0));
     QCOMPARE(window.windowTitle(), QStringLiteral("a.txt — Visual Notepad"));
 
     // Opening the same file again finds it in the right group.
     window.activateGroup(window.mainGroup());
     QVERIFY(window.openFile(path));
-    QCOMPARE(window.activeGroup(), window.sideGroup());
+    QCOMPARE(window.activeGroup(), window.groups().value(1));
     QCOMPARE(window.tabCount(), 2);
 
     window.activateGroup(window.mainGroup());
@@ -134,16 +122,16 @@ void TestGroups::tabClickActivatesGroup()
 {
     MainWindow window;
     window.newFile();
-    window.setSplit(true);
-    window.activateGroup(window.sideGroup());
+    split(window);
+    window.activateGroup(window.groups().value(1));
     window.newFile();
     window.activateGroup(window.mainGroup());
     show(window);
 
-    QTabBar *bar = window.sideGroup()->tabBar();
+    QTabBar *bar = window.groups().value(1)->tabBar();
     QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->tabRect(0).center());
-    QCOMPARE(window.activeGroup(), window.sideGroup());
-    QCOMPARE(window.currentTab(), window.sideGroup()->tab(0));
+    QCOMPARE(window.activeGroup(), window.groups().value(1));
+    QCOMPARE(window.currentTab(), window.groups().value(1)->tab(0));
 
     bar = window.mainGroup()->tabBar();
     QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->tabRect(0).center());
@@ -157,10 +145,10 @@ void TestGroups::dropMovesTabBetweenGroups()
     MainWindow window;
     QVERIFY(window.openFile(pathA));
     QVERIFY(window.openFile(pathB));
-    window.setSplit(true);
+    split(window);
     show(window);
     EditorGroup *main = window.mainGroup();
-    EditorGroup *side = window.sideGroup();
+    EditorGroup *side = window.groups().value(1);
     DocumentTab *first = main->tab(0);
     DocumentTab *second = main->tab(1);
     QTextCursor cursor = first->editor()->textCursor();
@@ -179,10 +167,10 @@ void TestGroups::dropMovesTabBetweenGroups()
     QCOMPARE(first->editor()->textCursor().position(), 4);
     QCOMPARE(first->text(), QStringLiteral("one two three\n"));
 
-    // Back onto the main strip, before its only tab.
+    // Back onto the main strip, before its only tab; the emptied group goes.
     drop(main, first, stripPos(main, main->tabBar()->tabRect(0).left() + 2));
     QCOMPARE(main->count(), 2);
-    QCOMPARE(side->count(), 0);
+    QCOMPARE(window.groups(), QList<EditorGroup *>{main});
     QCOMPARE(main->tab(0), first);
     QCOMPARE(main->tab(1), second);
     QCOMPARE(window.currentTab(), first);
@@ -201,11 +189,11 @@ void TestGroups::dropIsIgnoredForOtherMime()
 {
     MainWindow window;
     window.newFile();
-    window.setSplit(true);
+    split(window);
     show(window);
     QMimeData mime;
     mime.setText(QStringLiteral("x"));
-    EditorGroup *side = window.sideGroup();
+    EditorGroup *side = window.groups().value(1);
     QDropEvent event(QPointF(bodyPos(side)), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
     QCoreApplication::sendEvent(side, &event);
     QCOMPARE(side->count(), 0);
@@ -269,7 +257,7 @@ void TestGroups::droppedNowhereOpensWindow()
     tab->document()->setModified(false); // So closing the new window later does not prompt.
     const auto before = vn::SessionManager::instance().windows();
 
-    Q_EMIT source.mainGroup()->tabDroppedOutside(tab, QPoint(120, 80));
+    Q_EMIT source.mainGroup()->tabsDroppedOutside({tab}, QPoint(120, 80), false);
     QCOMPARE(source.tabCount(), 1);
     QVERIFY(source.isVisible());
     auto after = vn::SessionManager::instance().windows();
@@ -281,102 +269,15 @@ void TestGroups::droppedNowhereOpensWindow()
     created->close();
 }
 
-void TestGroups::splitOffMovesTabsBack()
-{
-    MainWindow window;
-    window.newFile();
-    window.setSplit(true);
-    window.activateGroup(window.sideGroup());
-    window.newFile();
-    window.newFile();
-    show(window);
-    DocumentTab *mainTab = window.mainGroup()->tab(0);
-    DocumentTab *sideA = window.sideGroup()->tab(0);
-    DocumentTab *sideB = window.sideGroup()->tab(1);
-    window.activateGroup(window.mainGroup());
-
-    window.setSplit(false);
-    QVERIFY(!window.sideGroup());
-    QCOMPARE(window.activeGroup(), window.mainGroup());
-    QCOMPARE(window.tabs(), (QList<DocumentTab *>{mainTab, sideA, sideB}));
-    QCOMPARE(window.currentTab(), mainTab);
-    QCOMPARE(window.tabCount(), 3);
-
-    // Splitting again gives a fresh empty group.
-    window.setSplit(true);
-    QCOMPARE(window.sideGroup()->count(), 0);
-}
-
-void TestGroups::lastTabClosedKeepsRightGroup()
-{
-    MainWindow window;
-    window.newFile();
-    window.setSplit(true);
-    window.activateGroup(window.sideGroup());
-    window.newFile();
-    QVERIFY(window.closeTabs(0, MainWindow::CloseScope::This));
-    QVERIFY(window.sideGroup());
-    QCOMPARE(window.sideGroup()->count(), 0);
-    QCOMPARE(window.activeGroup(), window.sideGroup());
-    QVERIFY(!window.currentTab());
-    QCOMPARE(window.windowTitle(), QStringLiteral("Visual Notepad"));
-}
-
-void TestGroups::contextMenuMovesToOtherGroup()
-{
-    MainWindow window;
-    window.newFile();
-    window.newFile();
-    show(window);
-    DocumentTab *tab = window.mainGroup()->tab(0);
-
-    const auto trigger = [](const QString &text, bool expectEnabled) {
-        QTimer::singleShot(0, qApp, [text, expectEnabled] {
-            auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
-            QVERIFY(menu);
-            for (QAction *action : menu->actions()) {
-                if (action->text() == text) {
-                    QCOMPARE(action->isEnabled(), expectEnabled);
-                    if (expectEnabled)
-                        action->trigger();
-                }
-            }
-            menu->close();
-        });
-    };
-
-    // No right group yet: the entry is disabled.
-    trigger(QStringLiteral("Move to Other Group"), false);
-    Q_EMIT window.mainGroup()->tabContextMenuRequested(0, window.mapToGlobal(QPoint(50, 50)));
-    QCOMPARE(window.mainGroup()->count(), 2);
-
-    window.setSplit(true);
-    trigger(QStringLiteral("Move to Other Group"), true);
-    Q_EMIT window.mainGroup()->tabContextMenuRequested(0, window.mapToGlobal(QPoint(50, 50)));
-    QCOMPARE(window.mainGroup()->count(), 1);
-    QCOMPARE(window.sideGroup()->count(), 1);
-    QCOMPARE(window.sideGroup()->tab(0), tab);
-    QCOMPARE(window.currentTab(), tab);
-
-    // And back; Close All from the right group's menu only affects that group.
-    window.moveToOtherGroup(tab);
-    QCOMPARE(window.sideGroup()->count(), 0);
-    window.moveToOtherGroup(tab);
-    window.activateGroup(window.mainGroup());
-    QVERIFY(window.closeTabs(0, MainWindow::CloseScope::All));
-    QCOMPARE(window.mainGroup()->count(), 0);
-    QCOMPARE(window.sideGroup()->count(), 1);
-}
-
 void TestGroups::tabsListBothGroups()
 {
     MainWindow window;
     window.newFile();
-    window.setSplit(true);
-    window.activateGroup(window.sideGroup());
+    split(window);
+    window.activateGroup(window.groups().value(1));
     window.newFile();
     DocumentTab *mainTab = window.mainGroup()->tab(0);
-    DocumentTab *sideTab = window.sideGroup()->tab(0);
+    DocumentTab *sideTab = window.groups().value(1)->tab(0);
     QCOMPARE(window.tabs(), (QList<DocumentTab *>{mainTab, sideTab}));
     QCOMPARE(window.currentTabIndex(), 1);
     window.setCurrentTabIndex(0);
@@ -388,7 +289,7 @@ void TestGroups::doubleClickingHandleEvensGroups()
 {
     MainWindow window;
     show(window);
-    window.setSplit(true);
+    split(window);
     auto *groups = window.findChild<vn::EvenSplitter *>();
     QVERIFY(groups);
     QCOMPARE(groups->count(), 2);
@@ -447,17 +348,17 @@ void TestGroups::screenshot()
     const QString right = write(QStringLiteral("right.md"), "# Right\n\nSome text on the right.\n");
     MainWindow window;
     QVERIFY(window.openFile(left));
-    window.setSplit(true);
-    window.activateGroup(window.sideGroup());
+    split(window);
+    window.activateGroup(window.groups().value(1));
     QVERIFY(window.openFile(right));
-    window.sideGroup()->tab(0)->setViewMode(DocumentTab::ViewMode::SourceVisual);
+    window.groups().value(1)->tab(0)->setViewMode(DocumentTab::ViewMode::SourceVisual);
     show(window);
     // The drop hints, as during a drag: an enter event first, then moves.
     const QString file = QDir(dir).filePath(QStringLiteral("groups.png"));
     QVERIFY(window.grab().save(file));
 
     std::unique_ptr<QMimeData> mime(EditorGroup::mimeForTab(window.mainGroup()->tab(0)));
-    EditorGroup *side = window.sideGroup();
+    EditorGroup *side = window.groups().value(1);
     QDragMoveEvent move(QPointF(bodyPos(side)), Qt::MoveAction, mime.get(), Qt::LeftButton, Qt::NoModifier);
     QDragEnterEvent enter(QPointF(bodyPos(side)), Qt::MoveAction, mime.get(), Qt::LeftButton, Qt::NoModifier);
     QCoreApplication::sendEvent(side, &enter);

@@ -118,7 +118,18 @@ QList<Command> build()
         {QStringLiteral("view.modeSplit"), view, tr("Source / Visual"), {k("Ctrl+K, V")}},
         {QStringLiteral("view.modeVisual"), view, tr("Visual Editor"), {}},
         {QStringLiteral("view.splitEditor"), view, tr("Split Editor"), {k("Ctrl+\\")}},
+        // VS Code binds all four to Ctrl+K Ctrl+\ (editorActions.ts
+        // SplitEditorLeftAction etc.), which clash with each other and with
+        // Split Editor Orthogonal; they have no default here.
+        {QStringLiteral("view.splitEditorUp"), view, tr("Split Editor Up"), {}},
+        {QStringLiteral("view.splitEditorDown"), view, tr("Split Editor Down"), {}},
+        {QStringLiteral("view.splitEditorLeft"), view, tr("Split Editor Left"), {}},
+        {QStringLiteral("view.splitEditorRight"), view, tr("Split Editor Right"), {}},
+        // No default in VS Code either (editorActions.ts FocusNextGroup).
+        {QStringLiteral("view.focusNextGroup"), view, tr("Focus Next Editor Group"), {}},
+        {QStringLiteral("view.focusPreviousGroup"), view, tr("Focus Previous Editor Group"), {}},
         {QStringLiteral("view.moveToNewWindow"), view, tr("Move Tab to New Window"), {k("Ctrl+K, O")}},
+        {QStringLiteral("view.copyToNewWindow"), view, tr("Copy Tab to New Window"), {}},
         {QStringLiteral("view.scrollPageUp"), view, tr("Scroll Page Up"), {k("Alt+PgUp")}},
         {QStringLiteral("view.scrollPageDown"), view, tr("Scroll Page Down"), {k("Alt+PgDown")}},
         {QStringLiteral("view.wordWrap"), view, tr("Word Wrap"), {k("Alt+Z")}},

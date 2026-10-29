@@ -14,6 +14,7 @@
 #include <QHash>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMap>
 #include <QPointer>
 #include <QSaveFile>
 #include <QSessionManager>
@@ -250,6 +251,8 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
     for (MainWindow *window : std::as_const(m_windows)) {
         QJsonArray tabs;
         int current = 0;
+        // Each stored tab's index in `tabs`, for the grid.
+        QHash<DocumentTab *, int> ids;
         for (DocumentTab *tab : window->tabs()) {
             const bool untitled = tab->path().isEmpty();
             const bool unsaved = tab->isModified() || (untitled && !tab->text().isEmpty());
@@ -292,6 +295,7 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
             entry[QStringLiteral("topLine")] = tab->sourceView()->topLine();
             if (tab == window->tabs().value(window->currentTabIndex()))
                 current = int(tabs.size());
+            ids.insert(tab, int(tabs.size()));
             tabs.append(entry);
         }
         if (tabs.isEmpty())
@@ -301,6 +305,7 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
         object[QStringLiteral("maximized")] = window->isMaximized();
         object[QStringLiteral("current")] = current;
         object[QStringLiteral("tabs")] = tabs;
+        object[QStringLiteral("grid")] = window->saveGrid(ids);
         windows.append(object);
     }
     for (const QJsonValue &carried : std::as_const(m_carried))
@@ -388,6 +393,8 @@ void SessionManager::carryOverUnsaved()
             continue;
         window[QStringLiteral("tabs")] = tabs;
         window[QStringLiteral("current")] = 0;
+        // Its tab ids no longer match; the tabs go into one group.
+        window.remove(QStringLiteral("grid"));
         m_carried.append(window);
     }
 }
@@ -406,8 +413,12 @@ bool SessionManager::restore()
         auto *window = new MainWindow;
         window->setAttribute(Qt::WA_DeleteOnClose);
 
-        for (const QJsonValue &tabValue : windowObject.value(QStringLiteral("tabs")).toArray()) {
-            const QJsonObject entry = tabValue.toObject();
+        // Tabs by their index in "tabs", placed in the grid once all exist.
+        QMap<int, DocumentTab *> restored;
+        QHash<DocumentTab *, QJsonObject> entries;
+        const QJsonArray tabEntries = windowObject.value(QStringLiteral("tabs")).toArray();
+        for (int id = 0; id < tabEntries.size(); ++id) {
+            const QJsonObject entry = tabEntries[id].toObject();
             const QString path = entry.value(QStringLiteral("path")).toString();
             const QString backupName = entry.value(QStringLiteral("backup")).toString();
             // Older sessions stored "utf8", "utf8bom", "legacy", ...
@@ -460,8 +471,15 @@ bool SessionManager::restore()
                                          entry.value(QStringLiteral("insertSpaces")).toBool()});
             }
             tab->setViewMode(modeFromString(entry.value(QStringLiteral("mode")).toString()));
-            window->adoptTab(tab);
+            restored.insert(id, tab);
+            entries.insert(tab, entry);
+        }
+        // Sessions from before the grid have none: one group, as then.
+        const QJsonObject grid = windowObject.value(QStringLiteral("grid")).toObject();
+        window->restoreGrid(grid, restored);
 
+        for (DocumentTab *tab : std::as_const(restored)) {
+            const QJsonObject entry = entries.value(tab);
             QTextCursor cursor(tab->document());
             cursor.setPosition(qBound(0, entry.value(QStringLiteral("caret")).toInt(), qMax(0, tab->document()->characterCount() - 1)));
             tab->sourceView()->setTextCursor(cursor);
@@ -480,7 +498,8 @@ bool SessionManager::restore()
             delete window;
             continue;
         }
-        window->setCurrentTabIndex(windowObject.value(QStringLiteral("current")).toInt());
+        if (grid.isEmpty())
+            window->setCurrentTabIndex(windowObject.value(QStringLiteral("current")).toInt());
         const QByteArray geometry = QByteArray::fromBase64(windowObject.value(QStringLiteral("geometry")).toString().toLatin1());
         if (!geometry.isEmpty())
             window->restoreGeometry(geometry);

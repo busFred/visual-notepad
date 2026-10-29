@@ -24,8 +24,11 @@
 #include <QDesktopServices>
 #include <QDockWidget>
 #include <QGuiApplication>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QMimeDatabase>
 #include <QPushButton>
+#include <QScopedValueRollback>
 #include <QSet>
 #include <QUrl>
 #include <QFileDialog>
@@ -142,22 +145,21 @@ private:
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
-    , m_groups(new EvenSplitter(Qt::Horizontal, this))
-    , m_group(new EditorGroup(m_groups))
-    , m_activeGroup(m_group)
+    , m_root(new EvenSplitter(Qt::Horizontal, this))
     , m_outlineTimer(new QTimer(this))
 {
     setWindowTitle(productName());
     resize(1100, 720);
     setAcceptDrops(true);
 
-    m_groups->setHandleWidth(1);
-    m_groups->setChildrenCollapsible(false);
-    m_groups->addWidget(m_group);
-    setCentralWidget(m_groups);
-    wireGroup(m_group);
+    m_root->setHandleWidth(1);
+    m_root->setChildrenCollapsible(false);
+    setCentralWidget(m_root);
     // Focus anywhere in a group makes it the active one.
     connect(qApp, &QApplication::focusChanged, this, [this](QWidget *, QWidget *now) {
+        // Focus handed on by a tab being taken out says nothing.
+        if (m_removingTab)
+            return;
         for (EditorGroup *group : groups()) {
             if (now && group->isAncestorOf(now)) {
                 activateGroup(group);
@@ -174,8 +176,11 @@ MainWindow::MainWindow(QWidget *parent)
     createActions();
     createOutline();
     createMenus();
-    createTabActions();
     createStatusBar();
+    // The groups' strip buttons use the actions, so groups come after them.
+    EditorGroup *first = createGroup();
+    m_root->addWidget(first);
+    activateGroup(first);
     statusBar()->setVisible(m_statusBarAction->isChecked());
     onCurrentTabChanged();
     SessionManager::instance().registerWindow(this);
@@ -333,11 +338,23 @@ void MainWindow::createActions()
     m_modeSourceVisual = addMode(QStringLiteral("view.modeSplit"), "source-visual", DocumentTab::ViewMode::SourceVisual);
     m_modeVisual = addMode(QStringLiteral("view.modeVisual"), "visual", DocumentTab::ViewMode::Visual);
 
-    m_splitAction = makeAction(QStringLiteral("view.splitEditor"));
+    // workbench.editor.openSideBySideDirection's default, "right".
+    m_splitAction = makeAction(QStringLiteral("view.splitEditor"), [this] { splitEditor(SplitDirection::Right); });
     m_splitAction->setIcon(QIcon(QStringLiteral(":/vn/icons/split-editor.svg")));
-    m_splitAction->setCheckable(true);
-    connect(m_splitAction, &QAction::toggled, this, &MainWindow::toggleSplitEditor);
-    makeAction(QStringLiteral("view.moveToNewWindow"), [this] { moveTabToNewWindow(currentTab()); });
+    makeAction(QStringLiteral("view.splitEditorUp"), [this] { splitEditor(SplitDirection::Up); });
+    makeAction(QStringLiteral("view.splitEditorDown"), [this] { splitEditor(SplitDirection::Down); });
+    makeAction(QStringLiteral("view.splitEditorLeft"), [this] { splitEditor(SplitDirection::Left); });
+    makeAction(QStringLiteral("view.splitEditorRight"), [this] { splitEditor(SplitDirection::Right); });
+    makeAction(QStringLiteral("view.focusNextGroup"), [this] { focusNextGroup(1); });
+    makeAction(QStringLiteral("view.focusPreviousGroup"), [this] { focusNextGroup(-1); });
+    makeAction(QStringLiteral("view.moveToNewWindow"), [this] {
+        if (m_activeGroup)
+            moveTabsToNewWindow(m_activeGroup->selectedTabs());
+    });
+    makeAction(QStringLiteral("view.copyToNewWindow"), [this] {
+        if (m_activeGroup)
+            moveTabsToNewWindow(m_activeGroup->selectedTabs(), std::nullopt, false, true);
+    });
     makeAction(QStringLiteral("edit.changeLanguage"), [this] { showLanguageMenu(); });
     makeAction(QStringLiteral("view.scrollPageUp"), [this] {
         if (auto *tab = currentTab())
@@ -425,23 +442,29 @@ void MainWindow::createMenus()
 
     QMenu *view = menuBar()->addMenu(tr("&View"));
     add(view, {"view.outline", "-", "view.modeSource", "view.modeSplit", "view.modeVisual", "-", "view.splitEditor",
-               "view.moveToNewWindow", "-", "view.wordWrap", "view.statusBar", "edit.changeLanguage", "-", "view.zoomIn", "view.zoomOut",
+               "view.splitEditorUp", "view.splitEditorDown", "view.splitEditorLeft", "view.splitEditorRight",
+               "view.focusNextGroup", "view.focusPreviousGroup", "view.moveToNewWindow", "view.copyToNewWindow", "-", "view.wordWrap", "view.statusBar", "edit.changeLanguage", "-", "view.zoomIn", "view.zoomOut",
                "view.zoomReset", "view.fullScreen"});
 
     QMenu *help = menuBar()->addMenu(tr("&Help"));
     add(help, {"help.shortcuts", "-", "help.about"});
 }
 
-void MainWindow::createTabActions()
+void MainWindow::createSplitButton(EditorGroup *group)
 {
-    createModeButton(m_group);
-    auto *split = new QToolButton(this);
+    // Every group has its own, like VS Code's editor title actions: it splits
+    // that group, not whichever is active.
+    auto *split = new QToolButton(group);
     split->setObjectName(QStringLiteral("IconButton"));
-    split->setDefaultAction(m_splitAction);
+    split->setIcon(m_splitAction->icon());
     split->setFixedSize(24, 24);
     split->setIconSize({16, 16});
     split->setToolTip(tr("Split Editor (%1)").arg(m_splitAction->shortcut().toString(QKeySequence::NativeText)));
-    m_group->addAction(split);
+    connect(split, &QToolButton::clicked, this, [this, group] {
+        activateGroup(group);
+        splitEditor(SplitDirection::Right);
+    });
+    group->addAction(split);
 }
 
 QToolButton *MainWindow::createModeButton(EditorGroup *group)
@@ -501,12 +524,14 @@ void MainWindow::wireGroup(EditorGroup *group)
         newFile();
     });
     connect(group, &EditorGroup::activated, this, [this, group] { activateGroup(group); });
-    connect(group, &EditorGroup::tabDropped, this, [this, group](quint64 id, int index) {
-        if (DocumentTab *tab = EditorGroup::tabForId(id))
-            receiveTab(tab, group, index);
-    });
-    connect(group, &EditorGroup::tabDroppedOutside, this,
-            [this](DocumentTab *tab, const QPoint &pos) { moveTabToNewWindow(tab, pos, true); });
+    connect(group, &EditorGroup::tabsDropped, this,
+            [this, group](const QList<DocumentTab *> &tabs, int index, SplitDirection split, bool copy) {
+                dropTabs(tabs, group, index, split, copy);
+            });
+    connect(group, &EditorGroup::tabsDroppedOutside, this,
+            [this](const QList<DocumentTab *> &tabs, const QPoint &pos, bool copy) {
+                moveTabsToNewWindow(tabs, pos, !copy, copy);
+            });
 }
 
 void MainWindow::createOutline()
@@ -575,15 +600,38 @@ void MainWindow::createStatusBar()
 
 DocumentTab *MainWindow::currentTab() const
 {
-    return m_activeGroup->currentTab();
+    return m_activeGroup ? m_activeGroup->currentTab() : nullptr;
 }
+
+namespace {
+
+void collectGroups(QWidget *node, QList<EditorGroup *> &out)
+{
+    if (auto *group = qobject_cast<EditorGroup *>(node)) {
+        out.append(group);
+    } else if (auto *splitter = qobject_cast<QSplitter *>(node)) {
+        for (int i = 0; i < splitter->count(); ++i)
+            collectGroups(splitter->widget(i), out);
+    }
+}
+
+EvenSplitter *splitterOf(QWidget *node)
+{
+    return node ? qobject_cast<EvenSplitter *>(node->parentWidget()) : nullptr;
+}
+
+} // namespace
 
 QList<EditorGroup *> MainWindow::groups() const
 {
-    QList<EditorGroup *> result{m_group};
-    if (m_sideGroup)
-        result.append(m_sideGroup);
+    QList<EditorGroup *> result;
+    collectGroups(m_root, result);
     return result;
+}
+
+EditorGroup *MainWindow::mainGroup() const
+{
+    return groups().value(0);
 }
 
 EditorGroup *MainWindow::groupOf(DocumentTab *tab) const
@@ -600,7 +648,330 @@ void MainWindow::activateGroup(EditorGroup *group)
     if (!group || group == m_activeGroup || !groups().contains(group))
         return;
     m_activeGroup = group;
+    m_groupHistory.removeAll(group);
+    m_groupHistory.prepend(group);
     onCurrentTabChanged();
+}
+
+EditorGroup *MainWindow::createGroup()
+{
+    auto *group = new EditorGroup;
+    wireGroup(group);
+    createModeButton(group);
+    createSplitButton(group);
+    return group;
+}
+
+EvenSplitter *MainWindow::createSplitter(Qt::Orientation orientation)
+{
+    auto *splitter = new EvenSplitter(orientation);
+    splitter->setHandleWidth(1);
+    splitter->setChildrenCollapsible(false);
+    return splitter;
+}
+
+EditorGroup *MainWindow::addGroup(EditorGroup *reference, SplitDirection direction)
+{
+    EvenSplitter *parent = splitterOf(reference);
+    if (direction == SplitDirection::None || !parent || !groups().contains(reference))
+        return reference;
+    const Qt::Orientation orientation = direction == SplitDirection::Left || direction == SplitDirection::Right
+                                            ? Qt::Horizontal
+                                            : Qt::Vertical;
+    const bool after = direction == SplitDirection::Right || direction == SplitDirection::Down;
+    EditorGroup *group = createGroup();
+    // gridview.ts addView(): a sibling in a branch of the same orientation,
+    // else the reference becomes a branch of the two. The new group takes
+    // half of the reference's space (workbench.editor.splitSizing "split").
+    if (parent->count() == 1)
+        parent->setOrientation(orientation);
+    const int at = parent->indexOf(reference);
+    QList<int> sizes = parent->sizes();
+    if (parent->orientation() == orientation) {
+        const int half = sizes.value(at) / 2;
+        parent->insertWidget(at + (after ? 1 : 0), group);
+        if (half > 0) {
+            sizes[at] -= half;
+            sizes.insert(at + (after ? 1 : 0), half);
+            parent->setSizes(sizes);
+        }
+    } else {
+        const int extent = orientation == Qt::Horizontal ? reference->width() : reference->height();
+        EvenSplitter *branch = createSplitter(orientation);
+        parent->replaceWidget(at, branch);
+        branch->addWidget(after ? reference : group);
+        branch->addWidget(after ? group : reference);
+        if (extent > 1)
+            branch->setSizes({extent / 2, extent - extent / 2});
+        parent->setSizes(sizes);
+        reference->show();
+        branch->show();
+    }
+    group->show();
+    SessionManager::instance().markDirty();
+    return group;
+}
+
+void MainWindow::removeGroupIfEmpty(EditorGroup *group)
+{
+    const QList<EditorGroup *> all = groups();
+    if (!group || group->count() > 0 || all.size() < 2 || !all.contains(group))
+        return;
+    EvenSplitter *parent = splitterOf(group);
+    // editorPart.ts doRemoveEmptyGroup(): the most recently active of the
+    // others takes over.
+    // Focus left with the group's last tab, if it was in this window.
+    QWidget *focus = QApplication::focusWidget();
+    const bool hadFocus = !focus || isAncestorOf(focus);
+    m_groupHistory.removeAll(group);
+    m_modeButtons.remove(group);
+    if (m_activeGroup == group) {
+        m_activeGroup = nullptr;
+        EditorGroup *next = nullptr;
+        for (EditorGroup *candidate : std::as_const(m_groupHistory)) {
+            if (all.contains(candidate)) {
+                next = candidate;
+                break;
+            }
+        }
+        group->hide();
+        group->setParent(nullptr);
+        collapse(parent);
+        activateGroup(next ? next : groups().value(0));
+    } else {
+        group->hide();
+        group->setParent(nullptr);
+        collapse(parent);
+    }
+    group->disconnect(this);
+    group->deleteLater();
+    if (hadFocus && m_activeGroup) {
+        if (DocumentTab *tab = m_activeGroup->currentTab())
+            tab->editor()->setFocus();
+        else
+            m_activeGroup->setFocus();
+    }
+    SessionManager::instance().markDirty();
+}
+
+void MainWindow::collapse(EvenSplitter *splitter)
+{
+    if (!splitter || splitter->count() != 1)
+        return;
+    QWidget *only = splitter->widget(0);
+    auto *branch = qobject_cast<EvenSplitter *>(only);
+    // gridview.ts removeView(): a branch with one child is replaced by it,
+    // and a child branch of its parent's orientation merges into the parent.
+    if (splitter == m_root) {
+        if (!branch)
+            return;
+        const QList<int> sizes = branch->sizes();
+        m_root->setOrientation(branch->orientation());
+        while (branch->count() > 0) {
+            QWidget *child = branch->widget(0);
+            m_root->addWidget(child);
+            child->show();
+        }
+        branch->hide();
+        branch->setParent(nullptr);
+        branch->deleteLater();
+        m_root->setSizes(sizes);
+        return;
+    }
+    EvenSplitter *parent = splitterOf(splitter);
+    const int at = parent->indexOf(splitter);
+    QList<int> sizes = parent->sizes();
+    if (branch && branch->orientation() == parent->orientation()) {
+        const QList<int> inner = branch->sizes();
+        int innerTotal = 0;
+        for (int size : inner)
+            innerTotal += size;
+        const int outer = sizes.value(at);
+        sizes.removeAt(at);
+        int given = 0;
+        for (int i = 0; i < inner.size(); ++i) {
+            const int share = i == inner.size() - 1 ? outer - given
+                                                    : (innerTotal > 0 ? outer * inner[i] / innerTotal : 0);
+            given += share;
+            sizes.insert(at + i, share);
+        }
+        for (int i = 0; branch->count() > 0; ++i) {
+            QWidget *child = branch->widget(0);
+            parent->insertWidget(at + i, child);
+            child->show();
+        }
+        splitter->hide();
+        splitter->setParent(nullptr);
+        splitter->deleteLater();
+        parent->setSizes(sizes);
+        return;
+    }
+    parent->replaceWidget(at, only);
+    only->show();
+    parent->setSizes(sizes);
+    splitter->deleteLater();
+}
+
+void MainWindow::splitEditor(SplitDirection direction)
+{
+    if (m_activeGroup)
+        splitTabs(m_activeGroup, m_activeGroup->selectedTabs(), direction);
+}
+
+EditorGroup *MainWindow::splitTabs(EditorGroup *group, const QList<DocumentTab *> &tabs, SplitDirection direction)
+{
+    DocumentTab *current = group->currentTab();
+    EditorGroup *created = addGroup(group, direction);
+    if (created == group)
+        return group;
+    for (DocumentTab *tab : tabs) {
+        if (group->indexOf(tab) >= 0)
+            copyTab(tab, created, -1);
+    }
+    // The copy of the current tab is the new group's current one.
+    for (int i = 0; current && i < created->count(); ++i) {
+        if (created->tab(i)->file() == current->file())
+            created->setCurrentIndex(i);
+    }
+    activateGroup(created);
+    if (DocumentTab *tab = created->currentTab())
+        tab->editor()->setFocus();
+    else
+        created->setFocus();
+    return created;
+}
+
+namespace {
+
+QString orientationName(Qt::Orientation orientation)
+{
+    return orientation == Qt::Horizontal ? QStringLiteral("horizontal") : QStringLiteral("vertical");
+}
+
+} // namespace
+
+QJsonObject MainWindow::saveNode(QWidget *node, const QHash<DocumentTab *, int> &ids) const
+{
+    // Like VS Code's serialized grid (gridview.ts ISerializedNode): branches
+    // with their orientation, children and sizes; leaves are groups.
+    QJsonObject object;
+    if (auto *group = qobject_cast<EditorGroup *>(node)) {
+        QJsonArray tabs;
+        for (int i = 0; i < group->count(); ++i) {
+            const auto it = ids.constFind(group->tab(i));
+            if (it != ids.constEnd())
+                tabs.append(*it);
+        }
+        object[QStringLiteral("tabs")] = tabs;
+        object[QStringLiteral("current")] = ids.value(group->currentTab(), -1);
+    } else if (auto *splitter = qobject_cast<QSplitter *>(node)) {
+        QJsonArray children;
+        QJsonArray sizes;
+        const QList<int> current = splitter->sizes();
+        for (int i = 0; i < splitter->count(); ++i) {
+            children.append(saveNode(splitter->widget(i), ids));
+            sizes.append(current.value(i));
+        }
+        object[QStringLiteral("orientation")] = orientationName(splitter->orientation());
+        object[QStringLiteral("sizes")] = sizes;
+        object[QStringLiteral("children")] = children;
+    }
+    return object;
+}
+
+QJsonObject MainWindow::saveGrid(const QHash<DocumentTab *, int> &ids) const
+{
+    QJsonObject grid;
+    grid[QStringLiteral("root")] = saveNode(m_root, ids);
+    grid[QStringLiteral("active")] = int(groups().indexOf(m_activeGroup));
+    return grid;
+}
+
+void MainWindow::restoreNode(const QJsonObject &node, EvenSplitter *parent, const QMap<int, DocumentTab *> &tabs,
+                             QSet<DocumentTab *> &placed)
+{
+    if (node.contains(QStringLiteral("children"))) {
+        const auto orientation = node.value(QStringLiteral("orientation")).toString() == QLatin1String("vertical")
+                                     ? Qt::Vertical
+                                     : Qt::Horizontal;
+        EvenSplitter *splitter = createSplitter(orientation);
+        parent->addWidget(splitter);
+        const QJsonArray children = node.value(QStringLiteral("children")).toArray();
+        for (const QJsonValue &child : children)
+            restoreNode(child.toObject(), splitter, tabs, placed);
+        QList<int> sizes;
+        for (const QJsonValue &size : node.value(QStringLiteral("sizes")).toArray())
+            sizes.append(qMax(1, size.toInt()));
+        if (sizes.size() == splitter->count())
+            splitter->setSizes(sizes);
+        return;
+    }
+    EditorGroup *group = createGroup();
+    parent->addWidget(group);
+    for (const QJsonValue &id : node.value(QStringLiteral("tabs")).toArray()) {
+        DocumentTab *tab = tabs.value(id.toInt());
+        if (tab && !placed.contains(tab)) {
+            addTab(tab, group);
+            placed.insert(tab);
+        }
+    }
+    if (DocumentTab *current = tabs.value(node.value(QStringLiteral("current")).toInt(-1)))
+        group->setCurrentIndex(group->indexOf(current));
+}
+
+void MainWindow::restoreGrid(const QJsonObject &grid, const QMap<int, DocumentTab *> &tabs)
+{
+    QSet<DocumentTab *> placed;
+    const QJsonObject root = grid.value(QStringLiteral("root")).toObject();
+    // A root that is one group is a branch of one.
+    const QJsonArray children = root.contains(QStringLiteral("tabs")) ? QJsonArray{root}
+                                                                       : root.value(QStringLiteral("children")).toArray();
+    EditorGroup *initial = mainGroup();
+    if (!children.isEmpty() && initial && initial->count() == 0) {
+        // The saved grid replaces the empty group a window starts with.
+        m_root->setOrientation(root.value(QStringLiteral("orientation")).toString() == QLatin1String("vertical")
+                                   ? Qt::Vertical
+                                   : Qt::Horizontal);
+        for (const QJsonValue &child : children)
+            restoreNode(child.toObject(), m_root, tabs, placed);
+        m_groupHistory.removeAll(initial);
+        m_modeButtons.remove(initial);
+        if (m_activeGroup == initial)
+            m_activeGroup = nullptr;
+        initial->setParent(nullptr);
+        initial->disconnect(this);
+        initial->deleteLater();
+        QList<int> sizes;
+        for (const QJsonValue &size : root.value(QStringLiteral("sizes")).toArray())
+            sizes.append(qMax(1, size.toInt()));
+        if (sizes.size() == m_root->count())
+            m_root->setSizes(sizes);
+    }
+    const QList<EditorGroup *> all = groups();
+    EditorGroup *active = all.value(grid.value(QStringLiteral("active")).toInt(-1));
+    if (!active)
+        active = m_activeGroup ? m_activeGroup : all.value(0);
+    for (auto it = tabs.cbegin(); it != tabs.cend(); ++it) {
+        if (it.value() && !placed.contains(it.value()))
+            addTab(it.value(), active);
+    }
+    // Forced: the active group may have been removed above.
+    m_activeGroup = nullptr;
+    activateGroup(active);
+}
+
+void MainWindow::focusNextGroup(int step)
+{
+    const QList<EditorGroup *> all = groups();
+    const int at = int(all.indexOf(m_activeGroup));
+    if (all.size() < 2 || at < 0)
+        return;
+    EditorGroup *next = all[(at + step + all.size()) % all.size()];
+    activateGroup(next);
+    if (DocumentTab *tab = next->currentTab())
+        tab->editor()->setFocus();
+    else
+        next->setFocus();
 }
 
 void MainWindow::newFile()
@@ -838,8 +1209,16 @@ bool MainWindow::closeTab(EditorGroup *group, int index)
     if (!tab || (tab->otherViews().isEmpty() && !confirmDiscard(tab)))
         return false;
     tab->setClosing();
-    group->removeTab(group->indexOf(tab));
+    const bool hadFocus = tab->isAncestorOf(QApplication::focusWidget());
+    {
+        const QScopedValueRollback<bool> removing(m_removingTab, true);
+        group->removeTab(group->indexOf(tab));
+    }
     tab->deleteLater();
+    // Like VS Code, focus stays in the group, on its next tab.
+    if (hadFocus && group == m_activeGroup && group->currentTab())
+        group->currentTab()->editor()->setFocus();
+    removeGroupIfEmpty(group);
     // Its changes were saved or discarded; drop the backup now.
     SessionManager::instance().sync();
     return true;
@@ -926,10 +1305,25 @@ void MainWindow::showTabContextMenu(EditorGroup *group, int index, const QPoint 
     })->setEnabled(hasPath);
     menu.addAction(tr("Reveal in File Manager"), this, [this, tab] { revealInFileManager(tab->path()); })
         ->setEnabled(hasPath);
+    // VS Code's editor title context menu: the split commands and the new
+    // window ones act on the selection when the clicked tab is part of it
+    // (editorCommandsContext.ts resolveCommandsContext()).
+    const QList<DocumentTab *> selected = group->isSelected(tab) ? group->selectedTabs() : QList<DocumentTab *>{tab};
+    const auto split = [this, group, selected](SplitDirection direction) {
+        return [this, group, selected, direction] {
+            if (groups().contains(group))
+                splitTabs(group, selected, direction);
+        };
+    };
     menu.addSeparator();
-    menu.addAction(tr("Move to Other Group"), this, [this, tab] { moveToOtherGroup(tab); })
-        ->setEnabled(m_sideGroup != nullptr);
-    menu.addAction(tr("Move to New Window"), this, [this, tab] { moveTabToNewWindow(tab); });
+    menu.addAction(tr("Split Up"), this, split(SplitDirection::Up));
+    menu.addAction(tr("Split Down"), this, split(SplitDirection::Down));
+    menu.addAction(tr("Split Left"), this, split(SplitDirection::Left));
+    menu.addAction(tr("Split Right"), this, split(SplitDirection::Right));
+    menu.addSeparator();
+    menu.addAction(tr("Move to New Window"), this, [this, selected] { moveTabsToNewWindow(selected); });
+    menu.addAction(tr("Copy to New Window"), this,
+                   [this, selected] { moveTabsToNewWindow(selected, std::nullopt, false, true); });
     menu.exec(globalPos);
 }
 
@@ -963,9 +1357,9 @@ void MainWindow::dragMoveEvent(QDragMoveEvent *event)
 void MainWindow::dropEvent(QDropEvent *event)
 {
     if (event->mimeData()->hasFormat(EditorGroup::tabMimeType())) {
-        if (DocumentTab *tab = EditorGroup::tabForId(event->mimeData()->data(EditorGroup::tabMimeType()).toULongLong()))
-            receiveTab(tab, m_activeGroup, -1);
-        event->setDropAction(Qt::MoveAction);
+        const bool copy = dragGeometry::isCopyOperation(event->modifiers());
+        dropTabs(EditorGroup::tabsForMime(event->mimeData()), m_activeGroup, -1, SplitDirection::None, copy);
+        event->setDropAction(copy ? Qt::CopyAction : Qt::MoveAction);
         event->accept();
         return;
     }
@@ -1226,7 +1620,11 @@ void MainWindow::detachTab(DocumentTab *tab)
     tab->disconnect(&SessionManager::instance());
     if (QTimer *timer = autoSaveTimer(tab))
         timer->disconnect(this);
-    group->removeTab(group->indexOf(tab));
+    {
+        const QScopedValueRollback<bool> removing(m_removingTab, true);
+        group->removeTab(group->indexOf(tab));
+    }
+    removeGroupIfEmpty(group);
 }
 
 void MainWindow::receiveTab(DocumentTab *tab, EditorGroup *group, int index)
@@ -1255,64 +1653,116 @@ void MainWindow::receiveTab(DocumentTab *tab, EditorGroup *group, int index)
         source->close();
 }
 
-void MainWindow::moveToOtherGroup(DocumentTab *tab)
+DocumentTab *MainWindow::copyTab(DocumentTab *tab, EditorGroup *group, int index)
 {
-    EditorGroup *from = groupOf(tab);
-    if (!from || !m_sideGroup)
+    if (!tab || !group || !groups().contains(group))
+        return nullptr;
+    // A group shows a file once (editorGroupView.ts doOpenEditor() finds the
+    // existing editor): copying there only brings it forward.
+    for (int i = 0; i < group->count(); ++i) {
+        if (group->tab(i)->file() == tab->file()) {
+            activateGroup(group);
+            group->setCurrentIndex(i);
+            return group->tab(i);
+        }
+    }
+    DocumentTab *copy = tab->openAnotherView();
+    addTab(copy, group, index);
+    return copy;
+}
+
+void MainWindow::dropTabs(const QList<DocumentTab *> &tabs, EditorGroup *target, int index, SplitDirection split,
+                          bool copy)
+{
+    if (tabs.isEmpty() || !target || !groups().contains(target))
         return;
-    receiveTab(tab, from == m_group ? m_sideGroup : m_group, -1);
+    auto *source = qobject_cast<MainWindow *>(tabs.constFirst()->window());
+    EditorGroup *from = source ? source->groupOf(tabs.constFirst()) : nullptr;
+    if (!from)
+        return;
+    // editorDropTarget.ts onDragOver(): a group's only tab cannot be moved
+    // onto that group's own body.
+    if (!copy && split != SplitDirection::None && from == target && from->count() < 2)
+        return;
+    EditorGroup *group = split == SplitDirection::None ? target : addGroup(target, split);
+    // Within their own group tabs only move (editorTabsControl.ts
+    // isMoveOperation()).
+    if (from == group)
+        copy = false;
+    // handleDrop(): onto the source group's own body nothing happens.
+    if (split == SplitDirection::None && index < 0 && from == group && !copy)
+        return;
+    QPointer<EditorGroup> guard(group);
+    DocumentTab *last = nullptr;
+    for (DocumentTab *tab : tabs) {
+        if (!guard)
+            break;
+        if (copy) {
+            last = copyTab(tab, group, index);
+        } else if (DocumentTab *existing = [&]() -> DocumentTab * {
+                       for (int i = 0; i < group->count(); ++i) {
+                           if (group->tab(i) != tab && group->tab(i)->file() == tab->file())
+                               return group->tab(i);
+                       }
+                       return nullptr;
+                   }()) {
+            // Moving a file onto a group that already shows it leaves one
+            // tab there (editorGroupView.ts doMoveEditorAcrossGroups() opens
+            // the existing editor and closes the moved one).
+            if (auto *owner = qobject_cast<MainWindow *>(tab->window())) {
+                if (EditorGroup *its = owner->groupOf(tab))
+                    owner->closeTab(its, its->indexOf(tab));
+                if (owner != this && owner->tabCount() == 0)
+                    owner->close();
+            }
+            last = existing;
+        } else {
+            receiveTab(tab, group, index);
+            last = tab;
+        }
+        // The next one goes after it (editorGroupView.ts moveEditors()).
+        if (index >= 0 && last && guard && group->indexOf(last) >= 0)
+            index = group->indexOf(last) + 1;
+    }
+    if (guard && last && group->indexOf(last) >= 0) {
+        activateGroup(group);
+        group->setCurrentIndex(group->indexOf(last));
+        last->editor()->setFocus();
+    }
 }
 
 void MainWindow::moveTabToNewWindow(DocumentTab *tab, std::optional<QPoint> globalPos, bool closeIfEmpty)
 {
-    if (!tab || !groupOf(tab))
-        return;
-    detachTab(tab);
+    moveTabsToNewWindow({tab}, globalPos, closeIfEmpty);
+}
 
+MainWindow *MainWindow::moveTabsToNewWindow(const QList<DocumentTab *> &tabs, std::optional<QPoint> globalPos,
+                                            bool closeIfEmpty, bool copy)
+{
+    QList<DocumentTab *> mine;
+    for (DocumentTab *tab : tabs) {
+        if (tab && groupOf(tab))
+            mine.append(tab);
+    }
+    if (mine.isEmpty())
+        return nullptr;
     auto *window = new MainWindow;
     window->setAttribute(Qt::WA_DeleteOnClose);
-    window->adoptTab(tab);
+    // editorActions.ts Move / CopyEditorToNewWindowAction.
+    for (DocumentTab *tab : std::as_const(mine)) {
+        if (copy) {
+            window->adoptTab(tab->openAnotherView());
+        } else {
+            detachTab(tab);
+            window->adoptTab(tab);
+        }
+    }
     if (globalPos)
         window->move(*globalPos - QPoint(60, 14));
     window->show();
     if (closeIfEmpty && tabCount() == 0)
         close();
-}
-
-void MainWindow::setSplit(bool on)
-{
-    m_splitAction->setChecked(on);
-}
-
-void MainWindow::toggleSplitEditor(bool on)
-{
-    if (on && !m_sideGroup) {
-        m_sideGroup = new EditorGroup(m_groups);
-        wireGroup(m_sideGroup);
-        createModeButton(m_sideGroup);
-        m_groups->addWidget(m_sideGroup);
-        const int half = m_groups->width() / 2;
-        m_groups->setSizes({half, m_groups->width() - half});
-        m_sideGroup->show();
-    } else if (!on && m_sideGroup) {
-        EditorGroup *side = m_sideGroup;
-        DocumentTab *keep = m_activeGroup == side ? side->currentTab() : m_group->currentTab();
-        // Closing the group keeps its tabs: they join the main group.
-        while (side->count() > 0) {
-            DocumentTab *tab = side->tab(0);
-            detachTab(tab);
-            addTab(tab, m_group);
-        }
-        if (keep)
-            m_group->setCurrentIndex(m_group->indexOf(keep));
-        activateGroup(m_group);
-        m_modeButtons.remove(side);
-        m_sideGroup = nullptr;
-        side->hide();
-        side->deleteLater();
-    }
-    if (m_splitAction->isChecked() != (m_sideGroup != nullptr))
-        m_splitAction->setChecked(m_sideGroup != nullptr);
+    return window;
 }
 
 void MainWindow::setViewMode(DocumentTab::ViewMode mode)

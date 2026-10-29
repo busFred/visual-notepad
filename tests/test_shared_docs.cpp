@@ -177,11 +177,10 @@ void TestSharedDocs::twoTabsShareEdits()
     MainWindow *window = makeWindow();
     QVERIFY(window->openFile(path));
     DocumentTab *first = window->currentTab();
-    window->setSplit(true);
-    window->activateGroup(window->sideGroup());
+    window->activateGroup(window->addGroup(window->mainGroup(), vn::dragGeometry::SplitDirection::Right));
     DocumentTab *second = first->openAnotherView();
     window->adoptTab(second);
-    QCOMPARE(window->sideGroup()->tab(0), second);
+    QCOMPARE(window->groups().value(1)->tab(0), second);
     QCOMPARE(second->file(), first->file());
     QCOMPARE(second->document(), first->document());
     QCOMPARE(first->otherViews(), QList<DocumentTab *>{second});
@@ -658,9 +657,9 @@ void TestSharedDocs::movingTabAcrossWindowsKeepsDocument()
     QCOMPARE(tabText(*window, first), QFileInfo(path).fileName());
 
     // And back into the first window's side group.
-    window->setSplit(true);
-    window->receiveTab(second, window->sideGroup(), -1);
-    QCOMPARE(window->groupOf(second), window->sideGroup());
+    vn::EditorGroup *side = window->addGroup(window->mainGroup(), vn::dragGeometry::SplitDirection::Right);
+    window->receiveTab(second, side, -1);
+    QCOMPARE(window->groupOf(second), side);
     QCOMPARE(second->file(), first->file());
 }
 
