@@ -142,6 +142,7 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_groups(new QSplitter(Qt::Horizontal, this))
     , m_group(new EditorGroup(m_groups))
+    , m_activeGroup(m_group)
     , m_outlineTimer(new QTimer(this))
 {
     setWindowTitle(productName());
@@ -152,10 +153,16 @@ MainWindow::MainWindow(QWidget *parent)
     m_groups->setChildrenCollapsible(false);
     m_groups->addWidget(m_group);
     setCentralWidget(m_groups);
-    connect(m_group, &EditorGroup::currentChanged, this, &MainWindow::onCurrentTabChanged);
-    connect(m_group, &EditorGroup::tabCloseRequested, this, &MainWindow::closeTab);
-    connect(m_group, &EditorGroup::tabContextMenuRequested, this, &MainWindow::showTabContextMenu);
-    connect(m_group, &EditorGroup::newTabRequested, this, &MainWindow::newFile);
+    wireGroup(m_group);
+    // Focus anywhere in a group makes it the active one.
+    connect(qApp, &QApplication::focusChanged, this, [this](QWidget *, QWidget *now) {
+        for (EditorGroup *group : groups()) {
+            if (now && group->isAncestorOf(now)) {
+                activateGroup(group);
+                return;
+            }
+        }
+    });
 
     m_zoomPercent = Settings::instance().number(key::zoom);
     m_outlineTimer->setSingleShot(true);
@@ -239,7 +246,7 @@ void MainWindow::createActions()
         if (auto *tab = currentTab())
             saveAs(tab);
     });
-    makeAction(QStringLiteral("file.closeTab"), [this] { closeTab(m_group->currentIndex()); });
+    makeAction(QStringLiteral("file.closeTab"), [this] { closeTab(m_activeGroup, m_activeGroup->currentIndex()); });
     makeAction(QStringLiteral("file.closeWindow"), [this] { close(); });
     makeAction(QStringLiteral("file.quit"), [] { SessionManager::instance().quit(); });
 
@@ -370,17 +377,7 @@ void MainWindow::createMenus()
 
 void MainWindow::createTabActions()
 {
-    // Mode dropdown: icon plus the current mode's name; items have no icons.
-    m_modeButton = new QToolButton(this);
-    m_modeButton->setObjectName(QStringLiteral("ModeButton"));
-    m_modeButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    m_modeButton->setPopupMode(QToolButton::InstantPopup);
-    m_modeButton->setIconSize({14, 14});
-    auto *modeMenu = new QMenu(m_modeButton);
-    modeMenu->addActions(m_modeGroup->actions());
-    m_modeButton->setMenu(modeMenu);
-    m_group->addAction(m_modeButton);
-
+    createModeButton(m_group);
     auto *split = new QToolButton(this);
     split->setObjectName(QStringLiteral("IconButton"));
     split->setDefaultAction(m_splitAction);
@@ -388,6 +385,62 @@ void MainWindow::createTabActions()
     split->setIconSize({16, 16});
     split->setToolTip(tr("Split Editor (%1)").arg(m_splitAction->shortcut().toString(QKeySequence::NativeText)));
     m_group->addAction(split);
+}
+
+QToolButton *MainWindow::createModeButton(EditorGroup *group)
+{
+    // Mode dropdown: icon plus the current mode's name; items have no icons.
+    // Each group has its own button, bound to that group's current tab; the
+    // menu shares the actions, so opening it first activates the group.
+    auto *button = new QToolButton(group);
+    button->setObjectName(QStringLiteral("ModeButton"));
+    button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    button->setPopupMode(QToolButton::InstantPopup);
+    button->setIconSize({14, 14});
+    auto *modeMenu = new QMenu(button);
+    modeMenu->addActions(m_modeGroup->actions());
+    connect(modeMenu, &QMenu::aboutToShow, this, [this, group] { activateGroup(group); });
+    button->setMenu(modeMenu);
+    group->addAction(button);
+    m_modeButtons.insert(group, button);
+    return button;
+}
+
+QAction *MainWindow::modeAction(DocumentTab::ViewMode mode) const
+{
+    switch (mode) {
+    case DocumentTab::ViewMode::SourceVisual:
+        return m_modeSourceVisual;
+    case DocumentTab::ViewMode::Visual:
+        return m_modeVisual;
+    case DocumentTab::ViewMode::Source:
+        break;
+    }
+    return m_modeSource;
+}
+
+void MainWindow::wireGroup(EditorGroup *group)
+{
+    connect(group, &EditorGroup::currentChanged, this, [this, group] {
+        if (group == m_activeGroup)
+            onCurrentTabChanged();
+        else
+            updateModeControls();
+    });
+    connect(group, &EditorGroup::tabCloseRequested, this, [this, group](int index) { closeTab(group, index); });
+    connect(group, &EditorGroup::tabContextMenuRequested, this,
+            [this, group](int index, const QPoint &pos) { showTabContextMenu(group, index, pos); });
+    connect(group, &EditorGroup::newTabRequested, this, [this, group] {
+        activateGroup(group);
+        newFile();
+    });
+    connect(group, &EditorGroup::activated, this, [this, group] { activateGroup(group); });
+    connect(group, &EditorGroup::tabDropped, this, [this, group](quint64 id, int index) {
+        if (DocumentTab *tab = EditorGroup::tabForId(id))
+            receiveTab(tab, group, index);
+    });
+    connect(group, &EditorGroup::tabDroppedOutside, this,
+            [this](DocumentTab *tab, const QPoint &pos) { moveTabToNewWindow(tab, pos, true); });
 }
 
 void MainWindow::createOutline()
@@ -454,7 +507,32 @@ void MainWindow::createStatusBar()
 
 DocumentTab *MainWindow::currentTab() const
 {
-    return m_group->currentTab();
+    return m_activeGroup->currentTab();
+}
+
+QList<EditorGroup *> MainWindow::groups() const
+{
+    QList<EditorGroup *> result{m_group};
+    if (m_sideGroup)
+        result.append(m_sideGroup);
+    return result;
+}
+
+EditorGroup *MainWindow::groupOf(DocumentTab *tab) const
+{
+    for (EditorGroup *group : groups()) {
+        if (tab && group->indexOf(tab) >= 0)
+            return group;
+    }
+    return nullptr;
+}
+
+void MainWindow::activateGroup(EditorGroup *group)
+{
+    if (!group || group == m_activeGroup || !groups().contains(group))
+        return;
+    m_activeGroup = group;
+    onCurrentTabChanged();
 }
 
 void MainWindow::newFile()
@@ -465,10 +543,13 @@ void MainWindow::newFile()
 bool MainWindow::openFile(const QString &path)
 {
     const QString canonical = QFileInfo(path).canonicalFilePath();
-    for (int i = 0; i < m_group->count(); ++i) {
-        if (!canonical.isEmpty() && QFileInfo(m_group->tab(i)->path()).canonicalFilePath() == canonical) {
-            m_group->setCurrentIndex(i);
-            return true;
+    for (EditorGroup *group : groups()) {
+        for (int i = 0; i < group->count(); ++i) {
+            if (!canonical.isEmpty() && QFileInfo(group->tab(i)->path()).canonicalFilePath() == canonical) {
+                activateGroup(group);
+                group->setCurrentIndex(i);
+                return true;
+            }
         }
     }
 
@@ -490,17 +571,18 @@ void MainWindow::adoptTab(DocumentTab *tab)
     addTab(tab);
 }
 
-void MainWindow::addTab(DocumentTab *tab)
+void MainWindow::addTab(DocumentTab *tab, EditorGroup *group, int index)
 {
+    if (!group || !groups().contains(group))
+        group = m_activeGroup;
+    activateGroup(group);
+
     connect(tab, &DocumentTab::modificationChanged, this, [this, tab] { updateTabTitle(tab); });
     connect(tab, &DocumentTab::cursorPositionChanged, this, [this, tab] {
         if (tab == currentTab())
             updateStatus();
     });
-    connect(tab, &DocumentTab::viewModeChanged, this, [this, tab] {
-        if (tab == currentTab())
-            updateModeControls();
-    });
+    connect(tab, &DocumentTab::viewModeChanged, this, [this] { updateModeControls(); });
     connect(tab, &DocumentTab::formatChanged, this, [this, tab] {
         if (tab != currentTab())
             return;
@@ -537,9 +619,9 @@ void MainWindow::addTab(DocumentTab *tab)
             m_outlineTimer->start();
     });
 
-    const int index = m_group->addTab(tab, tab->displayName());
+    const int at = group->addTab(tab, tab->displayName(), index);
     updateTabTitle(tab);
-    m_group->setCurrentIndex(index);
+    group->setCurrentIndex(at);
     applyZoom();
     tab->editor()->setFocus();
 }
@@ -584,7 +666,10 @@ bool MainWindow::confirmDiscard(DocumentTab *tab)
 {
     if (!tab->isModified())
         return true;
-    m_group->setCurrentIndex(m_group->indexOf(tab));
+    if (EditorGroup *group = groupOf(tab)) {
+        activateGroup(group);
+        group->setCurrentIndex(group->indexOf(tab));
+    }
     const auto answer = QMessageBox::warning(
         this, productName(), tr("Do you want to save the changes you made to %1?").arg(tab->displayName()),
         QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
@@ -593,48 +678,62 @@ bool MainWindow::confirmDiscard(DocumentTab *tab)
     return answer == QMessageBox::Discard;
 }
 
-bool MainWindow::closeTab(int index)
+bool MainWindow::closeTab(EditorGroup *group, int index)
 {
-    DocumentTab *tab = m_group->tab(index);
+    DocumentTab *tab = group->tab(index);
     if (!tab || !confirmDiscard(tab))
         return false;
-    m_group->removeTab(m_group->indexOf(tab));
+    group->removeTab(group->indexOf(tab));
     tab->deleteLater();
     return true;
 }
 
 int MainWindow::tabCount() const
 {
-    return m_group->count();
+    int count = 0;
+    for (EditorGroup *group : groups())
+        count += group->count();
+    return count;
 }
 
 QList<DocumentTab *> MainWindow::tabs() const
 {
     QList<DocumentTab *> result;
-    for (int i = 0; i < m_group->count(); ++i)
-        result.append(m_group->tab(i));
+    for (EditorGroup *group : groups()) {
+        for (int i = 0; i < group->count(); ++i)
+            result.append(group->tab(i));
+    }
     return result;
 }
 
 int MainWindow::currentTabIndex() const
 {
-    return m_group->currentIndex();
+    DocumentTab *tab = currentTab();
+    return tab ? int(tabs().indexOf(tab)) : -1;
 }
 
 void MainWindow::setCurrentTabIndex(int index)
 {
-    if (index >= 0 && index < m_group->count())
-        m_group->setCurrentIndex(index);
+    DocumentTab *tab = tabs().value(index);
+    if (EditorGroup *group = groupOf(tab)) {
+        activateGroup(group);
+        group->setCurrentIndex(group->indexOf(tab));
+    }
 }
 
 bool MainWindow::closeTabs(int index, CloseScope scope)
 {
-    DocumentTab *anchor = m_group->tab(index);
+    return closeTabs(m_activeGroup, index, scope);
+}
+
+bool MainWindow::closeTabs(EditorGroup *group, int index, CloseScope scope)
+{
+    DocumentTab *anchor = group->tab(index);
     if (!anchor)
         return false;
     QList<DocumentTab *> victims;
-    for (int i = 0; i < m_group->count(); ++i) {
-        DocumentTab *tab = m_group->tab(i);
+    for (int i = 0; i < group->count(); ++i) {
+        DocumentTab *tab = group->tab(i);
         const bool hit = scope == CloseScope::All || (scope == CloseScope::This && i == index)
                          || (scope == CloseScope::Others && i != index) || (scope == CloseScope::Right && i > index)
                          || (scope == CloseScope::Saved && !tab->isModified());
@@ -642,26 +741,26 @@ bool MainWindow::closeTabs(int index, CloseScope scope)
             victims.append(tab);
     }
     for (DocumentTab *tab : victims) {
-        if (!closeTab(m_group->indexOf(tab)))
+        if (!closeTab(group, group->indexOf(tab)))
             return false;
     }
     return true;
 }
 
-void MainWindow::showTabContextMenu(int index, const QPoint &globalPos)
+void MainWindow::showTabContextMenu(EditorGroup *group, int index, const QPoint &globalPos)
 {
-    DocumentTab *tab = m_group->tab(index);
+    DocumentTab *tab = group->tab(index);
     if (!tab)
         return;
     const bool hasPath = !tab->path().isEmpty();
     QMenu menu(this);
-    const auto close = [this, tab](CloseScope scope) {
-        return [this, tab, scope] { closeTabs(m_group->indexOf(tab), scope); };
+    const auto close = [this, group, tab](CloseScope scope) {
+        return [this, group, tab, scope] { closeTabs(group, group->indexOf(tab), scope); };
     };
     menu.addAction(tr("Close"), this, close(CloseScope::This));
-    menu.addAction(tr("Close Others"), this, close(CloseScope::Others))->setEnabled(m_group->count() > 1);
+    menu.addAction(tr("Close Others"), this, close(CloseScope::Others))->setEnabled(group->count() > 1);
     menu.addAction(tr("Close to the Right"), this, close(CloseScope::Right))
-        ->setEnabled(index < m_group->count() - 1);
+        ->setEnabled(index < group->count() - 1);
     menu.addAction(tr("Close Saved"), this, close(CloseScope::Saved));
     menu.addAction(tr("Close All"), this, close(CloseScope::All));
     menu.addSeparator();
@@ -671,6 +770,8 @@ void MainWindow::showTabContextMenu(int index, const QPoint &globalPos)
     menu.addAction(tr("Reveal in File Manager"), this, [this, tab] { revealInFileManager(tab->path()); })
         ->setEnabled(hasPath);
     menu.addSeparator();
+    menu.addAction(tr("Move to Other Group"), this, [this, tab] { moveToOtherGroup(tab); })
+        ->setEnabled(m_sideGroup != nullptr);
     menu.addAction(tr("Move to New Window"), this, [this, tab] { moveTabToNewWindow(tab); });
     menu.exec(globalPos);
 }
@@ -687,6 +788,11 @@ void MainWindow::revealInFileManager(const QString &path)
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *event)
 {
+    // A tab dropped beside the groups (menu bar, outline) joins the active one.
+    if (event->mimeData()->hasFormat(EditorGroup::tabMimeType())) {
+        event->acceptProposedAction();
+        return;
+    }
     const auto urls = event->mimeData()->urls();
     if (std::any_of(urls.begin(), urls.end(), [](const QUrl &url) { return url.isLocalFile(); }))
         event->acceptProposedAction();
@@ -694,6 +800,13 @@ void MainWindow::dragEnterEvent(QDragEnterEvent *event)
 
 void MainWindow::dropEvent(QDropEvent *event)
 {
+    if (event->mimeData()->hasFormat(EditorGroup::tabMimeType())) {
+        if (DocumentTab *tab = EditorGroup::tabForId(event->mimeData()->data(EditorGroup::tabMimeType()).toULongLong()))
+            receiveTab(tab, m_activeGroup, -1);
+        event->setDropAction(Qt::MoveAction);
+        event->accept();
+        return;
+    }
     const auto urls = event->mimeData()->urls();
     for (const QUrl &url : urls) {
         if (url.isLocalFile())
@@ -709,7 +822,7 @@ void MainWindow::popupAboveCell(QMenu *menu, QWidget *cell)
         pos = cell->mapToGlobal(QPoint(0, 0)) - QPoint(0, menu->sizeHint().height());
     } else {
         // No status bar: centre the menu under the tab strip.
-        pos = m_group->mapToGlobal(QPoint((m_group->width() - menu->sizeHint().width()) / 2, 32));
+        pos = m_activeGroup->mapToGlobal(QPoint((m_activeGroup->width() - menu->sizeHint().width()) / 2, 32));
     }
     menu->exec(pos);
 }
@@ -812,8 +925,8 @@ void MainWindow::closeEvent(QCloseEvent *event)
                 return;
             }
         } else {
-            for (int i = 0; i < m_group->count(); ++i) {
-                if (!confirmDiscard(m_group->tab(i))) {
+            for (DocumentTab *tab : tabs()) {
+                if (!confirmDiscard(tab)) {
                     event->ignore();
                     return;
                 }
@@ -868,34 +981,102 @@ void MainWindow::applyAutoSave()
     }
 }
 
-void MainWindow::moveTabToNewWindow(DocumentTab *tab)
+void MainWindow::detachTab(DocumentTab *tab)
 {
-    if (!tab)
+    EditorGroup *group = groupOf(tab);
+    if (!group)
         return;
     tab->disconnect(this);
+    tab->disconnect(&SessionManager::instance());
     if (QTimer *timer = autoSaveTimer(tab))
         timer->disconnect(this);
-    m_group->removeTab(m_group->indexOf(tab));
+    group->removeTab(group->indexOf(tab));
+}
+
+void MainWindow::receiveTab(DocumentTab *tab, EditorGroup *group, int index)
+{
+    if (!tab || !group || !groups().contains(group))
+        return;
+    // The tab's window is the top-level ancestor: the window it lives in.
+    auto *source = qobject_cast<MainWindow *>(tab->window());
+    EditorGroup *from = source ? source->groupOf(tab) : nullptr;
+    if (!from)
+        return;
+
+    if (from == group) {
+        const int old = group->indexOf(tab);
+        const int to = index < 0 ? group->count() - 1 : (index > old ? index - 1 : index);
+        if (to != old)
+            group->moveTab(old, to);
+        activateGroup(group);
+        group->setCurrentIndex(group->indexOf(tab));
+        return;
+    }
+    source->detachTab(tab);
+    addTab(tab, group, index);
+    // Only a drag-out empties a window this way, so no unsaved-changes prompt.
+    if (source != this && source->tabCount() == 0)
+        source->close();
+}
+
+void MainWindow::moveToOtherGroup(DocumentTab *tab)
+{
+    EditorGroup *from = groupOf(tab);
+    if (!from || !m_sideGroup)
+        return;
+    receiveTab(tab, from == m_group ? m_sideGroup : m_group, -1);
+}
+
+void MainWindow::moveTabToNewWindow(DocumentTab *tab, std::optional<QPoint> globalPos, bool closeIfEmpty)
+{
+    if (!tab || !groupOf(tab))
+        return;
+    detachTab(tab);
 
     auto *window = new MainWindow;
     window->setAttribute(Qt::WA_DeleteOnClose);
     window->adoptTab(tab);
+    if (globalPos)
+        window->move(*globalPos - QPoint(60, 14));
     window->show();
+    if (closeIfEmpty && tabCount() == 0)
+        close();
+}
+
+void MainWindow::setSplit(bool on)
+{
+    m_splitAction->setChecked(on);
 }
 
 void MainWindow::toggleSplitEditor(bool on)
 {
-    // The new group starts empty; moving tabs between groups comes with tab
-    // drag and drop.
     if (on && !m_sideGroup) {
         m_sideGroup = new EditorGroup(m_groups);
+        wireGroup(m_sideGroup);
+        createModeButton(m_sideGroup);
         m_groups->addWidget(m_sideGroup);
         const int half = m_groups->width() / 2;
         m_groups->setSizes({half, m_groups->width() - half});
+        m_sideGroup->show();
     } else if (!on && m_sideGroup) {
-        m_sideGroup->deleteLater();
+        EditorGroup *side = m_sideGroup;
+        DocumentTab *keep = m_activeGroup == side ? side->currentTab() : m_group->currentTab();
+        // Closing the group keeps its tabs: they join the main group.
+        while (side->count() > 0) {
+            DocumentTab *tab = side->tab(0);
+            detachTab(tab);
+            addTab(tab, m_group);
+        }
+        if (keep)
+            m_group->setCurrentIndex(m_group->indexOf(keep));
+        activateGroup(m_group);
+        m_modeButtons.remove(side);
         m_sideGroup = nullptr;
+        side->hide();
+        side->deleteLater();
     }
+    if (m_splitAction->isChecked() != (m_sideGroup != nullptr))
+        m_splitAction->setChecked(m_sideGroup != nullptr);
 }
 
 void MainWindow::setViewMode(DocumentTab::ViewMode mode)
@@ -913,8 +1094,8 @@ void MainWindow::zoom(int steps)
 
 void MainWindow::applyZoom()
 {
-    for (int i = 0; i < m_group->count(); ++i)
-        m_group->tab(i)->setZoom(m_zoomPercent);
+    for (DocumentTab *tab : tabs())
+        tab->setZoom(m_zoomPercent);
     updateStatus();
 }
 
@@ -970,7 +1151,7 @@ void MainWindow::onCurrentTabChanged()
 {
     DocumentTab *tab = currentTab();
     // Not for a tab that was just closed or moved away: its changes were discarded.
-    if (m_previousTab && m_previousTab != tab && m_group->indexOf(m_previousTab) >= 0
+    if (m_previousTab && m_previousTab != tab && groupOf(m_previousTab)
         && Settings::instance().text(key::autoSave) == QLatin1String("onFocusChange"))
         autoSave(m_previousTab);
     m_previousTab = tab;
@@ -983,11 +1164,12 @@ void MainWindow::onCurrentTabChanged()
 
 void MainWindow::updateTabTitle(DocumentTab *tab)
 {
-    const int index = m_group->indexOf(tab);
-    if (index < 0)
+    EditorGroup *group = groupOf(tab);
+    if (!group)
         return;
-    m_group->setTabText(index, tab->isModified() ? QStringLiteral("● ") + tab->displayName() : tab->displayName());
-    m_group->setTabToolTip(index, QDir::toNativeSeparators(tab->path()));
+    const int index = group->indexOf(tab);
+    group->setTabText(index, tab->isModified() ? QStringLiteral("● ") + tab->displayName() : tab->displayName());
+    group->setTabToolTip(index, QDir::toNativeSeparators(tab->path()));
     if (tab == currentTab())
         setWindowTitle(tr("%1 — %2").arg(tab->displayName(), productName()));
 }
@@ -1125,9 +1307,19 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
 
 void MainWindow::updateModeControls()
 {
+    // Every group's button shows its own tab; the menu actions follow the
+    // active tab.
+    for (auto it = m_modeButtons.cbegin(); it != m_modeButtons.cend(); ++it) {
+        const DocumentTab *tab = it.key()->currentTab();
+        it.value()->setVisible(tab && tab->isMarkdown());
+        if (tab && tab->isMarkdown()) {
+            QAction *shown = modeAction(tab->viewMode());
+            it.value()->setIcon(shown->icon());
+            it.value()->setText(shown->text());
+        }
+    }
     DocumentTab *tab = currentTab();
     const bool markdown = tab && tab->isMarkdown();
-    m_modeButton->setVisible(markdown);
     for (QAction *action : m_modeGroup->actions())
         action->setEnabled(markdown);
     if (!markdown) {
@@ -1138,14 +1330,7 @@ void MainWindow::updateModeControls()
         m_modeGroup->setExclusionPolicy(QActionGroup::ExclusionPolicy::Exclusive);
         return;
     }
-    QAction *current = m_modeSource;
-    if (tab->viewMode() == DocumentTab::ViewMode::SourceVisual)
-        current = m_modeSourceVisual;
-    else if (tab->viewMode() == DocumentTab::ViewMode::Visual)
-        current = m_modeVisual;
-    current->setChecked(true);
-    m_modeButton->setIcon(current->icon());
-    m_modeButton->setText(current->text());
+    modeAction(tab->viewMode())->setChecked(true);
 }
 
 } // namespace vn

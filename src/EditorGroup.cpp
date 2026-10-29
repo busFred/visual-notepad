@@ -3,8 +3,17 @@
 #include "DocumentTab.h"
 #include "Theme.h"
 
+#include <QApplication>
+#include <QCursor>
+#include <QDrag>
+#include <QDragEnterEvent>
+#include <QDragLeaveEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
 #include <QHBoxLayout>
+#include <QHash>
 #include <QLabel>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QStackedWidget>
@@ -33,7 +42,110 @@ protected:
     }
 };
 
+// Translucent wash over the group body while a tab is dragged over it.
+class DropOverlay : public QWidget
+{
+public:
+    explicit DropOverlay(QWidget *parent)
+        : QWidget(parent)
+    {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        hide();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QColor color = theme::selection;
+        color.setAlphaF(0.4);
+        QPainter(this).fillRect(rect(), color);
+    }
+};
+
+// Insertion marker between tabs.
+class DropMarker : public QWidget
+{
+public:
+    explicit DropMarker(QWidget *parent)
+        : QWidget(parent)
+    {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        hide();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override { QPainter(this).fillRect(rect(), theme::accent); }
+};
+
+EditorGroup *groupAround(QWidget *widget)
+{
+    for (; widget; widget = widget->parentWidget()) {
+        if (auto *group = qobject_cast<EditorGroup *>(widget))
+            return group;
+    }
+    return nullptr;
+}
+
+// Editors accept text drops themselves and would hide a tab drag from the
+// group, so tab drags over any descendant are routed to the group here.
+class DragRouter : public QObject
+{
+public:
+    using QObject::QObject;
+
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        const auto type = event->type();
+        if (type != QEvent::DragEnter && type != QEvent::DragMove && type != QEvent::Drop
+            && type != QEvent::DragLeave)
+            return false;
+        auto *widget = qobject_cast<QWidget *>(watched);
+        EditorGroup *group = groupAround(widget);
+        // The group's own handlers deal with events aimed at it.
+        if (!group || group == widget)
+            return false;
+        if (type == QEvent::DragLeave) {
+            group->hideDropHints();
+            return false;
+        }
+        auto *drop = static_cast<QDropEvent *>(event);
+        if (!drop->mimeData()->hasFormat(EditorGroup::tabMimeType()))
+            return false;
+        group->handleTabDrag(drop, widget->mapTo(group, drop->position().toPoint()));
+        return true;
+    }
+};
+
+QHash<quint64, QPointer<DocumentTab>> &tabRegistry()
+{
+    static QHash<quint64, QPointer<DocumentTab>> registry;
+    return registry;
+}
+
 } // namespace
+
+QString EditorGroup::tabMimeType()
+{
+    return QStringLiteral("application/x-visnotepad-tab");
+}
+
+QMimeData *EditorGroup::mimeForTab(DocumentTab *tab)
+{
+    static quint64 lastId = 0;
+    auto &registry = tabRegistry();
+    // Forget tabs that were destroyed since earlier drags.
+    registry.removeIf([](auto it) { return it.value().isNull(); });
+    const quint64 id = ++lastId;
+    registry.insert(id, tab);
+    auto *mime = new QMimeData;
+    mime->setData(tabMimeType(), QByteArray::number(id));
+    return mime;
+}
+
+DocumentTab *EditorGroup::tabForId(quint64 id)
+{
+    return tabRegistry().value(id).data();
+}
 
 EditorGroup::EditorGroup(QWidget *parent)
     : QWidget(parent)
@@ -43,7 +155,17 @@ EditorGroup::EditorGroup(QWidget *parent)
     , m_body(new QStackedWidget(this))
     , m_tabs(new QStackedWidget(m_body))
     , m_empty(new QLabel(tr("Empty. Drag a tab here or open a file"), m_body))
+    , m_dropOverlay(new DropOverlay(this))
+    , m_dropMarker(new DropMarker(m_strip))
 {
+    setAcceptDrops(true);
+    static const auto *router = [] {
+        auto *r = new DragRouter(qApp);
+        qApp->installEventFilter(r);
+        return r;
+    }();
+    Q_UNUSED(router);
+
     m_strip->setObjectName(QStringLiteral("TabStrip"));
     m_strip->setFixedHeight(stripHeight);
 
@@ -126,12 +248,20 @@ int EditorGroup::indexOf(DocumentTab *tab) const
     return m_tabs->indexOf(tab);
 }
 
-int EditorGroup::addTab(DocumentTab *tab, const QString &text)
+int EditorGroup::addTab(DocumentTab *tab, const QString &text, int index)
 {
+    if (index < 0 || index > m_tabs->count())
+        index = m_tabs->count();
     // Insert the page first so currentChanged sees it.
-    const int index = m_tabs->addWidget(tab);
+    m_tabs->insertWidget(index, tab);
     m_tabBar->insertTab(index, text);
     return index;
+}
+
+void EditorGroup::moveTab(int from, int to)
+{
+    // Goes through tabMoved, which reorders the pages.
+    m_tabBar->moveTab(from, to);
 }
 
 void EditorGroup::removeTab(int index)
@@ -170,7 +300,29 @@ void EditorGroup::addAction(QWidget *widget)
 bool EditorGroup::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == m_tabBar || watched == m_strip) {
-        if (event->type() == QEvent::MouseButtonRelease || event->type() == QEvent::MouseButtonDblClick) {
+        const auto type = event->type();
+        if (type == QEvent::MouseButtonPress) {
+            Q_EMIT activated();
+            auto *mouse = static_cast<QMouseEvent *>(event);
+            m_pressedTab = nullptr;
+            if (watched == m_tabBar && mouse->button() == Qt::LeftButton)
+                m_pressedTab = tab(m_tabBar->tabAt(mouse->position().toPoint()));
+        } else if (type == QEvent::MouseButtonRelease) {
+            m_pressedTab = nullptr;
+        } else if (type == QEvent::MouseMove && m_pressedTab && watched == m_tabBar) {
+            // Leaving the strip turns the tab move into a drag to another group
+            // or window.
+            auto *mouse = static_cast<QMouseEvent *>(event);
+            const int slack = QApplication::startDragDistance();
+            const QPoint inStrip = m_strip->mapFromGlobal(mouse->globalPosition().toPoint());
+            if ((mouse->buttons() & Qt::LeftButton) && !m_strip->rect().adjusted(-slack, -slack, slack, slack).contains(inStrip)) {
+                DocumentTab *dragged = m_pressedTab;
+                m_pressedTab = nullptr;
+                startDrag(dragged);
+                return true;
+            }
+        }
+        if (type == QEvent::MouseButtonRelease || type == QEvent::MouseButtonDblClick) {
             auto *mouse = static_cast<QMouseEvent *>(event);
             // The strip itself only receives clicks outside the tab bar.
             const int index = watched == m_tabBar ? m_tabBar->tabAt(mouse->position().toPoint()) : -1;
@@ -186,6 +338,124 @@ bool EditorGroup::eventFilter(QObject *watched, QEvent *event)
         }
     }
     return QWidget::eventFilter(watched, event);
+}
+
+void EditorGroup::startDrag(DocumentTab *tab)
+{
+    const int index = indexOf(tab);
+    if (index < 0)
+        return;
+    // End QTabBar's own tab move first; the drag takes over from here.
+    const QPoint local = m_tabBar->mapFromGlobal(QCursor::pos());
+    QMouseEvent release(QEvent::MouseButtonRelease, local, QCursor::pos(), Qt::LeftButton, Qt::NoButton,
+                        Qt::NoModifier);
+    QCoreApplication::sendEvent(m_tabBar, &release);
+
+    const QRect rect = m_tabBar->tabRect(indexOf(tab));
+    auto *drag = new QDrag(m_tabBar);
+    drag->setMimeData(mimeForTab(tab));
+    drag->setPixmap(m_tabBar->grab(rect));
+    drag->setHotSpot(local - rect.topLeft());
+
+    // The drop may close this group's window, so keep guarded handles.
+    QPointer<EditorGroup> self(this);
+    QPointer<DocumentTab> guarded(tab);
+    const Qt::DropAction result = drag->exec(Qt::MoveAction);
+    if (result == Qt::IgnoreAction && self && guarded && self->indexOf(guarded) >= 0)
+        Q_EMIT self->tabDroppedOutside(guarded, QCursor::pos());
+}
+
+int EditorGroup::insertIndexAt(const QPoint &pos) const
+{
+    if (!m_strip->geometry().contains(pos) || count() == 0)
+        return -1;
+    // Only the horizontal position matters: the cursor is already on the strip.
+    const int x = m_tabBar->mapFrom(this, pos).x();
+    for (int i = 0; i < count(); ++i) {
+        if (x < m_tabBar->tabRect(i).center().x())
+            return i;
+    }
+    return count();
+}
+
+void EditorGroup::handleTabDrag(QDropEvent *event, const QPoint &pos)
+{
+    const bool onStrip = m_strip->geometry().contains(pos);
+    // On the strip -1 from insertIndexAt only means an empty group: append.
+    const int index = onStrip ? insertIndexAt(pos) : -1;
+
+    if (event->type() == QEvent::Drop) {
+        hideDropHints();
+        event->setDropAction(Qt::MoveAction);
+        event->accept();
+        bool ok = false;
+        const quint64 id = event->mimeData()->data(tabMimeType()).toULongLong(&ok);
+        if (ok)
+            Q_EMIT tabDropped(id, index);
+        return;
+    }
+
+    event->setDropAction(Qt::MoveAction);
+    event->accept();
+    m_dropOverlay->setGeometry(m_body->geometry());
+    m_dropOverlay->setVisible(!onStrip);
+    m_dropOverlay->raise();
+    if (onStrip) {
+        const int slot = index < 0 ? 0 : index;
+        int x = 0;
+        if (count() > 0)
+            x = slot < count() ? m_tabBar->tabRect(slot).left() : m_tabBar->tabRect(count() - 1).right() + 1;
+        const QPoint at = m_strip->mapFromGlobal(m_tabBar->mapToGlobal(QPoint(x, 0)));
+        m_dropMarker->setGeometry(at.x() - 1, 3, 2, stripHeight - 6);
+        m_dropMarker->show();
+        m_dropMarker->raise();
+    } else {
+        m_dropMarker->hide();
+    }
+}
+
+void EditorGroup::hideDropHints()
+{
+    m_dropOverlay->hide();
+    m_dropMarker->hide();
+}
+
+void EditorGroup::dragEnterEvent(QDragEnterEvent *event)
+{
+    // Anything but a tab (e.g. files from the file manager) is the window's.
+    if (!event->mimeData()->hasFormat(tabMimeType()))
+        QCoreApplication::sendEvent(window(), event);
+    else
+        handleTabDrag(event, event->position().toPoint());
+}
+
+void EditorGroup::dragMoveEvent(QDragMoveEvent *event)
+{
+    // Anything but a tab (e.g. files from the file manager) is the window's.
+    if (!event->mimeData()->hasFormat(tabMimeType()))
+        QCoreApplication::sendEvent(window(), event);
+    else
+        handleTabDrag(event, event->position().toPoint());
+}
+
+void EditorGroup::dragLeaveEvent(QDragLeaveEvent *)
+{
+    hideDropHints();
+}
+
+void EditorGroup::dropEvent(QDropEvent *event)
+{
+    // Anything but a tab (e.g. files from the file manager) is the window's.
+    if (!event->mimeData()->hasFormat(tabMimeType()))
+        QCoreApplication::sendEvent(window(), event);
+    else
+        handleTabDrag(event, event->position().toPoint());
+}
+
+void EditorGroup::mousePressEvent(QMouseEvent *event)
+{
+    Q_EMIT activated();
+    QWidget::mousePressEvent(event);
 }
 
 void EditorGroup::updateEmpty()

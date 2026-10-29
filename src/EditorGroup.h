@@ -2,11 +2,19 @@
 // holds the tabs on the left and optional action buttons on the right.
 #pragma once
 
+#include <QPoint>
+#include <QPointer>
 #include <QWidget>
 
+class QDragEnterEvent;
+class QDragLeaveEvent;
+class QDragMoveEvent;
+class QDropEvent;
 class QHBoxLayout;
 class QLabel;
+class QMouseEvent;
 class QStackedWidget;
+class QMimeData;
 class QTabBar;
 
 namespace vn {
@@ -18,6 +26,15 @@ class EditorGroup : public QWidget
     Q_OBJECT
 
 public:
+    // Mime type of a dragged tab; the payload is an id from mimeForTab().
+    static QString tabMimeType();
+    // Mime data for dragging `tab`. The id stays valid while the tab lives; it
+    // is looked up through a registry of guarded pointers, never dereferenced
+    // blindly. The caller owns the result (or passes it to QDrag).
+    static QMimeData *mimeForTab(DocumentTab *tab);
+    // Null if the tab was destroyed since the id was issued.
+    static DocumentTab *tabForId(quint64 id);
+
     explicit EditorGroup(QWidget *parent = nullptr);
 
     int count() const;
@@ -26,7 +43,10 @@ public:
     DocumentTab *currentTab() const;
     int indexOf(DocumentTab *tab) const;
 
-    int addTab(DocumentTab *tab, const QString &text);
+    // Inserts at `index`, or at the end when negative.
+    int addTab(DocumentTab *tab, const QString &text, int index = -1);
+    // Reorders without changing the current tab.
+    void moveTab(int from, int to);
     // Removes the tab without deleting it.
     void removeTab(int index);
     void setCurrentIndex(int index);
@@ -36,18 +56,41 @@ public:
     // Widgets shown at the right end of the tab strip.
     void addAction(QWidget *widget);
 
+    QTabBar *tabBar() const { return m_tabBar; }
+    // Index a tab dropped at `pos` (group coordinates) would take: the slot
+    // under the cursor on the strip, the end elsewhere.
+    int insertIndexAt(const QPoint &pos) const;
+    // Handles the drag events of a tab drag; `pos` is in group coordinates.
+    // Called for the group itself and for editor children that would
+    // otherwise swallow the drag.
+    void handleTabDrag(QDropEvent *event, const QPoint &pos);
+    void hideDropHints();
+
 Q_SIGNALS:
     void currentChanged(int index);
     void tabCloseRequested(int index);
     void tabContextMenuRequested(int index, const QPoint &globalPos);
     // Double-click on the empty part of the strip.
     void newTabRequested();
+    // The user clicked or focused into this group.
+    void activated();
+    // A tab from this or another group was dropped; insertIndex is -1 for the
+    // body (append).
+    void tabDropped(quint64 tabId, int insertIndex);
+    // A drag started here ended on no drop target.
+    void tabDroppedOutside(DocumentTab *tab, const QPoint &globalPos);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dragMoveEvent(QDragMoveEvent *event) override;
+    void dragLeaveEvent(QDragLeaveEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
 
 private:
     void updateEmpty();
+    void startDrag(DocumentTab *tab);
 
     QWidget *m_strip;
     QTabBar *m_tabBar;
@@ -55,6 +98,9 @@ private:
     QStackedWidget *m_body;
     QStackedWidget *m_tabs;
     QLabel *m_empty;
+    QWidget *m_dropOverlay;
+    QWidget *m_dropMarker;
+    QPointer<DocumentTab> m_pressedTab;
 };
 
 } // namespace vn

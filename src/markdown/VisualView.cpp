@@ -18,6 +18,7 @@ namespace vn {
 namespace {
 
 constexpr qreal sideMargin = 26;
+constexpr qreal topMargin = 12;
 constexpr qreal gapRowFactor = 0.6;
 constexpr qreal activeBarInset = 10;
 
@@ -50,7 +51,7 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
     setLineNumbersVisible(false);
     // The edited block has its own shading instead.
     setHighlightCurrentLine(false);
-    setTextMargins(sideMargin, sideMargin);
+    setTextMargins(sideMargin, sideMargin, topMargin);
     viewport()->setMouseTracking(true);
     connect(model, &MarkdownModel::optionsChanged, this, [this] {
         m_cache.clear();
@@ -87,8 +88,10 @@ void VisualView::rebuildRows()
     const int lines = document()->blockCount();
     const auto &blocks = m_model->blocks();
 
+    // Blocks open for editing only while this view has focus, so a document
+    // opens (and stays, when you look elsewhere) fully rendered.
     QSet<int> caretLines;
-    if (!isReadOnly()) {
+    if (!isReadOnly() && hasFocus()) {
         for (const QTextCursor &c : cursors()) {
             const int from = document()->findBlock(c.selectionStart()).blockNumber();
             const int to = document()->findBlock(c.selectionEnd()).blockNumber();
@@ -312,6 +315,24 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
             QToolTip::hideText();
     }
     TextView::mouseMoveEvent(event);
+}
+
+void VisualView::focusInEvent(QFocusEvent *event)
+{
+    TextView::focusInEvent(event);
+    rebuildRows();
+    viewport()->update();
+}
+
+void VisualView::focusOutEvent(QFocusEvent *event)
+{
+    TextView::focusOutEvent(event);
+    // Context menus and the find bar take focus briefly; keep the block open
+    // for those, close it when focus really moves elsewhere.
+    if (event->reason() == Qt::PopupFocusReason)
+        return;
+    rebuildRows();
+    viewport()->update();
 }
 
 void VisualView::changeEvent(QEvent *event)

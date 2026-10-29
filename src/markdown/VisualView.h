@@ -41,6 +41,8 @@ protected:
     void rowsMayHaveChanged() override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void changeEvent(QEvent *event) override;
+    void focusInEvent(QFocusEvent *event) override;
+    void focusOutEvent(QFocusEvent *event) override;
 
 private:
     struct RowInfo

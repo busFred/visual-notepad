@@ -77,6 +77,7 @@ private Q_SLOTS:
     void typingInExpandedBlockKeepsRows();
     void taskCheckboxToggles();
     void linkClickEmits();
+    void unfocusedRendersEverything();
     void lockedRendersEverything();
     void screenshots();
 
@@ -105,6 +106,9 @@ void TestVisualView::init()
     m_view->resize(760, 900);
     m_view->show();
     QVERIFY(QTest::qWaitForWindowExposed(m_view));
+    m_view->activateWindow();
+    m_view->setFocus();
+    QVERIFY(QTest::qWaitForWindowActive(m_view));
     // Start with the caret on the blank line after the front matter.
     m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(4)));
 }
@@ -190,6 +194,14 @@ void TestVisualView::linkClickEmits()
     const QString url = spy.first().first().toString();
     QVERIFY2(url == QLatin1String("https://github.com/1jehuang/mermaid-rs-renderer") || url.startsWith(u'#'),
              qPrintable(url));
+}
+
+void TestVisualView::unfocusedRendersEverything()
+{
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(9)));
+    const QImage focused = m_view->grab().toImage();
+    m_view->clearFocus();
+    QVERIFY(m_view->grab().toImage() != focused);
 }
 
 void TestVisualView::lockedRendersEverything()

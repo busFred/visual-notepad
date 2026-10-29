@@ -84,6 +84,10 @@ QTreeWidget::item { padding: 2px 0; color: @text; }
 QTreeWidget::item:hover, QTreeWidget::branch:hover { background: @sideBarHover; }
 QTreeWidget::item:selected, QTreeWidget::branch:selected { background: @selection; color: @text; }
 
+#Pill QToolButton { border: none; border-radius: 12px; background: transparent; }
+#Pill QToolButton:hover { background: @panelTitle; }
+#Pill QToolButton:checked { background: @accent; }
+
 #FindBar { background: @sideBar; border: 1px solid @divider; border-top: none; }
 #FindInput { background: @editor; border: 1px solid @divider; border-radius: 2px; }
 #FindInput[focused="true"] { border-color: @switchOn; }

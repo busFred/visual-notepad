@@ -331,10 +331,11 @@ qreal TextView::textWidth() const
     return qMax<qreal>(m_charWidth * 4, viewport()->width() - textLeft() - m_rightMargin);
 }
 
-void TextView::setTextMargins(qreal left, qreal right)
+void TextView::setTextMargins(qreal left, qreal right, qreal top)
 {
     m_leftMargin = left;
     m_rightMargin = right;
+    m_topMargin = top;
     relayout();
 }
 
@@ -356,7 +357,7 @@ void TextView::scrollToLine(int line)
 
 int TextView::rowAt(qreal y, qreal *top)
 {
-    qreal rowY = -m_topOffset;
+    qreal rowY = firstRowY();
     const int rows = rowCount();
     for (int r = m_topRow; r < rows; ++r) {
         const qreal h = rowHeight(r);
@@ -512,7 +513,7 @@ bool TextView::rowTop(int index, qreal *top)
 {
     if (index < m_topRow)
         return false;
-    qreal y = -m_topOffset;
+    qreal y = firstRowY();
     const int height = viewport()->height();
     for (int r = m_topRow; r < index; ++r) {
         y += rowHeight(r);
@@ -553,7 +554,7 @@ qreal TextView::cursorX(const QTextCursor &cursor)
 
 int TextView::positionAt(const QPointF &point)
 {
-    qreal y = -m_topOffset;
+    qreal y = firstRowY();
     const int rows = rowCount();
     int r = m_topRow;
     if (point.y() < 0) {
@@ -692,7 +693,7 @@ void TextView::paintEvent(QPaintEvent *event)
 
     painter.save();
     painter.setClipRect(QRectF(gutter, 0, viewport()->width() - gutter, height));
-    qreal y = -m_topOffset;
+    qreal y = firstRowY();
     for (int r = m_topRow; r < rows && y < height; ++r) {
         const Row info = row(r);
         const qreal h = rowHeight(r);

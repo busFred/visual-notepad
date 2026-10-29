@@ -58,7 +58,7 @@ public:
     void ensureCursorVisible();
     void centerCursor();
     // Space left and right of the text (the gutter is extra).
-    void setTextMargins(qreal left, qreal right);
+    void setTextMargins(qreal left, qreal right, qreal top = 0);
 
     // First line at the top of the viewport, and scrolling to put a line there.
     int topLine() const;
@@ -172,6 +172,8 @@ private:
     QTextOption textOption() const;
     qreal rowHeight(int row);
     int gutterWidth() const;
+    // Viewport y of the top row (the top margin shows only at the very top).
+    qreal firstRowY() const { return (m_topRow == 0 ? m_topMargin : 0) - m_topOffset; }
     void updateScrollBars();
 
     // Geometry. Returns false if the position is not in a visible row.
@@ -229,6 +231,7 @@ private:
     QString m_commentMarker;
     qreal m_leftMargin = 4;
     qreal m_rightMargin = 8;
+    qreal m_topMargin = 0;
     Qt::KeyboardModifier m_multiCursorModifier = Qt::AltModifier;
 
     // Metrics.
