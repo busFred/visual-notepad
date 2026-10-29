@@ -439,6 +439,117 @@ void TextView::scrollToLine(int line)
     viewport()->update();
 }
 
+std::vector<TextView::LineAnchor> TextView::rowLineAnchors(const Row &, qreal)
+{
+    return {};
+}
+
+std::vector<TextView::LineAnchor> TextView::lineAnchors(int index, qreal height)
+{
+    const Row r = row(index);
+    const qreal end = r.lastLine + 1;
+    std::vector<LineAnchor> anchors{{qreal(r.firstLine), 0}};
+    for (const LineAnchor &a : rowLineAnchors(r, height)) {
+        const LineAnchor &last = anchors.back();
+        if (a.line >= last.line && a.line <= end && a.y >= last.y && a.y <= height)
+            anchors.push_back(a);
+    }
+    anchors.push_back({end, height});
+    return anchors;
+}
+
+qreal TextView::topLinePosition()
+{
+    const int rows = rowCount();
+    const int index = qBound(0, m_topRow, rows - 1);
+    const qreal height = rowHeight(index);
+    const std::vector<LineAnchor> anchors = lineAnchors(index, height);
+    const qreal y = qBound<qreal>(0, m_topOffset, height);
+    // The first anchor below y and the one before it.
+    for (size_t i = 1; i < anchors.size(); ++i) {
+        const LineAnchor &a = anchors[i - 1];
+        const LineAnchor &b = anchors[i];
+        if (y < b.y)
+            return a.line + (b.line - a.line) * (y - a.y) / (b.y - a.y);
+    }
+    return anchors.back().line;
+}
+
+void TextView::scrollToLinePosition(qreal position)
+{
+    const int lines = m_doc->blockCount();
+    position = qBound<qreal>(0, position, lines);
+    const int index = qBound(0, rowOfLine(qMin(int(position), lines - 1)), qMax(0, rowCount() - 1));
+    const qreal height = rowHeight(index);
+    const std::vector<LineAnchor> anchors = lineAnchors(index, height);
+    qreal y = height;
+    for (size_t i = 1; i < anchors.size(); ++i) {
+        const LineAnchor &a = anchors[i - 1];
+        const LineAnchor &b = anchors[i];
+        if (position < b.line) {
+            y = a.y + (b.y - a.y) * qMax<qreal>(0, position - a.line) / (b.line - a.line);
+            break;
+        }
+    }
+    m_topRow = index;
+    m_topOffset = y;
+    normalizeScroll();
+    updateScrollBars();
+    viewport()->update();
+}
+
+qreal TextView::maxLastRowOffset()
+{
+    return qMax<qreal>(0, rowHeight(rowCount() - 1) - m_lineHeight);
+}
+
+void TextView::normalizeScroll()
+{
+    const int rows = rowCount();
+    m_topRow = qBound(0, m_topRow, rows - 1);
+    while (m_topOffset < 0 && m_topRow > 0) {
+        --m_topRow;
+        m_topOffset += rowHeight(m_topRow);
+    }
+    if (m_topOffset < 0)
+        m_topOffset = 0;
+    while (m_topRow < rows - 1 && m_topOffset >= rowHeight(m_topRow)) {
+        m_topOffset -= rowHeight(m_topRow);
+        ++m_topRow;
+    }
+    if (m_topRow >= rows - 1)
+        m_topOffset = qMin(m_topOffset, maxLastRowOffset());
+}
+
+bool TextView::isAtScrollEnd()
+{
+    return m_topRow >= rowCount() - 1 && m_topOffset >= maxLastRowOffset() - 0.5;
+}
+
+void TextView::scrollToEnd()
+{
+    m_topRow = rowCount() - 1;
+    m_topOffset = maxLastRowOffset();
+    updateScrollBars();
+    viewport()->update();
+}
+
+void TextView::followScroll(TextView &leader)
+{
+    if (leader.isAtScrollEnd() && leader.m_topRow > 0)
+        scrollToEnd();
+    else
+        scrollToLinePosition(leader.topLinePosition());
+}
+
+qreal TextView::scrollPixels()
+{
+    qreal y = m_topOffset;
+    for (int r = 0; r < m_topRow; ++r)
+        y += rowHeight(r);
+    return y;
+}
+
 int TextView::rowAt(qreal y, qreal *top)
 {
     qreal rowY = firstRowY();
@@ -1318,19 +1429,7 @@ void TextView::wheelEvent(QWheelEvent *event)
         dy = event->angleDelta().y() / 120.0 * 3 * m_lineHeight;
     // Scroll by pixels across rows of different heights.
     m_topOffset -= dy;
-    while (m_topOffset < 0 && m_topRow > 0) {
-        --m_topRow;
-        m_topOffset += rowHeight(m_topRow);
-    }
-    if (m_topOffset < 0)
-        m_topOffset = 0;
-    const int rows = rowCount();
-    while (m_topRow < rows - 1 && m_topOffset >= rowHeight(m_topRow)) {
-        m_topOffset -= rowHeight(m_topRow);
-        ++m_topRow;
-    }
-    if (m_topRow >= rows - 1)
-        m_topOffset = qMin(m_topOffset, qMax<qreal>(0, rowHeight(m_topRow) - m_lineHeight));
+    normalizeScroll();
     updateScrollBars();
     viewport()->update();
     event->accept();

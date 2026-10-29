@@ -90,6 +90,20 @@ public:
     // First line at the top of the viewport, and scrolling to put a line there.
     int topLine() const;
     void scrollToLine(int line);
+    // The same with fractions: 12.3 is 30% of the way from where line 12
+    // starts to where line 13 starts. Rendered rows place lines through
+    // rowLineAnchors() and interpolate between anchors.
+    qreal topLinePosition();
+    void scrollToLinePosition(qreal position);
+    // Scrolled as far down as it goes, and scrolling there.
+    bool isAtScrollEnd();
+    void scrollToEnd();
+    // Puts the leader's top line position at this view's top (the end at the
+    // end), for split views of the same document.
+    void followScroll(TextView &leader);
+    // Pixels between the top of the content and the top of the viewport.
+    // Walks every row above, so it is meant for tests.
+    qreal scrollPixels();
 
     // Background highlights for find results; current is an index or -1.
     void setSearchHighlights(const QList<QTextCursor> &ranges, int current);
@@ -154,6 +168,16 @@ protected:
     virtual void rowsMayHaveChanged() {}
     // A press on a rendered row; return true to consume it (e.g. a link).
     virtual bool renderedRowPressed(const Row &row, const QPointF &point, QMouseEvent *event);
+    // Where source lines start inside a row of the given height: (line, y)
+    // pairs ascending in both. {firstLine, 0} and {lastLine + 1, height} are
+    // implied; lines between anchors are spread evenly. The default adds
+    // nothing, which suits source rows (one line, maybe wrapped).
+    struct LineAnchor
+    {
+        qreal line = 0;
+        qreal y = 0;
+    };
+    virtual std::vector<LineAnchor> rowLineAnchors(const Row &row, qreal height);
 
     // The row at viewport y and its top, or -1 past the end.
     int rowAt(qreal y, qreal *top);
@@ -214,6 +238,12 @@ private:
     int gutterWidth() const;
     // Viewport y of the top row (the top margin shows only at the very top).
     qreal firstRowY() const { return (m_topRow == 0 ? m_topMargin : 0) - m_topOffset; }
+    // Moves m_topOffset into range, stepping m_topRow across rows; the last
+    // row can scroll up until one line of it is left.
+    void normalizeScroll();
+    qreal maxLastRowOffset();
+    // rowLineAnchors() with both ends added and anything out of order dropped.
+    std::vector<LineAnchor> lineAnchors(int row, qreal height);
     void updateScrollBars();
 
     // Geometry. Returns false if the position is not in a visible row.

@@ -380,11 +380,12 @@ void DocumentTab::ensureVisualView()
 
 void DocumentTab::syncScroll(TextView *from, TextView *to)
 {
-    // Keep both halves of Source / Visual on the same line.
+    // Keep both halves of Source / Visual at the same source position,
+    // fractions of a line included.
     if (m_syncingScroll || !to || !to->isVisible() || !from->isVisible())
         return;
     m_syncingScroll = true;
-    to->scrollToLine(from->topLine());
+    to->followScroll(*from);
     m_syncingScroll = false;
 }
 

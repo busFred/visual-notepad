@@ -11,6 +11,8 @@
 #include <QTextDocument>
 
 #include <memory>
+#include <utility>
+#include <vector>
 
 class QPainter;
 
@@ -45,8 +47,17 @@ public:
     QString anchorAt(const QPointF &point) const;
     QString renderedText() const;
 
+    // Where source lines start in the rendering: (line offset from the
+    // block's first line, y from the block's top), ascending by line. Code
+    // has every line; rich text has the table rows, list items, paragraphs
+    // and headings the renderer marked with "vn-line:N" anchors. Line 0 (the
+    // top) is left out; the rest is interpolated.
+    using LineAnchor = std::pair<int, qreal>;
+    const std::vector<LineAnchor> &lineAnchors() const { return m_lineAnchors; }
+
 private:
     QPointF contentOffset() const;
+    void collectLineAnchors(int sourceLines);
 
     Kind m_kind = Kind::Empty;
     std::unique_ptr<QTextDocument> m_doc;
@@ -54,6 +65,7 @@ private:
     QString m_error;
     qreal m_height = 0;
     bool m_centered = false;
+    std::vector<LineAnchor> m_lineAnchors;
 };
 
 } // namespace vn
