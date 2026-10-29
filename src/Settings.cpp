@@ -17,6 +17,7 @@ const QHash<QString, QVariant> &defaults()
         {key::drawWhitespace, false},
         {key::tabWidth, 4},
         {key::insertSpaces, true},
+        {key::detectIndentation, true},
         {key::wordWrap, true},
         {key::lineSpacing, 1.4},
         {key::multiCursorModifier, QStringLiteral("alt")},

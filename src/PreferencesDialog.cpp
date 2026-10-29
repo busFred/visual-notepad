@@ -528,6 +528,7 @@ void PreferencesDialog::buildEditorPage()
     addHeading(tr("Indentation"));
     addTabWidthRow();
     addSwitch(tr("Use spaces instead of tabs"), key::insertSpaces);
+    addSwitch(tr("Detect indentation from file content"), key::detectIndentation);
     addHeading(tr("Word wrap"));
     addSwitch(tr("Word wrap"), key::wordWrap);
     addHeading(tr("Cursors"));
