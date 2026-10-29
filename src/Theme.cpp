@@ -380,10 +380,28 @@ UpdateBlocker::~UpdateBlocker()
     }
 }
 
+// The UI is laid out for Segoe UI, which may not be redistributed. Where it is
+// not installed, use the bundled Selawik, Microsoft's open-source stand-in
+// with nearly the same widths. The system font stays as the fallback for
+// scripts Selawik lacks, such as CJK.
+static void setUiFont(QApplication &app)
+{
+    QString family = QStringLiteral("Segoe UI");
+    if (!QFontDatabase::hasFamily(family)) {
+        for (const char *style : {"Regular", "Semibold", "Bold"})
+            QFontDatabase::addApplicationFont(QStringLiteral(":/vn/fonts/Selawik-%1.ttf").arg(QLatin1StringView(style)));
+        family = QStringLiteral("Selawik");
+    }
+    QFont font = QApplication::font();
+    font.setFamilies({family, font.family()});
+    app.setFont(font);
+}
+
 void apply(QApplication &app)
 {
     if (s_app != &app) {
         s_app = &app;
+        setUiFont(app);
         app.setStyle(new AppStyle);
         QObject::connect(&Settings::instance(), &Settings::changed, &app, &onSettingChanged);
     }

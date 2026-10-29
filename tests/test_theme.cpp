@@ -8,6 +8,7 @@
 #include <QComboBox>
 #include <QLineEdit>
 #include <QDialogButtonBox>
+#include <QFontInfo>
 #include <QPushButton>
 #include <QSettings>
 #include <QSignalSpy>
@@ -38,6 +39,7 @@ private Q_SLOTS:
     void dialogHitTest();
     void dialogPickersFollowItem();
     void editorColorReachesFieldsAndLists();
+    void uiFontIsSegoeOrBundledSelawik();
 
 private:
     QTemporaryDir m_dir;
@@ -258,6 +260,17 @@ void TestTheme::legacySettingsMigrateToStandard()
     QCOMPARE(theme::color(Role::editor), QColor(0xEFEEEB));
     QCOMPARE(Settings::instance().overriddenColors(QStringLiteral("standard")), QStringList{QStringLiteral("editor")});
     QVERIFY(Settings::instance().overriddenColors(QStringLiteral("legacy")).isEmpty());
+}
+
+// Without Segoe UI installed, the bundled Selawik must load and be used.
+void TestTheme::uiFontIsSegoeOrBundledSelawik()
+{
+    const QString family = QApplication::font().families().value(0);
+    QVERIFY2(family == QStringLiteral("Segoe UI") || family == QStringLiteral("Selawik"), qPrintable(family));
+    QCOMPARE(QFontInfo(QApplication::font()).family(), family);
+    QFont semibold = QApplication::font();
+    semibold.setWeight(QFont::DemiBold);
+    QCOMPARE(QFontInfo(semibold).family(), family);
 }
 
 QTEST_MAIN(TestTheme)

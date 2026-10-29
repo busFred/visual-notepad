@@ -27,6 +27,14 @@ in its header.
 The complete source of the library, including every definition, is at the
 link above.
 
+## Fonts
+
+The interface font is Segoe UI when it is installed. Segoe UI may not be
+redistributed, so the app embeds **Selawik** 1.01, Microsoft's open-source
+stand-in for it, and uses that otherwise. Selawik is under the SIL Open Font
+License 1.1 (`resources/fonts/Selawik-OFL.txt`); source:
+<https://github.com/microsoft/Selawik/releases/tag/1.01>.
+
 ## MicroTeX resources
 
 The math fonts shipped under `microtex/res/fonts` are under the SIL Open Font
