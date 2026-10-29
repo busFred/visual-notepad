@@ -692,6 +692,14 @@ void TextView::updateScrollBars()
     m_updatingScrollBars = false;
 }
 
+// Tab and Shift+Tab indent and outdent; they never move focus out of the
+// editor, even read-only (QWidget::event offers them to focusNextPrevChild
+// before keyPressEvent sees them).
+bool TextView::focusNextPrevChild(bool)
+{
+    return false;
+}
+
 void TextView::scrollContentsBy(int, int)
 {
     viewport()->update();

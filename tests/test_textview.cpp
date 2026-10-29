@@ -5,6 +5,8 @@
 #include "editor/TextView.h"
 
 #include <QApplication>
+#include <QLineEdit>
+#include <QVBoxLayout>
 #include <QClipboard>
 #include <QTemporaryDir>
 #include <QTest>
@@ -56,6 +58,7 @@ private Q_SLOTS:
     void autoCloseSettingsOff();
     void autoCloseIsOneUndoStep();
     void tabIndentsSingleLineSelection();
+    void tabStaysInEditorBesideOtherWidgets();
     void addCursorsToLineEnds();
     void columnSelectWithMouse();
     void columnSelectUsesVisualColumns();
@@ -257,6 +260,37 @@ void TestTextView::tabAndOutdent()
     QCOMPARE(text(), QStringLiteral("    a   b\n    cd"));
     QTest::keyClick(m_view, Qt::Key_Backtab);
     QCOMPARE(text(), QStringLiteral("a   b\ncd"));
+}
+
+void TestTextView::tabStaysInEditorBesideOtherWidgets()
+{
+    // With another focusable widget in the window, Qt would move focus on Tab.
+    QTextDocument doc;
+    doc.setDocumentLayout(new vn::DocumentLayout(&doc));
+    doc.setPlainText(QStringLiteral("ab"));
+    QWidget window;
+    auto *layout = new QVBoxLayout(&window);
+    auto *before = new QLineEdit(&window);
+    auto *view = new vn::TextView(&doc, &window);
+    auto *after = new QLineEdit(&window);
+    layout->addWidget(before);
+    layout->addWidget(view);
+    layout->addWidget(after);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    view->setFocus();
+    QTRY_VERIFY(view->hasFocus());
+    QTest::keyClick(view, Qt::Key_Tab);
+    QCOMPARE(doc.toPlainText(), QStringLiteral("    ab"));
+    QVERIFY(view->hasFocus());
+    QTest::keyClick(view, Qt::Key_Backtab);
+    QCOMPARE(doc.toPlainText(), QStringLiteral("ab"));
+    QVERIFY(view->hasFocus());
+    // Read-only: nothing changes and focus stays.
+    view->setReadOnly(true);
+    QTest::keyClick(view, Qt::Key_Tab);
+    QCOMPARE(doc.toPlainText(), QStringLiteral("ab"));
+    QVERIFY(view->hasFocus());
 }
 
 void TestTextView::undoRevertsMultiCaretEditAtOnce()

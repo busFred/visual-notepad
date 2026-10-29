@@ -256,6 +256,7 @@ protected:
     void timerEvent(QTimerEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
     void scrollContentsBy(int dx, int dy) override;
+    bool focusNextPrevChild(bool next) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dragMoveEvent(QDragMoveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
