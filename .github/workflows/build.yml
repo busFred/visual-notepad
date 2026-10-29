@@ -44,9 +44,11 @@ jobs:
         with:
           environment-file: ci/environment-linux.yml
           environment-name: visnotepad
-          cache-environment: true
-          cache-environment-key: env-${{ matrix.arch }}-${{ hashFiles('ci/environment-linux.yml') }}
+          # The env itself is rebuilt from the cached package downloads: the license
+          # texts come from the extracted packages, which an env cache does not restore.
+          cache-environment: false
           cache-downloads: true
+          cache-downloads-key: pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/environment-*.yml') }}
           init-shell: bash
 
       - name: Cache KDE frameworks
@@ -137,9 +139,11 @@ jobs:
         with:
           environment-file: ci/environment-windows.yml
           environment-name: visnotepad
-          cache-environment: true
-          cache-environment-key: env-win-${{ hashFiles('ci/environment-windows.yml') }}
+          # The env itself is rebuilt from the cached package downloads: the license
+          # texts come from the extracted packages, which an env cache does not restore.
+          cache-environment: false
           cache-downloads: true
+          cache-downloads-key: pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/environment-*.yml') }}
           init-shell: none
 
       - uses: ilammy/msvc-dev-cmd@v1
@@ -153,6 +157,7 @@ jobs:
           if (-not (Test-Path $prefix)) { throw "conda env not found at $prefix" }
           "ENV_PREFIX=$prefix" >> $env:GITHUB_ENV
           "CMAKE_PREFIX_PATH=$env:KF6_PREFIX;$prefix\Library" >> $env:GITHUB_ENV
+          "$env:KF6_PREFIX\bin" >> $env:GITHUB_PATH
           # Tools from the env (cmake, ninja, rust) come after the MSVC tools.
           foreach ($d in "$prefix\Library\bin", "$prefix\Scripts", "$prefix\bin", $prefix) { if (Test-Path $d) { $d >> $env:GITHUB_PATH } }
           # Git's usr\bin\link.exe shadows the MSVC linker on PATH.
