@@ -38,6 +38,15 @@ private Q_SLOTS:
     void smartHome();
     void escapeCollapsesCarets();
     void lineCacheFollowsEdits();
+    void surroundSelection();
+    void surroundRepeatsAndMultiCaret();
+    void surroundPairsDependOnLanguage();
+    void autoCloseConditions();
+    void autoCloseOvertypeAndDelete();
+    void plainTextDoesNotAutoClose();
+    void autoCloseSettingsOff();
+    void autoCloseIsOneUndoStep();
+    void tabIndentsSingleLineSelection();
 
 private:
     void setText(const QString &text);
@@ -45,12 +54,24 @@ private:
     void type(const QString &text);
     void place(int line, int column);
 
+    void selectRange(int from, int to);
+
     QTextDocument *m_doc = nullptr;
     TextView *m_view = nullptr;
 };
 
+void TestTextView::selectRange(int from, int to)
+{
+    QTextCursor c(m_doc);
+    c.setPosition(from);
+    c.setPosition(to, QTextCursor::KeepAnchor);
+    m_view->setTextCursor(c);
+}
+
 void TestTextView::init()
 {
+    vn::Settings::instance().reset(vn::key::autoClose);
+    vn::Settings::instance().reset(vn::key::autoSurround);
     m_doc = new QTextDocument;
     m_doc->setDocumentLayout(new vn::DocumentLayout(m_doc));
     m_view = new TextView(m_doc);
@@ -325,6 +346,165 @@ static void useTestSettings()
     vn::Settings::instance().useFile(dir.filePath(QStringLiteral("settings.ini")));
 }
 Q_COREAPP_STARTUP_FUNCTION(useTestSettings)
+
+void TestTextView::surroundSelection()
+{
+    m_view->setMarkdownEditing(true);
+    setText(QStringLiteral("a word b"));
+    selectRange(2, 6);
+    type(QStringLiteral("("));
+    QCOMPARE(text(), QStringLiteral("a (word) b"));
+    QCOMPARE(m_view->textCursor().selectedText(), QStringLiteral("word"));
+}
+
+void TestTextView::surroundRepeatsAndMultiCaret()
+{
+    m_view->setMarkdownEditing(true);
+    setText(QStringLiteral("word"));
+    m_view->selectAll();
+    type(QStringLiteral("**"));
+    QCOMPARE(text(), QStringLiteral("**word**"));
+    QCOMPARE(m_view->textCursor().selectedText(), QStringLiteral("word"));
+
+    setText(QStringLiteral("foo bar foo"));
+    m_view->addNextOccurrence();
+    m_view->addNextOccurrence();
+    QCOMPARE(m_view->cursorCount(), 2);
+    type(QStringLiteral("["));
+    QCOMPARE(text(), QStringLiteral("[foo] bar [foo]"));
+    type(QStringLiteral("x"));
+    QCOMPARE(text(), QStringLiteral("[x] bar [x]"));
+}
+
+void TestTextView::surroundPairsDependOnLanguage()
+{
+    setText(QStringLiteral("word"));
+    m_view->selectAll();
+    type(QStringLiteral("*"));
+    QCOMPARE(text(), QStringLiteral("*")); // Not a plain-text surrounding pair.
+    setText(QStringLiteral("word"));
+    m_view->selectAll();
+    type(QStringLiteral("\""));
+    QCOMPARE(text(), QStringLiteral("\"word\""));
+    m_view->setMarkdownEditing(true);
+    setText(QStringLiteral("word"));
+    m_view->selectAll();
+    type(QStringLiteral("~"));
+    QCOMPARE(text(), QStringLiteral("~word~"));
+}
+
+void TestTextView::autoCloseConditions()
+{
+    m_view->setMarkdownEditing(true);
+    setText(QString());
+    type(QStringLiteral("("));
+    QCOMPARE(text(), QStringLiteral("()"));
+    // Markdown has no quote pairs.
+    setText(QString());
+    type(QStringLiteral("\""));
+    QCOMPARE(text(), QStringLiteral("\""));
+    // Not before a word character.
+    setText(QStringLiteral("word"));
+    type(QStringLiteral("("));
+    QCOMPARE(text(), QStringLiteral("(word"));
+    m_view->setMarkdownEditing(false);
+    m_view->setCodeEditing(true);
+    setText(QString());
+    type(QStringLiteral("'"));
+    QCOMPARE(text(), QStringLiteral("''"));
+    // Not after a word character for quotes.
+    setText(QStringLiteral("don"));
+    place(0, 3);
+    type(QStringLiteral("'"));
+    QCOMPARE(text(), QStringLiteral("don'"));
+    // Brackets still close after a word.
+    type(QStringLiteral("("));
+    QCOMPARE(text(), QStringLiteral("don'()"));
+    // Multi-caret.
+    setText(QStringLiteral("\n"));
+    m_view->addCursorBelow();
+    type(QStringLiteral("["));
+    QCOMPARE(text(), QStringLiteral("[]\n[]"));
+}
+
+void TestTextView::autoCloseOvertypeAndDelete()
+{
+    m_view->setCodeEditing(true);
+    setText(QString());
+    type(QStringLiteral("(a)"));
+    QCOMPARE(text(), QStringLiteral("(a)"));
+    QCOMPARE(m_view->textCursor().position(), 3);
+    // A closer that was not auto-inserted is not typed over.
+    setText(QStringLiteral("a)"));
+    place(0, 1);
+    type(QStringLiteral(")"));
+    QCOMPARE(text(), QStringLiteral("a))"));
+    // Backspace removes an empty auto-inserted pair.
+    setText(QString());
+    type(QStringLiteral("{"));
+    QCOMPARE(text(), QStringLiteral("{}"));
+    QTest::keyClick(m_view, Qt::Key_Backspace);
+    QCOMPARE(text(), QString());
+    // But not a pair that was typed by hand.
+    setText(QStringLiteral("()"));
+    place(0, 1);
+    QTest::keyClick(m_view, Qt::Key_Backspace);
+    QCOMPARE(text(), QStringLiteral(")"));
+    // Nested pairs close from the inside out.
+    setText(QString());
+    type(QStringLiteral("([x])"));
+    QCOMPARE(text(), QStringLiteral("([x])"));
+    QCOMPARE(m_view->textCursor().position(), 5);
+}
+
+void TestTextView::plainTextDoesNotAutoClose()
+{
+    setText(QString());
+    type(QStringLiteral("([\"'`"));
+    QCOMPARE(text(), QStringLiteral("([\"'`"));
+}
+
+void TestTextView::autoCloseSettingsOff()
+{
+    m_view->setCodeEditing(true);
+    vn::Settings::instance().setValue(vn::key::autoClose, false);
+    setText(QString());
+    type(QStringLiteral("("));
+    QCOMPARE(text(), QStringLiteral("("));
+    vn::Settings::instance().setValue(vn::key::autoSurround, false);
+    setText(QStringLiteral("word"));
+    m_view->selectAll();
+    type(QStringLiteral("("));
+    QCOMPARE(text(), QStringLiteral("("));
+    vn::Settings::instance().reset(vn::key::autoClose);
+    vn::Settings::instance().reset(vn::key::autoSurround);
+}
+
+void TestTextView::autoCloseIsOneUndoStep()
+{
+    m_view->setCodeEditing(true);
+    setText(QString());
+    type(QStringLiteral("("));
+    QCOMPARE(text(), QStringLiteral("()"));
+    m_view->undo();
+    QCOMPARE(text(), QString());
+    setText(QStringLiteral("word"));
+    m_view->selectAll();
+    type(QStringLiteral("("));
+    QCOMPARE(text(), QStringLiteral("(word)"));
+    m_view->undo();
+    QCOMPARE(text(), QStringLiteral("word"));
+}
+
+void TestTextView::tabIndentsSingleLineSelection()
+{
+    setText(QStringLiteral("abc def"));
+    selectRange(1, 3);
+    QTest::keyClick(m_view, Qt::Key_Tab);
+    QCOMPARE(text(), QStringLiteral("    abc def"));
+    QTest::keyClick(m_view, Qt::Key_Backtab);
+    QCOMPARE(text(), QStringLiteral("abc def"));
+}
 
 QTEST_MAIN(TestTextView)
 #include "test_textview.moc"

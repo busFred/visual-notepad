@@ -56,6 +56,7 @@ private Q_SLOTS:
     void cleanup();
 
     void switchWritesSetting();
+    void typingSwitchesDefaultOn();
     void externalChangeUpdatesSwitch();
     void spaceTogglesSwitch();
     void comboWritesValue();
@@ -91,7 +92,7 @@ void TestPreferences::init()
     Settings::instance().resetAllShortcuts();
     for (const char *k : {key::lineNumbers, key::tabWidth, key::autoSave, key::mathMacros, key::zoom, key::fontFamily,
                           key::fontSize, key::textFontFamily, key::textFontSize, key::textLineHeight,
-                          key::guessEncoding, key::legacyEncoding, key::encoding})
+                          key::guessEncoding, key::legacyEncoding, key::encoding, key::autoClose, key::autoSurround})
         Settings::instance().reset(k);
     PreferencesDialog::showPage(nullptr, QStringLiteral("editor"));
     QVERIFY(prefsWindow());
@@ -115,6 +116,18 @@ void TestPreferences::switchWritesSetting()
     QCOMPARE(Settings::instance().flag(key::lineNumbers), !before);
     toggle->click();
     QCOMPARE(Settings::instance().flag(key::lineNumbers), before);
+}
+
+void TestPreferences::typingSwitchesDefaultOn()
+{
+    for (const char *k : {key::autoClose, key::autoSurround}) {
+        auto *toggle = find<QAbstractButton>(k);
+        QVERIFY(toggle);
+        QVERIFY(toggle->isChecked());
+        toggle->click();
+        QVERIFY(!Settings::instance().flag(k));
+        Settings::instance().reset(k);
+    }
 }
 
 void TestPreferences::externalChangeUpdatesSwitch()

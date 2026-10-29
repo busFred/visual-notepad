@@ -19,6 +19,8 @@ const QHash<QString, QVariant> &defaults()
         {key::insertSpaces, true},
         {key::wordWrap, true},
         {key::lineSpacing, 1.4},
+        {key::autoClose, true},
+        {key::autoSurround, true},
         {key::multiCursorModifier, QStringLiteral("alt")},
         {key::defaultMode, QStringLiteral("split")},
         {key::highlightActiveBlock, true},

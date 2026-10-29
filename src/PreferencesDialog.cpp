@@ -530,6 +530,9 @@ void PreferencesDialog::buildEditorPage()
     addSwitch(tr("Use spaces instead of tabs"), key::insertSpaces);
     addHeading(tr("Word wrap"));
     addSwitch(tr("Word wrap"), key::wordWrap);
+    addHeading(tr("Typing"));
+    addSwitch(tr("Auto-close brackets and quotes"), key::autoClose);
+    addSwitch(tr("Surround selections when typing a bracket or quote"), key::autoSurround);
     addHeading(tr("Cursors"));
     addCombo(tr("Add a cursor with"), key::multiCursorModifier,
              {{tr("Alt+Click"), QStringLiteral("alt")}, {tr("Ctrl+Click"), QStringLiteral("ctrl")}});

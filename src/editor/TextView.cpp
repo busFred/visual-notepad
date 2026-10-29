@@ -267,6 +267,7 @@ void TextView::mirrorCursorsFrom(const TextView *other, bool reveal)
     m_expandHistory.clear();
     // Like caretsChanged(), but silent: the owner of the selection announces it.
     normalizeCarets();
+    pruneAutoClosed();
     rowsMayHaveChanged();
     updateScrollBars();
     if (reveal)
@@ -1246,7 +1247,8 @@ void TextView::keyPressEvent(QKeyEvent *event)
     const QString text = event->text();
     const bool altGr = ctrl && alt;
     if (!text.isEmpty() && text.at(0).isPrint() && (!ctrl || altGr) && !(alt && !ctrl)) {
-        insertTextAtCarets(text);
+        if (!typeCharacter(text))
+            insertTextAtCarets(text);
         return;
     }
     QAbstractScrollArea::keyPressEvent(event);
@@ -1259,7 +1261,8 @@ void TextView::inputMethodEvent(QInputMethodEvent *event)
         return;
     }
     const int line = textCursor().blockNumber();
-    if (!event->commitString().isEmpty() || event->replacementLength() > 0) {
+    const bool typed = event->replacementLength() == 0 && typeCharacter(event->commitString());
+    if (!typed && (!event->commitString().isEmpty() || event->replacementLength() > 0)) {
         beginEdit();
         for (Caret &caret : m_carets) {
             if (event->replacementLength() > 0) {
@@ -1884,6 +1887,8 @@ void TextView::deleteAtCarets(QTextCursor::MoveOperation op)
     for (Caret &caret : m_carets) {
         QTextCursor &c = caret.cursor;
         if (!c.hasSelection()) {
+            if (op == QTextCursor::PreviousCharacter && deleteAutoClosedPair(caret))
+                continue;
             if (op == QTextCursor::PreviousCharacter && m_insertSpaces && c.positionInBlock() > 0) {
                 // In leading spaces, Backspace removes back to the previous tab stop.
                 const QString text = c.block().text();
@@ -1956,7 +1961,7 @@ void TextView::insertTab()
         return;
     for (const Caret &caret : m_carets) {
         const QTextCursor &c = caret.cursor;
-        if (c.hasSelection() && m_doc->findBlock(c.selectionStart()) != m_doc->findBlock(c.selectionEnd())) {
+        if (c.hasSelection()) {
             indent();
             return;
         }
@@ -1990,6 +1995,244 @@ void TextView::insertTab()
     }
     endEdit();
     caretsChanged();
+}
+
+namespace {
+
+using CharPair = std::pair<QChar, QChar>;
+
+// VS Code's Markdown surroundingPairs, and the default set for other files.
+const QList<CharPair> &surroundingPairs(bool markdown)
+{
+    static const QList<CharPair> md = {{u'(', u')'}, {u'[', u']'}, {u'`', u'`'}, {u'_', u'_'}, {u'*', u'*'},
+                                       {u'{', u'}'}, {u'\'', u'\''}, {u'"', u'"'}, {u'<', u'>'}, {u'~', u'~'},
+                                       {u'$', u'$'}};
+    static const QList<CharPair> other = {{u'(', u')'}, {u'[', u']'}, {u'{', u'}'}, {u'<', u'>'},
+                                          {u'"', u'"'}, {u'\'', u'\''}, {u'`', u'`'}};
+    return markdown ? md : other;
+}
+
+// Markdown follows markdown-basics, code gets brackets and quotes, plain
+// text has no auto-closing, like VS Code.
+const QList<CharPair> &autoClosingPairs(bool markdown, bool code)
+{
+    static const QList<CharPair> md = {{u'{', u'}'}, {u'[', u']'}, {u'(', u')'}, {u'<', u'>'}};
+    static const QList<CharPair> other = {{u'{', u'}'}, {u'[', u']'}, {u'(', u')'},
+                                          {u'"', u'"'}, {u'\'', u'\''}, {u'`', u'`'}};
+    static const QList<CharPair> none;
+    return markdown ? md : code ? other : none;
+}
+
+bool isQuoteChar(QChar ch)
+{
+    return ch == u'"' || ch == u'\'' || ch == u'`';
+}
+
+} // namespace
+
+bool TextView::typeCharacter(const QString &text)
+{
+    if (!canEdit() || text.size() != 1 || text.at(0).unicode() >= 128 || !text.at(0).isPrint())
+        return false;
+    const QChar ch = text.at(0);
+    auto &settings = Settings::instance();
+    if (settings.flag(key::autoSurround) && surroundSelections(ch))
+        return true;
+    if (settings.flag(key::autoClose))
+        return overtypeClosers(ch) || autoCloseBrackets(ch);
+    return false;
+}
+
+bool TextView::surroundSelections(QChar open)
+{
+    QChar close;
+    for (const CharPair &pair : surroundingPairs(m_markdown)) {
+        if (pair.first == open)
+            close = pair.second;
+    }
+    if (close.isNull())
+        return false;
+    for (const Caret &caret : m_carets) {
+        const QTextCursor &c = caret.cursor;
+        if (!c.hasSelection())
+            return false;
+        const QString selected = c.selectedText();
+        bool onlyWhitespace = true;
+        for (QChar sc : selected) {
+            if (sc != u' ' && sc != u'\t' && sc != QChar::ParagraphSeparator) {
+                onlyWhitespace = false;
+                break;
+            }
+        }
+        if (onlyWhitespace)
+            return false;
+        // A quote typed over a single quote replaces it.
+        if (isQuoteChar(open) && selected.size() == 1 && isQuoteChar(selected.at(0)))
+            return false;
+    }
+    beginEdit();
+    for (Caret &caret : m_carets) {
+        QTextCursor &c = caret.cursor;
+        const bool forward = c.position() > c.anchor();
+        const int start = c.selectionStart();
+        const int end = c.selectionEnd();
+        QTextCursor edit(m_doc);
+        edit.setPosition(end);
+        edit.insertText(close);
+        edit.setPosition(start);
+        edit.insertText(open);
+        // Keep the wrapped text selected so the key can be repeated.
+        c.setPosition(forward ? start + 1 : end + 1);
+        c.setPosition(forward ? end + 1 : start + 1, QTextCursor::KeepAnchor);
+        caret.desiredX = -1;
+    }
+    endEdit();
+    m_expandHistory.clear();
+    caretsChanged();
+    return true;
+}
+
+bool TextView::overtypeClosers(QChar ch)
+{
+    if (m_autoClosed.isEmpty())
+        return false;
+    QList<qsizetype> used;
+    for (const Caret &caret : m_carets) {
+        const QTextCursor &c = caret.cursor;
+        if (c.hasSelection())
+            return false;
+        const int pos = c.position();
+        if (m_doc->characterAt(pos) != ch)
+            return false;
+        // Quotes after a backslash are escaped, not closers.
+        if (isQuoteChar(ch) && pos > 0 && m_doc->characterAt(pos - 1) == u'\\')
+            return false;
+        qsizetype found = -1;
+        for (qsizetype i = 0; i < m_autoClosed.size(); ++i) {
+            if (m_autoClosed.at(i).closer.selectionStart() == pos) {
+                found = i;
+                break;
+            }
+        }
+        if (found < 0)
+            return false;
+        used.append(found);
+    }
+    std::sort(used.begin(), used.end(), std::greater<>());
+    for (qsizetype i : used)
+        m_autoClosed.removeAt(i);
+    for (Caret &caret : m_carets) {
+        caret.cursor.setPosition(caret.cursor.position() + 1);
+        caret.desiredX = -1;
+    }
+    caretsChanged();
+    return true;
+}
+
+bool TextView::autoCloseBrackets(QChar open)
+{
+    const auto &pairs = autoClosingPairs(m_markdown, m_codeEditing);
+    QChar close;
+    for (const CharPair &pair : pairs) {
+        if (pair.first == open)
+            close = pair.second;
+    }
+    if (close.isNull())
+        return false;
+    const bool quote = isQuoteChar(open);
+    // VS Code's languageDefined auto-close-before characters.
+    const QString before = quote ? QStringLiteral(";:.,=}])> \n\t") : QStringLiteral("'\"`;:.,=}])> \n\t");
+    for (const Caret &caret : m_carets) {
+        const QTextCursor &c = caret.cursor;
+        if (c.hasSelection())
+            return false;
+        const QString line = c.block().text();
+        const int col = c.positionInBlock();
+        if (col < line.size()) {
+            const QChar next = line.at(col);
+            bool isCloser = false;
+            for (const CharPair &pair : pairs)
+                isCloser = isCloser || pair.second == next;
+            if (!isCloser && !before.contains(next))
+                return false;
+        }
+        // Not after a word character for ' and ", which are often apostrophes or closers.
+        if ((open == u'\'' || open == u'"') && col > 0) {
+            const QChar prev = line.at(col - 1);
+            if (prev.isLetterOrNumber() || prev == u'_')
+                return false;
+        }
+    }
+    beginEdit();
+    QList<AutoClosed> added;
+    for (Caret &caret : m_carets) {
+        QTextCursor &c = caret.cursor;
+        c.insertText(QString(open) + close);
+        c.movePosition(QTextCursor::PreviousCharacter);
+        AutoClosed entry;
+        entry.inner = QTextCursor(m_doc);
+        entry.inner.setPosition(c.position());
+        entry.inner.setKeepPositionOnInsert(true);
+        entry.closer = QTextCursor(m_doc);
+        entry.closer.setPosition(c.position());
+        entry.closer.setPosition(c.position() + 1, QTextCursor::KeepAnchor);
+        m_autoClosed.append(entry);
+        caret.desiredX = -1;
+    }
+    endEdit();
+    m_expandHistory.clear();
+    caretsChanged();
+    return true;
+}
+
+bool TextView::deleteAutoClosedPair(Caret &caret)
+{
+    if (m_autoClosed.isEmpty() || !Settings::instance().flag(key::autoClose))
+        return false;
+    QTextCursor &c = caret.cursor;
+    const int pos = c.position();
+    if (pos == 0)
+        return false;
+    for (qsizetype i = 0; i < m_autoClosed.size(); ++i) {
+        if (m_autoClosed.at(i).closer.selectionStart() != pos)
+            continue;
+        const QChar open = m_doc->characterAt(pos - 1);
+        const QChar close = m_doc->characterAt(pos);
+        for (const CharPair &pair : autoClosingPairs(m_markdown, m_codeEditing)) {
+            if (pair.first == open && pair.second == close) {
+                m_autoClosed.removeAt(i);
+                c.setPosition(pos - 1);
+                c.setPosition(pos + 1, QTextCursor::KeepAnchor);
+                c.removeSelectedText();
+                caret.desiredX = -1;
+                return true;
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
+void TextView::pruneAutoClosed()
+{
+    for (qsizetype i = m_autoClosed.size() - 1; i >= 0; --i) {
+        const AutoClosed &entry = m_autoClosed.at(i);
+        bool keep = entry.closer.selectionEnd() - entry.closer.selectionStart() == 1;
+        if (keep) {
+            // Only while a caret stays between the opener and the closer.
+            keep = false;
+            for (const Caret &caret : m_carets) {
+                const int pos = caret.cursor.position();
+                if (!caret.cursor.hasSelection() && pos >= entry.inner.position()
+                    && pos <= entry.closer.selectionStart()) {
+                    keep = true;
+                    break;
+                }
+            }
+        }
+        if (!keep)
+            m_autoClosed.removeAt(i);
+    }
 }
 
 QList<int> TextView::caretLines() const

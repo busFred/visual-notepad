@@ -594,6 +594,7 @@ void DocumentTab::updateDefinition()
                                       : repository.definitionForFileName(m_path);
     m_highlighter->setDefinition(def);
     m_editor->setCommentMarker(def.singleLineCommentMarker());
+    m_editor->setCodeEditing(def.isValid() && def.name() != QLatin1String("Markdown"));
     updateViews();
     Q_EMIT formatChanged();
 }

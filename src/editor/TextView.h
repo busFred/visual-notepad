@@ -58,6 +58,10 @@ public:
     // Ctrl+Click on links. Off for other languages.
     void setMarkdownEditing(bool on);
     bool markdownEditing() const { return m_markdown; }
+    // Documents with a syntax definition other than Markdown auto-close
+    // quotes and backticks too; plain text auto-closes nothing.
+    void setCodeEditing(bool on) { m_codeEditing = on; }
+    bool codeEditing() const { return m_codeEditing; }
     // The file being edited; relative paths in pasted links and images are
     // relative to its folder.
     void setDocumentPath(const QString &path);
@@ -275,6 +279,14 @@ private:
     void deleteAtCarets(QTextCursor::MoveOperation op);
     void insertNewline();
     void insertTab();
+    // Auto-closing, overtyping and surrounding for one typed ASCII character.
+    // Returns false when it should be inserted normally.
+    bool typeCharacter(const QString &text);
+    bool surroundSelections(QChar open);
+    bool overtypeClosers(QChar ch);
+    bool autoCloseBrackets(QChar open);
+    bool deleteAutoClosedPair(Caret &caret);
+    void pruneAutoClosed();
     // Distinct line numbers covered by the carets, ascending.
     QList<int> caretLines() const;
     // Merged [first, last] line ranges covered by the carets.
@@ -348,6 +360,16 @@ private:
     qreal m_topMargin = 0;
     Qt::KeyboardModifier m_multiCursorModifier = Qt::AltModifier;
     bool m_markdown = false;
+    bool m_codeEditing = false;
+    // Closers inserted by auto-closing that may still be typed over or
+    // deleted with their opener. closer selects the closer; inner marks where
+    // the text between the pair starts.
+    struct AutoClosed
+    {
+        QTextCursor inner;
+        QTextCursor closer;
+    };
+    QList<AutoClosed> m_autoClosed;
     QString m_documentPath;
     QList<DiagnosticRange> m_diagnostics;
     QList<md::LinkTarget> m_linkSpans;

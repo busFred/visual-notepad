@@ -22,6 +22,8 @@ inline constexpr char tabWidth[] = "editor/tabWidth";
 inline constexpr char insertSpaces[] = "editor/insertSpaces";
 inline constexpr char wordWrap[] = "editor/wordWrap";
 inline constexpr char lineSpacing[] = "editor/lineSpacing"; // multiple of the font height
+inline constexpr char autoClose[] = "editor/autoClose";     // brackets and quotes
+inline constexpr char autoSurround[] = "editor/autoSurround"; // wrap selections when typing a bracket or quote
 inline constexpr char multiCursorModifier[] = "editor/multiCursorModifier"; // "alt" | "ctrl"
 // Markdown
 inline constexpr char defaultMode[] = "markdown/defaultMode"; // "source" | "split" | "visual"
