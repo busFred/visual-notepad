@@ -1810,12 +1810,56 @@ bool TextView::canEdit() const
 
 void TextView::beginEdit()
 {
+    if (m_editDepth++ == 0) {
+        // Entries only line up with undo steps while every change went through us.
+        if (m_doc->revision() != m_syncedRevision)
+            m_undoEntries.clear();
+        m_editStart = captureCarets();
+        m_editStartRevision = m_doc->revision();
+        m_editStartSteps = m_doc->availableUndoSteps();
+    }
     QTextCursor(m_doc).beginEditBlock();
 }
 
 void TextView::endEdit()
 {
     QTextCursor(m_doc).endEditBlock();
+    if (--m_editDepth > 0)
+        return;
+    const int steps = m_doc->availableUndoSteps();
+    if (steps <= 0 || m_doc->revision() == m_editStartRevision)
+        return;
+    // Steps beyond the one before this edit were discarded.
+    const bool merged = steps == m_editStartSteps && m_undoEntries.count(steps) > 0;
+    m_undoEntries.erase(m_undoEntries.upper_bound(m_editStartSteps), m_undoEntries.end());
+    // Typing that Qt merged into the previous step keeps that step's carets.
+    UndoEntry &entry = m_undoEntries[steps];
+    if (!merged)
+        entry.before = m_editStart;
+    entry.after = {};
+    m_syncedRevision = m_doc->revision();
+}
+
+TextView::CaretState TextView::captureCarets() const
+{
+    CaretState state;
+    for (const Caret &caret : m_carets)
+        state.ranges.append({caret.cursor.anchor(), caret.cursor.position()});
+    state.primary = m_primary;
+    return state;
+}
+
+void TextView::restoreCarets(const CaretState &state)
+{
+    QList<QTextCursor> cursors;
+    const int end = m_doc->characterCount() - 1;
+    for (const auto &range : state.ranges) {
+        QTextCursor cursor(m_doc);
+        cursor.setPosition(qBound(0, range.first, end));
+        cursor.setPosition(qBound(0, range.second, end), QTextCursor::KeepAnchor);
+        cursors.append(cursor);
+    }
+    setCursors(cursors, state.primary);
 }
 
 void TextView::insertTextAtCarets(const QString &text)
@@ -2482,22 +2526,74 @@ void TextView::dropEvent(QDropEvent *event)
     setFocus(Qt::MouseFocusReason);
 }
 
+// QTextDocument::undo(QTextCursor *) reports a cursor position that is not
+// the edit (it can be 0), so collect the document's own change notifications
+// instead and put a caret at the end of every changed range.
+void TextView::undoRedo(bool undo)
+{
+    if (!canEdit() || !(undo ? m_doc->isUndoAvailable() : m_doc->isRedoAvailable()))
+        return;
+    // Prefer the carets recorded around the step by beginEdit()/endEdit(),
+    // as long as no change bypassed them.
+    if (m_doc->revision() != m_syncedRevision)
+        m_undoEntries.clear();
+    const int steps = m_doc->availableUndoSteps();
+    // Entries are keyed by the undo position right after their step; redo's
+    // key is only known once it has run.
+    const auto found = undo ? m_undoEntries.find(steps) : m_undoEntries.end();
+    UndoEntry *entry = found != m_undoEntries.end() ? &found->second : nullptr;
+    const CaretState current = captureCarets();
+
+    QList<int> positions;
+    const QMetaObject::Connection connection =
+        connect(m_doc, &QTextDocument::contentsChange, this, [&positions](int from, int removed, int added) {
+            for (int &p : positions) {
+                if (p >= from + removed)
+                    p += added - removed;
+                else if (p > from)
+                    p = from;
+            }
+            positions.append(from + added);
+        });
+    if (undo)
+        m_doc->undo();
+    else
+        m_doc->redo();
+    disconnect(connection);
+    m_syncedRevision = m_doc->revision();
+    if (!undo) {
+        const auto it = m_undoEntries.find(m_doc->availableUndoSteps());
+        entry = it != m_undoEntries.end() ? &it->second : nullptr;
+    }
+
+    if (entry && !(undo ? entry->before : entry->after).ranges.isEmpty()) {
+        // Redo needs the state we are leaving.
+        const CaretState target = undo ? entry->before : entry->after;
+        if (undo)
+            entry->after = current;
+        restoreCarets(target);
+        return;
+    }
+    if (positions.isEmpty())
+        return;
+    QList<QTextCursor> cursors;
+    const int end = m_doc->characterCount() - 1;
+    for (const int p : std::as_const(positions)) {
+        QTextCursor cursor(m_doc);
+        cursor.setPosition(qBound(0, p, end));
+        cursors.append(cursor);
+    }
+    setCursors(cursors, 0);
+}
+
 void TextView::undo()
 {
-    if (!canEdit() || !m_doc->isUndoAvailable())
-        return;
-    QTextCursor cursor = textCursor();
-    m_doc->undo(&cursor);
-    setTextCursor(cursor);
+    undoRedo(true);
 }
 
 void TextView::redo()
 {
-    if (!canEdit() || !m_doc->isRedoAvailable())
-        return;
-    QTextCursor cursor = textCursor();
-    m_doc->redo(&cursor);
-    setTextCursor(cursor);
+    undoRedo(false);
 }
 
 } // namespace vn

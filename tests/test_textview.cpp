@@ -31,6 +31,7 @@ private Q_SLOTS:
     void deleteLines();
     void tabAndOutdent();
     void undoRevertsMultiCaretEditAtOnce();
+    void undoRestoresCaretAtEdit();
     void toggleLineComment();
     void backspaceInIndentGoesToTabStop();
     void enterKeepsIndent();
@@ -204,6 +205,51 @@ void TestTextView::undoRevertsMultiCaretEditAtOnce()
     QCOMPARE(text(), QStringLiteral("a\nb\nc"));
     m_view->redo();
     QCOMPARE(text(), QStringLiteral("\n\n"));
+}
+
+void TestTextView::undoRestoresCaretAtEdit()
+{
+    QStringList lines;
+    for (int i = 0; i < 200; ++i)
+        lines << QStringLiteral("line %1").arg(i);
+    setText(lines.join(u'\n'));
+    place(120, 4);
+    m_view->ensureCursorVisible();
+    const int topBefore = m_view->topLine();
+    const int startPos = m_view->textCursor().position();
+    type(QStringLiteral("x"));
+    m_view->undo();
+    QCOMPARE(m_view->textCursor().position(), startPos);
+    QCOMPARE(m_view->textCursor().blockNumber(), 120);
+    QCOMPARE(m_view->topLine(), topBefore);
+    m_view->redo();
+    QCOMPARE(m_view->textCursor().position(), startPos + 1);
+    QCOMPARE(m_view->textCursor().blockNumber(), 120);
+
+    // Multi-caret edit: all carets are restored.
+    place(100, 0);
+    m_view->addCursorBelow();
+    m_view->addCursorBelow();
+    QTest::keyClick(m_view, Qt::Key_Delete);
+    m_view->undo();
+    QCOMPARE(m_view->cursorCount(), 3);
+    QCOMPARE(m_view->textCursor().blockNumber(), 102);
+    m_view->redo();
+    QCOMPARE(m_view->cursorCount(), 3);
+
+    // Two steps in a row, undone and redone.
+    place(10, 2);
+    type(QStringLiteral("a"));
+    place(150, 1);
+    QTest::keyClick(m_view, Qt::Key_Return);
+    m_view->undo();
+    QCOMPARE(m_view->textCursor().blockNumber(), 150);
+    m_view->undo();
+    QCOMPARE(m_view->textCursor().blockNumber(), 10);
+    QCOMPARE(m_view->textCursor().positionInBlock(), 2);
+    m_view->redo();
+    m_view->redo();
+    QCOMPARE(m_view->textCursor().blockNumber(), 151);
 }
 
 void TestTextView::toggleLineComment()
