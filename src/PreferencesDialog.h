@@ -41,6 +41,7 @@ private:
         ShortcutCell *cell = nullptr;
         QToolButton *reset = nullptr;
         QLabel *warning = nullptr;
+        QPushButton *resolve = nullptr;
     };
     struct ComboItem;
 

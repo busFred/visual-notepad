@@ -13,6 +13,7 @@
 #include <QFontInfo>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QHash>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -248,6 +249,20 @@ private:
 };
 
 namespace {
+
+// Unbinds, on the other commands, every sequence that clashes with id's own;
+// their remaining shortcuts are kept.
+void removeConflictingShortcuts(const QString &id)
+{
+    QHash<QString, QList<QKeySequence>> remaining;
+    for (const ShortcutConflict &conflict : shortcutConflicts(id)) {
+        if (!remaining.contains(conflict.otherId))
+            remaining.insert(conflict.otherId, shortcutsFor(conflict.otherId));
+        remaining[conflict.otherId].removeAll(conflict.theirs);
+    }
+    for (auto it = remaining.cbegin(); it != remaining.cend(); ++it)
+        Settings::instance().setShortcutOverride(it.key(), it.value());
+}
 
 QToolButton *smallButton(const QString &text, const QString &name, QWidget *parent = nullptr)
 {
@@ -901,7 +916,17 @@ void PreferencesDialog::buildShortcutsPage()
             warning->setProperty("warning", true);
             warning->setWordWrap(true);
             warning->hide();
-            rowLayout->addWidget(warning);
+            auto *resolve = new QPushButton(tr("Remove from other"), row);
+            resolve->setObjectName(QStringLiteral("shortcut-resolve-") + command.id);
+            resolve->setProperty("link", true);
+            resolve->setFlat(true);
+            resolve->setCursor(Qt::PointingHandCursor);
+            resolve->hide();
+            auto *warningLine = new QHBoxLayout;
+            warningLine->setSpacing(8);
+            warningLine->addWidget(warning, 1);
+            warningLine->addWidget(resolve, 0, Qt::AlignTop);
+            rowLayout->addLayout(warningLine);
             m_page->addWidget(row);
 
             const QString id = command.id;
@@ -909,7 +934,8 @@ void PreferencesDialog::buildShortcutsPage()
                 Settings::instance().setShortcutOverride(id, keys);
             };
             connect(reset, &QAbstractButton::clicked, this, [id] { Settings::instance().resetShortcut(id); });
-            m_shortcutRows.append({id, cell, reset, warning});
+            connect(resolve, &QAbstractButton::clicked, this, [id] { removeConflictingShortcuts(id); });
+            m_shortcutRows.append({id, cell, reset, warning, resolve});
         }
     }
     endPage(tr("Shortcuts"), QStringLiteral("shortcuts"));
@@ -922,19 +948,22 @@ void PreferencesDialog::refreshShortcuts()
     for (const ShortcutRow &row : std::as_const(m_shortcutRows)) {
         const QList<QKeySequence> keys = shortcutsFor(row.id);
         QStringList names;
-        QStringList others;
-        for (const QKeySequence &sequence : keys) {
+        for (const QKeySequence &sequence : keys)
             names.append(sequence.toString(QKeySequence::NativeText));
-            for (const QString &otherId : conflictingCommands(sequence, row.id)) {
-                if (const Command *other = command(otherId); other && !others.contains(other->text))
-                    others.append(other->text);
-            }
+        QStringList others;
+        for (const ShortcutConflict &conflict : shortcutConflicts(row.id)) {
+            if (const Command *other = command(conflict.otherId))
+                others.append(QStringLiteral("%1 (%2)").arg(other->text, conflict.theirs.toString(QKeySequence::NativeText)));
         }
+        others.removeDuplicates();
         const bool modified = settings.hasShortcutOverride(row.id);
         row.cell->setShortcut(names.join(QStringLiteral(", ")), modified);
         row.reset->setVisible(modified);
-        row.warning->setText(others.isEmpty() ? QString() : tr("Also used by: ") + others.join(QStringLiteral(", ")));
+        row.warning->setText(others.isEmpty() ? QString()
+                                              : tr("Conflicts with: %1. Neither shortcut will work while the conflict remains.")
+                                                    .arg(others.join(QStringLiteral(", "))));
         row.warning->setVisible(!others.isEmpty());
+        row.resolve->setVisible(!others.isEmpty());
     }
 }
 

@@ -258,7 +258,7 @@ QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 #PrefPage QLabel, #PrefRow QLabel { background: transparent; color: @text; }
 QLabel#PrefHeading { font-size: 14px; font-weight: bold; }
 QLabel#PrefMuted { color: @mutedText; }
-QLabel[warning="true"] { color: #a33a1c; }
+QLabel[warning="true"] { color: @warning; }
 
 #PreferencesDialog QLineEdit { background: @editor; border: 1px solid @divider; border-radius: 3px; padding: 0 8px;
                                min-height: 24px; selection-background-color: @selection; selection-color: @selectionText; }
@@ -438,6 +438,10 @@ void apply(QApplication &app)
     QString sheet = QString::fromLatin1(styleSheet);
     for (const Role role : roles)
         sheet.replace(u'@' + roleName(role), hex(color(role)));
+    // There is no role for warnings: a dark red on light surfaces, a light
+    // orange-red on dark ones (custom colours can make a surface dark).
+    sheet.replace(QStringLiteral("@warning"),
+                  color(Role::surface).lightness() >= 128 ? QStringLiteral("#a33a1c") : QStringLiteral("#ff8a65"));
     app.setStyleSheet(sheet);
 
     // Widgets that paint with theme::color() do not see a palette change when
