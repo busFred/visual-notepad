@@ -95,18 +95,6 @@ jobs:
           FONTCONFIG_FILE: /etc/fonts/fonts.conf
         run: ctest --test-dir build --output-on-failure --timeout 120
 
-      - name: Debug hung test
-        if: failure()
-        env:
-          QT_QPA_PLATFORM: offscreen
-          FONTCONFIG_FILE: /etc/fonts/fonts.conf
-        run: |
-          sudo apt-get install -y gdb
-          build/tests/test_markdown_editing pasteImageCreatesFile > /tmp/t.log 2>&1 &
-          sleep 15
-          sudo gdb -p $! -batch -ex "thread apply all bt 25" 2>&1 | tail -80
-          cat /tmp/t.log
-
       - name: Package
         run: |
           export CMAKE_PREFIX_PATH="$KF6_PREFIX:$CONDA_PREFIX"

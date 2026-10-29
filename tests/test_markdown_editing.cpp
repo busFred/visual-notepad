@@ -104,7 +104,9 @@ DocumentTab *TestMarkdownEditing::makeTab(const QString &relative, const QString
     if (!relative.isEmpty()) {
         const QString path = m_dir.filePath(relative);
         QDir().mkpath(QFileInfo(path).absolutePath());
-        Q_ASSERT(tab->save(path));
+        // Not Q_ASSERT: the save must also happen in Release builds.
+        if (!tab->save(path))
+            qFatal("could not save %s", qPrintable(path));
     }
     tab->show();
     return tab;
