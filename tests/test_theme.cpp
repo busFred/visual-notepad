@@ -231,4 +231,13 @@ void TestTheme::editorColorReachesFieldsAndLists()
     QCOMPARE(QColor(list.pixel(item.right() - 4, item.center().y())), cream);
     combo->hidePopup();
     prefs->close();
+
+    // The colour pickers' fields too.
+    CustomizeColorsDialog dialog;
+    dialog.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+    auto *picker = dialog.findChild<QPushButton *>(QStringLiteral("BackgroundButton"));
+    QVERIFY(picker);
+    const QImage pickerImage = picker->grab().toImage();
+    QCOMPARE(QColor(pickerImage.pixel(pickerImage.width() - 30, pickerImage.height() / 2)), cream);
 }
