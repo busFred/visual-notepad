@@ -15,6 +15,12 @@ cxx = "1.0.205"
 mermaid-rs-renderer = { version = "0.3.1", default-features = false }
 resvg = "0.47"
 
+# Debug builds (the default for local CMake builds) would otherwise compile
+# comrak, resvg and the mermaid renderer unoptimized; only this crate stays
+# debuggable.
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 lto = true
 codegen-units = 1
