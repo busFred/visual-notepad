@@ -6,18 +6,23 @@
 #include <KSyntaxHighlighting/Repository>
 #include <KSyntaxHighlighting/Theme>
 
+#include <QAbstractButton>
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
 #include <QFontDatabase>
+#include <QGroupBox>
 #include <QIcon>
 #include <QKeyEvent>
+#include <QLabel>
+#include <QMainWindow>
 #include <QMenu>
 #include <QMenuBar>
 #include <QPainter>
 #include <QPalette>
 #include <QProxyStyle>
 #include <QStyleFactory>
+#include <QTabBar>
 #include <QTimer>
 #include <QWidget>
 
@@ -130,6 +135,16 @@ public:
     {
         QProxyStyle::polish(app);
         app->installEventFilter(this);
+        // styleHint() runs for every disabled text painted; the theme only
+        // changes through the settings, so remember the answer until then.
+        m_etchDisabled = -1;
+        if (!m_watchingSettings) {
+            m_watchingSettings = true;
+            connect(&Settings::instance(), &Settings::changed, this, [this](const QString &changedKey) {
+                if (changedKey == QLatin1String(key::theme))
+                    m_etchDisabled = -1;
+            });
+        }
     }
 
     void unpolish(QApplication *app) override
@@ -177,8 +192,11 @@ public:
             return QDialogButtonBox::WinLayout;
         // Classic Windows draws disabled text etched (grey with a white
         // shadow), which stays legible on the grey faces.
-        if (hint == SH_EtchDisabledText)
-            return currentThemeId() != QLatin1String("modern");
+        if (hint == SH_EtchDisabledText) {
+            if (m_etchDisabled < 0)
+                m_etchDisabled = currentThemeId() != QLatin1String("modern");
+            return m_etchDisabled;
+        }
         return QProxyStyle::styleHint(hint, option, widget, returnData);
     }
 
@@ -217,8 +235,34 @@ private:
         if (qobject_cast<QMenu *>(QApplication::activePopupWidget()))
             return true;
         if (QWidget *window = QApplication::activeWindow()) {
+            // The main window knows its menu bar; menuWidget() doesn't create one.
+            if (const auto *main = qobject_cast<QMainWindow *>(window))
+                return menuBarActive(qobject_cast<QMenuBar *>(main->menuWidget()));
             for (const QMenuBar *bar : window->findChildren<QMenuBar *>()) {
                 if (bar->activeAction())
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    static bool menuBarActive(const QMenuBar *bar) { return bar && bar->activeAction(); }
+
+    // Whether the widget paints a mnemonic underline: menu bars and menus
+    // always, other widgets only when their text has an '&'.
+    static bool drawsMnemonics(QWidget *widget)
+    {
+        if (qobject_cast<QMenuBar *>(widget) || qobject_cast<QMenu *>(widget))
+            return true;
+        if (const auto *button = qobject_cast<QAbstractButton *>(widget))
+            return button->text().contains(u'&');
+        if (const auto *label = qobject_cast<QLabel *>(widget))
+            return label->text().contains(u'&');
+        if (const auto *group = qobject_cast<QGroupBox *>(widget))
+            return group->title().contains(u'&');
+        if (const auto *tabs = qobject_cast<QTabBar *>(widget)) {
+            for (int i = 0; i < tabs->count(); ++i) {
+                if (tabs->tabText(i).contains(u'&'))
                     return true;
             }
         }
@@ -231,12 +275,14 @@ private:
             return;
         m_mnemonicsShown = shown;
         for (QWidget *widget : QApplication::allWidgets()) {
-            if (widget->isVisible())
+            if (widget->isVisible() && drawsMnemonics(widget))
                 widget->update();
         }
     }
 
     bool m_mnemonicsShown = false;
+    mutable int m_etchDisabled = -1; // -1 = not looked up yet
+    bool m_watchingSettings = false;
 };
 
 // @name placeholders are replaced with theme colours in apply().
