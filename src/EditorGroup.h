@@ -129,7 +129,7 @@ private:
     QHBoxLayout *m_actions;
     QStackedWidget *m_body;
     QStackedWidget *m_tabs;
-    WelcomeView *m_empty;
+    WelcomeView *m_empty = nullptr; // created by updateEmpty() when first needed
     QWidget *m_dropOverlay;
     QWidget *m_dropMarker;
     QPointer<DocumentTab> m_pressedTab;

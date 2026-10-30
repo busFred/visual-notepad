@@ -370,8 +370,9 @@ void TestSession::welcomeFollowsRecentFiles()
     Settings &settings = Settings::instance();
     settings.clearRecentFiles();
     MainWindow *window = makeWindow(); // No tabs: the welcome page shows.
-    auto *welcome = window->findChild<WelcomeView *>();
-    QVERIFY(welcome && welcome->isVisible());
+    // The page is built when the event loop first finds the group empty.
+    WelcomeView *welcome = nullptr;
+    QTRY_VERIFY((welcome = window->findChild<WelcomeView *>()) && welcome->isVisible());
     auto headings = [welcome] {
         int count = 0;
         for (QLabel *label : welcome->findChildren<QLabel *>(QStringLiteral("WelcomeHeading")))

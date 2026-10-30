@@ -20,6 +20,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QStackedWidget>
+#include <QTimer>
 #include <QTabBar>
 #include <QVBoxLayout>
 
@@ -217,7 +218,6 @@ EditorGroup::EditorGroup(QWidget *parent)
     , m_actions(new QHBoxLayout)
     , m_body(new QStackedWidget(this))
     , m_tabs(new QStackedWidget(m_body))
-    , m_empty(new WelcomeView(m_body))
     , m_dropOverlay(new DropOverlay(this))
     , m_dropMarker(new DropMarker(m_strip))
 {
@@ -250,10 +250,7 @@ EditorGroup::EditorGroup(QWidget *parent)
     stripLayout->addStretch(1);
     stripLayout->addLayout(m_actions);
 
-    connect(m_empty, &WelcomeView::commandRequested, this, &EditorGroup::commandRequested);
-    connect(m_empty, &WelcomeView::recentFileRequested, this, &EditorGroup::recentFileRequested);
     m_body->addWidget(m_tabs);
-    m_body->addWidget(m_empty);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -727,7 +724,20 @@ void EditorGroup::mousePressEvent(QMouseEvent *event)
 void EditorGroup::updateEmpty()
 {
     const bool empty = m_tabBar->count() == 0;
-    m_body->setCurrentWidget(empty ? static_cast<QWidget *>(m_empty) : m_tabs);
+    if (empty && !m_empty) {
+        // Made on first need, after the event loop turn that fills a group
+        // being restored: such a group never builds one.
+        QTimer::singleShot(0, this, [this] {
+            if (m_tabBar->count() != 0 || m_empty)
+                return;
+            m_empty = new WelcomeView(m_body);
+            connect(m_empty, &WelcomeView::commandRequested, this, &EditorGroup::commandRequested);
+            connect(m_empty, &WelcomeView::recentFileRequested, this, &EditorGroup::recentFileRequested);
+            m_body->addWidget(m_empty);
+            updateEmpty();
+        });
+    }
+    m_body->setCurrentWidget(empty && m_empty ? static_cast<QWidget *>(m_empty) : m_tabs);
     // Like VS Code, an empty group shows only its welcome page, no tab strip.
     m_strip->setVisible(!empty);
     // QTabBar does not always re-announce its size when tabs change before

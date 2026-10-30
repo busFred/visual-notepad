@@ -48,9 +48,12 @@ WelcomeView::WelcomeView(QWidget *parent)
     setObjectName(QStringLiteral("Welcome"));
     setAttribute(Qt::WA_StyledBackground);
 
+    // The SVG is rendered when first shown (showEvent): every editor group
+    // has a welcome view, most of them never visible.
     auto *icon = new QLabel(this);
-    icon->setPixmap(QIcon(QStringLiteral(":/vn/app/visnotepad.svg")).pixmap(QSize(112, 112)));
+    icon->setMinimumSize(112, 112);
     icon->setAlignment(Qt::AlignCenter);
+    m_icon = icon;
     auto *fade = new QGraphicsOpacityEffect(icon);
     fade->setOpacity(0.35);
     icon->setGraphicsEffect(fade);
@@ -93,6 +96,8 @@ WelcomeView::WelcomeView(QWidget *parent)
 void WelcomeView::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
+    if (m_icon->pixmap().isNull())
+        m_icon->setPixmap(QIcon(QStringLiteral(":/vn/app/visnotepad.svg")).pixmap(QSize(112, 112)));
     // Shortcuts and recent files may have changed since last time.
     rebuild();
 }

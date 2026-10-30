@@ -114,7 +114,8 @@ public:
     VisualView *visualView() const { return m_visual; }
     bool isReadOnly() const;
     void goToLine(int line);
-    FindBar *findBar() const { return m_findBar; }
+    // Created on first use.
+    FindBar *findBar() const;
     void showFind(bool replace);
     void showGoToLine();
     int zoom() const { return m_zoom; }

@@ -4,6 +4,7 @@
 
 #include <QWidget>
 
+class QLabel;
 class QVBoxLayout;
 
 namespace vn {
@@ -26,6 +27,7 @@ protected:
 private:
     void rebuild();
 
+    QLabel *m_icon;
     QVBoxLayout *m_commands;
     QVBoxLayout *m_recent;
 };

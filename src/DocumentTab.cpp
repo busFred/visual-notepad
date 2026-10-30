@@ -118,14 +118,8 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
     m_splitter->addWidget(m_editor);
     m_active = m_editor;
     m_pill = new EditorPill(this);
-    m_findBar = new FindBar(m_editor, this);
-    auto *shadow = new QGraphicsDropShadowEffect(m_findBar);
-    shadow->setBlurRadius(8);
-    shadow->setOffset(0, 3);
-    shadow->setColor(QColor(0, 0, 0, 40));
-    m_findBar->setGraphicsEffect(shadow);
-    m_findBar->installEventFilter(this);
-    m_goToLine = createGoToLine();
+    // The find bar and the go-to-line field are built on first use: most
+    // tabs never show them, and a restored session creates many tabs.
 
     const QString defaultMode = Settings::instance().text(key::defaultMode);
     m_viewMode = defaultMode == QLatin1String("source")  ? ViewMode::Source
@@ -326,7 +320,8 @@ void DocumentTab::setActiveView(TextView *view)
     if (m_active == view)
         return;
     m_active = view;
-    m_findBar->setView(view);
+    if (m_findBar)
+        m_findBar->setView(view);
     Q_EMIT cursorPositionChanged();
 }
 
@@ -463,7 +458,7 @@ bool DocumentTab::eventFilter(QObject *watched, QEvent *event)
         placeOverlays();
     if ((watched == m_editor || watched == m_visual) && event->type() == QEvent::FocusIn)
         setActiveView(static_cast<TextView *>(watched));
-    if (watched->objectName() == QLatin1String("GoToLineEdit")) {
+    if (m_goToLineEdit && watched == m_goToLineEdit) {
         if (event->type() == QEvent::FocusOut
             || (event->type() == QEvent::KeyPress && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape)) {
             m_goToLine->hide();
@@ -481,10 +476,14 @@ void DocumentTab::placeOverlays()
     m_pill->move(width() - m_pill->width() - pillMarginRight, pillMarginTop);
     // The find bar hangs from the top edge, clear of the scroll bar and pill.
     const int right = m_pill->isVisible() ? m_pill->width() + pillMarginRight * 2 : findBarMarginRight;
-    m_findBar->adjustSize();
-    m_findBar->move(qMax(0, width() - m_findBar->width() - right), 0);
-    m_goToLine->adjustSize();
-    m_goToLine->move((width() - m_goToLine->width()) / 2, 0);
+    if (m_findBar) {
+        m_findBar->adjustSize();
+        m_findBar->move(qMax(0, width() - m_findBar->width() - right), 0);
+    }
+    if (m_goToLine) {
+        m_goToLine->adjustSize();
+        m_goToLine->move((width() - m_goToLine->width()) / 2, 0);
+    }
 }
 
 void DocumentTab::applySettings()
@@ -635,12 +634,32 @@ QWidget *DocumentTab::createGoToLine()
     });
     edit->installEventFilter(this);
     edit->setObjectName(QStringLiteral("GoToLineEdit"));
+    m_goToLineEdit = edit;
     return frame;
+}
+
+FindBar *DocumentTab::findBar() const
+{
+    if (!m_findBar) {
+        auto *self = const_cast<DocumentTab *>(this);
+        self->m_findBar = new FindBar(editor(), self);
+        auto *shadow = new QGraphicsDropShadowEffect(m_findBar);
+        shadow->setBlurRadius(8);
+        shadow->setOffset(0, 3);
+        shadow->setColor(QColor(0, 0, 0, 40));
+        m_findBar->setGraphicsEffect(shadow);
+        m_findBar->installEventFilter(self);
+        // Under the pill, which updatePill() keeps raised over it.
+        m_findBar->stackUnder(m_pill);
+    }
+    return m_findBar;
 }
 
 void DocumentTab::showGoToLine()
 {
-    auto *edit = m_goToLine->findChild<QLineEdit *>();
+    if (!m_goToLine)
+        m_goToLine = createGoToLine();
+    QLineEdit *edit = m_goToLineEdit;
     const QTextCursor cursor = m_editor->textCursor();
     edit->clear();
     edit->setPlaceholderText(tr("Current line: %1. Type a line number between 1 and %2.")
@@ -654,7 +673,7 @@ void DocumentTab::showGoToLine()
 
 void DocumentTab::showFind(bool replace)
 {
-    m_findBar->open(replace);
+    findBar()->open(replace);
     placeOverlays();
 }
 
