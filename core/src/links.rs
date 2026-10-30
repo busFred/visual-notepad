@@ -1,6 +1,8 @@
 //! Link destinations: locating them in the source (for broken-link checks) and
 //! rewriting relative ones when text moves between folders.
 
+use std::borrow::Cow;
+
 use comrak::nodes::NodeValue;
 use comrak::{Arena, parse_document};
 
@@ -379,10 +381,13 @@ fn same_component(a: &str, b: &str) -> bool {
 }
 
 /// The same file as seen from `to`, or None if no relative path exists.
-fn rebase_path(path: &str, from: &[String], to: &[String]) -> Option<String> {
-    let mut abs: Vec<(String, String)> = from
+/// `from` holds each component of the source folder with its percent-encoded
+/// form, computed once per `rebase`.
+fn rebase_path(path: &str, from: &[(String, String)], to: &[String]) -> Option<String> {
+    // Borrowed where possible: only decoded segments of `path` allocate.
+    let mut abs: Vec<(Cow<str>, Cow<str>)> = from
         .iter()
-        .map(|c| (c.clone(), percent_encode(c)))
+        .map(|(d, r)| (Cow::Borrowed(d.as_str()), Cow::Borrowed(r.as_str())))
         .collect();
     for seg in path.split('/') {
         match seg {
@@ -393,7 +398,7 @@ fn rebase_path(path: &str, from: &[String], to: &[String]) -> Option<String> {
                 }
                 abs.pop();
             }
-            _ => abs.push((percent_decode(seg), seg.to_string())),
+            _ => abs.push((Cow::Owned(percent_decode(seg)), Cow::Borrowed(seg))),
         }
     }
     let common = abs
@@ -405,7 +410,7 @@ fn rebase_path(path: &str, from: &[String], to: &[String]) -> Option<String> {
         return None;
     }
     let mut parts: Vec<&str> = vec![".."; to.len() - common];
-    parts.extend(abs[common..].iter().map(|(_, raw)| raw.as_str()));
+    parts.extend(abs[common..].iter().map(|(_, raw)| raw.as_ref()));
     let mut result = parts.join("/");
     if result.is_empty() {
         result.push('.');
@@ -425,6 +430,10 @@ pub fn rebase(text: &str, from_dir: &str, to_dir: &str) -> String {
     {
         return text.to_string();
     }
+    let encoded: Vec<(String, String)> = from
+        .iter()
+        .map(|c| (c.clone(), percent_encode(c)))
+        .collect();
     let mut out = String::with_capacity(text.len());
     let mut last = 0usize;
     for dest in destinations(text) {
@@ -441,7 +450,7 @@ pub fn rebase(text: &str, from_dir: &str, to_dir: &str) -> String {
         if path.is_empty() {
             continue;
         }
-        if let Some(new) = rebase_path(path, &from, &to) {
+        if let Some(new) = rebase_path(path, &encoded, &to) {
             out.push_str(&text[last..dest.start]);
             out.push_str(&new);
             out.push_str(suffix);

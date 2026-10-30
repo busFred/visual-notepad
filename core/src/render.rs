@@ -4,6 +4,7 @@
 //! the C++ side can draw them (syntax highlighting, math, diagrams).
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use comrak::nodes::{AstNode, NodeValue, TableAlignment};
 use comrak::{Arena, parse_document};
@@ -30,18 +31,23 @@ pub fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block> {
         }
     }
     footnotes.sort();
-    let footnotes: Vec<String> = footnotes.into_iter().map(|(_, name)| name).collect();
+    // Name -> number, built once so that each reference is a lookup. A name
+    // defined twice keeps its first number.
+    let mut numbers: HashMap<String, usize> = HashMap::with_capacity(footnotes.len());
+    for (i, (_, name)) in footnotes.into_iter().enumerate() {
+        numbers.entry(name).or_insert(i + 1);
+    }
 
     let mut renderer = Html {
         options,
-        footnotes: &footnotes,
-        out: String::new(),
+        footnotes: &numbers,
+        out: String::with_capacity(4096),
         inline_math: Vec::new(),
         slugs: HashMap::new(),
         base_line: 0,
     };
 
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(root.children().count());
     for node in root.children() {
         let (first_line, last_line) = md::line_range(node);
         for flag in covered.iter_mut().take(last_line + 1).skip(first_line) {
@@ -80,7 +86,9 @@ pub fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block> {
                     renderer.inline_math.clear();
                     renderer.base_line = first_line;
                     renderer.node(node);
-                    block.html = std::mem::take(&mut renderer.out);
+                    // Copy rather than move: the scratch buffer keeps its
+                    // capacity for the next block, and the copy is exact.
+                    block.html = renderer.out.clone();
                     block.inline_math = std::mem::take(&mut renderer.inline_math);
                 }
             }
@@ -100,8 +108,28 @@ pub fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block> {
             inline_math: Vec::new(),
         });
     }
-    result.sort_by_key(|b| b.first_line);
-    result
+    sort_by_line(result)
+}
+
+/// Stable sort by first line. Only footnote definitions (moved to the end by
+/// comrak) and link definitions (appended) are out of place, so most
+/// documents are checked and returned as they are; otherwise the large
+/// blocks are not moved around by the sort, only (line, index) keys.
+fn sort_by_line(blocks: Vec<Block>) -> Vec<Block> {
+    if blocks.is_sorted_by_key(|b| b.first_line) {
+        return blocks;
+    }
+    // The index makes the keys unique, which gives the stable order.
+    let mut keys: Vec<(usize, usize)> = blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.first_line, i))
+        .collect();
+    keys.sort_unstable();
+    let mut slots: Vec<Option<Block>> = blocks.into_iter().map(Some).collect();
+    keys.into_iter()
+        .filter_map(|(_, i)| slots[i].take())
+        .collect()
 }
 
 fn strip_newline(text: &str) -> &str {
@@ -163,12 +191,12 @@ fn front_matter(block: &mut Block, value: &str, options: &RenderOptions) {
                     block.kind = BlockKind::FrontMatter;
                     return;
                 }
-                rows.push_str(&format!(
-                    "<tr><th>{}{}</th><td>{}</td></tr>",
-                    line_marker(offset),
-                    escape(key.trim()),
-                    escape(val.trim().trim_matches('"'))
-                ));
+                rows.push_str("<tr><th>");
+                write_line_marker(&mut rows, offset);
+                escape_into(&mut rows, key.trim());
+                rows.push_str("</th><td>");
+                escape_into(&mut rows, val.trim().trim_matches('"'));
+                rows.push_str("</td></tr>");
             }
             block.kind = BlockKind::Html;
             block.html = format!(
@@ -185,12 +213,12 @@ fn front_matter(block: &mut Block, value: &str, options: &RenderOptions) {
 /// and preview scrolled to the same line. Empty anchors take no space, add no
 /// text and have no href, so they are invisible and are not links. The colon
 /// keeps them apart from heading slugs.
-fn line_marker(offset: usize) -> String {
-    format!("<a name=\"vn-line:{offset}\"></a>")
+fn write_line_marker(out: &mut String, offset: usize) {
+    let _ = write!(out, "<a name=\"vn-line:{offset}\"></a>");
 }
 
-pub fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
+/// HTML-escapes `text` onto the end of `out`.
+fn escape_into(out: &mut String, text: &str) {
     for c in text.chars() {
         match c {
             '&' => out.push_str("&amp;"),
@@ -200,7 +228,6 @@ pub fn escape(text: &str) -> String {
             _ => out.push(c),
         }
     }
-    out
 }
 
 /// GitHub-style heading anchor.
@@ -220,29 +247,10 @@ pub fn slug(text: &str) -> String {
         .collect()
 }
 
-/// Smart quotes and dashes, like markdown-it's typographer.
-fn typographer(text: &str) -> String {
-    let text = text
-        .replace("---", "\u{2014}")
-        .replace("--", "\u{2013}")
-        .replace("...", "\u{2026}");
-    let mut out = String::with_capacity(text.len());
-    let mut previous: Option<char> = None;
-    for c in text.chars() {
-        let opening = previous.is_none_or(|p| p.is_whitespace() || "([{".contains(p));
-        match c {
-            '"' => out.push(if opening { '\u{201C}' } else { '\u{201D}' }),
-            '\'' => out.push(if opening { '\u{2018}' } else { '\u{2019}' }),
-            _ => out.push(c),
-        }
-        previous = Some(c);
-    }
-    out
-}
-
 struct Html<'a> {
     options: &'a RenderOptions,
-    footnotes: &'a [String],
+    /// Footnote name (lowercase) to its 1-based number.
+    footnotes: &'a HashMap<String, usize>,
     out: String,
     inline_math: Vec<String>,
     slugs: HashMap<String, usize>,
@@ -268,34 +276,69 @@ impl Html<'_> {
         self.text(&text);
     }
 
+    /// Escaped text, with the typographer and soft-break settings applied in
+    /// one pass: `---`, `--`, `...` and smart quotes, then `&<>"` and `\n`.
     fn text(&mut self, value: &str) {
-        if value.is_empty() {
-            return;
-        }
-        let escaped = if self.options.typographer {
-            escape(&typographer(value))
-        } else {
-            escape(value)
-        };
-        if self.options.breaks {
-            self.out.push_str(&escaped.replace('\n', "<br />"));
-        } else {
-            self.out.push_str(&escaped);
+        let typographer = self.options.typographer;
+        let breaks = self.options.breaks;
+        let mut previous: Option<char> = None;
+        let mut rest = value;
+        while let Some(c) = rest.chars().next() {
+            if typographer {
+                let replacement = if rest.starts_with("---") {
+                    Some(("\u{2014}", 3))
+                } else if rest.starts_with("--") {
+                    Some(("\u{2013}", 2))
+                } else if rest.starts_with("...") {
+                    Some(("\u{2026}", 3))
+                } else {
+                    None
+                };
+                if let Some((text, len)) = replacement {
+                    self.out.push_str(text);
+                    rest = &rest[len..];
+                    // Neither whitespace nor an opening bracket.
+                    previous = Some('\u{2014}');
+                    continue;
+                }
+            }
+            rest = &rest[c.len_utf8()..];
+            match c {
+                '&' => self.out.push_str("&amp;"),
+                '<' => self.out.push_str("&lt;"),
+                '>' => self.out.push_str("&gt;"),
+                '"' if typographer => {
+                    let opening = previous.is_none_or(|p| p.is_whitespace() || "([{".contains(p));
+                    self.out.push(if opening { '\u{201C}' } else { '\u{201D}' });
+                }
+                '\'' if typographer => {
+                    let opening = previous.is_none_or(|p| p.is_whitespace() || "([{".contains(p));
+                    self.out.push(if opening { '\u{2018}' } else { '\u{2019}' });
+                }
+                '"' => self.out.push_str("&quot;"),
+                '\n' if breaks => self.out.push_str("<br />"),
+                _ => self.out.push(c),
+            }
+            previous = Some(c);
         }
     }
 
     fn link_open(&mut self, url: &str, title: &str) {
-        self.out.push_str(&format!("<a href=\"{}\"", escape(url)));
+        self.out.push_str("<a href=\"");
+        escape_into(&mut self.out, url);
+        self.out.push('"');
         if !title.is_empty() {
-            self.out.push_str(&format!(" title=\"{}\"", escape(title)));
+            self.out.push_str(" title=\"");
+            escape_into(&mut self.out, title);
+            self.out.push('"');
         }
         self.out.push('>');
     }
 
     fn wrap<'a>(&mut self, node: &'a AstNode<'a>, tag: &str) {
-        self.out.push_str(&format!("<{tag}>"));
+        let _ = write!(self.out, "<{tag}>");
         self.children(node);
-        self.out.push_str(&format!("</{tag}>"));
+        let _ = write!(self.out, "</{tag}>");
     }
 
     /// Marks where the node's first source line starts in the output; the
@@ -306,15 +349,12 @@ impl Html<'_> {
 
     fn marker_at(&mut self, line: usize) {
         if line > self.base_line {
-            self.out.push_str(&line_marker(line - self.base_line));
+            write_line_marker(&mut self.out, line - self.base_line);
         }
     }
 
     fn footnote_number(&self, id: &str) -> usize {
-        self.footnotes
-            .iter()
-            .position(|x| x == id)
-            .map_or(0, |i| i + 1)
+        self.footnotes.get(id).copied().unwrap_or(0)
     }
 
     fn node<'a>(&mut self, node: &'a AstNode<'a>) {
@@ -325,10 +365,11 @@ impl Html<'_> {
                     // Display math nested in a list or quote.
                     self.out.push_str("<p align=\"center\">");
                     self.marker(node);
-                    self.out.push_str(&format!(
+                    let _ = write!(
+                        self.out,
                         "<img src=\"vn-math-display:{}\" /></p>",
                         self.inline_math.len()
-                    ));
+                    );
                     self.inline_math.push(tex);
                 } else {
                     self.out.push_str("<p>");
@@ -340,20 +381,26 @@ impl Html<'_> {
             NodeValue::Heading(h) => {
                 let mut plain = String::new();
                 md::plain_text(node, &mut plain);
-                let mut slug = slug(&plain);
-                let count = self.slugs.entry(slug.clone()).or_insert(0);
-                if *count > 0 {
-                    slug = format!("{slug}-{count}");
+                let base = slug(&plain);
+                let seen = match self.slugs.get_mut(&base) {
+                    Some(count) => {
+                        *count += 1;
+                        *count - 1
+                    }
+                    None => {
+                        self.slugs.insert(base.clone(), 1);
+                        0
+                    }
+                };
+                let _ = write!(self.out, "<h{}><a name=\"", h.level);
+                escape_into(&mut self.out, &base);
+                if seen > 0 {
+                    let _ = write!(self.out, "-{seen}");
                 }
-                *count += 1;
-                self.out.push_str(&format!(
-                    "<h{d}><a name=\"{}\"></a>",
-                    escape(&slug),
-                    d = h.level
-                ));
+                self.out.push_str("\"></a>");
                 self.marker(node);
                 self.children(node);
-                self.out.push_str(&format!("</h{}>", h.level));
+                let _ = write!(self.out, "</h{}>", h.level);
             }
             NodeValue::Text(t) => self.text(t),
             NodeValue::SoftBreak => self.text("\n"),
@@ -361,14 +408,17 @@ impl Html<'_> {
             NodeValue::Emph => self.wrap(node, "em"),
             NodeValue::Strong => self.wrap(node, "strong"),
             NodeValue::Strikethrough => self.wrap(node, "s"),
-            NodeValue::Code(c) => self
-                .out
-                .push_str(&format!("<code>{}</code>", escape(&c.literal))),
+            NodeValue::Code(c) => {
+                self.out.push_str("<code>");
+                escape_into(&mut self.out, &c.literal);
+                self.out.push_str("</code>");
+            }
             NodeValue::Math(m) => {
-                self.out.push_str(&format!(
+                let _ = write!(
+                    self.out,
                     "<img src=\"vn-math:{}\" style=\"vertical-align: middle\" />",
                     self.inline_math.len()
-                ));
+                );
                 self.inline_math
                     .push(m.literal.trim_matches('\n').to_string());
             }
@@ -380,33 +430,37 @@ impl Html<'_> {
             NodeValue::Image(i) => {
                 let mut alt = String::new();
                 md::plain_text(node, &mut alt);
-                self.out.push_str(&format!(
-                    "<img src=\"{}\" alt=\"{}\"",
-                    escape(&i.url),
-                    escape(&alt)
-                ));
+                self.out.push_str("<img src=\"");
+                escape_into(&mut self.out, &i.url);
+                self.out.push_str("\" alt=\"");
+                escape_into(&mut self.out, &alt);
+                self.out.push('"');
                 if !i.title.is_empty() {
-                    self.out
-                        .push_str(&format!(" title=\"{}\"", escape(&i.title)));
+                    self.out.push_str(" title=\"");
+                    escape_into(&mut self.out, &i.title);
+                    self.out.push('"');
                 }
                 self.out.push_str(" />");
             }
             NodeValue::FootnoteReference(f) => {
                 let id = f.name.to_lowercase();
                 let n = self.footnote_number(&id);
-                self.out.push_str(&format!(
-                    "<sup><a href=\"#fn-{}\">{}</a></sup>",
-                    escape(&slug(&id)),
-                    if n > 0 { n.to_string() } else { escape(&id) }
-                ));
+                self.out.push_str("<sup><a href=\"#fn-");
+                escape_into(&mut self.out, &slug(&id));
+                self.out.push_str("\">");
+                if n > 0 {
+                    let _ = write!(self.out, "{n}");
+                } else {
+                    escape_into(&mut self.out, &id);
+                }
+                self.out.push_str("</a></sup>");
             }
             NodeValue::FootnoteDefinition(f) => {
                 let id = f.name.to_lowercase();
-                self.out.push_str(&format!(
-                    "<div class=\"footnote\"><a name=\"fn-{}\"></a><sup>{}</sup> ",
-                    escape(&slug(&id)),
-                    self.footnote_number(&id)
-                ));
+                self.out.push_str("<div class=\"footnote\"><a name=\"fn-");
+                escape_into(&mut self.out, &slug(&id));
+                let n = self.footnote_number(&id);
+                let _ = write!(self.out, "\"></a><sup>{n}</sup> ");
                 // The first paragraph's text follows the number on the same
                 // line; Qt would start a new block for a <p>.
                 for (i, child) in node.children().enumerate() {
@@ -430,10 +484,9 @@ impl Html<'_> {
                 };
                 let ordered = l.list_type == comrak::nodes::ListType::Ordered;
                 if ordered {
-                    self.out
-                        .push_str(&format!("<ol start=\"{}\"{style}>", l.start));
+                    let _ = write!(self.out, "<ol start=\"{}\"{style}>", l.start);
                 } else {
-                    self.out.push_str(&format!("<ul{style}>"));
+                    let _ = write!(self.out, "<ul{style}>");
                 }
                 for item in node.children() {
                     self.item(item, l.tight);
@@ -444,7 +497,7 @@ impl Html<'_> {
             NodeValue::CodeBlock(c) => {
                 self.out.push_str("<pre>");
                 self.marker(node);
-                self.out.push_str(&escape(c.literal.trim_end_matches('\n')));
+                escape_into(&mut self.out, c.literal.trim_end_matches('\n'));
                 self.out.push_str("</pre>");
             }
             NodeValue::HtmlBlock(h) => self.out.push_str(h.literal.trim_end_matches(['\n', '\r'])),
@@ -463,14 +516,14 @@ impl Html<'_> {
                             Some(TableAlignment::Center) => " align=\"center\"",
                             _ => "",
                         };
-                        self.out.push_str(&format!("<{tag}{align}>"));
+                        let _ = write!(self.out, "<{tag}{align}>");
                         // The header row also stands for the delimiter line
                         // below it, which is not rendered.
                         if c == 0 {
                             self.marker(row);
                         }
                         self.children(cell);
-                        self.out.push_str(&format!("</{tag}>"));
+                        let _ = write!(self.out, "</{tag}>");
                     }
                     self.out.push_str("</tr>");
                 }
@@ -486,14 +539,15 @@ impl Html<'_> {
         self.marker(node);
         if let NodeValue::TaskItem(task) = &node.data().value {
             let line = node.data().sourcepos.start.line.saturating_sub(1);
-            self.out.push_str(&format!(
+            let _ = write!(
+                self.out,
                 "<a class=\"task\" href=\"vn-task:{line}\">{}</a> ",
                 if task.symbol.is_some() {
                     "\u{2611}"
                 } else {
                     "\u{2610}"
                 }
-            ));
+            );
         }
         // Tight list items hold paragraphs; drop their <p> so items don't
         // get paragraph spacing.
@@ -697,6 +751,22 @@ mod tests {
         assert_eq!(markers(&b[2].html), vec![2]);
         // A one-line block has none.
         assert!(markers(&blocks("# T\n", &opts())[0].html).is_empty());
+    }
+
+    #[test]
+    fn typographer_runs_and_quotes() {
+        let mut o = opts();
+        o.typographer = true;
+        let b = blocks("a---b -- c.... (\"d\") 'e' f's ----- g\n", &o);
+        assert_eq!(
+            b[0].html,
+            "<p>a\u{2014}b \u{2013} c\u{2026}. (\u{201C}d\u{201D}) \u{2018}e\u{2019} f\u{2019}s \u{2014}\u{2013} g</p>"
+        );
+        o.typographer = false;
+        assert_eq!(
+            blocks("\"q\" -- &\n", &o)[0].html,
+            "<p>&quot;q&quot; -- &amp;</p>"
+        );
     }
 
     #[test]

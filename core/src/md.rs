@@ -23,7 +23,8 @@ pub fn options(math: bool, linkify: bool) -> Options<'static> {
 /// `\r\n` or a lone `\r`).
 pub fn line_starts(src: &str) -> Vec<usize> {
     let bytes = src.as_bytes();
-    let mut starts = vec![0];
+    let mut starts = Vec::with_capacity(src.len() / 32 + 1);
+    starts.push(0);
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {

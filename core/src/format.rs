@@ -53,16 +53,7 @@ fn display_width(text: &str) -> usize {
 /// Splits `prefix| a | b |` into the prefix and trimmed cells. The prefix is
 /// whatever list or quote markers precede the first pipe.
 fn split_row(line: &str) -> Option<(&str, Vec<String>)> {
-    let bar = line.find('|')?;
-    let prefix = &line[..bar];
-    if !prefix
-        .chars()
-        .all(|c| matches!(c, ' ' | '>' | '-' | '*' | '+' | '.' | ')') || c.is_ascii_digit())
-    {
-        return None;
-    }
-    let body = line[bar + 1..].trim_end();
-    let body = body.strip_suffix('|').filter(|b| !b.ends_with('\\'))?;
+    let (prefix, body) = row_parts(line)?;
     let mut cells = vec![String::new()];
     let mut escaped = false;
     for c in body.chars() {
@@ -77,6 +68,22 @@ fn split_row(line: &str) -> Option<(&str, Vec<String>)> {
         cells.last_mut().unwrap().push(c);
     }
     Some((prefix, cells.iter().map(|c| c.trim().to_string()).collect()))
+}
+
+/// The prefix and the text between the first and the closing pipe, if the
+/// line is a table row. Cheap: no allocation.
+fn row_parts(line: &str) -> Option<(&str, &str)> {
+    let bar = line.find('|')?;
+    let prefix = &line[..bar];
+    if !prefix
+        .chars()
+        .all(|c| matches!(c, ' ' | '>' | '-' | '*' | '+' | '.' | ')') || c.is_ascii_digit())
+    {
+        return None;
+    }
+    let body = line[bar + 1..].trim_end();
+    let body = body.strip_suffix('|').filter(|b| !b.ends_with('\\'))?;
+    Some((prefix, body))
 }
 
 /// Column alignment from a delimiter cell like `:---:`; None if it isn't one.
@@ -100,7 +107,7 @@ fn pad(text: &str, width: usize, left: bool, right: bool) -> String {
 /// cell. Works on the printed text, skipping fenced code.
 fn align_tables(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
-    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut out = String::with_capacity(text.len() + text.len() / 16);
     let mut fence: Option<(char, usize)> = None;
     let mut i = 0;
     while i < lines.len() {
@@ -120,18 +127,32 @@ fn align_tables(text: &str) -> String {
         if fence.is_none()
             && let Some(end) = table_end(&lines, i)
         {
-            out.extend(align_table(&lines[i..end]));
+            for row in align_table(&lines[i..end]) {
+                let not_first = i > 0 || !out.is_empty();
+                push_line(&mut out, not_first, &row);
+            }
             i = end;
             continue;
         }
-        out.push(line.to_string());
+        push_line(&mut out, i > 0, line);
         i += 1;
     }
-    out.join("\n")
+    out
+}
+
+/// Appends a line, preceded by a newline unless it is the first.
+fn push_line(out: &mut String, not_first: bool, line: &str) {
+    if not_first {
+        out.push('\n');
+    }
+    out.push_str(line);
 }
 
 /// End (exclusive) of the table starting at `start`, if one does.
 fn table_end(lines: &[&str], start: usize) -> Option<usize> {
+    // Most lines are not rows; reject them without splitting.
+    row_parts(lines[start])?;
+    row_parts(lines.get(start + 1)?)?;
     let (_, header) = split_row(lines[start])?;
     let (prefix, delimiter) = split_row(lines.get(start + 1)?)?;
     if !prefix.chars().all(|c| matches!(c, ' ' | '>'))
@@ -142,7 +163,7 @@ fn table_end(lines: &[&str], start: usize) -> Option<usize> {
     }
     let mut end = start + 2;
     while end < lines.len()
-        && split_row(lines[end]).is_some_and(|(p, _)| p.chars().all(|c| matches!(c, ' ' | '>')))
+        && row_parts(lines[end]).is_some_and(|(p, _)| p.chars().all(|c| matches!(c, ' ' | '>')))
     {
         end += 1;
     }
