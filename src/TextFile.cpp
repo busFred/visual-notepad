@@ -1,5 +1,7 @@
 #include "TextFile.h"
 
+#include "DocumentTab.h"
+
 #include "Settings.h"
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
@@ -13,6 +15,7 @@
 
 #include <QCryptographicHash>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
@@ -35,6 +38,17 @@ namespace {
 // report deletes that did not happen), and enough to let a burst of change
 // notifications from one write settle.
 constexpr int diskCheckDelayMs = 100;
+// Scheduled checks of one file are at least this far apart: each one that
+// finds a change reads, hashes and reloads the whole file.
+constexpr int diskRecheckIntervalMs = 500;
+
+// Above either limit a file is not syntax highlighted. QSyntaxHighlighter
+// highlights the whole document synchronously when the text is set, which
+// blocks the window for seconds on files this large. The language (and so
+// Markdown editing and the visual view) is unaffected; the source view just
+// shows plain text. Decided on each load, not while typing.
+constexpr qsizetype largeFileChars = 5 * 1024 * 1024;
+constexpr qsizetype largeFileLines = 100'000;
 
 QString keyFor(const QString &path)
 {
@@ -50,9 +64,32 @@ QString watchPathFor(const QString &path)
     return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
 }
 
+// SHA-1 stays: session.json stores it ("diskHash") to notice changes made
+// while the app was not running, and it runs at disk-read speed.
 QByteArray hashOf(const QByteArray &bytes)
 {
     return QCryptographicHash::hash(bytes, QCryptographicHash::Sha1);
+}
+
+qint64 now()
+{
+    static const QElapsedTimer clock = [] {
+        QElapsedTimer timer;
+        timer.start();
+        return timer;
+    }();
+    return clock.elapsed();
+}
+
+// The text with "\r\n" turned into "\n", and the line ending style the
+// first line ending decides (used on save).
+void normalizeLineEndings(QString &content, TextFile::LineEnding &lineEnding)
+{
+    const qsizetype lf = content.indexOf(u'\n');
+    lineEnding = (lf > 0 && content.at(lf - 1) == u'\r') ? TextFile::LineEnding::CRLF : TextFile::LineEnding::LF;
+    // Most files have no CR at all; replace() would scan (and may copy) anyway.
+    if (content.contains(u'\r'))
+        content.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
 }
 
 } // namespace
@@ -74,8 +111,28 @@ public:
     void remove(TextFile *file)
     {
         m_files.removeAll(file);
+        m_pendingChecks.remove(file);
         unregister(file);
         updateWatches();
+    }
+
+    // Checks `file` against the disk once it is due: diskCheckDelayMs from
+    // now, and no sooner than diskRecheckIntervalMs after its last check.
+    void scheduleCheck(TextFile *file)
+    {
+        if (m_pendingChecks.contains(file))
+            return;
+        qint64 due = now() + diskCheckDelayMs;
+        if (file->m_lastDiskCheck >= 0)
+            due = std::max(due, file->m_lastDiskCheck + diskRecheckIntervalMs);
+        m_pendingChecks.insert(file, due);
+        armCheckTimer();
+    }
+
+    void cancelCheck(TextFile *file)
+    {
+        if (m_pendingChecks.remove(file))
+            armCheckTimer();
     }
 
     TextFile *find(const QString &path) const { return m_byKey.value(keyFor(path)); }
@@ -97,6 +154,7 @@ public:
     {
         QSet<QString> files;
         QSet<QString> dirs;
+        files.reserve(m_files.size());
         for (const TextFile *file : std::as_const(m_files)) {
             if (file->path().isEmpty())
                 continue;
@@ -107,8 +165,10 @@ public:
             else if (QFileInfo::exists(info.absolutePath()))
                 dirs.insert(info.absolutePath());
         }
-        const QStringList watchedFiles = m_watcher->files();
-        const QStringList watchedDirs = m_watcher->directories();
+        const QStringList watchedFileList = m_watcher->files();
+        const QStringList watchedDirList = m_watcher->directories();
+        const QSet<QString> watchedFiles(watchedFileList.cbegin(), watchedFileList.cend());
+        const QSet<QString> watchedDirs(watchedDirList.cbegin(), watchedDirList.cend());
         for (const QString &path : watchedFiles) {
             if (!files.contains(path))
                 m_watcher->removePath(path);
@@ -138,7 +198,12 @@ public:
 private:
     TextFileRegistry()
         : m_watcher(new QFileSystemWatcher(this))
+        , m_checkTimer(new QTimer(this))
     {
+        m_checkTimer->setSingleShot(true);
+        // A coarse timer may fire early, before the earliest check is due.
+        m_checkTimer->setTimerType(Qt::PreciseTimer);
+        connect(m_checkTimer, &QTimer::timeout, this, &TextFileRegistry::runDueChecks);
         connect(m_watcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &path) {
             // Writes by rename leave the watch on the old file; drop it and
             // let the check add the path back.
@@ -156,6 +221,40 @@ private:
         });
     }
 
+    void armCheckTimer()
+    {
+        if (m_pendingChecks.isEmpty()) {
+            m_checkTimer->stop();
+            return;
+        }
+        const qint64 next = *std::min_element(m_pendingChecks.cbegin(), m_pendingChecks.cend());
+        m_checkTimer->start(int(std::max<qint64>(0, next - now())));
+    }
+
+    void runDueChecks()
+    {
+        const qint64 time = now();
+        QList<TextFile *> due;
+        for (auto it = m_pendingChecks.begin(); it != m_pendingChecks.end();) {
+            if (it.value() <= time) {
+                due.append(it.key());
+                it = m_pendingChecks.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (!due.isEmpty()) {
+            // Watch first, then look, so a change in between is not missed;
+            // once for the whole batch (window activation checks every file).
+            updateWatches();
+            for (TextFile *file : std::as_const(due)) {
+                if (m_files.contains(file))
+                    file->compareWithDisk();
+            }
+        }
+        armCheckTimer();
+    }
+
     void unregister(TextFile *file)
     {
         for (auto it = m_byKey.begin(); it != m_byKey.end();) {
@@ -167,6 +266,9 @@ private:
     }
 
     QFileSystemWatcher *m_watcher;
+    QTimer *m_checkTimer;
+    // Files waiting for a disk check, with when it is due.
+    QHash<TextFile *, qint64> m_pendingChecks;
     QList<TextFile *> m_files;
     QHash<QString, TextFile *> m_byKey;
 };
@@ -204,10 +306,6 @@ TextFile::TextFile()
     m_linkTimer->setSingleShot(true);
     m_linkTimer->setInterval(500);
     connect(m_linkTimer, &QTimer::timeout, this, &TextFile::checkLinks);
-    m_diskTimer = new QTimer(this);
-    m_diskTimer->setSingleShot(true);
-    m_diskTimer->setInterval(diskCheckDelayMs);
-    connect(m_diskTimer, &QTimer::timeout, this, &TextFile::checkDisk);
 
     // New files take their line ending and encoding from the settings.
     const QString eol = Settings::instance().text(key::lineEnding);
@@ -219,18 +317,23 @@ TextFile::TextFile()
     const QString newEncoding = encoding::canonical(Settings::instance().text(key::encoding));
     m_encoding = newEncoding.isEmpty() ? encoding::utf8 : newEncoding;
     m_indentation = defaultIndentation();
+    m_validateLinks = Settings::instance().flag(key::validateLinks);
     connect(&Settings::instance(), &Settings::changed, this, [this](const QString &changedKey) {
         if (changedKey == QLatin1String(key::tabWidth) || changedKey == QLatin1String(key::insertSpaces)
             || changedKey == QLatin1String(key::detectIndentation))
             refreshIndentation();
-        if (changedKey == QLatin1String(key::validateLinks))
+        if (changedKey == QLatin1String(key::validateLinks)) {
+            m_validateLinks = Settings::instance().flag(key::validateLinks);
             checkLinks();
+        }
     });
 
     m_highlighter = new KSyntaxHighlighting::SyntaxHighlighter(m_doc);
     m_highlighter->setTheme(theme::syntaxTheme());
     updateDefinition();
 
+    // Text edits only: highlighter format changes do not emit contentsChange.
+    connect(m_doc, &QTextDocument::contentsChange, this, [this] { ++m_changeSerial; });
     connect(m_doc, &QTextDocument::modificationChanged, this, &TextFile::modificationChanged);
     connect(m_doc, &QTextDocument::contentsChanged, this, &TextFile::contentsChanged);
     connect(m_doc, &QTextDocument::contentsChanged, this, &TextFile::scheduleLinkCheck);
@@ -293,11 +396,7 @@ bool TextFile::reopenWithEncoding(const Encoding &encoding)
 bool TextFile::applyBytes(const QString &path, const QByteArray &bytes, const Encoding &encoding)
 {
     QString content = encoding::decode(bytes, encoding);
-
-    // The first line ending decides the style used on save.
-    const qsizetype lf = content.indexOf(u'\n');
-    m_lineEnding = (lf > 0 && content.at(lf - 1) == u'\r') ? LineEnding::CRLF : LineEnding::LF;
-    content.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    normalizeLineEndings(content, m_lineEnding);
 
     m_encoding = encoding;
     setPath(path);
@@ -306,6 +405,7 @@ bool TextFile::applyBytes(const QString &path, const QByteArray &bytes, const En
     setChangedOnDisk(false);
     m_languageOverridden = false;
     updateDefinition();
+    updateHighlighting(content);
     m_doc->setPlainText(content);
     m_doc->setModified(false);
     Q_EMIT contentReset();
@@ -328,6 +428,7 @@ void TextFile::loadBackup(const QString &path, const QString &content, const Enc
     }
     m_languageOverridden = false;
     updateDefinition();
+    updateHighlighting(content);
     m_doc->setPlainText(content);
     Q_EMIT contentReset();
     m_doc->setModified(true);
@@ -336,6 +437,16 @@ void TextFile::loadBackup(const QString &path, const QString &content, const Enc
     Q_EMIT formatChanged();
     // A file deleted since the backup shows as such.
     scheduleDiskCheck();
+}
+
+void TextFile::updateHighlighting(const QString &content)
+{
+    const bool highlight = content.size() <= largeFileChars && content.count(u'\n') < largeFileLines;
+    if (highlight == m_highlighted)
+        return;
+    m_highlighted = highlight;
+    // Detached before the text is set, so the highlighter never sees it.
+    m_highlighter->setDocument(highlight ? m_doc : nullptr);
 }
 
 void TextFile::rememberDisk(const QByteArray &bytes)
@@ -421,9 +532,8 @@ bool TextFile::revert()
     }
     const QByteArray bytes = file.readAll();
     QString content = encoding::decode(bytes, m_encoding);
-    const qsizetype lf = content.indexOf(u'\n');
-    const LineEnding lineEnding = (lf > 0 && content.at(lf - 1) == u'\r') ? LineEnding::CRLF : LineEnding::LF;
-    content.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    LineEnding lineEnding;
+    normalizeLineEndings(content, lineEnding);
     replaceText(content);
     m_doc->setModified(false);
     rememberDisk(bytes);
@@ -465,17 +575,26 @@ void TextFile::replaceText(const QString &content)
 
 void TextFile::scheduleDiskCheck()
 {
-    if (!m_path.isEmpty() && !m_diskTimer->isActive())
-        m_diskTimer->start();
+    if (!m_path.isEmpty())
+        TextFileRegistry::instance().scheduleCheck(this);
 }
 
 void TextFile::checkDisk()
 {
-    m_diskTimer->stop();
+    auto &registry = TextFileRegistry::instance();
+    registry.cancelCheck(this);
     if (m_path.isEmpty())
         return;
     // Watch first, then look, so a change in between is not missed.
-    TextFileRegistry::instance().updateWatches();
+    registry.updateWatches();
+    compareWithDisk();
+}
+
+void TextFile::compareWithDisk()
+{
+    if (m_path.isEmpty())
+        return;
+    m_lastDiskCheck = now();
     const QFileInfo info(m_path);
     if (!info.exists()) {
         setOrphaned(true);
@@ -633,7 +752,8 @@ MarkdownModel *TextFile::markdownModel()
 
 void TextFile::updateDefinition()
 {
-    // New documents default to Markdown, like the old app, unless set otherwise.
+    // New documents are plain text unless "Open new files as" says Markdown
+    // (the old app's behaviour).
     auto &repository = theme::syntaxRepository();
     const bool markdownByDefault = Settings::instance().text(key::newFileLanguage) == QLatin1String("markdown");
     const auto def = m_languageOverridden ? (m_languageOverride.isEmpty() ? KSyntaxHighlighting::Definition()
@@ -654,7 +774,7 @@ void TextFile::updateDefinition()
 
 void TextFile::scheduleLinkCheck()
 {
-    if (isMarkdown() && Settings::instance().flag(key::validateLinks))
+    if (m_validateLinks && isMarkdown())
         m_linkTimer->start();
     else if (!m_diagnostics.isEmpty())
         checkLinks();
@@ -663,12 +783,45 @@ void TextFile::scheduleLinkCheck()
 void TextFile::checkLinks()
 {
     m_linkTimer->stop();
-    if (isMarkdown() && Settings::instance().flag(key::validateLinks))
+    if (m_validateLinks && isMarkdown())
         m_diagnostics = brokenLinks();
     else
         m_diagnostics.clear();
     Q_EMIT diagnosticsChanged();
 }
+
+namespace {
+
+// The heading anchors of a linked Markdown file. The check runs half a second
+// after each edit, so files are only read again when they change on disk.
+QStringList anchorsOfFile(const QFileInfo &info)
+{
+    struct Entry
+    {
+        QDateTime modified;
+        qint64 size = -1;
+        QStringList anchors;
+    };
+    static QHash<QString, Entry> cache;
+    const QString path = info.absoluteFilePath();
+    const QDateTime modified = info.lastModified();
+    const qint64 size = info.size();
+    const auto it = cache.constFind(path);
+    if (it != cache.constEnd() && it->modified == modified && it->size == size)
+        return it->anchors;
+    QFile f(path);
+    QString content;
+    if (size <= 8 * 1024 * 1024 && f.open(QIODevice::ReadOnly))
+        content = QString::fromUtf8(f.readAll());
+    // Bounded: links to many files over a long session.
+    if (cache.size() >= 256)
+        cache.clear();
+    Entry entry{modified, size, md::anchorsOf(content)};
+    cache.insert(path, entry);
+    return entry.anchors;
+}
+
+} // namespace
 
 QList<TextView::Diagnostic> TextFile::brokenLinks() const
 {
@@ -677,12 +830,12 @@ QList<TextView::Diagnostic> TextFile::brokenLinks() const
     const auto decode = [](const QString &s) { return QUrl::fromPercentEncoding(s.toUtf8()); };
 
     const QDir dir = m_path.isEmpty() ? QDir() : QFileInfo(m_path).absoluteDir();
+    const QString content = text();
     QStringList ownAnchors;
     bool ownLoaded = false;
-    QHash<QString, QStringList> fileAnchors;
     QList<TextView::Diagnostic> found;
 
-    for (const md::LinkTarget &target : md::linkTargets(text())) {
+    for (const md::LinkTarget &target : md::linkTargets(content)) {
         const QString &dest = target.dest;
         if (dest.isEmpty() || scheme.match(dest).hasMatch())
             continue;
@@ -697,7 +850,7 @@ QList<TextView::Diagnostic> TextFile::brokenLinks() const
             if (fragment.isEmpty() || lineAnchor.match(fragment, 0).hasMatch())
                 continue;
             if (!ownLoaded) {
-                ownAnchors = md::anchorsOf(text());
+                ownAnchors = md::anchorsOf(content);
                 ownLoaded = true;
             }
             if (!ownAnchors.contains(fragment))
@@ -710,24 +863,17 @@ QList<TextView::Diagnostic> TextFile::brokenLinks() const
         const QString file = QDir::isAbsolutePath(path) ? path : (m_path.isEmpty() ? QString() : dir.filePath(path));
         if (file.isEmpty())
             continue;
-        if (!QFileInfo::exists(file)) {
+        const QFileInfo info(file);
+        if (!info.exists()) {
             report();
             continue;
         }
-        const QString suffix = QFileInfo(file).suffix().toLower();
-        if (fragment.isEmpty() || lineAnchor.match(fragment, 0).hasMatch() || !QFileInfo(file).isFile()
+        const QString suffix = info.suffix().toLower();
+        if (fragment.isEmpty() || lineAnchor.match(fragment, 0).hasMatch() || !info.isFile()
             || (suffix != QLatin1String("md") && suffix != QLatin1String("markdown") && suffix != QLatin1String("mdown")
                 && suffix != QLatin1String("mkd")))
             continue;
-        auto it = fileAnchors.find(file);
-        if (it == fileAnchors.end()) {
-            QFile f(file);
-            QString content;
-            if (f.size() <= 8 * 1024 * 1024 && f.open(QIODevice::ReadOnly))
-                content = QString::fromUtf8(f.readAll());
-            it = fileAnchors.insert(file, md::anchorsOf(content));
-        }
-        if (!it->contains(fragment))
+        if (!anchorsOfFile(info).contains(fragment))
             report();
     }
     return found;

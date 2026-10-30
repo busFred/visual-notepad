@@ -324,12 +324,11 @@ QString detect(const QByteArray &bytes)
     }
     // Files with NUL bytes that are not UTF-16 are treated as legacy text,
     // like Notepad.
-    if (bytes.left(binarySniffSize).contains('\0'))
+    const QByteArrayView view(bytes);
+    if (view.left(binarySniffSize).contains('\0'))
         return legacy();
-    QStringDecoder utf8Decoder(QStringDecoder::Utf8, QStringDecoder::Flag::Stateless);
-    const QString decoded = utf8Decoder(bytes); // Decoding is lazy; force it.
-    Q_UNUSED(decoded);
-    if (!utf8Decoder.hasError())
+    // Validates without decoding; the caller decodes once with the result.
+    if (view.isValidUtf8())
         return utf8;
     if (Settings::instance().flag(key::guessEncoding)) {
         const QString guessed = guess(bytes);

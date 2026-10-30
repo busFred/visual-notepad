@@ -119,7 +119,10 @@ public:
     DiskState diskBaseline() const { return m_disk; }
     void setDiskBaseline(const DiskState &state);
     // Compares the disk with the baseline: now, or ~100 ms later (as after a
-    // change notification or window activation).
+    // change notification or window activation). Scheduled checks of one file
+    // are at least half a second apart, so a file written continuously
+    // (a growing log) is not re-read and reloaded on every write; the check
+    // after the last write still comes.
     void checkDisk();
     void scheduleDiskCheck();
 
@@ -131,6 +134,15 @@ public:
     // Hot exit backup file name, shared by all tabs of the file.
     QString backupName() const { return m_backupName; }
     void setBackupName(const QString &name) { m_backupName = name; }
+    // Counts text changes (edits, undo/redo, reloads; not highlighting), so
+    // a backup or an outline can tell whether it is still current.
+    quint64 changeSerial() const { return m_changeSerial; }
+    // changeSerial() when the backup was last written.
+    quint64 backupSerial() const { return m_backupSerial; }
+    void setBackupSerial(quint64 serial) { m_backupSerial = serial; }
+    // False for files too large to highlight without blocking (see
+    // updateHighlighting()).
+    bool isHighlighted() const { return m_highlighted; }
 
 Q_SIGNALS:
     void modificationChanged(bool modified);
@@ -164,13 +176,16 @@ private:
     void setOrphaned(bool orphaned);
     void setChangedOnDisk(bool changed);
     void rememberDisk(const QByteArray &bytes);
+    // checkDisk() without updating the watches; the registry does that once
+    // for a batch of checks.
+    void compareWithDisk();
+    void updateHighlighting(const QString &content);
     friend class TextFileRegistry;
 
     QTextDocument *m_doc;
     KSyntaxHighlighting::SyntaxHighlighter *m_highlighter;
     MarkdownModel *m_model = nullptr;
     QTimer *m_linkTimer;
-    QTimer *m_diskTimer;
     QList<TextView::Diagnostic> m_diagnostics;
     QList<DocumentTab *> m_views;
     QString m_path;
@@ -186,6 +201,13 @@ private:
     bool m_orphaned = false;
     bool m_changedOnDisk = false;
     bool m_saveConflict = false;
+    bool m_highlighted = true;
+    // Cached key::validateLinks, read on every keystroke otherwise.
+    bool m_validateLinks = false;
+    quint64 m_changeSerial = 0;
+    quint64 m_backupSerial = 0;
+    // When the disk was last compared (TextFileRegistry's clock), -1 if never.
+    qint64 m_lastDiskCheck = -1;
 };
 
 } // namespace vn

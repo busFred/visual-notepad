@@ -43,6 +43,7 @@ private Q_SLOTS:
     void lineEndingChangeIsSaved();
     void languageOverride();
     void newFileLanguageSetting();
+    void largeFileIsNotHighlighted();
     void closeScopes();
     void dropOpensFiles();
 
@@ -375,6 +376,25 @@ void TestFiles::newFileLanguageSetting()
     vn::Settings::instance().reset(vn::key::newFileLanguage);
     DocumentTab untitled;
     QVERIFY(!untitled.isMarkdown());
+}
+
+// Highlighting a huge file would block the window on load; it keeps its
+// language (Markdown editing, the visual view) without the colours.
+void TestFiles::largeFileIsNotHighlighted()
+{
+    const QString small = write(QStringLiteral("small.md"), "# Title\n\ntext\n");
+    const QString large = write(QStringLiteral("large.md"), QByteArray("- item\n").repeated(120'000));
+    DocumentTab tab;
+    QVERIFY(tab.load(small));
+    QVERIFY(tab.file()->isHighlighted());
+    QVERIFY(tab.load(large));
+    QVERIFY(!tab.file()->isHighlighted());
+    QVERIFY(tab.isMarkdown());
+    QCOMPARE(tab.document()->blockCount(), 120'001);
+    // Decided again on each load.
+    QVERIFY(tab.load(small));
+    QVERIFY(tab.file()->isHighlighted());
+    QCOMPARE(tab.text(), QStringLiteral("# Title\n\ntext\n"));
 }
 
 void TestFiles::closeScopes()
