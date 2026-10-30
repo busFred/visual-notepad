@@ -146,9 +146,22 @@ jobs:
           cache-downloads-key: pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/environment-*.yml') }}
           init-shell: none
 
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
+      # What ilammy/msvc-dev-cmd did (it still targets Node 20): load the x64
+      # MSVC environment and keep, for the later steps, what vcvars changed.
+      - name: MSVC environment
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "No Visual Studio with the x64 C++ tools" }
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          $lines = cmd /c "`"$vcvars`" >nul && set"
+          if ($LASTEXITCODE) { throw "vcvars64.bat failed" }
+          foreach ($line in $lines) {
+            if ($line -match '^([^=]+)=(.*)$' -and [Environment]::GetEnvironmentVariable($Matches[1]) -ne $Matches[2]) {
+              "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
 
       - name: Environment paths
         shell: pwsh
