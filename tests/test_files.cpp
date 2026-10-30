@@ -42,6 +42,7 @@ private Q_SLOTS:
     void menuListsEveryCodecOnce();
     void lineEndingChangeIsSaved();
     void languageOverride();
+    void newFileLanguageSetting();
     void closeScopes();
     void dropOpensFiles();
 
@@ -337,6 +338,43 @@ void TestFiles::languageOverride()
     // Saving under a new name goes back to choosing by file name.
     QVERIFY(tab.save(m_dir.filePath(QStringLiteral("script.py"))));
     QCOMPARE(tab.definitionName(), QStringLiteral("Python"));
+}
+
+// "Open new files as": plain text by default, Markdown when chosen; files
+// with a name still go by their name.
+void TestFiles::newFileLanguageSetting()
+{
+    vn::Settings::instance().reset(vn::key::newFileLanguage);
+    QCOMPARE(vn::Settings::instance().text(vn::key::newFileLanguage), QStringLiteral("plaintext"));
+    {
+        vn::MainWindow window;
+        window.newFile();
+        DocumentTab *tab = window.currentTab();
+        QVERIFY(tab);
+        QVERIFY(!tab->isMarkdown());
+        QVERIFY(tab->definitionName().isEmpty());
+        QCOMPARE(tab->languageName(), QStringLiteral("Plain Text"));
+        QVERIFY(!tab->visualView());
+    }
+
+    vn::Settings::instance().setValue(vn::key::newFileLanguage, QStringLiteral("markdown"));
+    {
+        vn::MainWindow window;
+        window.newFile();
+        DocumentTab *tab = window.currentTab();
+        QVERIFY(tab);
+        QVERIFY(tab->isMarkdown());
+        QCOMPARE(tab->definitionName(), QStringLiteral("Markdown"));
+    }
+    // Only untitled files follow the setting.
+    const QString path = write(QStringLiteral("notes.txt"), "plain\n");
+    DocumentTab loaded;
+    QVERIFY(loaded.load(path));
+    QVERIFY(!loaded.isMarkdown());
+
+    vn::Settings::instance().reset(vn::key::newFileLanguage);
+    DocumentTab untitled;
+    QVERIFY(!untitled.isMarkdown());
 }
 
 void TestFiles::closeScopes()

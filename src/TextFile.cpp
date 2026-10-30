@@ -635,7 +635,7 @@ void TextFile::updateDefinition()
 {
     // New documents default to Markdown, like the old app, unless set otherwise.
     auto &repository = theme::syntaxRepository();
-    const bool markdownByDefault = Settings::instance().text(key::newFileLanguage) != QLatin1String("plaintext");
+    const bool markdownByDefault = Settings::instance().text(key::newFileLanguage) == QLatin1String("markdown");
     const auto def = m_languageOverridden ? (m_languageOverride.isEmpty() ? KSyntaxHighlighting::Definition()
                                                                           : repository.definitionForName(m_languageOverride))
                      : m_path.isEmpty() ? (markdownByDefault ? repository.definitionForName(QStringLiteral("Markdown"))

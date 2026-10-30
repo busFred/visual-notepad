@@ -42,7 +42,7 @@ const QHash<QString, QVariant> &defaults()
         {key::restoreSession, false},
         {key::rememberRecent, true},
         {key::autoSave, QStringLiteral("off")},
-        {key::newFileLanguage, QStringLiteral("markdown")},
+        {key::newFileLanguage, QStringLiteral("plaintext")},
         {key::encoding, QStringLiteral("utf8")},
         {key::guessEncoding, true},
         {key::legacyEncoding, QString()},

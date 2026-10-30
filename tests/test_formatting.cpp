@@ -82,6 +82,9 @@ void TestFormatting::initTestCase()
     QVERIFY(m_dir.isValid());
     // Defaults, whatever the user's own settings say.
     Settings::instance().useFile(m_dir.filePath(QStringLiteral("settings.ini")));
+    // These tests format Markdown in untitled tabs; new files are plain text
+    // by default.
+    Settings::instance().setValue(key::newFileLanguage, QStringLiteral("markdown"));
     theme::apply(*qApp);
 }
 

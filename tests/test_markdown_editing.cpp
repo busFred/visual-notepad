@@ -78,6 +78,9 @@ private:
 void TestMarkdownEditing::initTestCase()
 {
     QVERIFY(m_dir.isValid());
+    // These tests edit Markdown in untitled tabs; new files are plain text
+    // by default.
+    Settings::instance().setValue(key::newFileLanguage, QStringLiteral("markdown"));
     theme::apply(*qApp);
 }
 
