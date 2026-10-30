@@ -208,7 +208,7 @@ QList<QKeySequence> shortcutsFor(const QString &id)
 //    consumes the key (~line 456), so the chord works but the single-key
 //    command does not; commands are enabled and disabled at run time, so the
 //    outcome is not predictable and we report the clash either way.
-static bool clashes(const QKeySequence &a, const QKeySequence &b)
+bool shortcutsClash(const QKeySequence &a, const QKeySequence &b)
 {
     if (a.isEmpty() || b.isEmpty())
         return false;
@@ -226,7 +226,7 @@ QList<ShortcutConflict> shortcutConflicts(const QString &id)
         const QList<QKeySequence> theirs = shortcutsFor(c.id);
         for (const QKeySequence &a : mine) {
             for (const QKeySequence &b : theirs) {
-                if (clashes(a, b))
+                if (shortcutsClash(a, b))
                     result.append({c.id, a, b});
             }
         }
@@ -256,7 +256,7 @@ QStringList conflictingCommands(const QKeySequence &sequence, const QString &id)
         if (c.id == id || result.contains(c.id))
             continue;
         for (const QKeySequence &other : shortcutsFor(c.id)) {
-            if (clashes(sequence, other)) {
+            if (shortcutsClash(sequence, other)) {
                 result.append(c.id);
                 break;
             }

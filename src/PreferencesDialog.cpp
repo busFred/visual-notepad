@@ -434,7 +434,7 @@ void PreferencesDialog::onSettingChanged(const QString &changedKey)
     const auto refreshers = m_refreshers.values(changedKey);
     for (const auto &refresh : refreshers)
         refresh();
-    if (changedKey.startsWith(QLatin1String(key::shortcutsGroup)))
+    if (!m_batchingShortcuts && changedKey.startsWith(QLatin1String(key::shortcutsGroup)))
         refreshShortcuts();
 }
 
@@ -912,7 +912,14 @@ void PreferencesDialog::buildShortcutsPage()
     titleLayout->addWidget(title, 1);
     titleLayout->addWidget(resetAll);
     m_page->addWidget(titleRow);
-    connect(resetAll, &QAbstractButton::clicked, this, [] { Settings::instance().resetAllShortcuts(); });
+    connect(resetAll, &QAbstractButton::clicked, this, [this] {
+        // One change is announced per shortcut: refresh the table once after
+        // the last, not after each.
+        m_batchingShortcuts = true;
+        Settings::instance().resetAllShortcuts();
+        m_batchingShortcuts = false;
+        refreshShortcuts();
+    });
 
     for (const QString &category : registryCategories()) {
         auto *heading = new QLabel(category);
@@ -980,18 +987,41 @@ void PreferencesDialog::buildShortcutsPage()
 void PreferencesDialog::refreshShortcuts()
 {
     const Settings &settings = Settings::instance();
+    // Each command's effective keys, read from the settings once; the
+    // conflict search below is then pure in-memory work.
+    struct Binding
+    {
+        QString id;
+        QList<QKeySequence> keys;
+    };
+    QList<Binding> bindings;
+    QHash<QString, QList<QKeySequence>> keysById;
+    for (const Command &c : commands()) {
+        const QList<QKeySequence> keys = shortcutsFor(c.id);
+        keysById.insert(c.id, keys);
+        if (!keys.isEmpty())
+            bindings.append({c.id, keys});
+    }
     for (const ShortcutRow &row : std::as_const(m_shortcutRows)) {
-        const QList<QKeySequence> keys = shortcutsFor(row.id);
+        const QList<QKeySequence> keys = keysById.value(row.id);
         QStringList names;
         for (const QKeySequence &sequence : keys)
             names.append(sequence.toString(QKeySequence::NativeText));
         QStringList others;
         bool identical = false;
         bool prefix = false;
-        for (const ShortcutConflict &conflict : shortcutConflicts(row.id)) {
-            if (const Command *other = command(conflict.otherId))
-                others.append(QStringLiteral("%1 (%2)").arg(other->text, conflict.theirs.toString(QKeySequence::NativeText)));
-            (conflict.mine == conflict.theirs ? identical : prefix) = true;
+        for (const Binding &binding : std::as_const(bindings)) {
+            if (binding.id == row.id)
+                continue;
+            for (const QKeySequence &mine : keys) {
+                for (const QKeySequence &theirs : binding.keys) {
+                    if (!shortcutsClash(mine, theirs))
+                        continue;
+                    if (const Command *other = command(binding.id))
+                        others.append(QStringLiteral("%1 (%2)").arg(other->text, theirs.toString(QKeySequence::NativeText)));
+                    (mine == theirs ? identical : prefix) = true;
+                }
+            }
         }
         const bool commandConflict = !others.isEmpty();
         bool menu = false;
@@ -1006,7 +1036,7 @@ void PreferencesDialog::refreshShortcuts()
         const bool modified = settings.hasShortcutOverride(row.id);
         row.cell->setShortcut(names.join(QStringLiteral(", ")), modified);
         row.reset->setVisible(modified);
-        // What Qt does (see clashes() in Commands.cpp): identical keys trigger
+        // What Qt does (see shortcutsClash() in Commands.cpp): identical keys trigger
         // nothing; a key that starts another's chord wins, so the chord can't
         // be completed.
         QStringList consequences;

@@ -36,6 +36,8 @@ struct ShortcutConflict
 };
 // Every clash between the effective shortcuts of id and those of other commands.
 QList<ShortcutConflict> shortcutConflicts(const QString &id);
+// Whether two sequences clash: equal, or one is a prefix of the other.
+bool shortcutsClash(const QKeySequence &a, const QKeySequence &b);
 
 // The menu bar's titles with their mnemonics ("&File", "&Edit", …), in order.
 QStringList menuTitles();

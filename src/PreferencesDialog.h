@@ -88,6 +88,7 @@ private:
     QMultiHash<QString, std::function<void()>> m_refreshers;
     QVBoxLayout *m_macroRows = nullptr;
     QList<ShortcutRow> m_shortcutRows;
+    bool m_batchingShortcuts = false; // Reset All: refresh the table once at the end
 };
 
 } // namespace vn
