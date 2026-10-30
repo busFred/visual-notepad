@@ -103,6 +103,17 @@ public:
     void removeRecentFile(const QString &path);
     void clearRecentFiles();
 
+    // While alive, changed() is held back and then emitted once per distinct
+    // key, after all writes: related keys (font family and size) are all in
+    // place when listeners react. Nests.
+    class ChangeBatch
+    {
+    public:
+        ChangeBatch() { ++Settings::instance().m_batchDepth; }
+        ~ChangeBatch() { Settings::instance().endBatch(); }
+        Q_DISABLE_COPY(ChangeBatch)
+    };
+
     // For tests: use a separate file.
     void useFile(const QString &path);
 
@@ -113,6 +124,10 @@ Q_SIGNALS:
 
 private:
     Settings();
+    void announce(const QString &changedKey);
+    void endBatch();
+    int m_batchDepth = 0;
+    QStringList m_batched;
     // Renames values written by older versions.
     void migrate();
     QSettings *m_store;

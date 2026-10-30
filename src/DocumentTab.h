@@ -7,11 +7,14 @@
 #include "editor/TextView.h"
 
 #include <QByteArray>
+#include <QFont>
 #include <QString>
 #include <QWidget>
 
+#include <functional>
 #include <memory>
 
+class QLineEdit;
 class QSplitter;
 class QTimer;
 class QTextDocument;
@@ -135,6 +138,7 @@ Q_SIGNALS:
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    void showEvent(QShowEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
@@ -145,6 +149,9 @@ private:
     void applySettings();
     void applyDiagnostics();
     void applyViewSettings(TextView *view);
+    void onSettingChanged(const QString &changedKey);
+    void forEachView(const std::function<void(TextView *)> &apply);
+    QFont zoomedEditorFont() const;
     QWidget *createGoToLine();
     void ensureVisualView();
     void updateViews();
@@ -163,9 +170,13 @@ private:
     bool m_syncingScroll = false;
     bool m_mirroringSelection = false;
     EditorPill *m_pill;
-    FindBar *m_findBar;
-    QWidget *m_goToLine;
+    FindBar *m_findBar = nullptr;
+    QWidget *m_goToLine = nullptr;
+    QLineEdit *m_goToLineEdit = nullptr;
     int m_zoom = 100;
+    // Font, zoom and view settings changed while hidden; applied on show.
+    bool m_settingsStale = false;
+    QFont m_appliedFont;
     ViewMode m_viewMode = ViewMode::Source;
     // Whether the visual view is read-only, per mode: beside the source it is
     // a preview, on its own an editor.

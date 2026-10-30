@@ -610,6 +610,7 @@ void PreferencesDialog::addFontRow(const QString &label, const QString &name, co
     addRow(label, box);
 
     connect(reset, &QAbstractButton::clicked, this, [familyKey, sizeKey] {
+        const Settings::ChangeBatch batch;
         Settings::instance().reset(familyKey);
         Settings::instance().reset(sizeKey);
     });
@@ -632,6 +633,7 @@ void PreferencesDialog::chooseFont(const char *familyKey, const char *sizeKey, Q
     picker->setOption(QFontDialog::MonospacedFonts, monospaced);
     picker->setAttribute(Qt::WA_DeleteOnClose);
     connect(picker, &QFontDialog::fontSelected, this, [familyKey, sizeKey](const QFont &font) {
+        const Settings::ChangeBatch batch; // one re-layout for family and size together
         Settings::instance().setValue(familyKey, font.family());
         Settings::instance().setValue(sizeKey, font.pointSize());
     });

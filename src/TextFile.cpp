@@ -320,8 +320,16 @@ TextFile::TextFile()
     m_validateLinks = Settings::instance().flag(key::validateLinks);
     connect(&Settings::instance(), &Settings::changed, this, [this](const QString &changedKey) {
         if (changedKey == QLatin1String(key::tabWidth) || changedKey == QLatin1String(key::insertSpaces)
-            || changedKey == QLatin1String(key::detectIndentation))
-            refreshIndentation();
+            || changedKey == QLatin1String(key::detectIndentation)) {
+            // Guessing reads the whole text; do it now only if someone sees
+            // the file, otherwise when a view is shown (applyPendingSettings).
+            const bool seen = std::any_of(m_views.cbegin(), m_views.cend(),
+                                          [](const DocumentTab *view) { return view->isVisible(); });
+            if (seen || m_views.isEmpty())
+                refreshIndentation();
+            else
+                m_indentationStale = true;
+        }
         if (changedKey == QLatin1String(key::validateLinks)) {
             m_validateLinks = Settings::instance().flag(key::validateLinks);
             checkLinks();
@@ -672,8 +680,15 @@ void TextFile::setEffectiveIndentation(const indentation::Settings &indentation)
     Q_EMIT indentationChanged();
 }
 
+void TextFile::applyPendingSettings()
+{
+    if (m_indentationStale)
+        refreshIndentation();
+}
+
 void TextFile::refreshIndentation()
 {
+    m_indentationStale = false;
     if (m_indentationOverridden)
         return;
     const indentation::Settings defaults = defaultIndentation();

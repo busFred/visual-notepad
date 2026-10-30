@@ -3,6 +3,8 @@
 #include <QHash>
 #include <QSettings>
 
+#include <utility>
+
 namespace vn {
 
 namespace {
@@ -119,6 +121,25 @@ QVariant Settings::value(const char *key) const
     return stored;
 }
 
+void Settings::announce(const QString &changedKey)
+{
+    if (m_batchDepth == 0) {
+        Q_EMIT changed(changedKey);
+        return;
+    }
+    if (!m_batched.contains(changedKey))
+        m_batched.append(changedKey);
+}
+
+void Settings::endBatch()
+{
+    if (--m_batchDepth > 0)
+        return;
+    const QStringList keys = std::exchange(m_batched, {});
+    for (const QString &k : keys)
+        Q_EMIT changed(k);
+}
+
 void Settings::setValue(const char *key, const QVariant &value)
 {
     if (this->value(key) == value)
@@ -129,7 +150,7 @@ void Settings::setValue(const char *key, const QVariant &value)
         m_store->setValue(QLatin1String(key), value);
     if (qstrcmp(key, key::rememberRecent) == 0 && !value.toBool())
         clearRecentFiles();
-    Q_EMIT changed(QLatin1String(key));
+    announce(QLatin1String(key));
 }
 
 void Settings::reset(const char *key)
@@ -137,7 +158,7 @@ void Settings::reset(const char *key)
     if (!m_store->contains(QLatin1String(key)))
         return;
     m_store->remove(QLatin1String(key));
-    Q_EMIT changed(QLatin1String(key));
+    announce(QLatin1String(key));
 }
 
 QList<QKeySequence> Settings::shortcutOverride(const QString &commandId) const
@@ -165,7 +186,7 @@ void Settings::setShortcutOverride(const QString &commandId, const QList<QKeySeq
     if (stored.isEmpty())
         stored.append(QStringLiteral("none"));
     m_store->setValue(shortcutKey(commandId), stored);
-    Q_EMIT changed(shortcutKey(commandId));
+    announce(shortcutKey(commandId));
 }
 
 void Settings::resetShortcut(const QString &commandId)
@@ -173,7 +194,7 @@ void Settings::resetShortcut(const QString &commandId)
     if (!m_store->contains(shortcutKey(commandId)))
         return;
     m_store->remove(shortcutKey(commandId));
-    Q_EMIT changed(shortcutKey(commandId));
+    announce(shortcutKey(commandId));
 }
 
 QColor Settings::colorOverride(const QString &themeId, const QString &role) const
@@ -188,7 +209,7 @@ void Settings::setColorOverride(const QString &themeId, const QString &role, con
     if (m_store->value(colorKey(themeId, role)).toString() == name)
         return;
     m_store->setValue(colorKey(themeId, role), name);
-    Q_EMIT changed(colorKey(themeId, role));
+    announce(colorKey(themeId, role));
 }
 
 void Settings::resetColorOverride(const QString &themeId, const QString &role)
@@ -196,7 +217,7 @@ void Settings::resetColorOverride(const QString &themeId, const QString &role)
     if (!m_store->contains(colorKey(themeId, role)))
         return;
     m_store->remove(colorKey(themeId, role));
-    Q_EMIT changed(colorKey(themeId, role));
+    announce(colorKey(themeId, role));
 }
 
 QStringList Settings::overriddenColors(const QString &themeId) const
@@ -222,7 +243,7 @@ void Settings::addRecentFile(const QString &path)
     while (files.size() > 15)
         files.removeLast();
     m_store->setValue(QLatin1String(key::recentFiles), files);
-    Q_EMIT changed(QLatin1String(key::recentFiles));
+    announce(QLatin1String(key::recentFiles));
 }
 
 void Settings::removeRecentFile(const QString &path)
@@ -230,14 +251,14 @@ void Settings::removeRecentFile(const QString &path)
     QStringList files = recentFiles();
     if (files.removeAll(path) > 0) {
         m_store->setValue(QLatin1String(key::recentFiles), files);
-        Q_EMIT changed(QLatin1String(key::recentFiles));
+        announce(QLatin1String(key::recentFiles));
     }
 }
 
 void Settings::clearRecentFiles()
 {
     m_store->remove(QLatin1String(key::recentFiles));
-    Q_EMIT changed(QLatin1String(key::recentFiles));
+    announce(QLatin1String(key::recentFiles));
 }
 
 void Settings::resetAllShortcuts()

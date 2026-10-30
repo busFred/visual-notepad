@@ -76,6 +76,7 @@ private Q_SLOTS:
     void statusBarMenu();
     void overrideBeatsSettings();
     void settingsUpdateTabsWithoutOverride();
+    void hiddenTabRefreshesWhenShown();
     void detectActionClearsOverride();
     void convertToSpacesIsOneUndo();
     void convertToTabsIsOneUndo();
@@ -263,6 +264,7 @@ void TestIndentation::detectionOffUsesDefaults()
     QCOMPARE(tab.indentation(), (indentation::Settings{4, true}));
     // Switching it on detects the content of tabs without an override.
     Settings::instance().setValue(key::detectIndentation, true);
+    tab.show(); // A hidden file re-guesses when a view is shown.
     QCOMPARE(tab.indentation(), (indentation::Settings{2, true}));
     // Hot-exit content counts as arriving content.
     DocumentTab restored;
@@ -357,6 +359,19 @@ void TestIndentation::overrideBeatsSettings()
     QCOMPARE(pressTab(&tab), QStringLiteral("     "));
 }
 
+void TestIndentation::hiddenTabRefreshesWhenShown()
+{
+    Settings::instance().setValue(key::detectIndentation, false);
+    DocumentTab tab;
+    const indentation::Settings before = tab.indentation();
+    Settings::instance().setValue(key::tabWidth, before.tabSize + 2);
+    QCOMPARE(tab.indentation(), before); // Deferred while no view is visible.
+    tab.show();
+    QCOMPARE(tab.indentation().tabSize, before.tabSize + 2);
+    Settings::instance().setValue(key::tabWidth, before.tabSize + 3); // Visible: immediate.
+    QCOMPARE(tab.indentation().tabSize, before.tabSize + 3);
+}
+
 void TestIndentation::settingsUpdateTabsWithoutOverride()
 {
     Settings::instance().setValue(key::detectIndentation, false);
@@ -364,6 +379,7 @@ void TestIndentation::settingsUpdateTabsWithoutOverride()
     DocumentTab chosen;
     chosen.setIndentation({3, true});
     Settings::instance().setValue(key::tabWidth, 2);
+    plain.show(); // A hidden file refreshes when a view is shown.
     QCOMPARE(plain.indentation(), (indentation::Settings{2, true}));
     QCOMPARE(chosen.indentation(), (indentation::Settings{3, true}));
     Settings::instance().setValue(key::insertSpaces, false);

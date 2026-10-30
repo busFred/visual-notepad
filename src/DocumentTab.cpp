@@ -132,10 +132,7 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
                  : defaultMode == QLatin1String("split") ? ViewMode::SourceVisual
                                                          : ViewMode::Visual;
     applySettings();
-    connect(&Settings::instance(), &Settings::changed, this, [this](const QString &changedKey) {
-        if (changedKey.startsWith(QLatin1String("editor/")) || changedKey == QLatin1String(key::highlightActiveBlock))
-            applySettings();
-    });
+    connect(&Settings::instance(), &Settings::changed, this, &DocumentTab::onSettingChanged);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -164,7 +161,10 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
     connect(f, &TextFile::definitionChanged, this, &DocumentTab::onDefinitionChanged);
     connect(f, &TextFile::formatChanged, this, &DocumentTab::formatChanged);
     connect(f, &TextFile::indentationChanged, this, [this] {
-        applySettings();
+        forEachView([this](TextView *view) {
+            view->setTabWidth(indentation().tabSize);
+            view->setInsertSpaces(indentation().insertSpaces);
+        });
         Q_EMIT indentationChanged();
     });
     connect(f, &TextFile::diagnosticsChanged, this, &DocumentTab::applyDiagnostics);
@@ -447,6 +447,16 @@ void DocumentTab::resizeEvent(QResizeEvent *event)
     placeOverlays();
 }
 
+void DocumentTab::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    if (m_settingsStale) {
+        m_settingsStale = false;
+        applySettings();
+    }
+    m_file->applyPendingSettings();
+}
+
 bool DocumentTab::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == m_findBar && (event->type() == QEvent::Resize || event->type() == QEvent::Show))
@@ -479,17 +489,77 @@ void DocumentTab::placeOverlays()
 
 void DocumentTab::applySettings()
 {
+    m_settingsStale = false;
+    m_appliedFont = zoomedEditorFont();
     applyViewSettings(m_editor);
     if (m_visual)
         applyViewSettings(m_visual);
 }
 
+void DocumentTab::forEachView(const std::function<void(TextView *)> &apply)
+{
+    apply(m_editor);
+    if (m_visual)
+        apply(m_visual);
+}
+
+void DocumentTab::onSettingChanged(const QString &changedKey)
+{
+    // Only what the key affects: a font change re-lays out the whole text,
+    // so it should not come along with every other editor setting.
+    if (!isVisible()) {
+        // Hidden tabs catch up when shown (showEvent), in one pass.
+        if (changedKey.startsWith(QLatin1String("editor/")) || changedKey == QLatin1String(key::highlightActiveBlock))
+            m_settingsStale = true;
+        return;
+    }
+    Settings &s = Settings::instance();
+    if (changedKey == QLatin1String(key::fontFamily) || changedKey == QLatin1String(key::fontSize)) {
+        // Family and size are written together: the first notice applies the
+        // new font, the second finds nothing left to lay out.
+        const QFont font = zoomedEditorFont();
+        if (font != m_appliedFont) {
+            m_appliedFont = font;
+            forEachView([&](TextView *view) { view->setFont(font); });
+        }
+    } else if (changedKey == QLatin1String(key::drawWhitespace)) {
+        forEachView([&](TextView *view) { view->setShowWhitespace(s.flag(key::drawWhitespace)); });
+    } else if (changedKey == QLatin1String(key::lineSpacing)) {
+        forEachView([&](TextView *view) { view->setLineSpacing(s.value(key::lineSpacing).toDouble()); });
+    } else if (changedKey == QLatin1String(key::multiCursorModifier)) {
+        const Qt::KeyboardModifier modifier =
+            s.text(key::multiCursorModifier) == QLatin1String("ctrl") ? Qt::ControlModifier : Qt::AltModifier;
+        forEachView([&](TextView *view) { view->setMultiCursorModifier(modifier); });
+    } else if (changedKey == QLatin1String(key::lineNumbers)) {
+        m_editor->setLineNumbersVisible(s.flag(key::lineNumbers));
+    } else if (changedKey == QLatin1String(key::highlightCurrentLine)) {
+        m_editor->setHighlightCurrentLine(s.flag(key::highlightCurrentLine));
+    } else if (changedKey == QLatin1String(key::wordWrap)) {
+        m_editor->setWordWrap(s.flag(key::wordWrap));
+    } else if (changedKey == QLatin1String(key::highlightActiveBlock)) {
+        if (m_visual)
+            m_visual->setHighlightActiveBlock(s.flag(key::highlightActiveBlock));
+    } else if (changedKey.startsWith(QLatin1String("editor/"))) {
+        // Tab width and the rest arrive through the file (indentationChanged)
+        // or are read when used; anything new here gets the full treatment.
+        if (changedKey != QLatin1String(key::tabWidth) && changedKey != QLatin1String(key::insertSpaces)
+            && changedKey != QLatin1String(key::detectIndentation) && changedKey != QLatin1String(key::autoClose)
+            && changedKey != QLatin1String(key::autoSurround))
+            applySettings();
+    }
+}
+
+QFont DocumentTab::zoomedEditorFont() const
+{
+    QFont font = theme::editorFont();
+    font.setPointSizeF(font.pointSizeF() * m_zoom / 100.0);
+    return font;
+}
+
 void DocumentTab::applyViewSettings(TextView *view)
 {
     Settings &s = Settings::instance();
-    QFont font = theme::editorFont();
-    font.setPointSizeF(font.pointSizeF() * m_zoom / 100.0);
-    view->setFont(font);
+    view->setFont(zoomedEditorFont());
     view->setShowWhitespace(s.flag(key::drawWhitespace));
     view->setTabWidth(indentation().tabSize);
     view->setInsertSpaces(indentation().insertSpaces);
@@ -512,7 +582,13 @@ void DocumentTab::setZoom(int percent)
     if (m_zoom == percent)
         return;
     m_zoom = percent;
-    applySettings();
+    if (!isVisible()) {
+        m_settingsStale = true;
+        return;
+    }
+    const QFont font = zoomedEditorFont();
+    m_appliedFont = font;
+    forEachView([&](TextView *view) { view->setFont(font); });
 }
 
 QWidget *DocumentTab::createGoToLine()

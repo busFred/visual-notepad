@@ -91,6 +91,9 @@ public:
     Encoding encoding() const { return m_encoding; }
     void setEncoding(const Encoding &encoding);
 
+    // Brings what was deferred while no view was visible up to date; a view
+    // calls it when it is shown.
+    void applyPendingSettings();
     indentation::Settings indentation() const { return m_indentation; }
     bool indentationOverridden() const { return m_indentationOverridden; }
     void setIndentation(const indentation::Settings &indentation);
@@ -188,6 +191,7 @@ private:
     QTimer *m_linkTimer;
     QList<TextView::Diagnostic> m_diagnostics;
     QList<DocumentTab *> m_views;
+    bool m_indentationStale = false;
     QString m_path;
     QString m_error;
     QString m_backupName;
