@@ -1,8 +1,10 @@
 #include "DesktopSettings.h"
 
+#include <QByteArray>
 #include <QFontDatabase>
 #include <QGuiApplication>
 #include <QHash>
+#include <QStringList>
 
 #include <cstdio>
 #include <cstdlib>
@@ -87,16 +89,19 @@ FontDescription parseFontDescription(const QString &text)
     return result;
 }
 
-QString interfaceSetting(const char *key)
-{
 #ifdef Q_OS_LINUX
-    const char *desktop = std::getenv("XDG_CURRENT_DESKTOP");
-    if (desktop && (std::strstr(desktop, "KDE") || std::strstr(desktop, "LXQt")))
-        return {};
-    const char *schema = desktop && std::strstr(desktop, "Cinnamon") ? "org.cinnamon.desktop.interface"
-                         : desktop && std::strstr(desktop, "MATE")   ? "org.mate.interface"
-                                                                     : "org.gnome.desktop.interface";
-    const QByteArray command = QByteArray("gsettings get ") + schema + ' ' + key + " 2>/dev/null";
+// A gsettings value as printed: strings come quoted ('Segoe UI 10'), numbers
+// may carry a type ("uint32 0").
+static QString cleanedValue(const QByteArray &output)
+{
+    QString value = QString::fromUtf8(output).trimmed();
+    if (value.size() >= 2 && value.startsWith(u'\'') && value.endsWith(u'\''))
+        value = value.mid(1, value.size() - 2);
+    return value;
+}
+
+static QByteArray runShell(const QByteArray &command)
+{
     FILE *pipe = popen(command.constData(), "r");
     if (!pipe)
         return {};
@@ -105,11 +110,62 @@ QString interfaceSetting(const char *key)
     while (std::fgets(buffer, sizeof buffer, pipe))
         output += buffer;
     pclose(pipe);
-    QString value = QString::fromUtf8(output).trimmed();
-    // Strings print quoted ('Segoe UI 10'); numbers may carry a type ("uint32 0").
-    if (value.size() >= 2 && value.startsWith(u'\'') && value.endsWith(u'\''))
-        value = value.mid(1, value.size() - 2);
-    return value;
+    return output;
+}
+
+// Null when the desktop has no gsettings schema we read (KDE, LXQt).
+static const char *interfaceSchema()
+{
+    const char *desktop = std::getenv("XDG_CURRENT_DESKTOP");
+    if (desktop && (std::strstr(desktop, "KDE") || std::strstr(desktop, "LXQt")))
+        return nullptr;
+    return desktop && std::strstr(desktop, "Cinnamon") ? "org.cinnamon.desktop.interface"
+           : desktop && std::strstr(desktop, "MATE")   ? "org.mate.interface"
+                                                       : "org.gnome.desktop.interface";
+}
+
+// The cursor size and the font are both read at startup: ask for them in one
+// process. A missing key leaves its part empty; "@@" separates them. Only the
+// first font read uses this; later ones (a theme re-applied after the desktop
+// font changed) ask gsettings again.
+static const QStringList &startupSettings()
+{
+    static const QStringList values = [] {
+        const char *schema = interfaceSchema();
+        if (!schema)
+            return QStringList{QString(), QString()};
+        const QByteArray prefix = QByteArray("gsettings get ") + schema + ' ';
+        const QByteArray output = runShell(prefix + "cursor-size 2>/dev/null; echo @@; " + prefix
+                                           + "font-name 2>/dev/null");
+        QByteArray cursor;
+        QByteArray font;
+        bool afterMarker = false;
+        for (const QByteArray &line : output.split('\n')) {
+            if (!afterMarker && line.trimmed() == "@@")
+                afterMarker = true;
+            else
+                (afterMarker ? font : cursor) += line + '\n';
+        }
+        return QStringList{cleanedValue(cursor), cleanedValue(font)};
+    }();
+    return values;
+}
+#endif
+
+QString interfaceSetting(const char *key)
+{
+#ifdef Q_OS_LINUX
+    if (std::strcmp(key, "cursor-size") == 0)
+        return startupSettings().at(0);
+    static bool startupFontUsed = false;
+    if (std::strcmp(key, "font-name") == 0 && !startupFontUsed) {
+        startupFontUsed = true;
+        return startupSettings().at(1);
+    }
+    const char *schema = interfaceSchema();
+    if (!schema)
+        return {};
+    return cleanedValue(runShell(QByteArray("gsettings get ") + schema + ' ' + key + " 2>/dev/null"));
 #else
     Q_UNUSED(key);
     return {};
