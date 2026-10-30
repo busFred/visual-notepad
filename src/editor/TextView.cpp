@@ -380,6 +380,7 @@ void TextView::restartBlink()
 
 void TextView::onDocumentChanged(int from, int charsRemoved, int charsAdded)
 {
+    shiftSearchRanges(from, charsRemoved, charsAdded);
     // Splice the line cache: [first, first + oldAffected) is replaced by the
     // newAffected lines now covering the change.
     const int newCount = m_doc->blockCount();
@@ -417,6 +418,61 @@ void TextView::invalidateLayouts()
     for (LineCache &line : m_lines)
         line.layout.reset();
     m_maxLineWidth = 0;
+}
+
+void TextView::trimLayouts(int firstLine, int lastLine)
+{
+    // Every painted or measured line keeps a QTextLayout; without a bound a
+    // long scroll through a big file retains one per line. Layouts are
+    // rebuilt on demand, so keep a generous band around the viewport.
+    constexpr int maxLive = 2000;
+    constexpr int keepAround = 500;
+    if (m_liveLayouts <= maxLive)
+        return;
+    const int keepFrom = firstLine - keepAround;
+    const int keepTo = lastLine + keepAround;
+    int live = 0;
+    for (int i = 0; i < int(m_lines.size()); ++i) {
+        LineCache &line = m_lines[i];
+        if (!line.layout)
+            continue;
+        if (i < keepFrom || i > keepTo)
+            line.layout.reset();
+        else
+            ++live;
+    }
+    m_liveLayouts = live;
+}
+
+void TextView::shiftSearchRanges(int from, int charsRemoved, int charsAdded)
+{
+    // Keep the highlights in place until the find bar searches again: ranges
+    // after the edit move, ranges the edit touched are dropped.
+    if (m_searchRanges.isEmpty())
+        return;
+    const auto firstAffected = std::lower_bound(m_searchRanges.begin(), m_searchRanges.end(), from,
+                                                [](const search::Range &r, int pos) { return r.end <= pos; });
+    const int delta = charsAdded - charsRemoved;
+    const int removedEnd = from + charsRemoved;
+    int index = int(firstAffected - m_searchRanges.begin());
+    int current = m_searchCurrent;
+    int out = index;
+    for (int i = index; i < m_searchRanges.size(); ++i) {
+        search::Range r = m_searchRanges.at(i);
+        if (r.start < removedEnd) {
+            // Touched by the edit.
+            if (i == m_searchCurrent)
+                current = -1;
+            else if (i < m_searchCurrent && current >= 0)
+                --current;
+            continue;
+        }
+        r.start += delta;
+        r.end += delta;
+        m_searchRanges[out++] = r;
+    }
+    m_searchRanges.resize(out);
+    m_searchCurrent = current;
 }
 
 void TextView::relayout()
@@ -914,7 +970,7 @@ void TextView::centerCursor()
     viewport()->update();
 }
 
-void TextView::setSearchHighlights(const QList<QTextCursor> &ranges, int current)
+void TextView::setSearchHighlights(const QList<search::Range> &ranges, int current)
 {
     m_searchRanges = ranges;
     m_searchCurrent = current;
@@ -1000,11 +1056,14 @@ void TextView::paintEvent(QPaintEvent *event)
                 painter.fillRect(QRectF(origin.x() + x1, y + textLine.y() - m_linePad, x2 - x1, m_lineHeight), color);
             }
         };
-        for (int i = 0; i < m_searchRanges.size(); ++i) {
-            const QTextCursor &match = m_searchRanges.at(i);
-            if (match.selectionEnd() <= blockStart || match.selectionStart() >= blockEnd)
-                continue;
-            fillRange(match.selectionStart() - blockStart, match.selectionEnd() - blockStart,
+        // The ranges are sorted, so start at the first one reaching this line.
+        const auto firstMatch = std::lower_bound(m_searchRanges.cbegin(), m_searchRanges.cend(), blockStart,
+                                                 [](const search::Range &r, int pos) { return r.end <= pos; });
+        for (int i = int(firstMatch - m_searchRanges.cbegin()); i < m_searchRanges.size(); ++i) {
+            const search::Range &match = m_searchRanges.at(i);
+            if (match.start >= blockEnd)
+                break;
+            fillRange(match.start - blockStart, match.end - blockStart,
                       i == m_searchCurrent ? searchCurrentColor() : searchColor(), false);
         }
         // A selection text colour other than the normal text (Legacy's white on

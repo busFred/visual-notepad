@@ -16,16 +16,6 @@ QRegularExpression regexFor(const Options &options)
     return QRegularExpression(options.pattern, flags);
 }
 
-QTextDocument::FindFlags findFlags(const Options &options)
-{
-    QTextDocument::FindFlags flags;
-    if (options.caseSensitive)
-        flags |= QTextDocument::FindCaseSensitively;
-    if (options.wholeWord)
-        flags |= QTextDocument::FindWholeWords;
-    return flags;
-}
-
 QString applyCase(const QString &match, const QString &replacement)
 {
     if (match.isEmpty() || replacement.isEmpty())
@@ -41,52 +31,108 @@ QString applyCase(const QString &match, const QString &replacement)
 
 } // namespace
 
-bool isValid(const Options &options)
+Compiled::Compiled(const Options &options)
+    : m_options(options)
 {
-    return !options.regex || regexFor(options).isValid();
+    if (options.regex) {
+        m_regex = regexFor(options);
+        m_valid = m_regex.isValid();
+    }
 }
 
-QList<QTextCursor> findAll(QTextDocument *document, const Options &options, int scopeStart, int scopeEnd)
+bool isValid(const Options &options)
 {
-    QList<QTextCursor> matches;
-    if (options.pattern.isEmpty() || !isValid(options))
+    return Compiled(options).isValid();
+}
+
+QList<Range> findAll(QTextDocument *document, const Compiled &query, int scopeStart, int scopeEnd)
+{
+    QList<Range> matches;
+    const Options &options = query.options();
+    if (options.pattern.isEmpty() || !query.isValid())
         return matches;
-    const QRegularExpression re = options.regex ? regexFor(options) : QRegularExpression();
-    const auto flags = findFlags(options);
-    int from = scopeStart >= 0 ? scopeStart : 0;
-    while (matches.size() < maxMatches) {
-        QTextCursor found = options.regex ? document->find(re, from, flags) : document->find(options.pattern, from, flags);
-        if (found.isNull())
+    const Qt::CaseSensitivity sensitivity = options.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    const auto isWord = [](const QString &text, int start, int end) {
+        // Same test as QTextDocument::FindWholeWords.
+        return (start == 0 || !text.at(start - 1).isLetterOrNumber())
+               && (end == text.size() || !text.at(end).isLetterOrNumber());
+    };
+
+    // One pass over the blocks; QTextDocument::find would copy a block's text
+    // for every match.
+    const int from = scopeStart >= 0 ? scopeStart : 0;
+    QTextBlock block = document->findBlock(from);
+    int offset = from - block.position();
+    for (; block.isValid(); block = block.next(), offset = 0) {
+        const int base = block.position();
+        if (scopeEnd >= 0 && base > scopeEnd)
             break;
-        if (scopeEnd >= 0 && found.selectionEnd() > scopeEnd)
-            break;
-        if (found.hasSelection()) {
-            matches.append(found);
-            from = found.selectionEnd();
-        } else {
-            // Empty regex match (e.g. ^): step past it.
-            from = found.position() + 1;
-            if (from >= document->characterCount())
-                break;
+        if (block.length() <= 1)
+            continue; // Empty line: nothing non-empty can match.
+        QString text = block.text();
+        text.replace(QChar::Nbsp, u' ');
+        int pos = offset;
+        while (pos >= 0 && pos <= text.size()) {
+            int start;
+            int end;
+            if (options.regex) {
+                const QRegularExpressionMatch m = query.regex().match(text, pos);
+                if (!m.hasMatch())
+                    break;
+                start = m.capturedStart();
+                end = m.capturedEnd();
+            } else {
+                start = text.indexOf(options.pattern, pos, sensitivity);
+                if (start < 0)
+                    break;
+                end = start + options.pattern.size();
+            }
+            if (options.wholeWord && !isWord(text, start, end)) {
+                pos = options.regex ? start + 1 : end + 1;
+                continue;
+            }
+            if (scopeEnd >= 0 && base + end > scopeEnd)
+                return matches;
+            if (end > start) {
+                matches.append({base + start, base + end});
+                if (matches.size() >= maxMatches)
+                    return matches;
+                pos = end;
+            } else {
+                pos = start + 1; // Empty regex match (e.g. ^): step past it.
+            }
         }
     }
     return matches;
 }
 
-QString replacementFor(const Options &options, const QTextCursor &match, const QString &replacement,
-                       bool preserveCase)
+QList<Range> findAll(QTextDocument *document, const Options &options, int scopeStart, int scopeEnd)
 {
-    const QString matched = match.selectedText();
+    return findAll(document, Compiled(options), scopeStart, scopeEnd);
+}
+
+QString replacementFor(QTextDocument *document, const Compiled &query, Range match, const QString &replacement,
+                       bool preserveCase, LineText *line)
+{
+    if (!query.options().regex && !preserveCase)
+        return replacement; // Neither the match nor its line is needed.
+    const QTextBlock block = document->findBlock(match.start);
+    LineText local;
+    LineText &cache = line ? *line : local;
+    if (cache.blockPosition != block.position()) {
+        cache.blockPosition = block.position();
+        cache.text = block.text();
+    }
+    const int offset = match.start - block.position();
+    const QString matched = cache.text.mid(offset, match.end - match.start);
     QString result;
-    if (!options.regex) {
+    if (!query.options().regex) {
         result = replacement;
     } else {
         // Re-run the regex on the match's line to get its groups.
-        const QTextBlock block = match.document()->findBlock(match.selectionStart());
-        const int offset = match.selectionStart() - block.position();
         const QRegularExpressionMatch m =
-            regexFor(options).match(block.text(), offset, QRegularExpression::NormalMatch,
-                                    QRegularExpression::AnchorAtOffsetMatchOption);
+            query.regex().match(cache.text, offset, QRegularExpression::NormalMatch,
+                                QRegularExpression::AnchorAtOffsetMatchOption);
         for (int i = 0; i < replacement.size(); ++i) {
             const QChar c = replacement.at(i);
             const QChar next = i + 1 < replacement.size() ? replacement.at(i + 1) : QChar();
@@ -111,6 +157,16 @@ QString replacementFor(const Options &options, const QTextCursor &match, const Q
         }
     }
     return preserveCase ? applyCase(matched, result) : result;
+}
+
+} // namespace vn::search
+
+namespace vn::search {
+
+QString replacementFor(QTextDocument *document, const Options &options, Range match, const QString &replacement,
+                       bool preserveCase)
+{
+    return replacementFor(document, Compiled(options), match, replacement, preserveCase);
 }
 
 } // namespace vn::search

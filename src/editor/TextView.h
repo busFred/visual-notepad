@@ -8,6 +8,7 @@
 #pragma once
 
 #include "../markdown/MarkdownEditing.h"
+#include "Search.h"
 
 #include <QAbstractScrollArea>
 #include <QBasicTimer>
@@ -129,7 +130,7 @@ public:
     void pasteTextAt(int position, const QString &text);
 
     // Background highlights for find results; current is an index or -1.
-    void setSearchHighlights(const QList<QTextCursor> &ranges, int current);
+    void setSearchHighlights(const QList<search::Range> &ranges, int current);
 
 public Q_SLOTS:
     void undo();
@@ -283,6 +284,9 @@ private:
     void onDocumentChanged(int from, int charsRemoved, int charsAdded);
     void updateMetrics();
     void invalidateLayouts();
+    // Drops cached layouts far from [firstLine, lastLine] once too many are live.
+    void trimLayouts(int firstLine, int lastLine);
+    void shiftSearchRanges(int from, int charsRemoved, int charsAdded);
     QTextLayout *layoutForLine(int line);
     QTextOption textOption() const;
     qreal rowHeight(int row);
@@ -364,6 +368,7 @@ private:
 
     QTextDocument *m_doc;
     std::vector<LineCache> m_lines;
+    int m_liveLayouts = 0; // Layouts created since the last trim; an upper bound on the live ones.
     std::vector<Caret> m_carets;
     int m_primary = 0;
 
@@ -416,7 +421,7 @@ private:
     bool m_columnAnchorValid = false;
     bool m_columnDragging = false;
 
-    QList<QTextCursor> m_searchRanges;
+    QList<search::Range> m_searchRanges; // Sorted, disjoint.
     int m_searchCurrent = -1;
 
     // Options.

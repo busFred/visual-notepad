@@ -4,6 +4,7 @@
 #include "Search.h"
 
 #include <QFrame>
+#include <QTextCursor>
 #include <QTimer>
 
 class QLabel;
@@ -57,6 +58,9 @@ private:
     search::Options options() const;
     void setReplaceVisible(bool on);
     void research();
+    // Runs a search a pending keystroke or edit has not yet triggered.
+    void flushResearch();
+    QTextCursor cursorFor(search::Range range) const;
     void selectMatch(int index);
     void step(bool forward);
     void updateCount();
@@ -76,7 +80,8 @@ private:
     QToolButton *m_inSelection;
     QLabel *m_count;
 
-    QList<QTextCursor> m_matches;
+    QList<search::Range> m_matches;
+    bool m_selectAfterResearch = false; // The query was typed: jump to the first match.
     int m_current = -1;
     QTextCursor m_scope; // Find-in-selection range.
     int m_searchStart = 0;

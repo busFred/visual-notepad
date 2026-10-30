@@ -13,6 +13,8 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 namespace vn {
 
 namespace {
@@ -130,9 +132,9 @@ FindBar::FindBar(TextView *view, QWidget *parent)
         edit->installEventFilter(this);
     connect(m_find, &QLineEdit::textEdited, this, [this] {
         m_historyIndex = -1;
-        research();
-        if (!m_matches.isEmpty())
-            selectMatch(m_current);
+        // Search once typing pauses rather than on every keystroke.
+        m_selectAfterResearch = true;
+        m_researchTimer.start();
     });
 
     m_researchTimer.setSingleShot(true);
@@ -244,36 +246,60 @@ void FindBar::close()
 {
     remember(m_find);
     hide();
+    m_researchTimer.stop();
+    m_selectAfterResearch = false;
     m_matches.clear();
     m_view->setSearchHighlights({}, -1);
     m_view->setFocus();
     Q_EMIT closed();
 }
 
+void FindBar::flushResearch()
+{
+    if (m_researchTimer.isActive())
+        research();
+}
+
+QTextCursor FindBar::cursorFor(search::Range range) const
+{
+    QTextCursor cursor(m_view->document());
+    cursor.setPosition(range.start);
+    cursor.setPosition(range.end, QTextCursor::KeepAnchor);
+    return cursor;
+}
+
 void FindBar::research()
 {
-    const search::Options opts = options();
-    const bool valid = search::isValid(opts);
-    m_findField->setProperty("error", !valid);
-    m_findField->style()->unpolish(m_findField);
-    m_findField->style()->polish(m_findField);
+    m_researchTimer.stop();
+    const search::Compiled query(options());
+    const bool valid = query.isValid();
+    // Re-polishing restyles the whole bar, so only do it when the state flips.
+    if (m_findField->property("error").toBool() == valid) {
+        m_findField->setProperty("error", !valid);
+        m_findField->style()->unpolish(m_findField);
+        m_findField->style()->polish(m_findField);
+    }
 
     const int scopeStart = m_scope.isNull() ? -1 : m_scope.selectionStart();
     const int scopeEnd = m_scope.isNull() ? -1 : m_scope.selectionEnd();
-    m_matches = search::findAll(m_view->document(), opts, scopeStart, scopeEnd);
+    m_matches = search::findAll(m_view->document(), query, scopeStart, scopeEnd);
 
     // The current match is the first one at or after the search start.
     m_current = m_matches.isEmpty() ? -1 : 0;
     const QTextCursor caret = m_view->textCursor();
     const int start = caret.hasSelection() ? caret.selectionStart() : m_searchStart;
-    for (int i = 0; i < m_matches.size(); ++i) {
-        if (m_matches[i].selectionStart() >= start) {
-            m_current = i;
-            break;
-        }
-    }
+    const auto first = std::lower_bound(m_matches.begin(), m_matches.end(), start,
+                                        [](const search::Range &r, int pos) { return r.start < pos; });
+    if (first != m_matches.end())
+        m_current = int(first - m_matches.begin());
     m_view->setSearchHighlights(m_matches, m_current);
     updateCount();
+
+    if (m_selectAfterResearch) {
+        m_selectAfterResearch = false;
+        if (!m_matches.isEmpty())
+            selectMatch(m_current);
+    }
 }
 
 void FindBar::updateCount()
@@ -288,9 +314,12 @@ void FindBar::updateCount()
     else
         text = tr("%1 of %2").arg(m_current + 1).arg(m_matches.size());
     m_count->setText(text);
-    m_count->setProperty("empty", !m_find->text().isEmpty() && m_matches.isEmpty());
-    m_count->style()->unpolish(m_count);
-    m_count->style()->polish(m_count);
+    const bool empty = !m_find->text().isEmpty() && m_matches.isEmpty();
+    if (m_count->property("empty").toBool() != empty) {
+        m_count->setProperty("empty", empty);
+        m_count->style()->unpolish(m_count);
+        m_count->style()->polish(m_count);
+    }
 }
 
 void FindBar::selectMatch(int index)
@@ -298,9 +327,9 @@ void FindBar::selectMatch(int index)
     if (index < 0 || index >= m_matches.size())
         return;
     m_current = index;
-    m_view->setTextCursor(m_matches[index]);
+    m_view->setTextCursor(cursorFor(m_matches[index]));
     m_view->setSearchHighlights(m_matches, m_current);
-    m_searchStart = m_matches[index].selectionStart();
+    m_searchStart = m_matches[index].start;
     updateCount();
 }
 
@@ -320,28 +349,28 @@ void FindBar::findPrevious()
 
 void FindBar::step(bool forward)
 {
+    flushResearch();
     remember(m_find);
     if (m_matches.isEmpty())
         return;
     const QTextCursor caret = m_view->textCursor();
+    const int caretStart = caret.selectionStart();
     const int count = int(m_matches.size());
     int target = forward ? 0 : count - 1;
+    // Matches are sorted by start, so both searches are binary.
     if (forward) {
         // Next match after the caret; wraps to the first.
-        for (int i = 0; i < count; ++i) {
-            if (m_matches[i].selectionStart() > caret.selectionStart()
-                || (m_matches[i].selectionStart() == caret.selectionStart() && !caret.hasSelection())) {
-                target = i;
-                break;
-            }
-        }
+        const auto it = std::partition_point(m_matches.begin(), m_matches.end(), [&](const search::Range &r) {
+            return !(r.start > caretStart || (r.start == caretStart && !caret.hasSelection()));
+        });
+        if (it != m_matches.end())
+            target = int(it - m_matches.begin());
     } else {
-        for (int i = count - 1; i >= 0; --i) {
-            if (m_matches[i].selectionStart() < caret.selectionStart()) {
-                target = i;
-                break;
-            }
-        }
+        // Last match before the caret; wraps to the last.
+        const auto it = std::lower_bound(m_matches.begin(), m_matches.end(), caretStart,
+                                         [](const search::Range &r, int pos) { return r.start < pos; });
+        if (it != m_matches.begin())
+            target = int(it - m_matches.begin()) - 1;
     }
     selectMatch(target);
 }
@@ -365,25 +394,31 @@ void FindBar::findSelection(bool forward)
 
 void FindBar::selectAllMatches()
 {
+    flushResearch();
     if (m_matches.isEmpty())
         return;
     remember(m_find);
-    m_view->setCursors(m_matches, qMax(0, m_current));
+    QList<QTextCursor> cursors;
+    cursors.reserve(m_matches.size());
+    for (const search::Range &match : std::as_const(m_matches))
+        cursors.append(cursorFor(match));
+    m_view->setCursors(cursors, qMax(0, m_current));
     m_view->setFocus();
 }
 
 void FindBar::replaceOne()
 {
+    flushResearch();
     if (m_view->isReadOnly() || m_matches.isEmpty())
         return;
     remember(m_replace);
     const QTextCursor caret = m_view->textCursor();
     // Replace the selected match if the selection is one, then move on.
-    for (const QTextCursor &match : std::as_const(m_matches)) {
-        if (match.selectionStart() == caret.selectionStart() && match.selectionEnd() == caret.selectionEnd()) {
-            QTextCursor edit = match;
-            edit.insertText(
-                search::replacementFor(options(), match, m_replace->text(), m_preserveCaseOption->isChecked()));
+    for (const search::Range &match : std::as_const(m_matches)) {
+        if (match.start == caret.selectionStart() && match.end == caret.selectionEnd()) {
+            QTextCursor edit = cursorFor(match);
+            edit.insertText(search::replacementFor(m_view->document(), options(), match, m_replace->text(),
+                                                   m_preserveCaseOption->isChecked()));
             m_view->setTextCursor(edit);
             research();
             break;
@@ -394,21 +429,28 @@ void FindBar::replaceOne()
 
 void FindBar::replaceAll()
 {
+    flushResearch();
     if (m_view->isReadOnly() || m_matches.isEmpty())
         return;
     remember(m_replace);
-    const search::Options opts = options();
+    const search::Compiled query(options());
+    const bool preserveCase = m_preserveCaseOption->isChecked();
     // Compute every replacement first: regex groups need the original text.
     QStringList replacements;
-    for (const QTextCursor &match : std::as_const(m_matches))
-        replacements.append(search::replacementFor(opts, match, m_replace->text(), m_preserveCaseOption->isChecked()));
-    QTextCursor block(m_view->document());
-    block.beginEditBlock();
+    replacements.reserve(m_matches.size());
+    search::LineText line;
+    for (const search::Range &match : std::as_const(m_matches))
+        replacements.append(search::replacementFor(m_view->document(), query, match, m_replace->text(), preserveCase, &line));
+    // Back to front with one cursor, so earlier positions stay valid and Qt
+    // only adjusts that single cursor.
+    QTextCursor edit(m_view->document());
+    edit.beginEditBlock();
     for (int i = int(m_matches.size()) - 1; i >= 0; --i) {
-        QTextCursor edit = m_matches[i];
+        edit.setPosition(m_matches[i].start);
+        edit.setPosition(m_matches[i].end, QTextCursor::KeepAnchor);
         edit.insertText(replacements[i]);
     }
-    block.endEditBlock();
+    edit.endEditBlock();
     research();
 }
 

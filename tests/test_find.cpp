@@ -6,6 +6,7 @@
 #include "editor/TextView.h"
 
 #include <QLineEdit>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextDocument>
@@ -32,6 +33,9 @@ private Q_SLOTS:
     void invalidRegexFlagsField();
     void findSelectionWithoutOpeningBar();
     void altEnterSelectsAllMatches();
+    void findAllReportsRanges();
+    void enterBeforeDebounceUsesTypedQuery();
+    void replaceAllManyMatchesIsOneUndoStep();
 
 private:
     QTextDocument *m_doc = nullptr;
@@ -93,7 +97,7 @@ void TestFind::regexReplacementGroups()
     search::Options o{QStringLiteral("(\\w+) = (\\w+)"), false, false, true};
     const auto matches = search::findAll(m_doc, o);
     QCOMPARE(matches.size(), 1);
-    QCOMPARE(search::replacementFor(o, matches.first(), QStringLiteral("$2: $1\\t$&"), false),
+    QCOMPARE(search::replacementFor(m_doc, o, matches.first(), QStringLiteral("$2: $1\\t$&"), false),
              QStringLiteral("value: key\tkey = value"));
 }
 
@@ -103,9 +107,9 @@ void TestFind::preserveCase()
     const search::Options o{QStringLiteral("hello")};
     const auto m = search::findAll(m_doc, o);
     QCOMPARE(m.size(), 3);
-    QCOMPARE(search::replacementFor(o, m[0], QStringLiteral("world"), true), QStringLiteral("World"));
-    QCOMPARE(search::replacementFor(o, m[1], QStringLiteral("world"), true), QStringLiteral("WORLD"));
-    QCOMPARE(search::replacementFor(o, m[2], QStringLiteral("World"), true), QStringLiteral("world"));
+    QCOMPARE(search::replacementFor(m_doc, o, m[0], QStringLiteral("world"), true), QStringLiteral("World"));
+    QCOMPARE(search::replacementFor(m_doc, o, m[1], QStringLiteral("world"), true), QStringLiteral("WORLD"));
+    QCOMPARE(search::replacementFor(m_doc, o, m[2], QStringLiteral("World"), true), QStringLiteral("world"));
 }
 
 void TestFind::barSeedsFromSelectionAndCounts()
@@ -120,9 +124,10 @@ void TestFind::barSeedsFromSelectionAndCounts()
     QCOMPARE(m_bar->matchCount(), 1);
     m_bar->findField()->clear();
     QTest::keyClicks(m_bar->findField(), QStringLiteral("alpha"));
-    QCOMPARE(m_bar->matchCount(), 3);
-    // Typing selects the first match at or after the original selection.
-    QCOMPARE(m_view->textCursor().selectionStart(), 11);
+    // Typing searches once it pauses, then selects the first match at or
+    // after the original selection.
+    QTRY_COMPARE(m_bar->matchCount(), 3);
+    QTRY_COMPARE(m_view->textCursor().selectionStart(), 11);
 }
 
 void TestFind::enterCyclesMatches()
@@ -131,7 +136,7 @@ void TestFind::enterCyclesMatches()
     m_view->setTextCursor(QTextCursor(m_doc));
     m_bar->open(false);
     QTest::keyClicks(m_bar->findField(), QStringLiteral("x"));
-    QCOMPARE(m_bar->currentMatch(), 0);
+    QTRY_COMPARE(m_bar->currentMatch(), 0);
     QTest::keyClick(m_bar->findField(), Qt::Key_Return);
     QCOMPARE(m_bar->currentMatch(), 1);
     QTest::keyClick(m_bar->findField(), Qt::Key_Return);
@@ -233,6 +238,96 @@ void TestFind::altEnterSelectsAllMatches()
     // Typing now replaces every match.
     QTest::keyClicks(m_view, QStringLiteral("z"));
     QCOMPARE(m_doc->toPlainText(), QStringLiteral("z y z y z"));
+}
+
+void TestFind::findAllReportsRanges()
+{
+    using R = search::Range;
+    m_doc->setPlainText(QStringLiteral("ab ab\n\nab_ab ab\nxab"));
+    QCOMPARE(search::findAll(m_doc, {QStringLiteral("ab")}), (QList<R>{{0, 2}, {3, 5}, {7, 9}, {10, 12}, {13, 15}, {17, 19}}));
+    search::Options o{QStringLiteral("ab"), false, true, false};
+    // An underscore is not part of a word for QTextDocument.
+    QCOMPARE(search::findAll(m_doc, o), (QList<R>{{0, 2}, {3, 5}, {7, 9}, {10, 12}, {13, 15}}));
+    // Scope: a match must end inside it.
+    QCOMPARE(search::findAll(m_doc, search::Options{QStringLiteral("ab")}, 1, 12), (QList<R>{{3, 5}, {7, 9}, {10, 12}}));
+    // Regex: empty matches are skipped and later lines still match.
+    o = {QStringLiteral("b*"), false, false, true};
+    QCOMPARE(search::findAll(m_doc, o), (QList<R>{{1, 2}, {4, 5}, {8, 9}, {11, 12}, {14, 15}, {18, 19}}));
+    // Same matches as QTextDocument::find, which this replaced.
+    m_doc->setPlainText(QStringLiteral("Foo foo\u00a0FOO fooo\n\nfoo-foo (foo) f\no"));
+    for (const bool word : {false, true}) {
+        for (const bool matchCase : {false, true}) {
+            for (const QString &pattern : {QStringLiteral("foo"), QStringLiteral("foo ")}) {
+                QList<R> expected;
+                QTextDocument::FindFlags flags;
+                if (word)
+                    flags |= QTextDocument::FindWholeWords;
+                if (matchCase)
+                    flags |= QTextDocument::FindCaseSensitively;
+                for (QTextCursor c = m_doc->find(pattern, 0, flags); !c.isNull();
+                     c = m_doc->find(pattern, c.selectionEnd(), flags))
+                    expected.append({c.selectionStart(), c.selectionEnd()});
+                QCOMPARE(search::findAll(m_doc, search::Options{pattern, matchCase, word, false}), expected);
+            }
+        }
+    }
+    for (const bool word : {false, true}) {
+        for (const QString &pattern : {QStringLiteral("o+"), QStringLiteral("fo*"), QStringLiteral("\\bfoo\\b|^"),
+                                       QStringLiteral("f?$")}) {
+            QList<R> expected;
+            QTextDocument::FindFlags flags = word ? QTextDocument::FindWholeWords : QTextDocument::FindFlags();
+            const QRegularExpression re(pattern, QRegularExpression::CaseInsensitiveOption
+                                                     | QRegularExpression::UseUnicodePropertiesOption);
+            int from = 0;
+            while (true) {
+                const QTextCursor c = m_doc->find(re, from, flags);
+                if (c.isNull())
+                    break;
+                if (c.hasSelection()) {
+                    expected.append({c.selectionStart(), c.selectionEnd()});
+                    from = c.selectionEnd();
+                } else {
+                    from = c.position() + 1;
+                }
+            }
+            QCOMPARE(search::findAll(m_doc, search::Options{pattern, false, word, true}), expected);
+        }
+    }
+    // Matches are capped.
+    m_doc->setPlainText(QString(search::maxMatches + 50, QLatin1Char('a')));
+    QCOMPARE(search::findAll(m_doc, {QStringLiteral("a")}).size(), search::maxMatches);
+}
+
+void TestFind::enterBeforeDebounceUsesTypedQuery()
+{
+    m_doc->setPlainText(QStringLiteral("x y x y x"));
+    m_view->setTextCursor(QTextCursor(m_doc));
+    m_bar->open(false);
+    QTest::keyClicks(m_bar->findField(), QStringLiteral("y"));
+    // No wait: Enter must search first, then step past the first match.
+    QTest::keyClick(m_bar->findField(), Qt::Key_Return);
+    QCOMPARE(m_bar->matchCount(), 2);
+    QCOMPARE(m_view->textCursor().selectionStart(), 6);
+    QCOMPARE(m_bar->currentMatch(), 1);
+}
+
+void TestFind::replaceAllManyMatchesIsOneUndoStep()
+{
+    QStringList lines;
+    for (int i = 0; i < 3000; ++i)
+        lines << QStringLiteral("k%1=v%1 k").arg(i);
+    const QString original = lines.join(u'\n');
+    m_doc->setPlainText(original);
+    m_bar->open(true);
+    QTest::keyClick(m_bar->findField(), Qt::Key_R, Qt::AltModifier); // Regex on.
+    m_bar->setQuery(QStringLiteral("k(\\d*)"));
+    m_bar->replaceField()->setText(QStringLiteral("[$1]"));
+    m_bar->replaceAll();
+    QVERIFY(m_doc->toPlainText().startsWith(QStringLiteral("[0]=v0 []\n[1]=v1 []")));
+    QVERIFY(m_doc->toPlainText().endsWith(QStringLiteral("[2999]=v2999 []")));
+    QCOMPARE(m_bar->matchCount(), 0);
+    m_view->undo();
+    QCOMPARE(m_doc->toPlainText(), original);
 }
 
 // Keep tests away from the user's settings file.
