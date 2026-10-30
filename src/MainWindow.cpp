@@ -1068,7 +1068,7 @@ void MainWindow::addTab(DocumentTab *tab, EditorGroup *group, int index)
             openFile(file);
     });
     connect(tab, &DocumentTab::textChanged, this, [this, tab] {
-        if (tab == currentTab() && tab->isMarkdown())
+        if (tab == currentTab() && !m_outlineDock->isHidden() && tab->isMarkdown())
             m_outlineTimer->start();
     });
 
@@ -1856,8 +1856,9 @@ void MainWindow::onCurrentTabChanged()
     else
         setWindowTitle(productName());
     updateStatus();
-    updateOutline();
+    // Visibility first: a hidden outline is not built.
     updateOutlineVisibility();
+    updateOutline();
     updateModeControls();
 }
 
@@ -1902,10 +1903,21 @@ void MainWindow::updateStatus()
 
 void MainWindow::updateOutline()
 {
-    m_outline->clear();
+    m_outlineTimer->stop();
     DocumentTab *tab = currentTab();
-    if (!tab || !tab->isMarkdown())
+    TextFile *file = tab && tab->isMarkdown() ? tab->file() : nullptr;
+    if (!file) {
+        m_outline->clear();
+        m_outlineFile = nullptr;
         return;
+    }
+    // Hidden: built when shown (updateOutlineVisibility). Unchanged, as
+    // after switching back to the tab it was built for: kept.
+    if (m_outlineDock->isHidden() || (m_outlineFile == file && m_outlineSerial == file->changeSerial()))
+        return;
+    m_outlineFile = file;
+    m_outlineSerial = file->changeSerial();
+    m_outline->clear();
 
     const QByteArray utf8 = tab->text().toUtf8();
     const auto headings = core::outline(rust::Str(utf8.constData(), utf8.size()));
@@ -1927,7 +1939,11 @@ void MainWindow::updateOutline()
 void MainWindow::updateOutlineVisibility()
 {
     DocumentTab *tab = currentTab();
-    m_outlineDock->setVisible(m_outlineAction->isChecked() && tab && tab->isMarkdown());
+    const bool show = m_outlineAction->isChecked() && tab && tab->isMarkdown();
+    const bool wasHidden = m_outlineDock->isHidden();
+    m_outlineDock->setVisible(show);
+    if (show && wasHidden)
+        updateOutline();
 }
 
 void MainWindow::openLink(DocumentTab *tab, const QString &url)

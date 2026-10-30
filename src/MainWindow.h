@@ -197,6 +197,9 @@ private:
     QDockWidget *m_outlineDock;
     QTreeWidget *m_outline;
     QTimer *m_outlineTimer;
+    // What the outline shows: the file and its TextFile::changeSerial().
+    QPointer<TextFile> m_outlineFile;
+    quint64 m_outlineSerial = 0;
 
     QHash<EditorGroup *, QToolButton *> m_modeButtons;
     QActionGroup *m_modeGroup;
