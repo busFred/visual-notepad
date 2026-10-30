@@ -417,6 +417,7 @@ void TextView::invalidateLayouts()
 {
     for (LineCache &line : m_lines)
         line.layout.reset();
+    m_liveLayouts = 0;
     m_maxLineWidth = 0;
 }
 
@@ -669,8 +670,10 @@ QTextLayout *TextView::layoutForLine(int line)
     if (cache.layout && cache.wrapWidth == wrapWidth && !hasPreedit)
         return cache.layout.get();
 
-    if (!cache.layout)
+    if (!cache.layout) {
         cache.layout = std::make_unique<QTextLayout>();
+        ++m_liveLayouts;
+    }
     QTextLayout *layout = cache.layout.get();
     layout->clearLayout();
     layout->setText(block.text());
@@ -1007,6 +1010,27 @@ void TextView::paintEvent(QPaintEvent *event)
     };
     QList<VisibleLine> visibleLines;
 
+    // Diagnostics by start, with the running maximum of their ends, so each
+    // line finds the ones reaching it by binary search.
+    struct DiagnosticSpan
+    {
+        int start;
+        int end;
+        int index;
+    };
+    std::vector<DiagnosticSpan> diagnosticSpans;
+    std::vector<int> diagnosticMaxEnd;
+    diagnosticSpans.reserve(m_diagnostics.size());
+    for (int i = 0; i < m_diagnostics.size(); ++i)
+        diagnosticSpans.push_back({m_diagnostics.at(i).start.position(), m_diagnostics.at(i).end.position(), i});
+    std::stable_sort(diagnosticSpans.begin(), diagnosticSpans.end(),
+                     [](const DiagnosticSpan &a, const DiagnosticSpan &b) { return a.start < b.start; });
+    int runningEnd = 0;
+    for (const DiagnosticSpan &d : diagnosticSpans)
+        diagnosticMaxEnd.push_back(runningEnd = qMax(runningEnd, d.end));
+    int paintedFirst = -1;
+    int paintedLast = -1;
+
     painter.save();
     painter.setClipRect(QRectF(gutter, 0, viewport()->width() - gutter, height));
     qreal y = firstRowY();
@@ -1017,6 +1041,9 @@ void TextView::paintEvent(QPaintEvent *event)
             y += h;
             continue;
         }
+        if (paintedFirst < 0)
+            paintedFirst = info.firstLine;
+        paintedLast = info.lastLine;
         if (info.rendered) {
             paintRenderedRow(painter, info, QRectF(left, y, textWidth(), h));
             y += h;
@@ -1071,9 +1098,16 @@ void TextView::paintEvent(QPaintEvent *event)
         const QColor selectionText = theme::color(theme::Role::selectionText);
         const bool recolorSelection = selectionText != theme::color(theme::Role::text);
         QList<QTextLayout::FormatRange> selectedText;
-        for (const Caret &caret : m_carets) {
-            const QTextCursor &c = caret.cursor;
-            if (!c.hasSelection() || c.selectionEnd() < blockStart || c.selectionStart() >= blockEnd)
+        // Carets are sorted and disjoint: only the ones reaching this line.
+        const auto firstCaret =
+            std::lower_bound(m_carets.begin(), m_carets.end(), blockStart,
+                             [](const Caret &c, int pos) { return c.cursor.selectionEnd() < pos; });
+        const auto endCaret = std::find_if(firstCaret, m_carets.end(), [blockEnd](const Caret &c) {
+            return c.cursor.selectionStart() >= blockEnd;
+        });
+        for (auto it = firstCaret; it != endCaret; ++it) {
+            const QTextCursor &c = it->cursor;
+            if (!c.hasSelection())
                 continue;
             fillRange(c.selectionStart() - blockStart, c.selectionEnd() - blockStart, theme::color(theme::Role::selection),
                       c.selectionEnd() >= blockEnd);
@@ -1089,10 +1123,13 @@ void TextView::paintEvent(QPaintEvent *event)
         painter.setPen(theme::color(theme::Role::text));
         layout->draw(&painter, origin, selectedText);
 
-        for (const DiagnosticRange &d : std::as_const(m_diagnostics)) {
-            const int rangeStart = d.start.position();
-            const int rangeEnd = d.end.position();
-            if (rangeEnd <= blockStart || rangeStart >= blockEnd)
+        for (auto span = diagnosticSpans.begin()
+                         + (std::upper_bound(diagnosticMaxEnd.begin(), diagnosticMaxEnd.end(), blockStart)
+                            - diagnosticMaxEnd.begin());
+             span != diagnosticSpans.end() && span->start < blockEnd; ++span) {
+            const int rangeStart = span->start;
+            const int rangeEnd = span->end;
+            if (rangeEnd <= blockStart)
                 continue;
             painter.save();
             painter.setPen(QPen(diagnosticColor(), 1));
@@ -1120,7 +1157,8 @@ void TextView::paintEvent(QPaintEvent *event)
 
         if (hasFocus() && m_caretOn) {
             painter.setPen(m_readOnly ? theme::color(theme::Role::mutedText) : theme::color(theme::Role::text));
-            for (const Caret &caret : m_carets) {
+            for (auto it = firstCaret; it != endCaret; ++it) {
+                const Caret &caret = *it;
                 if (caret.cursor.block() != block)
                     continue;
                 int pos = caret.cursor.positionInBlock();
@@ -1144,6 +1182,8 @@ void TextView::paintEvent(QPaintEvent *event)
                              Qt::AlignRight | Qt::AlignVCenter, QString::number(line.line + 1));
         }
     }
+    if (paintedFirst >= 0)
+        trimLayouts(paintedFirst, paintedLast);
 }
 
 // ---------------------------------------------------------------------------
