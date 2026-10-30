@@ -61,8 +61,16 @@ public:
     // Something a session stores changed; backs up again soon.
     void markDirty();
     // Writes the session now, e.g. after a tab was closed so its discarded
-    // backup cannot be recovered.
+    // backup cannot be recovered. Within a SyncBatch, once when it ends.
     void sync();
+    // Coalesces the sync() calls made while it lives (closing many tabs).
+    class SyncBatch
+    {
+    public:
+        SyncBatch();
+        ~SyncBatch();
+        Q_DISABLE_COPY_MOVE(SyncBatch)
+    };
     // Backups, the logout/shutdown hook and, on Unix, SIGTERM/SIGHUP/SIGINT.
     void start();
 
@@ -82,6 +90,8 @@ private:
     bool m_quitting = false;
     bool m_dirty = false;
     bool m_started = false;
+    int m_syncDeferred = 0;
+    bool m_syncPending = false;
 };
 
 } // namespace vn

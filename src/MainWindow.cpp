@@ -1280,6 +1280,8 @@ bool MainWindow::closeTabs(EditorGroup *group, int index, CloseScope scope)
         if (hit)
             victims.append(tab);
     }
+    // One session write for all of them, not one per tab.
+    const SessionManager::SyncBatch batch;
     for (DocumentTab *tab : victims) {
         if (!closeTab(group, group->indexOf(tab)))
             return false;

@@ -10,6 +10,7 @@
 #include <QApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QHash>
 #include <QJsonDocument>
@@ -187,8 +188,27 @@ void SessionManager::markDirty()
 
 void SessionManager::sync()
 {
+    // Closing many tabs at once writes the session once, at the end.
+    if (m_syncDeferred > 0) {
+        m_syncPending = true;
+        return;
+    }
     if (!m_quitting && enabled())
         saveSession();
+}
+
+SessionManager::SyncBatch::SyncBatch()
+{
+    ++SessionManager::instance().m_syncDeferred;
+}
+
+SessionManager::SyncBatch::~SyncBatch()
+{
+    SessionManager &session = SessionManager::instance();
+    if (--session.m_syncDeferred > 0 || !session.m_syncPending)
+        return;
+    session.m_syncPending = false;
+    session.sync();
 }
 
 void SessionManager::terminate()
@@ -225,6 +245,13 @@ QString SessionManager::writeBackup(DocumentTab *tab)
     // One backup per document, however many tabs show it.
     TextFile *document = tab->file();
     QString name = document->backupName();
+    // Unchanged since the last backup (the timer fires for caret moves,
+    // format changes and other tabs too): keep it rather than copy, encode
+    // and fsync the whole text again. It may have been removed meanwhile as
+    // stale, while the document was unmodified.
+    const quint64 serial = document->changeSerial();
+    if (!name.isEmpty() && document->backupSerial() == serial && QFileInfo::exists(backupsDir() + u'/' + name))
+        return name;
     if (name.isEmpty())
         name = QUuid::createUuid().toString(QUuid::WithoutBraces);
     if (!QDir().mkpath(backupsDir()))
@@ -236,6 +263,7 @@ QString SessionManager::writeBackup(DocumentTab *tab)
     if (file.write(bytes) != bytes.size() || !file.commit())
         return {};
     document->setBackupName(name);
+    document->setBackupSerial(serial);
     return name;
 }
 
@@ -255,7 +283,7 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
         QHash<DocumentTab *, int> ids;
         for (DocumentTab *tab : window->tabs()) {
             const bool untitled = tab->path().isEmpty();
-            const bool unsaved = tab->isModified() || (untitled && !tab->text().isEmpty());
+            const bool unsaved = tab->isModified() || (untitled && !tab->document()->isEmpty());
             QString backup;
             if (unsaved && hotExit() && !skipBackup.contains(tab)) {
                 const auto it = written.constFind(tab->file());

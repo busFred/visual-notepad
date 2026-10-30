@@ -39,6 +39,8 @@ private Q_SLOTS:
     void roundTrip();
     void crashRecovery();
     void discardedTabIsNotRecovered();
+    void closeOthersDropsBackupsAtOnce();
+    void unchangedBackupIsNotRewritten();
     void quitPrompts();
     void recoveryOff();
     void recentFiles();
@@ -252,6 +254,62 @@ void TestSession::discardedTabIsNotRecovered()
     const QList<DocumentTab *> tabs = SessionManager::instance().windows().at(0)->tabs();
     QCOMPARE(tabs.size(), 1);
     QCOMPARE(tabs.at(0)->text(), QStringLiteral("keep"));
+}
+
+void TestSession::closeOthersDropsBackupsAtOnce()
+{
+    MainWindow *window = makeWindow();
+    for (const QString &text : {QStringLiteral("keep"), QStringLiteral("drop 1"), QStringLiteral("drop 2")}) {
+        window->newFile();
+        append(window->tabs().last(), text);
+    }
+    QTRY_COMPARE_WITH_TIMEOUT(backupCount(), 3, 5000);
+
+    // One session write for the batch, done before closeTabs returns.
+    QVERIFY(window->closeTabs(0, MainWindow::CloseScope::Others)); // The watcher discards.
+    QCOMPARE(m_prompts, 2);
+    QCOMPARE(window->tabCount(), 1);
+    QCOMPARE(backupCount(), 1);
+    closeWindows();
+
+    QVERIFY(SessionManager::instance().restore());
+    const QList<DocumentTab *> tabs = SessionManager::instance().windows().at(0)->tabs();
+    QCOMPARE(tabs.size(), 1);
+    QCOMPARE(tabs.at(0)->text(), QStringLiteral("keep"));
+}
+
+void TestSession::unchangedBackupIsNotRewritten()
+{
+    auto &session = SessionManager::instance();
+    MainWindow *window = makeWindow();
+    window->newFile();
+    DocumentTab *tab = window->tabs().at(0);
+    append(tab, QStringLiteral("one"));
+    QVERIFY(session.saveSession().isEmpty());
+    const QString name = tab->file()->backupName();
+    QVERIFY(!name.isEmpty());
+    const QString path = SessionManager::dataDir() + QStringLiteral("/backups/") + name;
+    QCOMPARE(read(path), QByteArray("one"));
+
+    // Overwritten behind the session's back, so a rewrite would show.
+    {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("marker");
+    }
+    QVERIFY(session.saveSession().isEmpty());
+    QCOMPARE(read(path), QByteArray("marker"));
+
+    // Edited: written again, under the same name.
+    append(tab, QStringLiteral(" two"));
+    QVERIFY(session.saveSession().isEmpty());
+    QCOMPARE(tab->file()->backupName(), name);
+    QCOMPARE(read(path), QByteArray("one two"));
+
+    // Gone (removed as stale or by hand): written again although unchanged.
+    QVERIFY(QFile::remove(path));
+    QVERIFY(session.saveSession().isEmpty());
+    QCOMPARE(read(path), QByteArray("one two"));
 }
 
 void TestSession::quitPrompts()
