@@ -31,8 +31,8 @@ fn theme(name: &str) -> Theme {
     theme
 }
 
-/// Renders a diagram to PNG at the given scale (device pixel ratio).
-pub fn png(code: &str, theme_name: &str, scale: f32) -> Result<Vec<u8>, String> {
+/// Renders a diagram to premultiplied RGBA8 pixels at the given scale (device pixel ratio).
+pub fn raster(code: &str, theme_name: &str, scale: f32) -> Result<(u32, u32, Vec<u8>), String> {
     let theme = theme(theme_name);
     let svg = render_with_options(code, RenderOptions { theme: theme.clone(), ..RenderOptions::default() })
         .map_err(|e| e.to_string())?;
@@ -45,7 +45,7 @@ pub fn png(code: &str, theme_name: &str, scale: f32) -> Result<Vec<u8>, String> 
     let height = ((size.height() as f32) * scale).ceil() as u32;
     let mut pixmap = Pixmap::new(width.max(1), height.max(1)).ok_or("diagram too large")?;
     resvg::render(&tree, Transform::from_scale(scale, scale), &mut pixmap.as_mut());
-    pixmap.encode_png().map_err(|e| e.to_string())
+    Ok((pixmap.width(), pixmap.height(), pixmap.take()))
 }
 
 #[cfg(test)]
@@ -54,12 +54,14 @@ mod tests {
 
     #[test]
     fn renders_flowchart() {
-        let png = png("flowchart LR; A-->B", "auto", 1.0).expect("render");
-        assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
+        let (w, h, pixels) = raster("flowchart LR; A-->B", "auto", 1.0).expect("render");
+        assert!(w > 0 && h > 0);
+        assert_eq!(pixels.len(), (w * h * 4) as usize);
+        assert!(pixels.iter().any(|&b| b != 0));
     }
 
     #[test]
     fn reports_syntax_errors() {
-        assert!(png("not a diagram %%%", "default", 1.0).is_err());
+        assert!(raster("not a diagram %%%", "default", 1.0).is_err());
     }
 }

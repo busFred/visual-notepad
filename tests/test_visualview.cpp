@@ -101,6 +101,25 @@ public:
             return r.firstLine;
         return document()->findBlock(hitTestRenderedRow(r, QPointF(12, y - top))).blockNumber();
     }
+
+    // Rows cover every line once, in order, and lines map back to them.
+    bool rowsConsistent() const
+    {
+        int next = 0;
+        for (int i = 0; i < rowCount(); ++i) {
+            const Row r = row(i);
+            if (r.firstLine != next || r.lastLine < r.firstLine)
+                return false;
+            for (int line = r.firstLine; line <= r.lastLine; ++line) {
+                if (rowOfLine(line) != i)
+                    return false;
+            }
+            next = r.lastLine + 1;
+        }
+        return next == document()->blockCount();
+    }
+
+    bool lineIsRendered(int line) const { return row(rowOfLine(line)).rendered; }
 };
 
 void wheel(TextView *view, qreal dy)
@@ -142,6 +161,10 @@ private Q_SLOTS:
     void scrollSyncIsContinuous_data();
     void scrollSyncIsContinuous();
     void scrollSyncEnds();
+    void editsReparseLater();
+    void caretMovesDontReparse();
+    void diagramsRenderInBackground();
+    void onlyParseSettingsReparse();
 
 private:
     // Source and preview of longDocument(), side by side; the source has
@@ -691,6 +714,108 @@ void TestVisualView::scrollSyncEnds()
         QCOMPARE(follower->scrollPixels(), y);
         leader->scrollToLine(0);
     }
+}
+
+void TestVisualView::editsReparseLater()
+{
+    openLongDocument();
+    m_preview->grab();
+    const int generation = m_longModel->parseGeneration();
+    // Edits shift the parsed blocks without a reparse; rows always match
+    // the document's lines.
+    QTextCursor c(m_longDoc);
+    c.insertText(QStringLiteral("Changed "));
+    QVERIFY(m_longModel->hasPendingEdits());
+    QVERIFY(m_preview->rowsConsistent());
+    // The edited paragraph keeps its last rendering meanwhile.
+    QVERIFY(m_preview->lineIsRendered(0));
+    c.movePosition(QTextCursor::End);
+    c.insertText(QStringLiteral("\n\n# New heading\n\nNew paragraph\n"));
+    QVERIFY(m_preview->rowsConsistent());
+    c.setPosition(m_longDoc->findBlockByNumber(5).position());
+    c.setPosition(m_longDoc->findBlockByNumber(70).position(), QTextCursor::KeepAnchor);
+    c.removeSelectedText();
+    QVERIFY(m_preview->rowsConsistent());
+    c.setPosition(m_longDoc->findBlockByNumber(2).position());
+    c.insertText(QStringLiteral("a\nb\nc\n\n"));
+    QVERIFY(m_preview->rowsConsistent());
+    QVERIFY(!m_preview->grab().isNull());
+    QCOMPARE(m_longModel->parseGeneration(), generation);
+    // Then one reparse once typing pauses.
+    QTRY_VERIFY(!m_longModel->hasPendingEdits());
+    QCOMPARE(m_longModel->parseGeneration(), generation + 1);
+    QVERIFY(m_preview->rowsConsistent());
+    QVERIFY(m_preview->lineIsRendered(0));
+    const int heading = m_longDoc->blockCount() - 4;
+    QCOMPARE(m_longDoc->findBlockByNumber(heading).text(), QStringLiteral("# New heading"));
+    QVERIFY(m_preview->lineIsRendered(heading));
+    QVERIFY(m_longModel->blockAt(heading) >= 0);
+}
+
+void TestVisualView::caretMovesDontReparse()
+{
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(9)));
+    QTest::keyClicks(m_view, QStringLiteral("New "));
+    // The paragraph being typed in stays open as source.
+    QVERIFY(m_view->expandedBlockCount() == 1);
+    QTRY_VERIFY(!m_model->hasPendingEdits());
+    QCOMPARE(m_view->expandedBlockCount(), 1);
+    const int generation = m_model->parseGeneration();
+    for (int line : {0, 9, 17, 25, 30, 4})
+        m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(line)));
+    QTest::keyClick(m_view, Qt::Key_Down);
+    QTest::keyClick(m_view, Qt::Key_Down);
+    QVERIFY(!m_view->grab().isNull());
+    QCOMPARE(m_model->parseGeneration(), generation);
+}
+
+void TestVisualView::diagramsRenderInBackground()
+{
+    const auto &blocks = m_model->blocks();
+    const core::Block &diagram = blocks[11];
+    QCOMPARE(QString::fromUtf8(diagram.lang.data(), diagram.lang.size()), QStringLiteral("mermaid"));
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.devicePixelRatio = 1.5; // Not used by other tests, so not rendered yet.
+    const QString source = m_model->sourceText(int(diagram.first_line), int(diagram.last_line));
+    const auto first = RenderedBlock::create(diagram, source, ctx);
+    // Until the worker is done the source stands in.
+    if (first->isPending())
+        QCOMPARE(first->kind(), RenderedBlock::Kind::Code);
+    QTRY_VERIFY(!RenderedBlock::create(diagram, source, ctx)->isPending());
+    const auto done = RenderedBlock::create(diagram, source, ctx);
+    QCOMPARE(done->kind(), RenderedBlock::Kind::Image);
+    QVERIFY(done->height() > 20);
+    // The view swaps its stand-in for the picture by itself (a new theme
+    // makes the diagram render again).
+    m_view->clearFocus();
+    QSignalSpy spy(&DiagramNotifier::instance(), &DiagramNotifier::ready);
+    const QString theme = Settings::instance().text(key::mermaidTheme);
+    Settings::instance().setValue(key::mermaidTheme, QStringLiteral("neutral"));
+    const QImage pending = m_view->grab().toImage();
+    QTRY_VERIFY(spy.count() > 0);
+    QTRY_VERIFY(m_view->grab().toImage() != pending);
+    Settings::instance().setValue(key::mermaidTheme, theme);
+}
+
+void TestVisualView::onlyParseSettingsReparse()
+{
+    m_model->blocks();
+    const int generation = m_model->parseGeneration();
+    QSignalSpy spy(m_model, &MarkdownModel::optionsChanged);
+    Settings &settings = Settings::instance();
+    const QVariant lineHeight = settings.value(key::textLineHeight);
+    settings.setValue(key::textLineHeight, lineHeight.toDouble() + 0.1);
+    QCOMPARE(spy.count(), 1); // Renders are redone...
+    m_view->grab();
+    QCOMPARE(m_model->parseGeneration(), generation); // ...without a parse.
+    settings.setValue(key::textLineHeight, lineHeight);
+    const bool breaks = settings.flag(key::breaks);
+    settings.setValue(key::breaks, !breaks);
+    m_view->grab();
+    QCOMPARE(m_model->parseGeneration(), generation + 1);
+    settings.setValue(key::breaks, breaks);
 }
 
 // Keep tests away from the user's settings file.

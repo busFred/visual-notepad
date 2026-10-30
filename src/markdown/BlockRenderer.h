@@ -7,6 +7,7 @@
 #include <QFont>
 #include <QImage>
 #include <QList>
+#include <QObject>
 #include <QPair>
 #include <QPointF>
 #include <QString>
@@ -40,6 +41,20 @@ struct RenderedSelection
     bool isEmpty() const { return ranges.isEmpty() && !whole; }
 };
 
+// Mermaid diagrams render on a worker thread (they can take a while);
+// ready is emitted on the GUI thread when one has finished, after which
+// RenderedBlock::create returns it. Blocks created before show the source.
+class DiagramNotifier : public QObject
+{
+    Q_OBJECT
+
+public:
+    static DiagramNotifier &instance();
+
+Q_SIGNALS:
+    void ready();
+};
+
 class RenderedBlock
 {
 public:
@@ -57,6 +72,10 @@ public:
     int hitTest(const QPointF &point) const;
     QString anchorAt(const QPointF &point) const;
     QString renderedText() const;
+    // A Mermaid diagram still rendering: shown as its source for now.
+    bool isPending() const { return m_pending; }
+    // Rough memory use in KiB, for caches.
+    int cost() const;
 
     // Where source lines start in the rendering: (line offset from the
     // block's first line, y from the block's top), ascending by line. Code
@@ -76,7 +95,9 @@ private:
     QString m_error;
     qreal m_height = 0;
     bool m_centered = false;
+    bool m_pending = false;
     std::vector<LineAnchor> m_lineAnchors;
+    mutable QString m_renderedText; // Cached; null until asked for.
 };
 
 } // namespace vn

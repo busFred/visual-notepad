@@ -9,13 +9,17 @@
 #include <KSyntaxHighlighting/Theme>
 
 #include <QAbstractTextDocumentLayout>
+#include <QCache>
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QImageReader>
 #include <QPainter>
 #include <QPainterPath>
+#include <QSet>
 #include <QTextBlock>
 #include <QTextLayout>
+#include <QThreadPool>
 #include <QUrl>
 
 #include <algorithm>
@@ -27,6 +31,109 @@ namespace {
 constexpr qreal codePadX = 10;
 constexpr qreal codePadY = 5;
 constexpr qreal blockGap = 4;
+
+qsizetype imageCost(const QImage &image)
+{
+    return qMax<qsizetype>(1, image.sizeInBytes() / 1024);
+}
+
+// Rendered math by TeX and style. Blocks are re-created after edits and
+// option changes, and MicroTeX is slow enough to notice; GUI thread only.
+QImage cachedMath(const QString &tex, const math::Style &style)
+{
+    static QCache<QString, QImage> cache(32 * 1024); // KiB
+    const QString key = QStringLiteral("%1|%2|%3|%4|")
+                            .arg(style.pixelSize)
+                            .arg(style.color.rgba())
+                            .arg(style.devicePixelRatio)
+                            .arg(int(style.display))
+                        + tex;
+    if (const QImage *hit = cache.object(key))
+        return *hit;
+    const QImage image = math::render(tex, style);
+    cache.insert(key, new QImage(image), imageCost(image));
+    return image;
+}
+
+// Local pictures, read and scaled to the column, by file version and size.
+QImage cachedLocalImage(const QString &path, qreal width, qreal dpr)
+{
+    static QCache<QString, QImage> cache(64 * 1024); // KiB
+    const QFileInfo info(path);
+    const QString key = QStringLiteral("%1|%2|%3|%4|")
+                            .arg(info.lastModified().toMSecsSinceEpoch())
+                            .arg(info.size())
+                            .arg(width)
+                            .arg(dpr)
+                        + path;
+    if (const QImage *hit = cache.object(key))
+        return *hit;
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    QImage image = reader.read();
+    if (image.isNull())
+        return image; // Not cached: the file may appear later.
+    // One image pixel per logical pixel, shrunk to fit the column.
+    if (image.width() > width) {
+        image = image.scaledToWidth(int(width * dpr), Qt::SmoothTransformation);
+        image.setDevicePixelRatio(dpr);
+    }
+    cache.insert(key, new QImage(image), imageCost(image));
+    return image;
+}
+
+// Mermaid diagrams by theme, scale and code; filled by worker threads.
+struct Diagram
+{
+    QImage image;
+    QString error;
+};
+
+QCache<QString, Diagram> &diagramCache()
+{
+    static QCache<QString, Diagram> cache(64 * 1024); // KiB
+    return cache;
+}
+
+// True with the diagram if it is rendered; otherwise starts rendering it
+// (once) on the thread pool and returns false.
+bool mermaidDiagram(const QString &code, const RenderContext &context, Diagram *result)
+{
+    static QSet<QString> pending;
+    const qreal dpr = context.devicePixelRatio;
+    const QString key = context.mermaidTheme + u'|' + QString::number(dpr) + u'|' + code;
+    if (const Diagram *hit = diagramCache().object(key)) {
+        *result = *hit;
+        return true;
+    }
+    if (pending.contains(key))
+        return false;
+    pending.insert(key);
+    // Made here, on the GUI thread, so the result is delivered there.
+    DiagramNotifier *notifier = &DiagramNotifier::instance();
+    QThreadPool::globalInstance()->start([key, dpr, notifier, utf8 = code.toUtf8(),
+                                          themeName = context.mermaidTheme.toUtf8()] {
+        // mermaid_image is plain Rust (no Qt), and the QImage is built off the GUI thread.
+        Diagram diagram;
+        try {
+            const core::RgbaImage raw = core::mermaid_image(rust::Str(utf8.constData(), utf8.size()),
+                                                            rust::Str(themeName.constData(), themeName.size()),
+                                                            float(dpr));
+            // tiny-skia pixmaps are premultiplied RGBA8888; copy so the image owns its pixels.
+            diagram.image = QImage(raw.pixels.data(), int(raw.width), int(raw.height), int(raw.width) * 4,
+                                   QImage::Format_RGBA8888_Premultiplied).copy();
+            diagram.image.setDevicePixelRatio(dpr);
+        } catch (const std::exception &e) { // rust::Error
+            diagram.error = QString::fromUtf8(e.what());
+        }
+        QMetaObject::invokeMethod(notifier, [key, diagram] {
+            diagramCache().insert(key, new Diagram(diagram), imageCost(diagram.image));
+            pending.remove(key);
+            Q_EMIT DiagramNotifier::instance().ready();
+        }, Qt::QueuedConnection);
+    });
+    return false;
+}
 
 // Rich text with images resolved locally: math placeholders and files.
 class ResourceDocument : public QTextDocument
@@ -53,26 +160,26 @@ protected:
             style.color = theme::color(theme::Role::text);
             style.devicePixelRatio = m_context.devicePixelRatio;
             style.display = display;
-            return math::render(math::withMacros(m_math.value(index)), style);
+            return keep(type, url, cachedMath(math::withMacros(m_math.value(index)), style));
         }
         const QString path = localPath(url);
         if (path.isEmpty())
             return QVariant();
-        QImageReader reader(path);
-        reader.setAutoTransform(true);
-        QImage image = reader.read();
+        const QImage image = cachedLocalImage(path, m_context.width, m_context.devicePixelRatio);
         if (image.isNull())
             return QVariant();
-        // One image pixel per logical pixel, shrunk to fit the column.
-        if (image.width() > m_context.width) {
-            const qreal dpr = m_context.devicePixelRatio;
-            image = image.scaledToWidth(int(m_context.width * dpr), Qt::SmoothTransformation);
-            image.setDevicePixelRatio(dpr);
-        }
-        return image;
+        return keep(type, url, image);
     }
 
 private:
+    // QTextDocument::resource() only remembers what the base loadResource
+    // loads; without this every paint would load the picture again.
+    QVariant keep(int type, const QUrl &url, const QImage &image)
+    {
+        addResource(type, url, image);
+        return image;
+    }
+
     QString localPath(const QUrl &url) const
     {
         if (url.scheme() == QLatin1String("file"))
@@ -97,7 +204,16 @@ QString hex(theme::Role role)
 QString styleSheet(const RenderContext &context)
 {
     const int px = QFontInfo(context.font).pixelSize();
-    return QStringLiteral(R"(
+    // Every rich block asks for it, nearly always with the same inputs.
+    static QString lastKey;
+    static QString lastSheet;
+    const QString key = QStringLiteral("%1|%2|%3|").arg(px).arg(context.lineHeight).arg(context.codeFont.family())
+                        + hex(theme::Role::accent) + hex(theme::Role::text) + hex(theme::Role::codeBlock)
+                        + hex(theme::Role::divider) + hex(theme::Role::sideBar) + hex(theme::Role::mutedText);
+    if (key == lastKey)
+        return lastSheet;
+    lastKey = key;
+    lastSheet = QStringLiteral(R"(
 h1 { font-size: %1px; font-weight: 600; margin: 0; }
 h2 { font-size: %2px; font-weight: 600; margin: 0; }
 h3 { font-size: %3px; font-weight: 600; margin: 0; }
@@ -125,23 +241,7 @@ div.footnote { font-size: %12px; color: #444444; }
         .arg(hex(theme::Role::sideBar), hex(theme::Role::mutedText))
         .arg(qRound(px * 0.9))
         .arg(qRound(context.lineHeight * 100));
-}
-
-QImage mermaidImage(const QString &code, const RenderContext &context, QString *error)
-{
-    const QByteArray utf8 = code.toUtf8();
-    const QByteArray themeName = context.mermaidTheme.toUtf8();
-    try {
-        const rust::Vec<uint8_t> png = core::mermaid_png(rust::Str(utf8.constData(), utf8.size()),
-                                                         rust::Str(themeName.constData(), themeName.size()),
-                                                         float(context.devicePixelRatio));
-        QImage image = QImage::fromData(png.data(), int(png.size()), "PNG");
-        image.setDevicePixelRatio(context.devicePixelRatio);
-        return image;
-    } catch (const std::exception &e) { // rust::Error
-        *error = QString::fromUtf8(e.what());
-        return {};
-    }
+    return lastSheet;
 }
 
 std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString &definition,
@@ -164,6 +264,13 @@ std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString
 
 } // namespace
 
+DiagramNotifier &DiagramNotifier::instance()
+{
+    // Never deleted: worker threads may post to it while the app quits.
+    static auto *notifier = new DiagramNotifier;
+    return *notifier;
+}
+
 std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, const QString &source,
                                                      const RenderContext &context)
 {
@@ -184,14 +291,17 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         style.devicePixelRatio = context.devicePixelRatio;
         style.display = true;
         r.m_kind = Kind::Image;
-        r.m_image = math::render(math::withMacros(text), style);
+        r.m_image = cachedMath(math::withMacros(text), style);
         r.m_centered = true;
         r.m_height = r.m_image.height() / r.m_image.devicePixelRatio() + 2 * codePadY + blockGap;
         return result;
     }
     case core::BlockKind::Code:
         if (lang.compare(QLatin1String("mermaid"), Qt::CaseInsensitive) == 0) {
-            r.m_image = mermaidImage(text, context, &r.m_error);
+            Diagram diagram;
+            r.m_pending = !mermaidDiagram(text, context, &diagram);
+            r.m_image = diagram.image;
+            r.m_error = diagram.error;
             if (!r.m_image.isNull()) {
                 r.m_kind = Kind::Image;
                 r.m_centered = true;
@@ -352,7 +462,20 @@ QString RenderedBlock::anchorAt(const QPointF &point) const
 
 QString RenderedBlock::renderedText() const
 {
-    return m_doc ? m_doc->toPlainText() : QString();
+    if (m_renderedText.isNull() && m_doc)
+        m_renderedText = m_doc->toPlainText();
+    return m_renderedText;
+}
+
+int RenderedBlock::cost() const
+{
+    // Laid-out text takes very roughly 128 bytes a character.
+    int kib = 1;
+    if (!m_image.isNull())
+        kib += int(m_image.sizeInBytes() / 1024);
+    if (m_doc)
+        kib += m_doc->characterCount() / 8;
+    return kib;
 }
 
 } // namespace vn

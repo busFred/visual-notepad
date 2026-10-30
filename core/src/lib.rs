@@ -62,6 +62,13 @@ mod ffi {
         front_matter: u8,
     }
 
+    /// A raster image: premultiplied RGBA8, `width * height * 4` bytes.
+    struct RgbaImage {
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    }
+
     /// A link, image or definition destination in the source text.
     struct LinkTarget {
         /// UTF-16 offset of the destination's first character.
@@ -75,8 +82,8 @@ mod ffi {
     extern "Rust" {
         fn outline(markdown: &str) -> Vec<Heading>;
         fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block>;
-        /// PNG bytes of a Mermaid diagram; throws with the parse error.
-        fn mermaid_png(code: &str, theme: &str, scale: f32) -> Result<Vec<u8>>;
+        /// Premultiplied RGBA pixels of a Mermaid diagram; throws with the parse error.
+        fn mermaid_image(code: &str, theme: &str, scale: f32) -> Result<RgbaImage>;
         /// GitHub-style anchor for a heading's text.
         fn heading_slug(text: &str) -> String;
         /// Canonical CommonMark form of a document (GFM, front matter, math).
@@ -94,8 +101,9 @@ fn blocks(markdown: &str, options: &ffi::RenderOptions) -> Vec<ffi::Block> {
     render::blocks(markdown, options)
 }
 
-fn mermaid_png(code: &str, theme: &str, scale: f32) -> Result<Vec<u8>, String> {
-    mermaid::png(code, theme, scale)
+fn mermaid_image(code: &str, theme: &str, scale: f32) -> Result<ffi::RgbaImage, String> {
+    let (width, height, pixels) = mermaid::raster(code, theme, scale)?;
+    Ok(ffi::RgbaImage { width, height, pixels })
 }
 
 fn heading_slug(text: &str) -> String {

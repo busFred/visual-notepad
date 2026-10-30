@@ -8,10 +8,11 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QRegularExpression>
-#include <QSet>
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QToolTip>
+
+#include <algorithm>
 
 namespace vn {
 
@@ -21,6 +22,8 @@ constexpr qreal sideMargin = 26;
 constexpr qreal topMargin = 12;
 constexpr qreal gapRowFactor = 0.6;
 constexpr qreal activeBarInset = 10;
+// Render cache budget per view, in KiB (see RenderedBlock::cost).
+constexpr int renderCacheKiB = 48 * 1024;
 
 bool sameChar(QChar a, QChar b)
 {
@@ -55,6 +58,7 @@ int renderedOffsetFor(const QString &rendered, const QString &source, int source
 VisualView::VisualView(MarkdownModel *model, QWidget *parent)
     : TextView(model->document(), parent)
     , m_model(model)
+    , m_cache(renderCacheKiB)
 {
     setLineNumbersVisible(false);
     // The edited block has its own shading instead.
@@ -62,14 +66,22 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
     setTextMargins(sideMargin, sideMargin, topMargin);
     viewport()->setMouseTracking(true);
     connect(model, &MarkdownModel::optionsChanged, this, [this] {
-        m_cache.clear();
+        clearRenderCache();
         relayout();
     });
     // Rendered blocks have the theme's colours baked in.
     connect(&theme::notifier(), &theme::Notifier::changed, this, [this] {
-        m_cache.clear();
+        clearRenderCache();
         relayout();
     });
+    // Typing settled: one visible view asks for the reparse, every view
+    // then rebuilds its rows (hidden ones when shown).
+    connect(model, &MarkdownModel::reparseDue, this, [this] {
+        if (isVisible())
+            m_model->flush();
+    });
+    connect(model, &MarkdownModel::reparsed, this, &VisualView::relayout);
+    connect(&DiagramNotifier::instance(), &DiagramNotifier::ready, this, &VisualView::diagramsReady);
     // Rows are built when the view is first shown (see showEvent).
 }
 
@@ -78,7 +90,30 @@ void VisualView::setBaseDirectory(const QString &directory)
     if (m_baseDirectory == directory)
         return;
     m_baseDirectory = directory;
+    clearRenderCache();
+    relayout();
+}
+
+void VisualView::clearRenderCache()
+{
     m_cache.clear();
+    m_pendingKeys.clear();
+    m_spanRenders.clear();
+}
+
+void VisualView::diagramsReady()
+{
+    // Drop the source stand-ins of diagrams so they render again, now as
+    // pictures (or errors).
+    if (m_pendingKeys.isEmpty())
+        return;
+    for (const QString &key : std::as_const(m_pendingKeys))
+        m_cache.remove(key);
+    m_pendingKeys.clear();
+    for (Render &render : m_spanRenders) {
+        if (render.block && render.block->isPending())
+            render = {};
+    }
     relayout();
 }
 
@@ -105,71 +140,98 @@ void VisualView::rowsMayHaveChanged()
 void VisualView::showEvent(QShowEvent *event)
 {
     TextView::showEvent(event);
-    if (m_rowsStale) {
-        m_rowsStale = false;
+    // Edits made while hidden are parsed once now rather than shown stale.
+    m_model->flush();
+    if (m_rowsStale)
         relayout();
-    }
 }
 
 void VisualView::rebuildRows()
 {
     const int lines = document()->blockCount();
-    const auto &blocks = m_model->blocks();
+    const auto &spans = m_model->spans();
 
     // Blocks open for editing only while this view has focus, so a document
     // opens (and stays, when you look elsewhere) fully rendered.
     // While the mouse is selecting, rows stay as they are: blocks must not
     // swap to source and shift under the pointer mid-drag. mouseReleaseEvent
     // applies the expansion once the selection is made.
-    if (isMouseSelecting() && !m_rows.empty() && !m_rowsStale
-        && int(m_lineToRow.size()) == document()->blockCount())
+    if (isMouseSelecting() && !m_rows.empty() && !m_rowsStale && int(m_lineToRow.size()) == lines
+        && m_rowsRevision == m_model->revision())
         return;
 
-    QSet<int> caretLines;
+    // Line ranges carets touch, widened to whole spans, sorted and merged.
+    std::vector<std::pair<int, int>> expanded;
     if (!isReadOnly() && hasFocus()) {
         for (const QTextCursor &c : cursors()) {
-            const int from = document()->findBlock(c.selectionStart()).blockNumber();
-            const int to = document()->findBlock(c.selectionEnd()).blockNumber();
-            for (int line = from; line <= to; ++line)
-                caretLines.insert(line);
+            int from = document()->findBlock(c.selectionStart()).blockNumber();
+            int to = document()->findBlock(c.selectionEnd()).blockNumber();
+            if (const int s = m_model->spanAt(from); s >= 0)
+                from = spans[s].first;
+            if (const int s = m_model->spanAt(to); s >= 0)
+                to = spans[s].last;
+            expanded.push_back({from, to});
         }
+        std::sort(expanded.begin(), expanded.end());
+        std::vector<std::pair<int, int>> merged;
+        for (const auto &range : expanded) {
+            if (!merged.empty() && range.first <= merged.back().second)
+                merged.back().second = qMax(merged.back().second, range.second);
+            else
+                merged.push_back(range);
+        }
+        expanded = std::move(merged);
     }
+    if (!m_rowsStale && m_rowsRevision == m_model->revision() && int(m_lineToRow.size()) == lines
+        && expanded == m_rowsExpanded)
+        return;
 
     m_rows.clear();
+    m_rows.reserve(spans.size() * 2 + 16);
     m_expandedBlocks.clear();
     m_lineToRow.assign(lines, 0);
+    // Queries come in ascending line order, so one pass over the ranges.
+    size_t next = 0;
+    const auto touched = [&](int first, int last) {
+        while (next < expanded.size() && expanded[next].second < first)
+            ++next;
+        return next < expanded.size() && expanded[next].first <= last;
+    };
+    size_t s = 0;
     int line = 0;
     while (line < lines) {
-        const int b = m_model->blockAt(line);
-        if (b >= 0) {
-            const int first = int(blocks[b].first_line);
-            const int last = qMin(int(blocks[b].last_line), lines - 1);
-            bool expanded = false;
-            for (int l = first; l <= last && !expanded; ++l)
-                expanded = caretLines.contains(l);
-            if (expanded) {
-                m_expandedBlocks.insert(b);
-                for (int l = first; l <= last; ++l) {
+        while (s < spans.size() && spans[s].first < line)
+            ++s;
+        if (s < spans.size() && spans[s].first == line) {
+            const MarkdownModel::Span &span = spans[s];
+            const int last = qMin(span.last, lines - 1);
+            const bool open = touched(line, last);
+            if (open)
+                m_expandedBlocks.insert(int(s));
+            // Edited lines with nothing parsed to stand in show as source
+            // until the reparse.
+            if (open || (span.block < 0 && span.previous < 0)) {
+                for (int l = line; l <= last; ++l) {
                     m_lineToRow[l] = int(m_rows.size());
-                    m_rows.push_back({{l, l, false}, b});
+                    m_rows.push_back({{l, l, false}, int(s)});
                 }
             } else {
-                for (int l = first; l <= last; ++l)
+                for (int l = line; l <= last; ++l)
                     m_lineToRow[l] = int(m_rows.size());
-                m_rows.push_back({{first, last, true}, b});
+                m_rows.push_back({{line, last, true}, int(s)});
             }
             line = last + 1;
+            ++s;
             continue;
         }
         // A line outside every block (blank): a small gap unless edited.
         m_lineToRow[line] = int(m_rows.size());
-        m_rows.push_back({{line, line, !caretLines.contains(line)}, -1});
+        m_rows.push_back({{line, line, !touched(line, line)}, -1});
         ++line;
     }
-
-    // Drop renders for blocks that no longer exist.
-    if (m_cache.size() > int(blocks.size()) * 2 + 64)
-        m_cache.clear();
+    m_rowsStale = false;
+    m_rowsRevision = m_model->revision();
+    m_rowsExpanded = std::move(expanded);
 }
 
 int VisualView::rowCount() const
@@ -189,10 +251,10 @@ int VisualView::rowOfLine(int line) const
     return line >= 0 && line < int(m_lineToRow.size()) ? m_lineToRow[line] : 0;
 }
 
-int VisualView::blockForRow(const Row &r) const
+int VisualView::spanForRow(const Row &r) const
 {
     const int index = rowOfLine(r.firstLine);
-    return index < int(m_rows.size()) ? m_rows[index].block : -1;
+    return index < int(m_rows.size()) ? m_rows[index].span : -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -214,53 +276,83 @@ RenderContext VisualView::context() const
     return ctx;
 }
 
-const RenderedBlock *VisualView::rendered(int blockIndex)
+const RenderedBlock *VisualView::rendered(int index)
 {
-    const auto &blocks = m_model->blocks();
-    if (blockIndex < 0 || blockIndex >= int(blocks.size()))
+    const auto &spans = m_model->spans();
+    if (index < 0 || index >= int(spans.size()))
         return nullptr;
-    const core::Block &block = blocks[blockIndex];
-    const QString source = m_model->sourceText(int(block.first_line), int(block.last_line));
+    const MarkdownModel::Span &span = spans[index];
+    // An edited block shows its last parse until the reparse.
+    const int blockIndex = span.block >= 0 ? span.block : span.previous;
+    if (blockIndex < 0)
+        return nullptr;
+
     const RenderContext ctx = context();
-    // Identical blocks render identically, so the source is the cache key.
-    const QString key = QStringLiteral("%1|%2|%3|%4|%5|%6|")
-                            .arg(int(ctx.width))
-                            .arg(ctx.font.pointSizeF())
-                            .arg(ctx.font.family())
-                            .arg(ctx.lineHeight)
-                            .arg(int(block.kind))
-                            .arg(ctx.codeFont.family())
-                        + source;
-    auto it = m_cache.find(key);
-    if (it == m_cache.end())
-        it = m_cache.insert(key, std::shared_ptr<RenderedBlock>(RenderedBlock::create(block, source, ctx)));
-    return it->get();
+    if (m_spanRendersRevision != m_model->revision() || m_spanRendersWidth != ctx.width
+        || m_spanRendersDpr != ctx.devicePixelRatio || m_spanRenders.size() != spans.size()) {
+        m_spanRenders.assign(spans.size(), {});
+        m_spanRendersRevision = m_model->revision();
+        m_spanRendersWidth = ctx.width;
+        m_spanRendersDpr = ctx.devicePixelRatio;
+    }
+    Render &memo = m_spanRenders[index];
+    if (memo.block)
+        return memo.block.get();
+
+    const core::Block &block = m_model->parsedBlock(blockIndex);
+    const QString source = m_model->sourceText(span.first, span.last);
+    // Identical blocks render identically, so the source (by hash, checked
+    // on a hit) is the key. A stand-in pairs an old parse with new source:
+    // never mistake it for the real render of that source.
+    QString key = QStringLiteral("%1|%2|%3|%4|%5|%6|%7|%8|%9")
+                      .arg(int(ctx.width))
+                      .arg(ctx.font.pointSizeF())
+                      .arg(ctx.font.family())
+                      .arg(ctx.lineHeight)
+                      .arg(int(block.kind))
+                      .arg(ctx.codeFont.family())
+                      .arg(ctx.devicePixelRatio)
+                      .arg(source.size())
+                      .arg(qHash(source));
+    if (span.block < 0)
+        key += QStringLiteral("|stale:%1:%2").arg(m_model->parseGeneration()).arg(blockIndex);
+    const Render *hit = m_cache.object(key);
+    if (hit && hit->source == source) {
+        memo = *hit;
+    } else {
+        memo = {source, key, std::shared_ptr<RenderedBlock>(RenderedBlock::create(block, source, ctx))};
+        if (memo.block->isPending())
+            m_pendingKeys.insert(key);
+        m_cache.insert(key, new Render(memo), memo.block->cost() + int(source.size() / 512));
+    }
+    return memo.block.get();
 }
 
 const RenderedBlock *VisualView::renderedForRow(const Row &r)
 {
-    return rendered(blockForRow(r));
+    return rendered(spanForRow(r));
 }
 
 qreal VisualView::renderedRowHeight(const Row &r, qreal)
 {
-    const int b = blockForRow(r);
-    if (b < 0)
+    const int s = spanForRow(r);
+    if (s < 0)
         return lineHeight() * gapRowFactor;
-    const RenderedBlock *block = rendered(b);
+    const RenderedBlock *block = rendered(s);
     return block ? block->height() : lineHeight();
 }
 
 void VisualView::paintRenderedRow(QPainter &painter, const Row &r, const QRectF &rect)
 {
-    if (const RenderedBlock *block = renderedForRow(r))
-        block->paint(painter, rect.topLeft(), rect.width(), selectionForRow(r, block));
+    const int s = spanForRow(r);
+    if (const RenderedBlock *block = rendered(s))
+        block->paint(painter, rect.topLeft(), rect.width(), selectionForRow(r, block, m_spanRenders[s].source));
 }
 
-RenderedSelection VisualView::selectionForRow(const Row &r, const RenderedBlock *block) const
+RenderedSelection VisualView::selectionForRow(const Row &r, const RenderedBlock *block, const QString &source) const
 {
     RenderedSelection result;
-    if (!block || block->kind() == RenderedBlock::Kind::Empty || blockForRow(r) < 0)
+    if (!block || block->kind() == RenderedBlock::Kind::Empty || spanForRow(r) < 0 || !hasSelection())
         return result;
     QTextDocument *doc = document();
     const QTextBlock first = doc->findBlockByNumber(r.firstLine);
@@ -268,7 +360,6 @@ RenderedSelection VisualView::selectionForRow(const Row &r, const RenderedBlock 
     const int rowStart = first.position();
     const int rowEnd = last.position() + last.length() - 1; // Without the line break.
 
-    QString source;
     QString text;
     for (const QTextCursor &c : cursors()) {
         if (!c.hasSelection())
@@ -291,10 +382,9 @@ RenderedSelection VisualView::selectionForRow(const Row &r, const RenderedBlock 
             result.ranges.append({qMax(a, rowStart) - rowStart, qMin(b, rowEnd) - rowStart});
             break;
         case RenderedBlock::Kind::Rich: {
-            if (source.isNull()) {
-                source = m_model->sourceText(r.firstLine, r.lastLine);
+            // Only a selection end inside the block needs the (linear) mapping.
+            if (text.isNull())
                 text = block->renderedText();
-            }
             const int from = a <= rowStart ? 0 : renderedOffsetFor(text, source, a - rowStart);
             const int to = b >= rowEnd ? int(text.size()) : renderedOffsetFor(text, source, b - rowStart);
             if (to > from)
@@ -338,8 +428,9 @@ void VisualView::paintLineBackground(QPainter &painter, int line, const QRectF &
     // a navy bar, as in the mockup.
     if (!m_highlightActiveBlock)
         return;
-    const int b = m_model->blockAt(line);
-    if (b < 0 || !m_expandedBlocks.contains(b))
+    const int index = rowOfLine(line);
+    const int s = index < int(m_rows.size()) ? m_rows[index].span : -1;
+    if (s < 0 || !m_expandedBlocks.contains(s))
         return;
     const qreal left = textLeft() - activeBarInset;
     const QRectF area(left, rect.top(), viewport()->width() - left - sideMargin + activeBarInset, rect.height());
@@ -351,19 +442,19 @@ int VisualView::hitTestRenderedRow(const Row &r, const QPointF &point)
 {
     QTextDocument *doc = document();
     const QTextBlock first = doc->findBlockByNumber(r.firstLine);
-    const int b = blockForRow(r);
-    const RenderedBlock *block = rendered(b);
-    if (b < 0 || !block)
+    const int s = spanForRow(r);
+    const RenderedBlock *block = rendered(s);
+    if (s < 0 || !block)
         return first.position();
 
-    const auto &info = m_model->blocks()[b];
+    const MarkdownModel::Span &span = m_model->spans()[s];
+    const auto &info = m_model->parsedBlock(span.block >= 0 ? span.block : span.previous);
     switch (info.kind) {
     case core::BlockKind::Html: {
         const int pos = block->hitTest(point);
         if (pos < 0)
             return first.position();
-        const QString source = m_model->sourceText(r.firstLine, r.lastLine);
-        return first.position() + sourceOffsetFor(block->renderedText().left(pos), source);
+        return first.position() + sourceOffsetFor(block->renderedText().left(pos), m_spanRenders[s].source);
     }
     case core::BlockKind::Code:
     case core::BlockKind::FrontMatter: {
@@ -431,6 +522,8 @@ void VisualView::toggleTask(int line)
     c.setPosition(block.position() + m.capturedStart(1));
     c.setPosition(block.position() + m.capturedEnd(1), QTextCursor::KeepAnchor);
     c.insertText(m.captured(1) == QLatin1String(" ") ? QStringLiteral("x") : QStringLiteral(" "));
+    // A click is one edit, not typing: show the new state now.
+    m_model->flush();
 }
 
 void VisualView::mouseMoveEvent(QMouseEvent *event)
@@ -474,7 +567,7 @@ void VisualView::focusOutEvent(QFocusEvent *event)
 void VisualView::changeEvent(QEvent *event)
 {
     if (event->type() == QEvent::FontChange)
-        m_cache.clear();
+        clearRenderCache();
     TextView::changeEvent(event);
 }
 

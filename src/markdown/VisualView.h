@@ -7,9 +7,12 @@
 #include "../editor/TextView.h"
 #include "BlockRenderer.h"
 
-#include <QHash>
+#include <QCache>
+#include <QSet>
 
 #include <memory>
+#include <utility>
+#include <vector>
 
 namespace vn {
 
@@ -63,25 +66,47 @@ private:
     struct RowInfo
     {
         Row row;
-        int block = -1; // Block index for rendered blocks, -1 for gaps.
+        int span = -1; // Index into the model's spans, -1 for gaps.
+    };
+    // A render and the source it was made from.
+    struct Render
+    {
+        QString source;
+        QString key;
+        std::shared_ptr<RenderedBlock> block;
     };
 
     void rebuildRows();
     RenderContext context() const;
-    const RenderedBlock *rendered(int blockIndex);
+    const RenderedBlock *rendered(int span);
     const RenderedBlock *renderedForRow(const Row &row);
-    int blockForRow(const Row &row) const;
+    int spanForRow(const Row &row) const;
     void toggleTask(int line);
-    RenderedSelection selectionForRow(const Row &row, const RenderedBlock *block) const;
+    RenderedSelection selectionForRow(const Row &row, const RenderedBlock *block, const QString &source) const;
+    void clearRenderCache();
+    void diagramsReady();
 
     MarkdownModel *m_model;
     QString m_baseDirectory;
     bool m_highlightActiveBlock = true;
     std::vector<RowInfo> m_rows;
     std::vector<int> m_lineToRow;
-    QSet<int> m_expandedBlocks;
+    QSet<int> m_expandedBlocks; // Span indices.
     bool m_rowsStale = true;
-    QHash<QString, std::shared_ptr<RenderedBlock>> m_cache;
+    // What m_rows were built from, so caret moves that open or close
+    // nothing don't rebuild them.
+    int m_rowsRevision = -1;
+    std::vector<std::pair<int, int>> m_rowsExpanded; // Line ranges shown as source.
+
+    // Renders by size, fonts and source; bounded by cost (KiB).
+    QCache<QString, Render> m_cache;
+    QSet<QString> m_pendingKeys; // Diagrams still rendering.
+    // The render of each span, for the model revision, width and pixel
+    // ratio below, so painting doesn't rebuild sources and keys.
+    std::vector<Render> m_spanRenders;
+    int m_spanRendersRevision = -1;
+    qreal m_spanRendersWidth = -1;
+    qreal m_spanRendersDpr = -1;
 };
 
 } // namespace vn
