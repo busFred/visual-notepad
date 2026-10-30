@@ -200,6 +200,8 @@ private:
     // What the outline shows: the file and its TextFile::changeSerial().
     QPointer<TextFile> m_outlineFile;
     quint64 m_outlineSerial = 0;
+    // Cached key::autoSave, read on every keystroke otherwise.
+    QString m_autoSaveMode;
 
     QHash<EditorGroup *, QToolButton *> m_modeButtons;
     QActionGroup *m_modeGroup;

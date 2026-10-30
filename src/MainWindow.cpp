@@ -169,6 +169,7 @@ MainWindow::MainWindow(QWidget *parent)
     });
 
     m_zoomPercent = Settings::instance().number(key::zoom);
+    m_autoSaveMode = Settings::instance().text(key::autoSave);
     m_outlineTimer->setSingleShot(true);
     m_outlineTimer->setInterval(250);
     connect(m_outlineTimer, &QTimer::timeout, this, &MainWindow::updateOutline);
@@ -982,19 +983,22 @@ void MainWindow::newFile()
 
 bool MainWindow::openFile(const QString &path)
 {
-    const QString canonical = QFileInfo(path).canonicalFilePath();
-    for (EditorGroup *group : groups()) {
-        for (int i = 0; i < group->count(); ++i) {
-            if (!canonical.isEmpty() && QFileInfo(group->tab(i)->path()).canonicalFilePath() == canonical) {
-                activateGroup(group);
-                group->setCurrentIndex(i);
-                return true;
+    // Open files are registered under their canonical path: one lookup
+    // instead of resolving every open tab's path.
+    std::shared_ptr<TextFile> file = TextFile::find(path);
+    if (file && !QFileInfo(path).canonicalFilePath().isEmpty()) {
+        for (EditorGroup *group : groups()) {
+            for (int i = 0; i < group->count(); ++i) {
+                if (group->tab(i)->file() == file.get()) {
+                    activateGroup(group);
+                    group->setCurrentIndex(i);
+                    return true;
+                }
             }
         }
     }
 
     // Open in another window: a new tab on the same document.
-    std::shared_ptr<TextFile> file = TextFile::find(path);
     if (!file) {
         file = TextFile::create();
         if (!file->load(path)) {
@@ -1058,7 +1062,7 @@ void MainWindow::addTab(DocumentTab *tab, EditorGroup *group, int index)
     }
     connect(saveTimer, &QTimer::timeout, this, [this, tab] { autoSave(tab); });
     connect(tab, &DocumentTab::textChanged, this, [this, tab, saveTimer] {
-        if (Settings::instance().text(key::autoSave) == QLatin1String("afterDelay") && tab->isModified()
+        if (m_autoSaveMode == QLatin1String("afterDelay") && tab->isModified()
             && !tab->path().isEmpty())
             saveTimer->start();
     });
@@ -1507,18 +1511,28 @@ void MainWindow::showLanguageMenu()
     add(&menu, tr("Plain Text"), QString());
     menu.addSeparator();
 
-    std::map<QString, QList<KSyntaxHighlighting::Definition>> sections;
-    for (const auto &def : theme::syntaxRepository().definitions()) {
-        if (!def.isHidden())
-            sections[def.translatedSection()].append(def);
-    }
-    for (auto &[section, defs] : sections) {
-        std::sort(defs.begin(), defs.end(), [](const auto &a, const auto &b) {
-            return a.translatedName().localeAwareCompare(b.translatedName()) < 0;
-        });
+    // About 600 definitions, sorted by locale once rather than on every open.
+    struct Language
+    {
+        QString text;
+        QString name;
+    };
+    static const std::map<QString, QList<Language>> sections = [] {
+        std::map<QString, QList<Language>> result;
+        for (const auto &def : theme::syntaxRepository().definitions()) {
+            if (!def.isHidden())
+                result[def.translatedSection()].append({def.translatedName(), def.name()});
+        }
+        for (auto &[section, languages] : result) {
+            std::sort(languages.begin(), languages.end(),
+                      [](const Language &a, const Language &b) { return a.text.localeAwareCompare(b.text) < 0; });
+        }
+        return result;
+    }();
+    for (const auto &[section, languages] : sections) {
         QMenu *submenu = menu.addMenu(section.isEmpty() ? tr("Other") : section);
-        for (const auto &def : defs)
-            add(submenu, def.translatedName(), def.name());
+        for (const Language &language : languages)
+            add(submenu, language.text, language.name);
     }
     popupAboveCell(&menu, m_language);
 }
@@ -1566,7 +1580,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
 
 bool MainWindow::event(QEvent *event)
 {
-    if (event->type() == QEvent::WindowDeactivate && Settings::instance().text(key::autoSave) == QLatin1String("onFocusChange"))
+    if (event->type() == QEvent::WindowDeactivate && m_autoSaveMode == QLatin1String("onFocusChange"))
         autoSaveAll();
     // Like VS Code's TextFileEditorTracker: look at the disk again on return,
     // in case a change notification was missed.
@@ -1607,7 +1621,8 @@ void MainWindow::autoSaveAll()
 
 void MainWindow::applyAutoSave()
 {
-    const QString mode = Settings::instance().text(key::autoSave);
+    m_autoSaveMode = Settings::instance().text(key::autoSave);
+    const QString &mode = m_autoSaveMode;
     for (DocumentTab *tab : tabs()) {
         QTimer *timer = autoSaveTimer(tab);
         if (!timer)
@@ -1848,7 +1863,7 @@ void MainWindow::onCurrentTabChanged()
     DocumentTab *tab = currentTab();
     // Not for a tab that was just closed or moved away: its changes were discarded.
     if (m_previousTab && m_previousTab != tab && groupOf(m_previousTab)
-        && Settings::instance().text(key::autoSave) == QLatin1String("onFocusChange"))
+        && m_autoSaveMode == QLatin1String("onFocusChange"))
         autoSave(m_previousTab);
     m_previousTab = tab;
     if (tab)
