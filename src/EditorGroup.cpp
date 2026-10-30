@@ -104,11 +104,15 @@ protected:
     void paintEvent(QPaintEvent *event) override
     {
         QTabBar::paintEvent(event);
+        // Nearly always nothing is multi-selected: skip the painter then.
+        const QList<int> indexes = m_group->extraSelectedIndexes();
+        if (indexes.isEmpty())
+            return;
         QColor color = theme::color(theme::Role::selection);
         color.setAlphaF(0.35);
         QPainter painter(this);
-        for (int i = 0; i < count(); ++i) {
-            if (i != currentIndex() && m_group->isSelected(m_group->tab(i)))
+        for (const int i : indexes) {
+            if (i != currentIndex())
                 painter.fillRect(tabRect(i), color);
         }
     }
@@ -380,6 +384,16 @@ QList<DocumentTab *> EditorGroup::selectedTabs() const
 bool EditorGroup::isSelected(DocumentTab *tab) const
 {
     return tab && indexOf(tab) >= 0 && (tab == currentTab() || m_selection.contains(tab));
+}
+
+QList<int> EditorGroup::extraSelectedIndexes() const
+{
+    QList<int> result;
+    for (const QPointer<DocumentTab> &tab : m_selection) {
+        if (const int index = tab ? indexOf(tab) : -1; index >= 0)
+            result.append(index);
+    }
+    return result;
 }
 
 void EditorGroup::setSelection(DocumentTab *active, const QList<DocumentTab *> &others)

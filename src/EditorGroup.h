@@ -66,6 +66,9 @@ public:
     // any other way clears it.
     QList<DocumentTab *> selectedTabs() const;
     bool isSelected(DocumentTab *tab) const;
+    // Strip indexes of the tabs picked besides the current one (what the tab
+    // bar highlights), found in one pass over the selection.
+    QList<int> extraSelectedIndexes() const;
     // A left click on the tab at `index` with `modifiers`
     // (multiEditorTabsControl.ts handleClickOrTouch()); plain clicks on a
     // selected tab keep the selection until releaseTab() so it can be dragged.
