@@ -3,6 +3,8 @@
 #include "Settings.h"
 
 #include <QHash>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QSet>
 #include <QStringConverter>
 #include <QStringDecoder>
@@ -121,7 +123,10 @@ QString lookup(const QString &name)
 bool decoderExists(const QString &name)
 {
     // Constructing decoders for every codec is not free; remember the answers.
+    // detect() may run on a worker thread (see TextFile::loadAsync).
+    static QMutex mutex;
     static QHash<QString, bool> cache;
+    const QMutexLocker locker(&mutex);
     auto it = cache.find(name);
     if (it == cache.end())
         it = cache.insert(name, QStringDecoder(codecName(name).constData()).isValid());
@@ -316,7 +321,17 @@ QString legacy()
     return system;
 }
 
+DetectOptions detectOptions()
+{
+    return {legacy(), Settings::instance().flag(key::guessEncoding)};
+}
+
 QString detect(const QByteArray &bytes)
+{
+    return detect(bytes, detectOptions());
+}
+
+QString detect(const QByteArray &bytes, const DetectOptions &options)
 {
     for (const QString &name : {utf8Bom, utf16LE, utf16BE}) {
         if (bytes.startsWith(bom(name)))
@@ -326,16 +341,16 @@ QString detect(const QByteArray &bytes)
     // like Notepad.
     const QByteArrayView view(bytes);
     if (view.left(binarySniffSize).contains('\0'))
-        return legacy();
+        return options.legacy;
     // Validates without decoding; the caller decodes once with the result.
     if (view.isValidUtf8())
         return utf8;
-    if (Settings::instance().flag(key::guessEncoding)) {
+    if (options.guess) {
         const QString guessed = guess(bytes);
         if (!guessed.isEmpty())
             return guessed;
     }
-    return legacy();
+    return options.legacy;
 }
 
 } // namespace vn::encoding

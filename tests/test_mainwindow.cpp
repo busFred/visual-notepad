@@ -306,9 +306,18 @@ void TestMainWindow::largeOutlineIsParsedOffThread()
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     auto *outline = window.findChild<QTreeWidget *>();
     QVERIFY(window.openFile(small));
-    QVERIFY(window.openFile(path));
-    QVERIFY(window.outlineBusy());
-    QCOMPARE(outline->topLevelItemCount(), 0); // not the small file's
+    // A file this big loads on a worker thread; its tab, and with it the
+    // parse, follows from the event loop.
+    bool opened = false, busy = false;
+    int itemsAtOpen = -1;
+    QVERIFY(window.openFile(path, [&](vn::DocumentTab *) {
+        opened = true;
+        busy = window.outlineBusy();
+        itemsAtOpen = outline->topLevelItemCount();
+    }));
+    QTRY_VERIFY(opened);
+    QVERIFY(busy);
+    QCOMPARE(itemsAtOpen, 0); // not the small file's
     QTRY_VERIFY(!window.outlineBusy());
     QCOMPARE(outline->topLevelItemCount(), 20000);
 

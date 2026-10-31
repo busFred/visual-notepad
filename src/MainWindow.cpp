@@ -212,6 +212,10 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    // Stop the loads: no tab will come, and a worker must not outlive its file.
+    for (const auto &entry : std::as_const(m_pendingOpens))
+        entry->file->cancelLoad();
+    m_pendingOpens.clear();
     SessionManager::instance().unregisterWindow(this);
     // Child widgets are destroyed after this destructor; stop them signalling
     // back into a half-destroyed window (e.g. a tab bar's currentChanged).
@@ -1004,7 +1008,7 @@ void MainWindow::newFile()
     addTab(new DocumentTab);
 }
 
-bool MainWindow::openFile(const QString &path)
+bool MainWindow::openFile(const QString &path, std::function<void(DocumentTab *)> opened)
 {
     // Open files are registered under their canonical path: one lookup
     // instead of resolving every open tab's path.
@@ -1015,15 +1019,40 @@ bool MainWindow::openFile(const QString &path)
                 if (group->tab(i)->file() == file.get()) {
                     activateGroup(group);
                     group->setCurrentIndex(i);
+                    if (opened)
+                        opened(group->tab(i));
                     return true;
                 }
             }
         }
     }
 
+    // Already on its way to a tab (here or in another window).
+    if (!file && TextFile::isLoadingPath(path))
+        return true;
+
     // Open in another window: a new tab on the same document.
     if (!file) {
         file = TextFile::create();
+        if (QFileInfo(path).size() >= TextFile::largeLoadBytes) {
+            auto pending = std::make_shared<PendingOpen>();
+            pending->file = file;
+            pending->path = path;
+            pending->opened = std::move(opened);
+            m_pendingOpens.append(pending);
+            // Cancelled with the window (~MainWindow); the entry holds the file.
+            connect(file.get(), &TextFile::loadFinished, this,
+                    [this, weak = std::weak_ptr<PendingOpen>(pending)](bool ok) {
+                        if (const auto entry = weak.lock()) {
+                            entry->finished = true;
+                            entry->ok = ok;
+                        }
+                        finishPendingOpens();
+                    });
+            statusBar()->showMessage(tr("Opening %1...").arg(QDir::toNativeSeparators(path)));
+            file->loadAsync(path);
+            return true;
+        }
         if (!file->load(path)) {
             Settings::instance().removeRecentFile(path);
             QMessageBox::warning(this, tr("Open File"),
@@ -1031,9 +1060,40 @@ bool MainWindow::openFile(const QString &path)
             return false;
         }
     }
-    addTab(new DocumentTab(file));
+    auto *tab = new DocumentTab(file);
+    addTab(tab);
     Settings::instance().addRecentFile(QFileInfo(path).absoluteFilePath());
+    if (opened)
+        opened(tab);
     return true;
+}
+
+// Tabs for the files that have loaded, but not past one still loading that
+// was asked for earlier.
+void MainWindow::finishPendingOpens()
+{
+    while (!m_pendingOpens.isEmpty() && m_pendingOpens.first()->finished) {
+        const std::shared_ptr<PendingOpen> entry = m_pendingOpens.takeFirst();
+        if (m_pendingOpens.isEmpty())
+            statusBar()->clearMessage();
+        if (!entry->ok) {
+            Settings::instance().removeRecentFile(entry->path);
+            QMessageBox::warning(this, tr("Open File"),
+                                 tr("Could not open %1:\n%2")
+                                     .arg(QDir::toNativeSeparators(entry->path), entry->file->errorString()));
+            continue;
+        }
+        // Another window may have opened the same file meanwhile.
+        if (TextFile::find(entry->path) != entry->file) {
+            openFile(entry->path, std::move(entry->opened));
+            continue;
+        }
+        auto *tab = new DocumentTab(entry->file);
+        addTab(tab);
+        Settings::instance().addRecentFile(QFileInfo(entry->path).absoluteFilePath());
+        if (entry->opened)
+            entry->opened(tab);
+    }
 }
 
 void MainWindow::adoptTab(DocumentTab *tab)
@@ -2146,8 +2206,10 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
         QDesktopServices::openUrl(QUrl::fromLocalFile(path));
         return;
     }
-    if (openFile(path) && !fragment.isEmpty())
-        openLink(currentTab(), u'#' + fragment);
+    openFile(path, [this, fragment](DocumentTab *opened) {
+        if (!fragment.isEmpty())
+            openLink(opened, u'#' + fragment);
+    });
 }
 
 void MainWindow::updateModeControls()

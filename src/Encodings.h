@@ -50,5 +50,14 @@ QString legacy();
 // Chooses the encoding of a file's bytes: BOM, strict UTF-8, then (if enabled)
 // a guess, then legacy().
 QString detect(const QByteArray &bytes);
+// The settings detect() reads, taken on the thread that owns them, so that
+// detect() with them can run on a worker thread.
+struct DetectOptions
+{
+    QString legacy;
+    bool guess = false;
+};
+DetectOptions detectOptions();
+QString detect(const QByteArray &bytes, const DetectOptions &options);
 
 } // namespace vn::encoding
