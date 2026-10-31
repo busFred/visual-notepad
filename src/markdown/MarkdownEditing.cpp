@@ -11,6 +11,10 @@
 #include <iterator>
 #include <string_view>
 
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
+
 namespace vn::md {
 
 namespace {
@@ -247,7 +251,43 @@ bool isNetworkPath(const QString &path)
     // Windows takes either slash; two at the start name a host.
     const auto slash = [](QChar c) { return c == u'/' || c == u'\\'; };
     const QString p = path.trimmed();
-    return p.size() >= 2 && slash(p[0]) && slash(p[1]);
+    if (p.size() >= 2 && slash(p[0]) && slash(p[1]))
+        return true; // Also "\\?\" and "\\.\".
+    // "\??\UNC\host\share" (the object manager's own prefix) is a host too.
+    return p.size() >= 4 && slash(p[0]) && p[1] == u'?' && p[2] == u'?' && slash(p[3]);
+}
+
+QString cleanLocalPath(const QString &path, bool windowsNames)
+{
+    if (!windowsNames)
+        return QDir::cleanPath(QDir::fromNativeSeparators(path));
+    // Either slash, on any system.
+    QString clean = QDir::cleanPath(QString(path).replace(u'\\', u'/'));
+    // Dropping "x. " can leave "." or "..", resolving ".." can leave a
+    // component ending in a dot: until nothing changes.
+    for (;;) {
+        QStringList parts = clean.split(u'/');
+        for (QString &part : parts) {
+            QString spaced = part;
+            while (spaced.endsWith(u' '))
+                spaced.chop(1);
+            if (spaced == u"." || spaced == u"..") {
+                part = spaced; // ". " and ".. " too.
+                continue;
+            }
+            // The empty first part of "/x" stays empty; one that empties
+            // ("...") is the folder it is in.
+            const bool empty = part.isEmpty();
+            while (part.endsWith(u'.') || part.endsWith(u' '))
+                part.chop(1);
+            if (part.isEmpty() && !empty)
+                part = u'.';
+        }
+        const QString next = QDir::cleanPath(parts.join(u'/'));
+        if (next == clean)
+            return clean;
+        clean = next;
+    }
 }
 
 namespace {
@@ -257,7 +297,11 @@ namespace {
 // Windows: executables, scripts for the built-in hosts (cmd, PowerShell,
 // Windows Script Host, mshta), installers, control panel and console
 // snap-ins, shortcuts and shell links, registry and setup files, packages,
-// compiled help, search and library descriptors, troubleshooter packs.
+// compiled help, search and library descriptors, troubleshooter packs;
+// remote desktop and Citrix sessions, ClickOnce and Office add-ins, themes,
+// update and provisioning packages, Access databases (they run VBA), disk
+// images (mounting shows their programs), OneNote notebooks, Office files
+// with macros, Java Web Start and SYLK spreadsheets.
 // Linux/macOS: shell and interpreter scripts, self-extracting/AppImage
 // binaries, launchers (.desktop, .command, .terminal), bundles and
 // installers (.app, .pkg, .dmg, .deb, .rpm), Automator workflows/actions.
@@ -266,7 +310,9 @@ constexpr std::string_view launchableSuffixes[] = {
     "exe", "com", "scr", "pif", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi", "msp",
     "mst", "msc", "hta", "cpl", "lnk", "url", "reg", "jar", "dll", "sys", "inf", "appx", "appxbundle", "msix",
     "msixbundle", "application", "gadget", "ws", "chm", "scf", "library-ms", "search-ms", "diagcab",
-    "settingcontent-ms",
+    "settingcontent-ms", "rdp", "ica", "appref-ms", "vsto", "xll", "xlam", "themepack", "deskthemepack", "msu", "ppkg",
+    "mdb", "accdb", "accde", "mde", "ade", "adp", "iso", "img", "vhd", "vhdx", "one", "docm", "xlsm", "pptm", "dotm",
+    "xltm", "potm", "ppam", "sldm", "jnlp", "slk",
     // Linux / macOS
     "sh", "bash", "zsh", "csh", "ksh", "run", "bin", "appimage", "desktop", "command", "app", "pkg", "dmg", "py",
     "pl", "rb", "deb", "rpm", "workflow", "action", "terminal",
@@ -283,7 +329,8 @@ constexpr std::string_view documentSuffixes[] = {
 template<size_t N>
 bool listed(const std::string_view (&list)[N], const QString &suffix)
 {
-    const QByteArray lower = suffix.toLower().toUtf8();
+    // Upper first: "\u017F" (long s) upper-cases to "S", as Windows compares.
+    const QByteArray lower = suffix.toUpper().toLower().toUtf8();
     const std::string_view s(lower.constData(), size_t(lower.size()));
     return std::find(std::begin(list), std::end(list), s) != std::end(list);
 }
@@ -306,6 +353,23 @@ QString windowsName(QString name)
     }
 }
 
+#ifdef Q_OS_WIN
+// `path` with 8.3 short names ("SETTIN~1.SET") spelled out, if it exists.
+QString longPathName(const QString &path)
+{
+    const std::wstring native = QDir::toNativeSeparators(path).toStdWString();
+    const DWORD size = GetLongPathNameW(native.c_str(), nullptr, 0); // With the null.
+    if (size == 0)
+        return path;
+    std::wstring buffer(size, L'\0');
+    const DWORD written = GetLongPathNameW(native.c_str(), buffer.data(), size); // Without.
+    if (written == 0 || written >= size)
+        return path;
+    buffer.resize(written);
+    return QDir::fromNativeSeparators(QString::fromStdWString(buffer));
+}
+#endif
+
 bool hasLaunchableSuffix(const QString &path)
 {
     const QString name = windowsName(path.section(QRegularExpression(QStringLiteral("[/\\\\]")), -1));
@@ -315,15 +379,37 @@ bool hasLaunchableSuffix(const QString &path)
     return std::any_of(parts.cbegin(), parts.cend(), [](const QString &part) {
         const QString trimmed = windowsName(part);
         const qsizetype dot = trimmed.lastIndexOf(u'.');
-        return dot >= 0 && listed(launchableSuffixes, trimmed.mid(dot + 1));
+        if (dot < 0)
+            return false;
+        const QString suffix = trimmed.mid(dot + 1);
+        // One Windows may fold to a listed one some other way: ask.
+        const bool ascii = std::all_of(suffix.cbegin(), suffix.cend(), [](QChar c) { return c.unicode() < 0x80; });
+        return !ascii || listed(launchableSuffixes, suffix);
     });
 }
 
 } // namespace
 
-bool isLaunchable(const QString &path)
+QString resolvedLocalPath(const QString &path)
 {
-    if (hasLaunchableSuffix(path))
+#ifdef Q_OS_WIN
+    return longPathName(cleanLocalPath(QFileInfo(path).absoluteFilePath(), true));
+#else
+    return cleanLocalPath(QFileInfo(path).absoluteFilePath(), false);
+#endif
+}
+
+bool isLaunchable(const QString &rawPath)
+{
+    // "evil.exe/." and "evil.exe/x/.." name evil.exe.
+#ifdef Q_OS_WIN
+    const QString path = longPathName(cleanLocalPath(rawPath, true));
+#else
+    const QString path = cleanLocalPath(rawPath, false);
+    if (hasLaunchableSuffix(cleanLocalPath(rawPath, true)))
+        return true;
+#endif
+    if (hasLaunchableSuffix(rawPath) || hasLaunchableSuffix(path))
         return true; // Even a directory: a macOS .app is one.
     const QFileInfo info(path);
     // The end of a chain of symlinks: empty if it does not exist.

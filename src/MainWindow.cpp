@@ -2273,6 +2273,9 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
         return;
     if (QFileInfo(path).isRelative() && !tab->path().isEmpty())
         path = QFileInfo(tab->path()).absoluteDir().filePath(path);
+    // Checked and opened by the name of the file the OS opens: "evil.exe/."
+    // and "evil.exe/x/.." are evil.exe.
+    path = md::resolvedLocalPath(path);
     if (!QFileInfo::exists(path)) {
         QMessageBox::warning(this, productName(), tr("The file %1 does not exist.").arg(QDir::toNativeSeparators(path)));
         return;
