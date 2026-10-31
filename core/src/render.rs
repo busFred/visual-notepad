@@ -12,6 +12,8 @@ use comrak::{Arena, parse_document};
 use crate::ffi::{Block, BlockKind, RenderOptions};
 use crate::{links, md};
 
+mod qt_html;
+
 pub fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block> {
     let arena = Arena::new();
     let root = parse_document(
@@ -45,6 +47,8 @@ pub fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block> {
         inline_math: Vec::new(),
         slugs: HashMap::new(),
         base_line: 0,
+        depth: 0,
+        raw_html: false,
     };
 
     let mut result = Vec::with_capacity(root.children().count());
@@ -85,10 +89,16 @@ pub fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block> {
                     renderer.out.clear();
                     renderer.inline_math.clear();
                     renderer.base_line = first_line;
+                    renderer.raw_html = false;
                     renderer.node(node);
                     // Copy rather than move: the scratch buffer keeps its
                     // capacity for the next block, and the copy is exact.
-                    block.html = renderer.out.clone();
+                    // Without raw HTML, nesting is bounded by MAX_DEPTH.
+                    block.html = renderer
+                        .raw_html
+                        .then(|| qt_html::limit_nesting(&renderer.out))
+                        .flatten()
+                        .unwrap_or_else(|| renderer.out.clone());
                     block.inline_math = std::mem::take(&mut renderer.inline_math);
                 }
             }
@@ -247,6 +257,13 @@ pub fn slug(text: &str) -> String {
         .collect()
 }
 
+/// Nodes nested deeper than this are rendered as their plain text instead of
+/// recursing further. Rendering recurses once per level, and a stack overflow
+/// across the C++ bridge aborts the program; blocks are rendered on the GUI
+/// thread, which has a 1 MiB stack on Windows. Hand-written documents stay far
+/// below this (lists, quotes and inline markup together rarely pass 20).
+const MAX_DEPTH: usize = 100;
+
 struct Html<'a> {
     options: &'a RenderOptions,
     /// Footnote name (lowercase) to its 1-based number.
@@ -256,6 +273,10 @@ struct Html<'a> {
     slugs: HashMap<String, usize>,
     /// First source line of the block being rendered.
     base_line: usize,
+    /// Nesting level of the node being rendered, see `MAX_DEPTH`.
+    depth: usize,
+    /// Whether the block's HTML includes raw HTML from the document.
+    raw_html: bool,
 }
 
 impl Html<'_> {
@@ -357,7 +378,22 @@ impl Html<'_> {
         self.footnotes.get(id).copied().unwrap_or(0)
     }
 
+    /// Every recursive step of the renderer goes through here.
     fn node<'a>(&mut self, node: &'a AstNode<'a>) {
+        if self.depth >= MAX_DEPTH {
+            // Too deep to render: keep the text, drop the markup (and any raw
+            // HTML) below this level.
+            let mut plain = String::new();
+            md::plain_text(node, &mut plain);
+            self.text(&plain);
+            return;
+        }
+        self.depth += 1;
+        self.render(node);
+        self.depth -= 1;
+    }
+
+    fn render<'a>(&mut self, node: &'a AstNode<'a>) {
         let data = node.data();
         match &data.value {
             NodeValue::Paragraph => {
@@ -500,8 +536,14 @@ impl Html<'_> {
                 escape_into(&mut self.out, c.literal.trim_end_matches('\n'));
                 self.out.push_str("</pre>");
             }
-            NodeValue::HtmlBlock(h) => self.out.push_str(h.literal.trim_end_matches(['\n', '\r'])),
-            NodeValue::HtmlInline(h) => self.out.push_str(h),
+            NodeValue::HtmlBlock(h) => {
+                self.raw_html = true;
+                self.out.push_str(h.literal.trim_end_matches(['\n', '\r']));
+            }
+            NodeValue::HtmlInline(h) => {
+                self.raw_html = true;
+                self.out.push_str(h);
+            }
             NodeValue::ThematicBreak => self.out.push_str("<hr />"),
             NodeValue::Table(t) => {
                 self.out
@@ -794,6 +836,186 @@ mod tests {
                 (BlockKind::Html, 4, 4)
             ]
         );
+    }
+
+    /// Runs `f` on a thread with the 1 MiB stack of the Windows main thread.
+    pub(crate) fn on_small_stack<F: FnOnce() + Send + 'static>(f: F) {
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn count(html: &str, needle: &str) -> usize {
+        html.matches(needle).count()
+    }
+
+    #[test]
+    fn deep_blockquotes_are_flattened() {
+        on_small_stack(|| {
+            let doc = format!("{}deep *text*\n", "> ".repeat(10_000));
+            let b = blocks(&doc, &opts());
+            assert_eq!(b.len(), 1);
+            let html = &b[0].html;
+            let quotes = count(html, "<blockquote>");
+            assert!((50..=MAX_DEPTH).contains(&quotes), "{quotes}");
+            assert_eq!(quotes, count(html, "</blockquote>"));
+            assert!(html.contains("deep text"));
+        });
+    }
+
+    #[test]
+    fn deep_emphasis_and_links_are_flattened() {
+        on_small_stack(|| {
+            for (open, close) in [
+                ("*", "*"),
+                ("_", "_"),
+                ("**", "**"),
+                ("[", "](u)"),
+                ("~~", "~~"),
+            ] {
+                let doc = format!("{}x{}\n", open.repeat(50_000), close.repeat(50_000));
+                let b = blocks(&doc, &opts());
+                assert!(b[0].html.len() < 2 * doc.len(), "{open}");
+            }
+            // Headings and image alt text take the plain text of their
+            // inline content.
+            let deep = format!("{}x{}", "*".repeat(50_000), "*".repeat(50_000));
+            let b = blocks(&format!("# {deep}\n\n![{deep}](i.png)\n"), &opts());
+            assert!(b[0].html.starts_with("<h1><a name=\"x\"></a>"));
+            assert!(b[1].html.contains("alt=\"x\""));
+        });
+    }
+
+    #[test]
+    fn deep_lists_mixed_with_quotes_are_flattened() {
+        on_small_stack(|| {
+            // Each "- > " opens a list, an item and a quote.
+            let doc = format!("{}x\n", "- > 1. ".repeat(5_000));
+            let html = &blocks(&doc, &opts())[0].html;
+            assert!(html.ends_with("</ul>"));
+            assert!(html.contains('x'));
+            // Indented nesting on separate lines, with footnotes and tables
+            // at the bottom.
+            let mut doc = String::new();
+            for i in 0..3_000 {
+                doc.push_str(&"  ".repeat(i % 50));
+                doc.push_str(if i % 2 == 0 { "- " } else { "> " });
+                doc.push_str("item[^n]\n");
+            }
+            doc.push_str("\n[^n]: note\n");
+            assert!(!blocks(&doc, &opts()).is_empty());
+        });
+    }
+
+    #[test]
+    fn other_entry_points_survive_deep_input() {
+        // The outline, formatter and link scanner walk the tree without
+        // recursion (comrak's own walks are iterative too).
+        on_small_stack(|| {
+            let docs = [
+                format!("{}# deep *heading*\n", "> ".repeat(10_000)),
+                format!("# {}x{}\n", "*".repeat(50_000), "*".repeat(50_000)),
+                format!("{}x{}\n", "[".repeat(50_000), "](u)".repeat(50_000)),
+                format!("{}[a](b)\n", "- > ".repeat(5_000)),
+            ];
+            for doc in &docs {
+                let _ = crate::outline(doc);
+                let _ = crate::format_markdown(doc);
+                let _ = crate::link_targets(doc);
+            }
+            assert_eq!(crate::outline(&docs[0])[0].text, "deep heading");
+            assert_eq!(crate::outline(&docs[1])[0].text, "x");
+        });
+    }
+
+    #[test]
+    fn ordinary_nesting_is_not_flattened() {
+        // A quote in a list in a quote, nested emphasis and a nested list.
+        let b = blocks(
+            "> - item\n>\n>   > quoted **bold *both*** and [a *link*](u)\n>\n>   - inner\n",
+            &opts(),
+        );
+        assert_eq!(
+            b[0].html,
+            "<blockquote><ul><li><p>item</p><blockquote><p><a name=\"vn-line:2\"></a>quoted <strong>bold <em>both</em></strong> and <a href=\"u\">a <em>link</em></a></p></blockquote><ul><li><a name=\"vn-line:4\"></a>inner</li></ul></li></ul></blockquote>"
+        );
+        // Just within the limit, nothing is lost.
+        let depth = MAX_DEPTH - 2;
+        let html = &blocks(&format!("{}*x*\n", "> ".repeat(depth)), &opts())[0].html;
+        assert_eq!(count(html, "<blockquote>"), depth);
+        assert!(html.contains("<p><em>x</em></p>"));
+    }
+
+    fn nested_tables(depth: usize) -> String {
+        format!(
+            "{}x{}\n",
+            "<table><tr><td>".repeat(depth),
+            "</td></tr></table>".repeat(depth)
+        )
+    }
+
+    #[test]
+    fn deep_html_is_escaped() {
+        use qt_html::{MAX_ELEMENT_DEPTH, MAX_TABLE_DEPTH};
+        on_small_stack(|| {
+            let start = std::time::Instant::now();
+            // An HTML block, and inline HTML with one node per tag: the
+            // depth is followed across the whole block.
+            for doc in [nested_tables(50), format!("x {}", nested_tables(50))] {
+                let html = &blocks(&doc, &opts())[0].html;
+                assert_eq!(count(html, "<table>"), MAX_TABLE_DEPTH, "{html}");
+                assert_eq!(count(html, "&lt;table>"), 50 - MAX_TABLE_DEPTH);
+                assert!(html.contains("x</td></tr></table>"));
+            }
+            // Tables that Qt opens by itself for cells outside a table.
+            let html = &blocks(&"<td></tr>".repeat(50), &opts())[0].html;
+            assert!(count(html, "&lt;td>") >= 50 - MAX_TABLE_DEPTH, "{html}");
+            // Any element.
+            let html = &blocks(&"<div>".repeat(5000), &opts())[0].html;
+            assert_eq!(count(html, "<div>"), MAX_ELEMENT_DEPTH);
+            assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        });
+    }
+
+    #[test]
+    fn markdown_tables_count_towards_the_depth() {
+        use qt_html::MAX_TABLE_DEPTH;
+        // A Markdown table in raw HTML tables, all in one quote.
+        let doc = |depth: usize| {
+            format!(
+                "> {}\n>\n> | a |\n> |---|\n> | b |\n",
+                "<table><tr><td>".repeat(depth)
+            )
+        };
+        let html = &blocks(&doc(MAX_TABLE_DEPTH - 1), &opts())[0].html;
+        assert!(html.contains("<table cellspacing"), "{html}");
+        let html = &blocks(&doc(MAX_TABLE_DEPTH), &opts())[0].html;
+        assert!(html.contains("&lt;table cellspacing"), "{html}");
+    }
+
+    #[test]
+    fn ordinary_html_is_unchanged() {
+        let docs = [
+            // A README header: centred logo, badges and a layout table.
+            "<p align=\"center\">\n  <img src=\"logo.png\" width=\"120\" alt=\"Logo\">\n</p>\n\n<table>\n  <tr>\n    <td><img src=\"a.png\"></td>\n    <td>\n      <table><tr><td>inner <b>bold</b></td></tr></table>\n    </td>\n  </tr>\n</table>\n",
+            // Three nested tables with attributes, comments and odd case.
+            "<TABLE width=\"100%\"><tr><td><!-- <table> -->\n<table class='x'><tr><td>\n<table border=1><tr><th>a > b</th></tr></table>\n</td></tr></table>\n</td></tr></TABLE>\n",
+            // Inline HTML in a paragraph and in a Markdown table.
+            "Text <kbd>Ctrl</kbd> and <span title=\"<table>\">x</span>.\n\n| a <br> b | <table><tr><td>c</td></tr></table> |\n|---|---|\n",
+            // HTML in lists and quotes, mixed with Markdown.
+            "- <table><tr><td>\n\n  > quote <b>x</b>\n  >\n  > <table><tr><td>y</td></tr></table>\n\n  </td></tr></table>\n",
+            // Stray closes and an unclosed table.
+            "</table></table><table><tr><td>a\n",
+        ];
+        for doc in docs {
+            for block in blocks(doc, &opts()) {
+                assert!(!block.html.contains("&lt;"), "{}", block.html);
+                assert!(qt_html::limit_nesting(&block.html).is_none());
+            }
+        }
     }
 
     #[test]
