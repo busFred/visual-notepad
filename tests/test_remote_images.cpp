@@ -108,8 +108,23 @@ private:
             head += "Content-Type: " + type + "\r\n";
         if (declared != 0)
             head += "Content-Length: " + QByteArray::number(declared < 0 ? body.size() : declared) + "\r\n";
-        socket->write(head + "\r\n" + body);
-        socket->disconnectFromHost();
+        // A piece at a time, the next once the system took the last, so that
+        // `sent` tells how much the client read: Windows takes a single
+        // write of any size into its socket buffers, read or not.
+        static constexpr qint64 piece = 64 * 1024;
+        auto data = std::make_shared<QByteArray>(head + "\r\n" + body);
+        auto offset = std::make_shared<qint64>(0);
+        const auto feed = [socket, data, offset] {
+            if (*offset >= data->size() || socket->bytesToWrite() > 0)
+                return;
+            const qint64 n = qMin(piece, data->size() - *offset);
+            socket->write(data->constData() + *offset, n);
+            *offset += n;
+            if (*offset >= data->size())
+                socket->disconnectFromHost();
+        };
+        connect(socket, &QTcpSocket::bytesWritten, socket, feed);
+        feed();
     }
 
     static QByteArray svg(const QByteArray &content)
