@@ -4,10 +4,15 @@
 #include "../Theme.h"
 #include "ImageViewer.h"
 #include "MarkdownModel.h"
+#include "RemoteImages.h"
 
 #include <QApplication>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPushButton>
 #include <QRegularExpression>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -87,7 +92,22 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
             m_model->flushInBackground();
     });
     connect(model, &MarkdownModel::reparsed, this, &VisualView::relayout);
-    connect(&DiagramNotifier::instance(), &DiagramNotifier::ready, this, &VisualView::diagramsReady);
+    connect(model, &MarkdownModel::reparsed, this, &VisualView::updateRemoteBanner);
+    connect(&DiagramNotifier::instance(), &DiagramNotifier::ready, this, &VisualView::asyncRenderReady);
+    connect(&RemoteImages::instance(), &RemoteImages::ready, this, &VisualView::asyncRenderReady);
+    // Pictures are only requested once the user agreed (the bar asks).
+    connect(model, &MarkdownModel::remoteConsentChanged, this, [this] {
+        clearRenderCache();
+        relayout();
+        updateRemoteBanner();
+    });
+    connect(&Settings::instance(), &Settings::changed, this, [this](const QString &changedKey) {
+        if (changedKey != QLatin1String(key::remoteImages))
+            return;
+        clearRenderCache();
+        relayout();
+        updateRemoteBanner();
+    });
     // Rows are built when the view is first shown (see showEvent).
 }
 
@@ -125,10 +145,10 @@ void VisualView::dropSpanRender(int span)
     render = {};
 }
 
-void VisualView::diagramsReady()
+void VisualView::asyncRenderReady()
 {
-    // Drop the source stand-ins of diagrams so they render again, now as
-    // pictures (or errors).
+    // Drop the source stand-ins of diagrams and the blocks with pictures on
+    // their way so they render again, now with the results.
     if (m_pendingKeys.isEmpty())
         return;
     for (const QString &key : std::as_const(m_pendingKeys))
@@ -168,6 +188,126 @@ void VisualView::showEvent(QShowEvent *event)
     m_model->flush();
     if (m_rowsStale)
         relayout();
+    updateRemoteBanner();
+}
+
+// ---------------------------------------------------------------------------
+// Remote pictures
+
+bool VisualView::remoteImagesAllowed() const
+{
+    return Settings::instance().text(key::remoteImages) != QLatin1String("never")
+           && m_model->remoteConsent() == MarkdownModel::RemoteConsent::Allow;
+}
+
+void VisualView::updateRemoteBanner()
+{
+    QStringList urls;
+    if (isVisible() && Settings::instance().text(key::remoteImages) != QLatin1String("never")
+        && m_model->remoteConsent() == MarkdownModel::RemoteConsent::Undecided) {
+        if (m_remoteUrlsGeneration != m_model->parseGeneration()) {
+            // The last parse as it is (blocks() would parse a large document
+            // again here, on the GUI thread). Blocks are scanned by their
+            // HTML, so after an edit only the changed ones are laid out again.
+            m_remoteUrls.clear();
+            QSet<QString> seen;
+            QHash<size_t, QStringList> scans;
+            const RenderContext ctx = context();
+            for (int i = 0, n = m_model->parsedBlockCount(); i < n; ++i) {
+                const core::Block &block = m_model->parsedBlock(i);
+                if (block.kind != core::BlockKind::Html)
+                    continue;
+                const size_t hash = qHash(QByteArrayView(block.html.data(), qsizetype(block.html.size())));
+                const auto known = m_remoteScans.constFind(hash);
+                const QStringList urls = known != m_remoteScans.constEnd() ? *known : RenderedBlock::remoteImages(block, ctx);
+                scans.insert(hash, urls);
+                for (const QString &url : urls) {
+                    if (!seen.contains(url)) {
+                        seen.insert(url);
+                        m_remoteUrls.append(url);
+                    }
+                }
+            }
+            m_remoteScans = std::move(scans);
+            m_remoteUrlsGeneration = m_model->parseGeneration();
+        }
+        urls = m_remoteUrls;
+    }
+    if (urls.isEmpty()) {
+        if (m_banner && !m_banner->isHidden()) {
+            m_banner->hide();
+            layoutBanner();
+        }
+        return;
+    }
+
+    if (!m_banner) {
+        m_banner = new QFrame(this);
+        m_banner->setObjectName(QStringLiteral("RemoteImageBanner"));
+        m_banner->setAttribute(Qt::WA_StyledBackground);
+        auto *layout = new QHBoxLayout(m_banner);
+        // The right edge is left to the lock/pencil pill floating over it.
+        layout->setContentsMargins(int(sideMargin), 6, 84, 6);
+        layout->setSpacing(8);
+        m_bannerText = new QLabel(m_banner);
+        m_bannerText->setWordWrap(true);
+        layout->addWidget(m_bannerText, 1);
+        const auto addButton = [&](const QString &text, MarkdownModel::RemoteConsent consent) {
+            auto *button = new QPushButton(text, m_banner);
+            button->setObjectName(QStringLiteral("BannerButton"));
+            layout->addWidget(button);
+            connect(button, &QPushButton::clicked, this, [this, consent] {
+                // Choosing to load is also the way to try failed pictures again.
+                if (consent == MarkdownModel::RemoteConsent::Allow)
+                    RemoteImages::instance().clearFailures();
+                m_model->setRemoteConsent(consent);
+                setFocus();
+            });
+        };
+        addButton(tr("Load images"), MarkdownModel::RemoteConsent::Allow);
+        addButton(tr("Don't load"), MarkdownModel::RemoteConsent::Deny);
+    }
+    // Hosts in order of appearance, with how many pictures each serves.
+    QStringList hosts;
+    QHash<QString, int> counts;
+    for (const QString &url : urls) {
+        const QUrl parsed(url);
+        const QString host = parsed.port() > 0 ? QStringLiteral("%1:%2").arg(parsed.host()).arg(parsed.port()) : parsed.host();
+        if (counts[host]++ == 0)
+            hosts.append(host);
+    }
+    QStringList shown;
+    for (const QString &host : hosts)
+        shown.append(QStringLiteral("%1 (%2)").arg(host).arg(counts[host]));
+    constexpr int maxShown = 4;
+    QString text = shown.mid(0, maxShown).join(QLatin1String(", "));
+    if (shown.size() > maxShown)
+        text += tr(" and %n more host(s)", "", shown.size() - maxShown);
+    m_bannerText->setText(tr("%n remote image(s) from %1. Load them only if you trust the links in this file.", "",
+                             int(urls.size())).arg(text));
+    m_bannerText->setToolTip(shown.join(u'\n'));
+    m_banner->show();
+    layoutBanner();
+}
+
+void VisualView::layoutBanner()
+{
+    int height = 0;
+    if (m_banner && !m_banner->isHidden()) {
+        const int width = viewport()->width();
+        height = m_banner->layout()->totalHeightForWidth(width);
+        m_banner->setGeometry(0, 0, width, height);
+    }
+    if (height != m_bannerHeight) {
+        m_bannerHeight = height;
+        setViewportMargins(0, height, 0, 0);
+    }
+}
+
+void VisualView::resizeEvent(QResizeEvent *event)
+{
+    TextView::resizeEvent(event);
+    layoutBanner();
 }
 
 void VisualView::rebuildRows()
@@ -297,6 +437,7 @@ RenderContext VisualView::context() const
     ctx.width = textWidth();
     ctx.devicePixelRatio = devicePixelRatioF();
     ctx.mermaidTheme = Settings::instance().text(key::mermaidTheme);
+    ctx.allowRemoteImages = remoteImagesAllowed();
     return ctx;
 }
 

@@ -44,9 +44,9 @@ install -m 755 "$build/visnotepad" "$opt/bin/visnotepad"
 cp -r "$build/microtex" "$opt/share/visnotepad/microtex"
 
 # Qt plugins the app needs: X11 and Wayland, the XDG portal (native file
-# dialogs), input methods, images, icons.
+# dialogs), input methods, images, icons, TLS (https pictures in Markdown).
 qtplugins="$env_prefix/lib/qt6/plugins"
-for dir in platforms platformthemes platforminputcontexts imageformats iconengines xcbglintegrations \
+for dir in platforms platformthemes platforminputcontexts imageformats iconengines tls xcbglintegrations \
     wayland-shell-integration wayland-decoration-client wayland-graphics-integration-client; do
     [ -d "$qtplugins/$dir" ] || continue
     mkdir -p "$opt/plugins/$dir"
@@ -131,7 +131,7 @@ Version: $version
 Architecture: $arch
 Maintainer: Hung-Tien Huang <32878707+busFred@users.noreply.github.com>
 Installed-Size: $installed_kb
-Depends: libc6 (>= 2.28), libgl1, libegl1, fontconfig-config, xkb-data
+Depends: libc6 (>= 2.28), libgl1, libegl1, fontconfig-config, xkb-data, ca-certificates
 Section: editors
 Priority: optional
 Description: Lightweight Notepad replacement with a visual Markdown editor

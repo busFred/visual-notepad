@@ -68,6 +68,14 @@ def main():
     subprocess.run([tool, *extra, "--release", "--no-translations", "--no-system-d3d-compiler", "--no-compiler-runtime",
                     "--dir", out, exe], check=True, env=runenv)
 
+    # https pictures in Markdown need a TLS backend plugin (Schannel uses the
+    # Windows certificate store); make sure it is there whatever windeployqt decided.
+    tls = os.path.join(env, "Library", "lib", "qt6", "plugins", "tls")
+    for name in ("qschannelbackend.dll", "qcertonlybackend.dll"):
+        if os.path.isfile(os.path.join(tls, name)) and not os.path.isfile(os.path.join(out, "tls", name)):
+            os.makedirs(os.path.join(out, "tls"), exist_ok=True)
+            shutil.copy(os.path.join(tls, name), os.path.join(out, "tls"))
+
     # Everything windeployqt copied came from the env; record by name.
     for dirpath, _, files in os.walk(out):
         for fn in files:

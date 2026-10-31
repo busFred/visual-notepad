@@ -8,12 +8,17 @@
 #include "BlockRenderer.h"
 
 #include <QCache>
+#include <QHash>
 #include <QSet>
+#include <QStringList>
 
 #include <deque>
 #include <memory>
 #include <utility>
 #include <vector>
+
+class QFrame;
+class QLabel;
 
 namespace vn {
 
@@ -64,6 +69,7 @@ protected:
     void focusInEvent(QFocusEvent *event) override;
     void showEvent(QShowEvent *event) override;
     void focusOutEvent(QFocusEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
     struct RowInfo
@@ -90,7 +96,13 @@ private:
     bool openPicture(const RenderedBlock *block, const QPointF &point, const QMouseEvent *event);
     RenderedSelection selectionForRow(const Row &row, const RenderedBlock *block, const QString &source) const;
     void clearRenderCache();
-    void diagramsReady();
+    // Diagrams or downloads finished: blocks that waited for them render again.
+    void asyncRenderReady();
+    bool remoteImagesAllowed() const;
+    // Shows the bar asking whether to load the document's remote pictures
+    // while that is undecided and the document has any.
+    void updateRemoteBanner();
+    void layoutBanner();
     void resetSpanRenders(size_t spans);
     void dropSpanRender(int span);
 
@@ -120,6 +132,15 @@ private:
     int m_spanRendersRevision = -1;
     qreal m_spanRendersWidth = -1;
     qreal m_spanRendersDpr = -1;
+
+    // The bar above the text asking about remote pictures (see
+    // updateRemoteBanner); the remote addresses are scanned once per parse.
+    QFrame *m_banner = nullptr;
+    QLabel *m_bannerText = nullptr;
+    int m_bannerHeight = 0;
+    QStringList m_remoteUrls;
+    int m_remoteUrlsGeneration = -1;
+    QHash<size_t, QStringList> m_remoteScans; // Addresses by hash of a block's HTML.
 };
 
 } // namespace vn

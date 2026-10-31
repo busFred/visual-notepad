@@ -353,6 +353,11 @@ QPushButton#FindButton { background: @button; border: 1px solid @divider; border
 QPushButton#FindButton:hover { background: @buttonHover; }
 QPushButton#FindButton:pressed { background: @panelTitle; }
 
+#RemoteImageBanner { background: @sideBar; border-bottom: 1px solid @divider; }
+QPushButton#BannerButton { background: @button; border: 1px solid @divider; border-radius: 2px; padding: 2px 10px; }
+QPushButton#BannerButton:hover { background: @buttonHover; }
+QPushButton#BannerButton:pressed { background: @panelTitle; }
+
 #Welcome { background: @editor; }
 #Welcome QLabel#WelcomeTitle { color: @mutedText; }
 #Welcome QLabel#WelcomeHeading { color: @mutedText; font-weight: 600; padding-top: 4px; }

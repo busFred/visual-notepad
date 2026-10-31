@@ -37,6 +37,7 @@ const QHash<QString, QVariant> &defaults()
         {key::renderMath, true},
         {key::mathMacros, QVariantMap()},
         {key::mermaidTheme, QStringLiteral("auto")},
+        {key::remoteImages, QStringLiteral("ask")},
         {key::pasteImageFolder, QString()},
         {key::updateLinksOnPaste, true},
         {key::validateLinks, false},

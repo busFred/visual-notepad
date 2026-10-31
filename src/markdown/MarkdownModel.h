@@ -53,6 +53,8 @@ public:
     int spanAt(int line);
     // A block of the last parse (valid until the next reparsed signal).
     const core::Block &parsedBlock(int index) const { return m_parsed->blocks()[index]; }
+    // Blocks of the last parse, without reparsing (0 before the first).
+    int parsedBlockCount() const { return m_parsed ? int(m_parsed->blocks().size()) : 0; }
     // Bumped whenever spans() changes (edits and reparses).
     int revision() const { return m_revision; }
     // Bumped by every parse.
@@ -81,8 +83,16 @@ public:
     int optionsRevision() const { return m_optionsRevision; }
     core::RenderOptions options() const;
 
+    // Whether the user agreed to download the document's remote pictures,
+    // for this session. Nothing is fetched while Undecided; Deny is final
+    // (the views stop asking).
+    enum class RemoteConsent { Undecided, Allow, Deny };
+    RemoteConsent remoteConsent() const { return m_remoteConsent; }
+    void setRemoteConsent(RemoteConsent consent);
+
 Q_SIGNALS:
     void optionsChanged();
+    void remoteConsentChanged();
     // Edits have settled; a visible view calls flush() (hidden ones don't,
     // so Source mode never parses).
     void reparseDue();
@@ -117,6 +127,7 @@ private:
         bool running = false;
         bool again = false; // Asked for while a parse of older text ran.
     } m_job;
+    RemoteConsent m_remoteConsent = RemoteConsent::Undecided;
 };
 
 } // namespace vn

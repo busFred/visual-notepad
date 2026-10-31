@@ -3,6 +3,7 @@
 #include "../Theme.h"
 #include "MarkdownEditing.h"
 #include "MathRenderer.h"
+#include "RemoteImages.h"
 
 #include <KSyntaxHighlighting/Definition>
 #include <KSyntaxHighlighting/Format>
@@ -20,6 +21,7 @@
 #include <QImageReader>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPicture>
 #include <QRegularExpression>
 #include <QSet>
 #include <QTextBlock>
@@ -69,16 +71,14 @@ QImage cachedMath(const QString &tex, const math::Style &style)
 // shown in a column are far smaller; a gzip bomb is not.
 constexpr qint64 maxSvgBytes = 32 * 1024 * 1024;
 
-// True if the SVG at `path` names a file on another machine, which the SVG
-// plugin would open by itself: <image href> pictures and xml-stylesheet
-// style sheets. Read the way QtSvg reads it: a file that starts with the gzip
-// magic is an .svgz, unpacked (every member) before it is parsed. One that
-// cannot be unpacked, or is too big, counts as naming one: it is not opened.
-bool svgNamesNetworkPath(const QString &path)
+// True if the SVG in `file` (open for reading, a file or a download) names
+// a file on another machine, which the SVG plugin would open by itself:
+// <image href> pictures and xml-stylesheet style sheets. Read the way QtSvg
+// reads it: a file that starts with the gzip magic is an .svgz, unpacked
+// (every member) before it is parsed. One that cannot be unpacked, or is too
+// big, counts as naming one: it is not opened. Any thread.
+bool svgNamesNetworkPath(QIODevice &file)
 {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly))
-        return false;
     QBuffer unpacked;
     QIODevice *source = &file;
     if (file.peek(2) == "\x1f\x8b") {
@@ -124,8 +124,11 @@ QImage readImage(const QString &path)
     ++localImageReads;
     QImageReader reader(path);
     reader.setAutoTransform(true);
-    if (reader.format().startsWith("svg") && svgNamesNetworkPath(path))
-        return {};
+    if (reader.format().startsWith("svg")) {
+        QFile file(path);
+        if (file.open(QIODevice::ReadOnly) && svgNamesNetworkPath(file))
+            return {};
+    }
     return reader.read();
 }
 
@@ -239,6 +242,16 @@ DecodedPictures &decodedPictures()
     return pictures;
 }
 
+// One image pixel per logical pixel, shrunk to fit the column.
+QImage fitToColumn(QImage image, qreal width, qreal dpr)
+{
+    if (image.width() > width) {
+        image = image.scaledToWidth(int(width * dpr), Qt::SmoothTransformation);
+        image.setDevicePixelRatio(dpr);
+    }
+    return image;
+}
+
 // Local pictures, read and scaled to the column, by file version and size.
 // The decoded files are kept too (see above). SVGs are kept as decoded as
 // well: they are read at their own size, never at the column's, so a bigger
@@ -258,12 +271,26 @@ QImage cachedLocalImage(const QString &path, qreal width, qreal dpr)
             return image; // Not cached: the file may appear later.
         decodedPictures().insert(version, image);
     }
-    // One image pixel per logical pixel, shrunk to fit the column.
-    if (image.width() > width) {
-        image = image.scaledToWidth(int(width * dpr), Qt::SmoothTransformation);
-        image.setDevicePixelRatio(dpr);
-    }
+    image = fitToColumn(image, width, dpr);
     cache.insert(key, new QImage(image), imageCost(image));
+    return image;
+}
+
+// Downloaded pictures scaled to the column, by address (null until
+// downloaded). Their decoded full-size form is RemoteImages' to keep, as
+// DecodedPictures keeps the files': decoded once on a worker thread when they
+// arrive, in a bounded cache of its own (shared with the zoom viewer).
+QImage cachedRemoteImage(const QUrl &url, qreal width, qreal dpr)
+{
+    static QCache<QString, QImage> cache(32 * 1024); // KiB
+    RemoteImages &remote = RemoteImages::instance();
+    const QString key = QStringLiteral("%1|%2|%3|").arg(remote.generation()).arg(width).arg(dpr)
+                        + url.toString(QUrl::FullyEncoded);
+    if (const QImage *hit = cache.object(key))
+        return *hit;
+    const QImage image = fitToColumn(remote.fullImage(url), width, dpr);
+    if (!image.isNull())
+        cache.insert(key, new QImage(image), imageCost(image));
     return image;
 }
 
@@ -354,12 +381,25 @@ bool namesOtherMachine(const QUrl &url)
     return md::isNetworkPath(file ? url.toLocalFile() : QUrl::fromPercentEncoding(url.toString().toUtf8()));
 }
 
-// Rich text with images resolved locally: math placeholders and files.
+// Whether HTML can make Qt ask for a picture: an img tag, a background
+// attribute or a style. (Tag and attribute names are never entity-encoded.)
+bool mayLoadPictures(const QString &html)
+{
+    return html.contains(QLatin1String("<img"), Qt::CaseInsensitive)
+           || html.contains(QLatin1String("background"), Qt::CaseInsensitive)
+           || html.contains(QLatin1String("style"), Qt::CaseInsensitive);
+}
+
+// Rich text with images resolved here: math placeholders, files, and
+// downloads when the user agreed to them. A listing document only collects
+// the web addresses Qt asks for: every picture is a blank stand-in, so
+// listing reads, decodes and renders nothing.
 class ResourceDocument : public QTextDocument
 {
 public:
-    ResourceDocument(const core::Block &block, const RenderContext &context)
+    ResourceDocument(const core::Block &block, const RenderContext &context, bool listing = false)
         : m_context(context)
+        , m_listing(listing)
     {
         for (const auto &tex : block.inline_math)
             m_math.append(QString::fromUtf8(tex.data(), tex.size()));
@@ -413,10 +453,32 @@ public:
     // Bytes of the pictures (math, files) the document has resolved so far.
     qsizetype pictureBytes() const { return m_pictureBytes; }
 
+    // Some picture is still downloading.
+    bool hasPendingDownload() const { return m_pending; }
+    // Every http(s) address asked for so far, allowed or not.
+    const QStringList &remoteUrls() const { return m_remote; }
+    // Pictures behind backgrounds are only asked for when painting: paint
+    // once, into nothing.
+    void loadPaintedPictures()
+    {
+        QPicture picture;
+        QPainter painter(&picture);
+        documentLayout()->draw(&painter, QAbstractTextDocumentLayout::PaintContext());
+    }
+
     // The file a picture's source names, or empty (math, remote pictures).
     QString pathOf(const QString &source) const
     {
         return source.startsWith(QLatin1String("vn-math")) ? QString() : localPath(QUrl(source));
+    }
+
+    // The address of a picture that was downloaded for this block, or empty.
+    QUrl downloadedUrlOf(const QString &source) const
+    {
+        const QUrl url(source);
+        const bool loaded = m_context.allowRemoteImages && RemoteImages::isWebUrl(url)
+                            && RemoteImages::instance().state(url) == RemoteImages::State::Loaded;
+        return loaded ? url : QUrl();
     }
 
 protected:
@@ -426,6 +488,10 @@ protected:
         // open any path, even on another machine. The app sets its own.
         if (type != QTextDocument::ImageResource)
             return QVariant();
+        if (RemoteImages::isWebUrl(url))
+            return remoteImage(type, url);
+        if (m_listing)
+            return standIn(type, url);
         const QString name = url.toString();
         if (name.startsWith(QLatin1String("vn-math"))) {
             const bool display = name.startsWith(QLatin1String("vn-math-display:"));
@@ -456,6 +522,43 @@ private:
         return image;
     }
 
+    // Any picture, while listing (declining it would make Qt open the name).
+    QVariant standIn(int type, const QUrl &url)
+    {
+        static const QImage blank = [] {
+            QImage image(1, 1, QImage::Format_ARGB32_Premultiplied);
+            image.fill(Qt::transparent);
+            return image;
+        }();
+        addResource(type, url, blank);
+        return blank;
+    }
+
+    // Without the user's agreement nothing is requested and the picture
+    // stays missing; with it, the download starts now and this block is
+    // pending until it ends.
+    QVariant remoteImage(int type, const QUrl &url)
+    {
+        if (const QString address = url.toString(); !m_remote.contains(address))
+            m_remote.append(address);
+        if (m_listing)
+            return standIn(type, url);
+        if (!m_context.allowRemoteImages)
+            return QVariant();
+        RemoteImages &remote = RemoteImages::instance();
+        switch (remote.request(url)) {
+        case RemoteImages::State::Loading:
+            m_pending = true;
+            return QVariant();
+        case RemoteImages::State::Loaded: {
+            const QImage image = cachedRemoteImage(url, m_context.width, m_context.devicePixelRatio);
+            return image.isNull() ? QVariant() : keep(type, url, image);
+        }
+        default:
+            return QVariant();
+        }
+    }
+
     QString localPath(const QUrl &url) const
     {
         if (namesOtherMachine(url))
@@ -471,8 +574,11 @@ private:
     }
 
     RenderContext m_context;
+    bool m_listing = false;
     QStringList m_math;
     qsizetype m_pictureBytes = 0;
+    QStringList m_remote;
+    bool m_pending = false;
 };
 
 QString hex(theme::Role role)
@@ -760,6 +866,25 @@ std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString
 
 } // namespace
 
+QImage decodePicture(const QByteArray &data)
+{
+    QBuffer buffer;
+    buffer.setData(data);
+    buffer.open(QIODevice::ReadOnly);
+    QImageReader reader(&buffer);
+    reader.setAutoTransform(true);
+    if (!reader.canRead())
+        return {};
+    if (reader.format().startsWith("svg")) {
+        QBuffer scanned;
+        scanned.setData(data);
+        scanned.open(QIODevice::ReadOnly);
+        if (svgNamesNetworkPath(scanned))
+            return {};
+    }
+    return reader.read();
+}
+
 int RenderedBlock::pictureFileReads()
 {
     return localImageReads;
@@ -877,17 +1002,46 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         doc->setDocumentMargin(0);
         doc->setDefaultFont(context.font);
         doc->setDefaultStyleSheet(styleSheet(context));
-        doc->setHtml(QString::fromUtf8(block.html.data(), block.html.size()));
+        const QString html = QString::fromUtf8(block.html.data(), block.html.size());
+        doc->setHtml(html);
         doc->dropNetworkImages();
         doc->fitImages(context.width);
         doc->setTextWidth(context.width);
         r.m_height = doc->size().height() + blockGap;
-        r.m_pictureBytes = doc->pictureBytes(); // Resolved by the layout.
+        // Backgrounds are asked for when painted: start their downloads now.
+        if (context.allowRemoteImages && mayLoadPictures(html))
+            doc->loadPaintedPictures();
+        r.m_pending = doc->hasPendingDownload();
+        r.m_pictureBytes = doc->pictureBytes(); // Resolved by the layout (and the dry paint).
         r.m_doc = std::move(doc);
         r.collectLineAnchors(0);
         return result;
     }
     }
+}
+
+QStringList RenderedBlock::remoteImages(const core::Block &block, const RenderContext &context)
+{
+    if (block.kind != core::BlockKind::Html)
+        return {};
+    const QString html = QString::fromUtf8(block.html.data(), block.html.size());
+    if (!mayLoadPictures(html))
+        return {};
+    // Shown as its source (see create()): it asks for no pictures, and laying
+    // it out would take as long as create() avoids.
+    if (layoutGuard && tooHeavyForRichText(block.html.data(), block.html.size()))
+        return {};
+    RenderContext asking = context;
+    asking.allowRemoteImages = false;
+    ResourceDocument doc(block, asking, true);
+    doc.setDocumentMargin(0);
+    doc.setDefaultFont(context.font);
+    doc.setHtml(html);
+    // As in create(): Qt's image handler looks for "@2x" files by name first.
+    doc.dropNetworkImages();
+    doc.setTextWidth(context.width);
+    doc.loadPaintedPictures();
+    return doc.remoteUrls();
 }
 
 void RenderedBlock::collectLineAnchors(int sourceLines)
@@ -1017,16 +1171,24 @@ std::optional<RenderedBlock::Picture> RenderedBlock::pictureAt(const QPointF &po
     if (m_kind != Kind::Rich)
         return std::nullopt;
     const QString source = m_doc->documentLayout()->imageAt(point);
-    const QString path = source.isEmpty() ? QString() : static_cast<const ResourceDocument *>(m_doc.get())->pathOf(source);
-    if (path.isEmpty())
+    if (source.isEmpty())
         return std::nullopt;
-    return Picture{QFileInfo(path).fileName(), path};
+    const auto *doc = static_cast<const ResourceDocument *>(m_doc.get());
+    if (const QString path = doc->pathOf(source); !path.isEmpty())
+        return Picture{QFileInfo(path).fileName(), path, {}};
+    const QUrl url = doc->downloadedUrlOf(source);
+    if (url.isEmpty())
+        return std::nullopt;
+    const QString name = QFileInfo(url.path()).fileName();
+    return Picture{name.isEmpty() ? url.host() : name, {}, url.toString(QUrl::FullyEncoded)};
 }
 
 QImage RenderedBlock::pictureImage(const Picture &picture) const
 {
     if (!picture.path.isEmpty())
         return fullSizeImage(picture.path);
+    if (!picture.url.isEmpty())
+        return RemoteImages::instance().fullImage(QUrl(picture.url)); // Not downloaded again.
     if (!m_diagramCode.isNull()) {
         // The diagram is vector: render it larger rather than magnify pixels.
         try {

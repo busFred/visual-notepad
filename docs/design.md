@@ -80,7 +80,19 @@ no bevels. Values live in `src/Theme.h`.
 - Status bar, Notepad-style right-aligned columns: position, selections,
   zoom, line ending, encoding, language (clickable), sizing grip.
 - Web links always prompt: Open, Copy, Cancel.
-
+- Remote images (http/https) never load unasked. A bar above the visual view
+  lists the hosts and the number of images and offers Load images / Don't
+  load, for the session and per document; Don't load is final until the file
+  is reopened. Preferences > Markdown > Remote images can be set to Never
+  load. The bar counts what Qt would actually request (entities, background
+  attributes and CSS `url()` included). Downloads are limited (20 MiB,
+  5 redirects, never https to http, 10 s stall timeout, 4 at a time, at
+  most 200 distinct addresses a session, no cookies, a generic User-Agent
+  without the version), run off the GUI thread (Qt's network thread, and a
+  worker thread decodes each picture once) and are cached in memory only
+  (64 MiB as downloaded, 32 MiB decoded). Like local pictures they shrink to
+  the column, open in the zoom viewer and count toward the render cache; an
+  SVG that names a file on another machine is refused, as a local one is.
 ## Preferences
 
 xed-style dialog under Edit > Preferences (Ctrl+,). Left category list:
@@ -89,6 +101,7 @@ switches. Buttons: Help and Close; changes apply immediately. No search box.
 
 - Shortcuts: click a row and press keys; warns on conflicts; per-row reset
   and Reset All.
+- Markdown > Remote images: Ask before loading (default) or Never load.
 - Markdown > Math macros: a Command / Expands to table (`\RR` to
   `\mathbb{R}`), as the old `markdown.math.macros` setting.
 
