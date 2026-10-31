@@ -23,6 +23,7 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
+#include <QSignalBlocker>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTimer>
@@ -449,12 +450,46 @@ void TextFile::loadBackup(const QString &path, const QString &content, const Enc
 
 void TextFile::updateHighlighting(const QString &content)
 {
-    const bool highlight = content.size() <= largeFileChars && content.count(u'\n') < largeFileLines;
-    if (highlight == m_highlighted)
+    m_highlighted = content.size() <= largeFileChars && content.count(u'\n') < largeFileLines;
+    // Attached or detached before the text is set, so a highlighter that is
+    // not wanted never sees it.
+    const bool wanted = wantsHighlighting();
+    if (wanted != isHighlighting())
+        m_highlighter->setDocument(wanted ? m_doc : nullptr);
+}
+
+bool TextFile::isHighlighting() const
+{
+    return m_highlighter->document() != nullptr;
+}
+
+// Only the source view draws the colours: nothing else reads the
+// highlighter's formats or block states. A file shown only by visual views
+// opens without highlighting (a quarter of the time to open 1 MB).
+bool TextFile::wantsHighlighting() const
+{
+    return m_highlighted
+           && (m_views.isEmpty()
+               || std::any_of(m_views.cbegin(), m_views.cend(), [](const DocumentTab *view) { return view->showsSource(); }));
+}
+
+void TextFile::syncHighlighting()
+{
+    // Never detached here: switching back and forth would colour the whole
+    // text again each time, and edits keep an attached highlighter current.
+    if (isHighlighting() || !wantsHighlighting())
         return;
-    m_highlighted = highlight;
-    // Detached before the text is set, so the highlighter never sees it.
-    m_highlighter->setDocument(highlight ? m_doc : nullptr);
+    {
+        // rehighlight() tells the layout about every block it recolours,
+        // and each view then splices its line cache: 28,000 times for 1 MB,
+        // 1.4 s instead of 0.17 s. The views are told once, below.
+        const QSignalBlocker layoutBlocker(m_doc->documentLayout());
+        m_highlighter->setDocument(m_doc);
+        // Now rather than from the event loop, which the call above queues.
+        m_highlighter->rehighlight();
+    }
+    for (DocumentTab *view : std::as_const(m_views))
+        view->editor()->formatsChanged();
 }
 
 void TextFile::rememberDisk(const QByteArray &bytes)

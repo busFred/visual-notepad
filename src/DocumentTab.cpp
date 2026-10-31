@@ -344,6 +344,7 @@ void DocumentTab::updateViews()
         m_visual->setBaseDirectory(path().isEmpty() ? QString() : QFileInfo(path()).absolutePath());
     }
     applyMarkdownState();
+    m_file->syncHighlighting();
     m_editor->setVisible(mode != ViewMode::Visual);
     if (m_visual)
         m_visual->setVisible(mode != ViewMode::Source);
@@ -413,6 +414,11 @@ void DocumentTab::onDefinitionChanged()
     m_editor->setCommentMarker(def.singleLineCommentMarker());
     m_editor->setCodeEditing(def.isValid() && def.name() != QLatin1String("Markdown"));
     updateViews();
+}
+
+bool DocumentTab::showsSource() const
+{
+    return !isMarkdown() || m_viewMode != ViewMode::Visual;
 }
 
 void DocumentTab::setViewMode(ViewMode mode)

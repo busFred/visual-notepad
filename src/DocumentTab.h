@@ -106,6 +106,8 @@ public:
 
     ViewMode viewMode() const { return m_viewMode; }
     void setViewMode(ViewMode mode);
+    // Whether the source view is shown (always for a file that is not Markdown).
+    bool showsSource() const;
 
     QTextDocument *document() const { return m_doc; }
     // The view that has (or last had) focus; for plain text the source view.

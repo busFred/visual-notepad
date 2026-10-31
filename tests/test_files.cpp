@@ -4,6 +4,7 @@
 #include "Encodings.h"
 #include "MainWindow.h"
 #include "Settings.h"
+#include "TextFile.h"
 #include "Theme.h"
 #include "editor/TextView.h"
 
@@ -14,10 +15,16 @@
 #include <QTemporaryDir>
 #include <QSignalSpy>
 #include <QStringEncoder>
+#include <QScopeGuard>
 #include <QTest>
+#include <QTextBlock>
 #include <QTextCursor>
+#include <QTextLayout>
 #include <QTextDocument>
 #include <QUrl>
+
+#include <algorithm>
+#include <memory>
 
 using vn::DocumentTab;
 namespace enc = vn::encoding;
@@ -44,6 +51,9 @@ private Q_SLOTS:
     void languageOverride();
     void newFileLanguageSetting();
     void largeFileIsNotHighlighted();
+    void visualOnlyFileIsHighlightedWhenSourceIsShown();
+    void highlightedLateEqualsHighlightedAtLoad();
+    void sourceViewsAlwaysHighlight();
     void closeScopes();
     void dropOpensFiles();
 
@@ -395,6 +405,151 @@ void TestFiles::largeFileIsNotHighlighted()
     QVERIFY(tab.load(small));
     QVERIFY(tab.file()->isHighlighted());
     QCOMPARE(tab.text(), QStringLiteral("# Title\n\ntext\n"));
+}
+
+namespace {
+
+// Every block's formats, as the source view draws them.
+QList<QList<QTextLayout::FormatRange>> formatsOf(QTextDocument *doc)
+{
+    QList<QList<QTextLayout::FormatRange>> all;
+    for (QTextBlock block = doc->begin(); block.isValid(); block = block.next())
+        all.append(block.layout()->formats());
+    return all;
+}
+
+bool anyFormats(QTextDocument *doc)
+{
+    const auto all = formatsOf(doc);
+    return std::any_of(all.cbegin(), all.cend(), [](const auto &formats) { return !formats.isEmpty(); });
+}
+
+const char markdownSample[] = "# Title\n\nSome *emphasis*, **strong** and `code`, a [link](https://example.com).\n\n"
+                              "```python\nprint('hi')  # comment\n```\n\n- item\n- item 2\n\n> quote\n";
+
+} // namespace
+
+// A file shown only by the visual view is not highlighted when it opens (it
+// takes a quarter of the time to open one); showing the source highlights
+// all of it, without counting as a text change, and keeps it afterwards.
+void TestFiles::visualOnlyFileIsHighlightedWhenSourceIsShown()
+{
+    vn::Settings::instance().setValue(vn::key::defaultMode, QStringLiteral("visual"));
+    const auto restore = qScopeGuard([] { vn::Settings::instance().reset(vn::key::defaultMode); });
+    const QString path = write(QStringLiteral("visualonly.md"), markdownSample);
+
+    DocumentTab tab;
+    QCOMPARE(tab.viewMode(), DocumentTab::ViewMode::Visual);
+    QVERIFY(tab.load(path));
+    tab.resize(800, 500);
+    tab.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&tab));
+    QVERIFY(tab.file()->isHighlighted());   // small enough ...
+    QVERIFY(!tab.file()->isHighlighting()); // ... but nothing shows the colours
+    QVERIFY(!anyFormats(tab.document()));
+    const quint64 serial = tab.file()->changeSerial();
+
+    tab.setViewMode(DocumentTab::ViewMode::Source);
+    QVERIFY(tab.file()->isHighlighting());
+    QVERIFY(anyFormats(tab.document()));
+    QCOMPARE(tab.file()->changeSerial(), serial);
+    QVERIFY(!tab.isModified());
+    // The view paints them.
+    QApplication::processEvents();
+    QVERIFY(!tab.grab().isNull());
+
+    // Back and forth: still highlighted, and typing keeps the source coloured.
+    const auto colours = formatsOf(tab.document());
+    tab.setViewMode(DocumentTab::ViewMode::Visual);
+    QCOMPARE(formatsOf(tab.document()), colours);
+    tab.setViewMode(DocumentTab::ViewMode::SourceVisual);
+    QCOMPARE(formatsOf(tab.document()), colours);
+    QTextCursor end(tab.document());
+    end.movePosition(QTextCursor::End);
+    end.insertText(QStringLiteral("\n## Added *later*\n"));
+    const QTextBlock added = tab.document()->lastBlock().previous();
+    QCOMPARE(added.text(), QStringLiteral("## Added *later*"));
+    QVERIFY(!added.layout()->formats().isEmpty());
+
+    // A file too large to highlight stays plain in every mode.
+    const QString large = write(QStringLiteral("visualonly-large.md"), QByteArray("- item\n").repeated(120'000));
+    DocumentTab big;
+    QVERIFY(big.load(large));
+    big.setViewMode(DocumentTab::ViewMode::Source);
+    QVERIFY(!big.file()->isHighlighted());
+    QVERIFY(!big.file()->isHighlighting());
+}
+
+// What is highlighted late is highlighted exactly like what is highlighted
+// while loading: every block has the same formats.
+void TestFiles::highlightedLateEqualsHighlightedAtLoad()
+{
+    QByteArray text;
+    for (int i = 0; i < 50; ++i)
+        text += QByteArray(markdownSample) + "\n| a | b |\n|---|---|\n| " + QByteArray::number(i)
+                + " | `x` |\n\n<div>\nhtml\n</div>\n\n";
+    const QString path = write(QStringLiteral("late.md"), text);
+    const auto restore = qScopeGuard([] { vn::Settings::instance().reset(vn::key::defaultMode); });
+
+    vn::Settings::instance().setValue(vn::key::defaultMode, QStringLiteral("source"));
+    DocumentTab atLoad;
+    QVERIFY(atLoad.load(path));
+    QVERIFY(atLoad.file()->isHighlighting());
+    const auto expected = formatsOf(atLoad.document());
+    QVERIFY(anyFormats(atLoad.document()));
+
+    vn::Settings::instance().setValue(vn::key::defaultMode, QStringLiteral("visual"));
+    DocumentTab late;
+    QVERIFY(late.load(path));
+    QVERIFY(!late.file()->isHighlighting());
+    late.setViewMode(DocumentTab::ViewMode::SourceVisual);
+    QVERIFY(late.file()->isHighlighting());
+    QCOMPARE(late.document()->blockCount(), atLoad.document()->blockCount());
+    const auto got = formatsOf(late.document());
+    QCOMPARE(got.size(), expected.size());
+    for (int i = 0; i < got.size(); ++i)
+        QVERIFY2(got[i] == expected[i], qPrintable(QStringLiteral("block %1").arg(i)));
+    // The attach also queues a rehighlight; running it changes nothing.
+    QTest::qWait(50);
+    QCOMPARE(formatsOf(late.document()), expected);
+}
+
+// A file whose source is on screen is coloured from the start: a source or
+// split default, a file that is not Markdown (it has no visual view) and a
+// second view of a file whose first one is visual.
+void TestFiles::sourceViewsAlwaysHighlight()
+{
+    const auto restore = qScopeGuard([] { vn::Settings::instance().reset(vn::key::defaultMode); });
+    vn::Settings::instance().setValue(vn::key::defaultMode, QStringLiteral("visual"));
+
+    DocumentTab python;
+    QVERIFY(python.load(write(QStringLiteral("always.py"), "def f(x):\n    return x + 1  # comment\n")));
+    QVERIFY(python.file()->isHighlighting());
+    QVERIFY(anyFormats(python.document()));
+
+    const QString md = write(QStringLiteral("always.md"), markdownSample);
+    DocumentTab first;
+    QVERIFY(first.load(md));
+    QVERIFY(!first.file()->isHighlighting());
+    std::unique_ptr<DocumentTab> second(first.openAnotherView(nullptr));
+    QVERIFY(!first.file()->isHighlighting());
+    second->setViewMode(DocumentTab::ViewMode::Source);
+    QVERIFY(first.file()->isHighlighting());
+    QVERIFY(anyFormats(first.document()));
+
+    // A visual-only file given a code language shows as source, coloured.
+    DocumentTab other;
+    QVERIFY(other.load(md));
+    QVERIFY(!other.file()->isHighlighting());
+    other.setLanguage(QStringLiteral("Python"));
+    QVERIFY(other.file()->isHighlighting());
+    QVERIFY(anyFormats(other.document()));
+
+    vn::Settings::instance().setValue(vn::key::defaultMode, QStringLiteral("split"));
+    DocumentTab split;
+    QVERIFY(split.load(md));
+    QVERIFY(split.file()->isHighlighting());
+    QVERIFY(anyFormats(split.document()));
 }
 
 void TestFiles::closeScopes()

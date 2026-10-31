@@ -144,8 +144,16 @@ public:
     quint64 backupSerial() const { return m_backupSerial; }
     void setBackupSerial(quint64 serial) { m_backupSerial = serial; }
     // False for files too large to highlight without blocking (see
-    // updateHighlighting()).
+    // updateHighlighting()), whatever view is shown.
     bool isHighlighted() const { return m_highlighted; }
+    // Whether the highlighter is running on the document. A file is only
+    // highlighted while a view shows its source (or it has no views), and not
+    // before one does: see syncHighlighting().
+    bool isHighlighting() const;
+    // Starts the highlighter, if the file may be highlighted and a view shows
+    // its source now, with a view that just came to. Highlights the whole
+    // document at once, without a text change.
+    void syncHighlighting();
 
 Q_SIGNALS:
     void modificationChanged(bool modified);
@@ -183,6 +191,7 @@ private:
     // for a batch of checks.
     void compareWithDisk();
     void updateHighlighting(const QString &content);
+    bool wantsHighlighting() const;
     friend class TextFileRegistry;
 
     QTextDocument *m_doc;
