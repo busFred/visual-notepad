@@ -6,6 +6,8 @@
 #include <QRegularExpression>
 #include <QString>
 
+#include <atomic>
+
 class QTextDocument;
 
 namespace vn::search {
@@ -54,6 +56,13 @@ bool isValid(const Options &options);
 // scopeEnd). Matches never span lines.
 QList<Range> findAll(QTextDocument *document, const Compiled &query, int scopeStart = -1, int scopeEnd = -1);
 QList<Range> findAll(QTextDocument *document, const Options &options, int scopeStart = -1, int scopeEnd = -1);
+
+// The same search over QTextDocument::toRawText(), for a worker thread: it
+// touches no document. Returns the same ranges as findAll() would on the
+// document the text came from. Gives up and returns nothing once `cancel` is
+// set (checked between lines; a regex call already running cannot be stopped).
+QList<Range> findAllInText(QString rawText, const Compiled &query, int scopeStart = -1, int scopeEnd = -1,
+                           const std::atomic<bool> *cancel = nullptr);
 
 // The line a replacement last read, so consecutive matches on one line do not
 // copy it again.
