@@ -209,8 +209,9 @@ private:
     void onSettingChanged(const QString &key);
     void fillRecentMenu();
     void openLink(DocumentTab *tab, const QString &url);
-    // Asks before a link runs `target` (a native path or a URL).
-    bool confirmLaunch(const QString &target);
+    // Asks before a link runs `target` (a native path or a URL), naming
+    // `fileName` (the file's own name, for a path) on a line of its own.
+    bool confirmLaunch(const QString &target, const QString &fileName = {});
     static void openUrl(const QUrl &url);
 
     // Auto save: writes a modified tab that has a path; failures only reach

@@ -71,13 +71,248 @@ QImage cachedMath(const QString &tex, const math::Style &style)
 // shown in a column are far smaller; a gzip bomb is not.
 constexpr qint64 maxSvgBytes = 32 * 1024 * 1024;
 
+// QtSvg draws an element again for every <use> of it, every <use> of a group
+// holding that <use>, and so on: ten <use>s of a group of ten <use>s of ...,
+// nine deep, is a 2 KB file that takes minutes on the GUI thread. So an SVG
+// is refused when, with every <use>, pattern, mask, clip path, filter, marker
+// (once per vertex) and other #id reference counted as the elements it
+// repeats, it would draw more than this many elements...
+constexpr quint64 maxSvgDrawn = 200000;
+// ... or has more elements than this, or elements nested deeper than this.
+constexpr int maxSvgElements = 500000;
+constexpr int maxSvgDepth = 64;
+// SVG pictures in an SVG (data: addresses), and in those, that are scanned;
+// one nested deeper is refused.
+constexpr int maxSvgNesting = 2;
+
+// The bytes of a data: address, decoded the way QtSvg decodes an <image>'s
+// (qDecodeDataUrl), or none.
+QByteArray svgDataUrlBytes(const QString &href)
+{
+    const QUrl uri(href);
+    if (uri.scheme() != u"data" || !uri.host().isEmpty())
+        return {};
+    const QByteArray encoded = uri.toEncoded(QUrl::RemoveScheme);
+    const qsizetype comma = encoded.indexOf(',');
+    if (comma < 0)
+        return {};
+    const QByteArray header = QByteArray::fromPercentEncoding(encoded.first(comma)).trimmed().toLower();
+    QByteArray payload = QByteArray::fromPercentEncoding(encoded.sliced(comma + 1));
+    if (!header.endsWith(";base64"))
+        return payload;
+    auto decoded = QByteArray::fromBase64Encoding(std::move(payload));
+    return decoded ? decoded.decoded : QByteArray();
+}
+
+// The ids that url(#id) references in `text` name.
+void addSvgUrlReferences(QStringView text, QStringList &ids)
+{
+    static const QRegularExpression url(QStringLiteral(R"(url\(\s*['"]?\s*#?([^)'"\s]+))"),
+                                        QRegularExpression::CaseInsensitiveOption);
+    if (!text.contains(u"url(", Qt::CaseInsensitive))
+        return;
+    for (auto it = url.globalMatchView(text); it.hasNext();)
+        ids.append(it.next().captured(1));
+}
+
+// The number of numbers in path data or a point list: more than the vertices
+// a marker is drawn at, never fewer.
+quint64 svgVertexBound(QStringView data)
+{
+    quint64 count = 0;
+    bool inNumber = false;
+    for (const QChar c : data) {
+        const bool digit = c.isDigit();
+        if (digit && !inNumber)
+            ++count;
+        inNumber = digit;
+    }
+    return qMax<quint64>(1, count);
+}
+
+struct SvgElement
+{
+    QString tag; // Without a prefix.
+    QString id;
+    QString classes;
+    QStringList refs;       // Ids it draws once each.
+    QStringList markerRefs; // Ids it draws at each vertex (markers, maybe).
+    QList<int> children;
+    quint64 own = 1;      // Itself, and the SVG picture it shows, if any.
+    quint64 vertices = 1; // At most.
+};
+
+// url(#id) references in a style sheet, by what they apply to. A selector is
+// read as applying to every element with any name, class or id in it (more
+// rather than fewer); one that is not that simple applies to every element.
+struct SvgStyleReferences
+{
+    QHash<QString, QStringList> byTag, byClass, byId, markersByTag, markersByClass, markersById;
+    QStringList all, allMarkers;
+    bool tooMany = false; // More references than any picture needs: unsafe.
+};
+
+SvgStyleReferences svgStyleReferences(QString css)
+{
+    static const QRegularExpression comment(QStringLiteral(R"(/\*.*?\*/)"),
+                                            QRegularExpression::DotMatchesEverythingOption);
+    static const QRegularExpression rule(QStringLiteral(R"(([^{}]*)\{([^{}]*)\})"));
+    static const QRegularExpression token(QStringLiteral(R"(([.#]?)([^\s.#,>+~(){}]+))"));
+    SvgStyleReferences references;
+    qsizetype stored = 0;
+    css.remove(comment);
+    for (auto it = rule.globalMatch(css); it.hasNext();) {
+        const QRegularExpressionMatch match = it.next();
+        QStringList ids;
+        addSvgUrlReferences(match.capturedView(2), ids);
+        if (ids.isEmpty())
+            continue;
+        const bool markers = match.capturedView(2).contains(u"marker", Qt::CaseInsensitive);
+        const QStringView selector = match.capturedView(1);
+        if (selector.contains(u'*') || selector.contains(u'[') || selector.contains(u':') || selector.contains(u'\\')
+            || selector.trimmed().isEmpty()) {
+            (markers ? references.allMarkers : references.all) += ids;
+            stored += ids.size();
+            if (stored > qsizetype(maxSvgElements)) {
+                references.tooMany = true;
+                return references;
+            }
+            continue;
+        }
+        for (auto t = token.globalMatchView(selector); t.hasNext();) {
+            stored += ids.size();
+            if (stored > qsizetype(maxSvgElements)) {
+                references.tooMany = true;
+                return references;
+            }
+            const QRegularExpressionMatch part = t.next();
+            const QStringView kind = part.capturedView(1);
+            const QString name = part.captured(2);
+            auto &map = kind == u"." ? (markers ? references.markersByClass : references.byClass)
+                        : kind == u"#" ? (markers ? references.markersById : references.byId)
+                                       : (markers ? references.markersByTag : references.byTag);
+            map[name] += ids;
+        }
+    }
+    return references;
+}
+
+bool svgIsUnsafe(QIODevice &file, int nesting, quint64 &drawn);
+
+// True unless the SVG elements `elements`, their ids `byId` and the style
+// sheet `css` draw at most maxSvgDrawn elements; `drawn` is how many.
+// References in a cycle are unsafe too (QtSvg discards such a file).
+bool svgDrawsTooMuch(std::vector<SvgElement> &elements, const QHash<QString, QList<int>> &byId, const QString &css,
+                     quint64 &drawn)
+{
+    // The elements that an id names, but not gradients: they draw nothing
+    // of their own, and their stops may name them back in a style sheet.
+    const auto targets = [&](const QString &id) {
+        QList<int> found = byId.value(id);
+        found.removeIf([&](int i) { return elements[size_t(i)].tag.endsWith(u"Gradient"); });
+        return found;
+    };
+    struct Link
+    {
+        int target;
+        bool perVertex;
+    };
+    std::vector<QList<Link>> links(elements.size());
+    quint64 linkCount = 0; // Each is at least one more drawn element.
+    const auto link = [&](size_t from, const QStringList &ids, bool perVertex) {
+        for (const QString &id : ids) {
+            for (const int target : targets(id)) {
+                links[from].append({target, perVertex});
+                if (++linkCount > maxSvgDrawn)
+                    return false;
+            }
+        }
+        return true;
+    };
+    SvgStyleReferences style;
+    if (css.contains(u"url(", Qt::CaseInsensitive))
+        style = svgStyleReferences(css);
+    if (style.tooMany)
+        return true;
+    // Only ids that name something (each is looked up for every element).
+    const auto prune = [&](QStringList &ids) { ids.removeIf([&](const QString &id) { return targets(id).isEmpty(); }); };
+    prune(style.all);
+    prune(style.allMarkers);
+    for (auto *map : {&style.byTag, &style.byClass, &style.byId, &style.markersByTag, &style.markersByClass,
+                      &style.markersById}) {
+        for (QStringList &ids : *map)
+            prune(ids);
+    }
+    for (size_t i = 0; i < elements.size(); ++i) {
+        const SvgElement &element = elements[i];
+        for (const int child : element.children)
+            links[i].append({child, false});
+        bool ok = link(i, element.refs, false) && link(i, element.markerRefs, true) && link(i, style.all, false)
+                  && link(i, style.allMarkers, true) && link(i, style.byTag.value(element.tag), false)
+                  && link(i, style.markersByTag.value(element.tag), true);
+        if (ok && !element.id.isEmpty())
+            ok = link(i, style.byId.value(element.id), false) && link(i, style.markersById.value(element.id), true);
+        if (ok && !element.classes.isEmpty() && !(style.byClass.isEmpty() && style.markersByClass.isEmpty())) {
+            for (const QString &name : element.classes.simplified().split(u' ', Qt::SkipEmptyParts))
+                ok = ok && link(i, style.byClass.value(name), false) && link(i, style.markersByClass.value(name), true);
+        }
+        if (!ok)
+            return true;
+    }
+
+    // Elements drawn by each element, children and references included,
+    // depth first without recursion (reference chains can be long). Every
+    // count is checked against the limit as it grows, so none overflows.
+    enum : char { New, Open, Done };
+    std::vector<char> state(elements.size(), New);
+    std::vector<quint64> size(elements.size(), 0);
+    std::vector<std::pair<int, qsizetype>> stack;
+    for (size_t start = 0; start < elements.size(); ++start) {
+        if (state[start] != New)
+            continue;
+        state[start] = Open;
+        stack.push_back({int(start), 0});
+        while (!stack.empty()) {
+            const int node = stack.back().first;
+            const qsizetype next = stack.back().second;
+            const QList<Link> &out = links[size_t(node)];
+            if (next < out.size()) {
+                ++stack.back().second;
+                const int target = out[next].target;
+                if (state[size_t(target)] == Open)
+                    return true; // A cycle.
+                if (state[size_t(target)] == New) {
+                    state[size_t(target)] = Open;
+                    stack.push_back({target, 0});
+                }
+                continue;
+            }
+            const SvgElement &element = elements[size_t(node)];
+            quint64 total = element.own;
+            for (const Link &l : out) {
+                total += size[size_t(l.target)] * (l.perVertex ? element.vertices : 1);
+                if (total > maxSvgDrawn)
+                    return true;
+            }
+            size[size_t(node)] = total;
+            state[size_t(node)] = Done;
+            stack.pop_back();
+        }
+    }
+    drawn = elements.empty() ? 0 : size[0]; // The root holds every other element.
+    return false;
+}
+
 // True if the SVG in `file` (open for reading, a file or a download) names
 // a file on another machine, which the SVG plugin would open by itself:
-// <image href> pictures and xml-stylesheet style sheets. Read the way QtSvg
-// reads it: a file that starts with the gzip magic is an .svgz, unpacked
-// (every member) before it is parsed. One that cannot be unpacked, or is too
-// big, counts as naming one: it is not opened. Any thread.
-bool svgNamesNetworkPath(QIODevice &file)
+// <image href> pictures and xml-stylesheet style sheets; or would take too
+// long to draw (see maxSvgDrawn) or is nested too deep. SVG pictures inside
+// it as data: addresses are scanned too (QtSvg shows those, but no SVG
+// files). Read the way QtSvg reads it: a file that starts with the gzip magic
+// is an .svgz, unpacked (every member) before it is parsed. One that cannot
+// be unpacked, or is too big, is unsafe: it is not opened. `drawn` is set to
+// the elements it draws. Any thread.
+bool svgIsUnsafe(QIODevice &file, int nesting, quint64 &drawn)
 {
     QBuffer unpacked;
     QIODevice *source = &file;
@@ -98,6 +333,10 @@ bool svgNamesNetworkPath(QIODevice &file)
                                          QRegularExpression::CaseInsensitiveOption);
     QXmlStreamReader xml(source);
     xml.setNamespaceProcessing(false);
+    std::vector<SvgElement> elements;
+    QHash<QString, QList<int>> byId;
+    QList<int> open;
+    QString css;
     while (!xml.atEnd()) {
         const QXmlStreamReader::TokenType token = xml.readNext();
         if (token == QXmlStreamReader::ProcessingInstruction) {
@@ -105,20 +344,73 @@ bool svgNamesNetworkPath(QIODevice &file)
             if (match.hasMatch() && md::isNetworkPath(match.captured(1)))
                 return true;
         } else if (token == QXmlStreamReader::StartElement) {
+            if (elements.size() >= size_t(maxSvgElements) || open.size() >= maxSvgDepth)
+                return true;
+            const int index = int(elements.size());
+            if (!open.isEmpty())
+                elements[size_t(open.last())].children.append(index);
+            open.append(index);
+            SvgElement element;
+            const QStringView qualified = xml.qualifiedName();
+            element.tag = qualified.mid(qualified.lastIndexOf(u':') + 1).toString();
             for (const QXmlStreamAttribute &attribute : xml.attributes()) {
                 const QStringView name = attribute.qualifiedName();
-                if ((name == u"href" || name.endsWith(u":href")) && md::isNetworkPath(attribute.value().toString()))
-                    return true;
+                const QStringView value = attribute.value();
+                if (name == u"href" || name.endsWith(u":href")) {
+                    if (md::isNetworkPath(value.toString()))
+                        return true;
+                    // QtSvg takes the id after the first character: "#id".
+                    const QString target = value.trimmed().toString();
+                    if (!target.isEmpty())
+                        element.refs.append(target.mid(1));
+                    if (element.tag == u"image" && target.startsWith(u"data", Qt::CaseInsensitive)) {
+                        QBuffer picture;
+                        picture.setData(svgDataUrlBytes(target));
+                        picture.open(QIODevice::ReadOnly);
+                        if (QImageReader(&picture).format().startsWith("svg")) {
+                            quint64 inner = 0;
+                            picture.seek(0);
+                            if (nesting >= maxSvgNesting || svgIsUnsafe(picture, nesting + 1, inner))
+                                return true;
+                            element.own += inner;
+                        }
+                    }
+                } else if (name == u"d" || name == u"points") {
+                    element.vertices = qMax(element.vertices, svgVertexBound(value));
+                } else if (name == u"id" || name == u"xml:id") {
+                    element.id = value.toString();
+                    byId[element.id].append(index);
+                } else if (name == u"class") {
+                    element.classes = value.toString();
+                }
+                const bool markers = name.contains(u"marker", Qt::CaseInsensitive)
+                                     || (name == u"style" && value.contains(u"marker", Qt::CaseInsensitive));
+                addSvgUrlReferences(value, markers ? element.markerRefs : element.refs);
             }
+            elements.push_back(std::move(element));
+        } else if (token == QXmlStreamReader::EndElement) {
+            if (!open.isEmpty())
+                open.removeLast();
+        } else if (token == QXmlStreamReader::Characters && !open.isEmpty()
+                   && elements[size_t(open.last())].tag == u"style") {
+            css += xml.text();
+            css += u'\n';
         }
     }
-    return false;
+    return svgDrawsTooMuch(elements, byId, css, drawn);
+}
+
+bool svgIsUnsafe(QIODevice &file)
+{
+    quint64 drawn = 0;
+    return svgIsUnsafe(file, 0, drawn);
 }
 
 // Picture files read, for tests.
 std::atomic<int> localImageReads{0};
 
-// A picture file, unless it is an SVG that would reach another machine.
+// A picture file, unless it is an SVG that would reach another machine or
+// take too long to draw.
 QImage readImage(const QString &path)
 {
     ++localImageReads;
@@ -126,7 +418,7 @@ QImage readImage(const QString &path)
     reader.setAutoTransform(true);
     if (reader.format().startsWith("svg")) {
         QFile file(path);
-        if (file.open(QIODevice::ReadOnly) && svgNamesNetworkPath(file))
+        if (file.open(QIODevice::ReadOnly) && svgIsUnsafe(file))
             return {};
     }
     return reader.read();
@@ -919,7 +1211,7 @@ QImage decodePicture(const QByteArray &data)
         QBuffer scanned;
         scanned.setData(data);
         scanned.open(QIODevice::ReadOnly);
-        if (svgNamesNetworkPath(scanned))
+        if (svgIsUnsafe(scanned))
             return {};
     }
     return reader.read();

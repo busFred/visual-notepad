@@ -20,7 +20,6 @@
 #include <QDropEvent>
 #include <QMimeData>
 #include <QMouseEvent>
-#include <QProcess>
 #include <QDir>
 #include <QClipboard>
 #include <QDesktopServices>
@@ -56,6 +55,11 @@
 
 #include <algorithm>
 #include <map>
+
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#include <shlobj.h>
+#endif
 
 namespace vn {
 
@@ -1240,15 +1244,20 @@ void MainWindow::openUrl(const QUrl &url)
         QDesktopServices::openUrl(url);
 }
 
-bool MainWindow::confirmLaunch(const QString &target)
+bool MainWindow::confirmLaunch(const QString &target, const QString &fileName)
 {
     if (const auto &confirmer = launchConfirmer())
         return confirmer(target);
     // Plain text (the target comes from the document), all in the main label:
-    // the informative one guesses the format.
+    // the informative one guesses the format. Direction overrides and other
+    // invisible characters are spelled out: "\u{202E}exe.txt" is not
+    // "txt.exe" in disguise.
+    QString shown = md::withVisibleControls(target);
+    if (!fileName.isEmpty())
+        shown += u"\n\n" + tr("File name: %1").arg(md::withVisibleControls(fileName));
     QMessageBox box(QMessageBox::Warning, productName(),
                     tr("This link would run a program:\n\n%1\n\nOnly continue if you trust this document and the file.")
-                        .arg(target),
+                        .arg(shown),
                     QMessageBox::NoButton, this);
     box.setTextFormat(Qt::PlainText);
     QPushButton *open = box.addButton(tr("Open Anyway"), QMessageBox::AcceptRole);
@@ -1496,8 +1505,20 @@ void MainWindow::showTabContextMenu(EditorGroup *group, int index, const QPoint 
 void MainWindow::revealInFileManager(const QString &path)
 {
 #ifdef Q_OS_WIN
-    if (QProcess::startDetached(QStringLiteral("explorer"),
-                                {QStringLiteral("/select,") + QDir::toNativeSeparators(path)}))
+    // The shell's own call, not a program named "explorer": CreateProcess
+    // would look for one in the current folder (a document's) before
+    // System32. Nothing of the path is parsed as options either.
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool shown = false;
+    const std::wstring native = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath()).toStdWString();
+    if (PIDLIST_ABSOLUTE item = ILCreateFromPathW(native.c_str())) {
+        // No children: open the folder holding `item` and select it.
+        shown = SUCCEEDED(SHOpenFolderAndSelectItems(item, 0, nullptr, 0));
+        ILFree(item);
+    }
+    if (SUCCEEDED(com))
+        CoUninitialize();
+    if (shown)
         return;
 #endif
     QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
@@ -2281,6 +2302,9 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
         return;
     if (QFileInfo(path).isRelative() && !tab->path().isEmpty())
         path = QFileInfo(tab->path()).absoluteDir().filePath(path);
+    // Checked and opened by the name of the file the OS opens: "evil.exe/."
+    // and "evil.exe/x/.." are evil.exe.
+    path = md::resolvedLocalPath(path);
     if (!QFileInfo::exists(path)) {
         plainWarning(this, productName(), tr("The file %1 does not exist.").arg(QDir::toNativeSeparators(path)));
         return;
@@ -2289,7 +2313,8 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
     if (!mime.inherits(QStringLiteral("text/plain"))) {
         // Text (scripts included) opens here; the rest goes to the OS, which
         // runs programs, installers and shortcuts.
-        if (md::isLaunchable(path) && !confirmLaunch(QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath())))
+        if (md::isLaunchable(path)
+            && !confirmLaunch(QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath()), QFileInfo(path).fileName()))
             return;
         openUrl(QUrl::fromLocalFile(path));
         return;

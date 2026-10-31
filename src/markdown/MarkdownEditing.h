@@ -55,9 +55,10 @@ QString linkForFile(const QString &filePath, const QString &documentDir);
 // Percent-encodes characters that would end a Markdown destination.
 QString encodeDestination(const QString &path);
 // True for a path on another machine ("//host/share", "\\host\share", mixes
-// of the two, "\\?\UNC\..."). Opening one connects to the host; on Windows
-// over SMB, which hands it the user's password hash. Never open these for a
-// document.
+// of the two, "\\?\UNC\..."), and for Windows object manager paths ("\??\",
+// "\\?\", "\\.\", either slash), which can name one too. Opening one connects
+// to the host; on Windows over SMB, which hands it the user's password hash.
+// Never open these for a document.
 bool isNetworkPath(const QString &path);
 // True if a picture or link name from a document may reach another machine
 // in any reading Qt or the OS gives it: as written, percent-decoded once or
@@ -65,12 +66,27 @@ bool isNetworkPath(const QString &path);
 // "file:\\host\x"), with either slash. "@2x" variants share the start, so
 // they are covered too.
 bool mayNameOtherMachine(const QString &name);
+// `path` with "." and ".." resolved (QDir::cleanPath) and, with
+// `windowsNames`, trailing dots and spaces dropped from every component the
+// way Windows drops them: the file the OS opens for it, by a name that says
+// which (no "evil.exe/." ending in "."). Checks and opening use this one.
+QString cleanLocalPath(const QString &path, bool windowsNames);
+// The absolute form of local `path` that is checked and opened: cleaned
+// (with Windows' rules on Windows) and, on Windows, with 8.3 short names
+// spelled out.
+QString resolvedLocalPath(const QString &path);
 // True if handing local `path` to the OS (QDesktopServices) could run a
 // program rather than show a document: a launchable suffix (see
 // launchableSuffixes in the .cpp; case-insensitive, ignoring what Windows
-// ignores: trailing dots and spaces, "::$DATA", alternate stream names), on
-// the path or, for a symlink, on its target; or an existing non-directory
-// file with an execute bit, unless its suffix is a plain document type.
+// ignores: trailing dots and spaces, "::$DATA", alternate stream names; any
+// non-ASCII suffix counts), on the cleaned path (cleanLocalPath) or, for a
+// symlink, on its target; or an existing non-directory file with an execute
+// bit, unless its suffix is a plain document type.
 bool isLaunchable(const QString &path);
+// `text` with characters that change how the rest reads but show nothing of
+// their own spelled out as "\u{202E}": bidi controls, other format characters
+// (zero width, soft hyphen, tags), control characters, lone surrogates and
+// line separators.
+QString withVisibleControls(const QString &text);
 
 } // namespace vn::md

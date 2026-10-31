@@ -59,6 +59,32 @@ QString backupsDir()
     return SessionManager::dataDir() + QStringLiteral("/backups");
 }
 
+// Unsaved work and the list of open files are the user's alone: the data
+// and backups folders are 0700 (also when found wider) and the files in
+// them 0600. Elsewhere the per-user folder's ACL already keeps others out.
+bool makePrivateDir(const QString &path)
+{
+    if (!QDir().mkpath(path))
+        return false;
+#ifdef Q_OS_UNIX
+    constexpr QFile::Permissions others = QFile::ReadGroup | QFile::WriteGroup | QFile::ExeGroup | QFile::ReadOther
+                                          | QFile::WriteOther | QFile::ExeOther;
+    if (QFile::permissions(path) & others)
+        QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+#endif
+    return true;
+}
+
+// `file` (a QSaveFile, open) is written 0600 whatever the umask.
+void makePrivate(QFileDevice &file)
+{
+#ifdef Q_OS_UNIX
+    file.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
+#else
+    Q_UNUSED(file);
+#endif
+}
+
 using ViewMode = DocumentTab::ViewMode;
 
 QString modeToString(ViewMode mode)
@@ -254,11 +280,12 @@ QString SessionManager::writeBackup(DocumentTab *tab)
         return name;
     if (name.isEmpty())
         name = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    if (!QDir().mkpath(backupsDir()))
+    if (!makePrivateDir(dataDir()) || !makePrivateDir(backupsDir()))
         return {};
     QSaveFile file(backupsDir() + u'/' + name);
     if (!file.open(QIODevice::WriteOnly))
         return {};
+    makePrivate(file);
     const QByteArray bytes = tab->text().toUtf8();
     if (file.write(bytes) != bytes.size() || !file.commit())
         return {};
@@ -344,8 +371,12 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
     root[QStringLiteral("windows")] = windows;
     QSaveFile file(sessionFile());
     const QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Compact);
-    if (!QDir().mkpath(dataDir()) || !file.open(QIODevice::WriteOnly) || file.write(json) != json.size()
-        || !file.commit()) {
+    bool saved = makePrivateDir(dataDir()) && file.open(QIODevice::WriteOnly);
+    if (saved) {
+        makePrivate(file);
+        saved = file.write(json) == json.size() && file.commit();
+    }
+    if (!saved) {
         // Backups exist but nothing points at them: the content is not safe.
         failed.clear();
         for (MainWindow *window : std::as_const(m_windows)) {

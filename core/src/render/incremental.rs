@@ -80,6 +80,22 @@ impl Document {
         }
     }
 
+    /// A document of the given blocks that the next version of its text is
+    /// parsed from scratch for (not `local`): what is left when parsing
+    /// panicked.
+    pub fn unparsed(text: &str, blocks: Vec<Block>) -> Document {
+        Document {
+            text: text.to_owned(),
+            starts: Vec::new(),
+            options: [u8::MAX; 5],
+            blocks,
+            meta: Vec::new(),
+            front_matter_end: None,
+            local: false,
+            spliced: false,
+        }
+    }
+
     pub fn blocks(&self) -> &Vec<Block> {
         &self.blocks
     }

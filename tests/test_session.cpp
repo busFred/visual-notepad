@@ -23,6 +23,7 @@
 
 #ifdef Q_OS_UNIX
 #include <csignal>
+#include <sys/stat.h>
 #endif
 
 using namespace vn;
@@ -50,6 +51,7 @@ private Q_SLOTS:
     void missingFileIsSkipped();
     void autoSaveAfterDelay();
     void autoSaveOnFocusChange();
+    void recoveryDataIsPrivate();
 #ifdef Q_OS_UNIX
     // Last: the session stays in its quitting state afterwards.
     void sigtermBacksUp();
@@ -495,6 +497,52 @@ void TestSession::autoSaveOnFocusChange()
 }
 
 #ifdef Q_OS_UNIX
+void TestSession::recoveryDataIsPrivate()
+{
+#ifndef Q_OS_UNIX
+    QSKIP("Unix modes; elsewhere the per-user folder's ACL applies");
+#else
+    const auto mode = [](const QString &path) {
+        struct stat info {};
+        return ::stat(QFile::encodeName(path).constData(), &info) == 0 ? int(info.st_mode & 07777) : -1;
+    };
+    const QString data = SessionManager::dataDir();
+    const QString backups = data + QStringLiteral("/backups");
+    // A data folder left world-readable by an older version or a umask.
+    QVERIFY(QDir().mkpath(backups));
+    QVERIFY(::chmod(QFile::encodeName(data).constData(), 0755) == 0);
+    QVERIFY(::chmod(QFile::encodeName(backups).constData(), 0777) == 0);
+    const mode_t oldMask = ::umask(0); // Files would be 0666 by default.
+
+    auto &session = SessionManager::instance();
+    MainWindow *window = makeWindow();
+    window->newFile();
+    DocumentTab *tab = window->tabs().at(0);
+    append(tab, QStringLiteral("secret"));
+    const bool saved = session.saveSession().isEmpty();
+    ::umask(oldMask);
+    QVERIFY(saved);
+    const QString backup = backups + u'/' + tab->file()->backupName();
+    QCOMPARE(read(backup), QByteArray("secret"));
+    QCOMPARE(mode(data), 0700);
+    QCOMPARE(mode(backups), 0700);
+    QCOMPARE(mode(backup), 0600);
+    QCOMPARE(mode(data + QStringLiteral("/session.json")), 0600);
+
+    // Created afresh: private from the start.
+    closeWindows();
+    QVERIFY(QDir(data).removeRecursively());
+    window = makeWindow();
+    window->newFile();
+    tab = window->tabs().at(0);
+    append(tab, QStringLiteral("again"));
+    QVERIFY(session.saveSession().isEmpty());
+    QCOMPARE(mode(data), 0700);
+    QCOMPARE(mode(backups), 0700);
+    QCOMPARE(mode(backups + u'/' + tab->file()->backupName()), 0600);
+#endif
+}
+
 void TestSession::sigtermBacksUp()
 {
     MainWindow *window = makeWindow();
