@@ -50,13 +50,60 @@ BlockState *stateOf(const QTextBlock &block)
 
 } // namespace
 
+// Runs the slices of every highlighter that has some to do, within one
+// budget per turn of the event loop.
+class SliceScheduler : public QObject
+{
+public:
+    // Never destroyed: files, and so highlighters, may outlive the
+    // application object.
+    static SliceScheduler &instance()
+    {
+        static auto *scheduler = new SliceScheduler;
+        return *scheduler;
+    }
+
+    void add(Highlighter *highlighter)
+    {
+        if (!m_queue.contains(highlighter))
+            m_queue.append(highlighter);
+        m_timer.start();
+    }
+
+    void remove(Highlighter *highlighter) { m_queue.removeAll(highlighter); }
+
+private:
+    SliceScheduler()
+    {
+        m_timer.setSingleShot(true);
+        m_timer.setInterval(0);
+        connect(&m_timer, &QTimer::timeout, this, &SliceScheduler::run);
+    }
+
+    void run()
+    {
+        QElapsedTimer clock;
+        clock.start();
+        // Files on screen first, then the others in turn: one that ran goes
+        // to the back (runSlice() adds it again).
+        std::stable_partition(m_queue.begin(), m_queue.end(), [](const Highlighter *h) { return h->isShown(); });
+        while (!m_queue.isEmpty()) {
+            const qint64 left = sliceBudgetNs - clock.nsecsElapsed();
+            if (left <= 0)
+                break;
+            m_queue.takeFirst()->runSlice(left);
+        }
+        if (!m_queue.isEmpty())
+            m_timer.start();
+    }
+
+    QTimer m_timer;
+    QList<Highlighter *> m_queue;
+};
+
 Highlighter::Highlighter(QObject *parent)
     : QObject(parent)
-    , m_timer(new QTimer(this))
 {
-    m_timer->setSingleShot(true);
-    m_timer->setInterval(0);
-    connect(m_timer, &QTimer::timeout, this, &Highlighter::runSlice);
 }
 
 Highlighter::~Highlighter()
@@ -162,7 +209,7 @@ void Highlighter::recolourAll()
         m_frontier = QTextCursor(m_doc);
         settle();
         Q_EMIT highlighted(0, m_doc->blockCount() - 1);
-        runSlice();
+        runSlice(sliceBudgetNs);
         return;
     }
     for (QTextBlock block = m_doc->begin(); block.isValid(); block = block.next())
@@ -271,7 +318,7 @@ void Highlighter::onContentsChange(int from, int charsRemoved, int charsAdded)
                 break;
             if (sliced() && clock.nsecsElapsed() > sliceBudgetNs) {
                 moveFrontierBack(block.position());
-                m_timer->start();
+                SliceScheduler::instance().add(this);
                 break;
             }
         }
@@ -284,7 +331,7 @@ void Highlighter::onContentsChanged()
 {
     if (m_sliceAfterEdit) {
         m_sliceAfterEdit = false;
-        runSlice();
+        runSlice(sliceBudgetNs);
     }
 }
 
@@ -303,7 +350,12 @@ void Highlighter::moveFrontierBack(int position)
     m_frontier.setPosition(position);
 }
 
-void Highlighter::runSlice()
+bool Highlighter::isShown() const
+{
+    return m_visibleLines && !m_visibleLines().isEmpty();
+}
+
+void Highlighter::runSlice(qint64 budgetNs)
 {
     if (!m_doc || m_frontier.isNull())
         return;
@@ -333,7 +385,7 @@ void Highlighter::runSlice()
         }
     }
     // Then on in order.
-    while (next.isValid() && clock.nsecsElapsed() < sliceBudgetNs) {
+    for (bool any = false; next.isValid() && (!any || clock.nsecsElapsed() < budgetNs); any = true) {
         const BlockState *data = stateOf(next);
         const bool wasInOrder = data && !data->ahead;
         const bool changed = colourLine(next, number, true);
@@ -362,12 +414,12 @@ void Highlighter::runSlice()
     if (last >= 0)
         Q_EMIT highlighted(first, last);
     if (!m_frontier.isNull())
-        m_timer->start();
+        SliceScheduler::instance().add(this);
 }
 
 void Highlighter::stopSlices()
 {
-    m_timer->stop();
+    SliceScheduler::instance().remove(this);
     m_frontier = QTextCursor();
     m_doneTo = QTextCursor();
     m_doneToEnd = false;

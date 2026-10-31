@@ -18,6 +18,10 @@
 // as a line ends in another state than it did (an opened comment); with
 // slicing on, a long run of those goes on in slices.
 //
+// The slices of all highlighters share one budget per turn of the event
+// loop, files on screen first: a session of big files is coloured no slower
+// for it, and no turn takes longer.
+//
 // Lines longer than maxLineChars are coloured up to there only: a line is
 // one call into the engine that cannot be split, and a 1 MB line takes two
 // seconds, again on every keystroke in it (VS Code stops at 20,000
@@ -39,9 +43,10 @@
 #include <utility>
 
 class QTextBlock;
-class QTimer;
 
 namespace vn {
+
+class SliceScheduler;
 
 class Highlighter : public QObject, public KSyntaxHighlighting::AbstractHighlighter
 {
@@ -94,7 +99,11 @@ private:
     void settle();
     void onContentsChange(int from, int charsRemoved, int charsAdded);
     void onContentsChanged();
-    void runSlice();
+    // Colours for about `budgetNs` (at least a line), and has the scheduler
+    // come back if there is more.
+    void runSlice(qint64 budgetNs);
+    // Whether a view shows some of the text.
+    bool isShown() const;
     // The in-order pass goes on from `position` (a block start) if that is
     // before where it is.
     void moveFrontierBack(int position);
@@ -104,7 +113,6 @@ private:
 
     QPointer<QTextDocument> m_doc;
     std::function<QList<std::pair<int, int>>()> m_visibleLines;
-    QTimer *m_timer;
     // Where the in-order pass goes on; null when there is none.
     QTextCursor m_frontier;
     // Up to where (or, with m_doneToEnd, to the end) the text was coloured in
@@ -119,6 +127,8 @@ private:
     QList<QTextLayout::FormatRange> m_ranges;
     // Qt formats by KSyntaxHighlighting format id (0: the default format).
     QHash<int, QTextCharFormat> m_formats;
+
+    friend class SliceScheduler;
 };
 
 } // namespace vn
