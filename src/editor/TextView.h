@@ -103,6 +103,8 @@ public:
 
     // First line at the top of the viewport, and scrolling to put a line there.
     int topLine() const;
+    // The last line the viewport can show, at most (fewer with wrapping).
+    int bottomLine() const;
     void scrollToLine(int line);
     // The same with fractions: 12.3 is 30% of the way from where line 12
     // starts to where line 13 starts. Rendered rows place lines through
@@ -181,9 +183,9 @@ public:
     };
     void formatMarkdown(MarkdownFormat format);
 
-    // The colours of the whole text changed (the highlighter ran) without a
-    // text change.
-    void formatsChanged();
+    // The colours of lines [firstLine, lastLine] changed (the highlighter
+    // ran) without a text change.
+    void formatsChanged(int firstLine, int lastLine);
 
 Q_SIGNALS:
     void cursorPositionChanged();

@@ -13,6 +13,7 @@
 
 #include <functional>
 #include <memory>
+#include <utility>
 
 class QLineEdit;
 class QSplitter;
@@ -108,6 +109,8 @@ public:
     void setViewMode(ViewMode mode);
     // Whether the source view is shown (always for a file that is not Markdown).
     bool showsSource() const;
+    // The lines (first, last) the source view has on screen, or (-1, -1).
+    std::pair<int, int> visibleSourceLines() const;
 
     QTextDocument *document() const { return m_doc; }
     // The view that has (or last had) focus; for plain text the source view.
