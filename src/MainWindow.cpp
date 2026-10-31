@@ -19,7 +19,6 @@
 #include <QDropEvent>
 #include <QMimeData>
 #include <QMouseEvent>
-#include <QProcess>
 #include <QDir>
 #include <QClipboard>
 #include <QDesktopServices>
@@ -55,6 +54,11 @@
 
 #include <algorithm>
 #include <map>
+
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#include <shlobj.h>
+#endif
 
 namespace vn {
 
@@ -1492,8 +1496,20 @@ void MainWindow::showTabContextMenu(EditorGroup *group, int index, const QPoint 
 void MainWindow::revealInFileManager(const QString &path)
 {
 #ifdef Q_OS_WIN
-    if (QProcess::startDetached(QStringLiteral("explorer"),
-                                {QStringLiteral("/select,") + QDir::toNativeSeparators(path)}))
+    // The shell's own call, not a program named "explorer": CreateProcess
+    // would look for one in the current folder (a document's) before
+    // System32. Nothing of the path is parsed as options either.
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool shown = false;
+    const std::wstring native = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath()).toStdWString();
+    if (PIDLIST_ABSOLUTE item = ILCreateFromPathW(native.c_str())) {
+        // No children: open the folder holding `item` and select it.
+        shown = SUCCEEDED(SHOpenFolderAndSelectItems(item, 0, nullptr, 0));
+        ILFree(item);
+    }
+    if (SUCCEEDED(com))
+        CoUninitialize();
+    if (shown)
         return;
 #endif
     QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));

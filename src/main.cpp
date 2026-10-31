@@ -4,6 +4,7 @@
 #include "Theme.h"
 
 #include <QApplication>
+#include <QDir>
 #include <QIcon>
 #include <QCommandLineParser>
 
@@ -19,6 +20,16 @@
 
 int main(int argc, char *argv[])
 {
+#ifdef Q_OS_WIN
+    // DLLs loaded from now on (Qt's plugins and what they need, anything a
+    // file dialog or the shell pulls in) come from the app's folder,
+    // System32 and AddDllDirectory folders only: never from the current
+    // folder (a document's, when the app was opened from one) or PATH. Qt
+    // loads plugins by full path with plain LoadLibrary, which follows these
+    // defaults; deployed plugins' own dependencies sit beside the exe.
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    SetDllDirectoryW(L"");
+#endif
 #ifdef Q_OS_LINUX
     // Our Qt is not the system's, so it has no desktop integration by
     // default. Use the desktop's file dialogs through the XDG portal, and
@@ -67,7 +78,10 @@ int main(int argc, char *argv[])
 
     auto &session = vn::SessionManager::instance();
     session.start();
-    const QStringList files = parser.positionalArguments();
+    // Absolute at once: nothing later depends on the current folder.
+    QStringList files = parser.positionalArguments();
+    for (QString &file : files)
+        file = QDir::current().absoluteFilePath(file);
     if (files.isEmpty()) {
         if (!session.restore()) {
             auto *window = new vn::MainWindow;

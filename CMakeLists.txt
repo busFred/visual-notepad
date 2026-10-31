@@ -101,6 +101,11 @@ target_link_libraries(vn_app PUBLIC
     microtex
 )
 
+if(WIN32)
+    # SHOpenFolderAndSelectItems and friends (Reveal in File Explorer).
+    target_link_libraries(vn_app PRIVATE shell32 ole32)
+endif()
+
 if(ICU_FOUND)
     target_compile_definitions(vn_app PUBLIC VN_HAVE_ICU)
     target_link_libraries(vn_app PUBLIC ICU::i18n ICU::uc)
