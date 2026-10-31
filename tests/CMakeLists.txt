@@ -6,6 +6,7 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 
 qt_add_executable(test_mainwindow test_mainwindow.cpp)
 target_link_libraries(test_mainwindow PRIVATE vn_app Qt6::Test)
+target_compile_definitions(test_mainwindow PRIVATE VN_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 add_test(NAME mainwindow COMMAND test_mainwindow)
 set_tests_properties(mainwindow PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
 
