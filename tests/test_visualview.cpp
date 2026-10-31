@@ -220,6 +220,7 @@ private Q_SLOTS:
     void largeDocumentsParseInBackground();
     void editsDuringBackgroundParseAreKept();
     void flushOvertakesBackgroundParse();
+    void largeDocumentsReparseIncrementally();
     void modelDeletedDuringBackgroundParse();
     void modeSwitchDuringBackgroundParse();
     void wideImagesShrinkToColumn();
@@ -953,6 +954,8 @@ void TestVisualView::largeDocumentsParseInBackground()
     QVERIFY(background);
     QCOMPARE(checked, 1);
     QCOMPARE(model->parseGeneration(), generation + 1);
+    // Only the blocks around the edit were parsed again.
+    QVERIFY(model->lastParseSpliced());
     QVERIFY(view.rowsConsistent());
     QVERIFY(QString::fromUtf8(model->blocks()[1].html.data(), model->blocks()[1].html.size())
                 .startsWith(QStringLiteral("<p>Typed A paragraph")));
@@ -1029,6 +1032,43 @@ void TestVisualView::flushOvertakesBackgroundParse()
     QVERIFY(matchesFreshParse(*model));
     QCOMPARE(QString::fromUtf8(model->blocks()[0].html.data(), model->blocks()[0].html.size()),
              QStringLiteral("<h1><a name=\"more-top\"></a>More Top</h1>"));
+}
+
+void TestVisualView::largeDocumentsReparseIncrementally()
+{
+    // Edits of every kind through the document, each followed by a flush:
+    // the blocks always equal a fresh parse, and most parses only parse the
+    // blocks around the edit (core's tests cover the splicing in depth).
+    m_view->hide();
+    QTextDocument doc;
+    doc.setDocumentLayout(new DocumentLayout(&doc));
+    doc.setPlainText(largeDocument());
+    MarkdownModel *model = new MarkdownModel(&doc);
+    model->blocks();
+    const QStringList inserts = {QStringLiteral("x"), QStringLiteral("\n"), QStringLiteral("\n\n"),
+                                 QStringLiteral("# Heading\n\n"), QStringLiteral("- [ ] new task\n"),
+                                 QStringLiteral("```\n"), QStringLiteral("é中"), QStringLiteral("> quote\n"),
+                                 QStringLiteral("| a |\n|---|\n"), QStringLiteral("<div>\n")};
+    quint32 seed = 12345;
+    const auto random = [&seed](int n) {
+        seed = seed * 1103515245 + 12345;
+        return int((seed >> 8) % quint32(n));
+    };
+    int spliced = 0;
+    for (int i = 0; i < 60; ++i) {
+        QTextCursor c(&doc);
+        c.setPosition(random(doc.characterCount() - 1));
+        if (i % 3 == 2) {
+            c.setPosition(qMin(c.position() + 1 + random(40), doc.characterCount() - 1), QTextCursor::KeepAnchor);
+            c.removeSelectedText();
+        } else {
+            c.insertText(inserts[random(int(inserts.size()))]);
+        }
+        model->flush();
+        QVERIFY2(matchesFreshParse(*model), qPrintable(QStringLiteral("edit %1").arg(i)));
+        spliced += model->lastParseSpliced();
+    }
+    QVERIFY2(spliced > 30, qPrintable(QString::number(spliced)));
 }
 
 void TestVisualView::modelDeletedDuringBackgroundParse()

@@ -35,13 +35,24 @@ bool affectsRendering(const QString &key)
         || key == QLatin1String(key::mermaidTheme);
 }
 
-// The blocks of a document's text (from QTextDocument::toRawText). Only
-// values, no Qt objects: also runs on a worker thread.
-rust::Vec<core::Block> parseText(QString text, const core::RenderOptions &options)
+std::shared_ptr<const core::Document> shared(rust::Box<core::Document> document)
+{
+    return std::shared_ptr<const core::Document>(document.into_raw(), [](const core::Document *d) {
+        (void)rust::Box<core::Document>::from_raw(const_cast<core::Document *>(d));
+    });
+}
+
+// The blocks of a document's text (from QTextDocument::toRawText); given the
+// parse of an earlier version, only the blocks around the edits are parsed
+// again (when that gives the same blocks). Only values, no Qt objects: also
+// runs on a worker thread.
+std::shared_ptr<const core::Document> parseText(QString text, const core::RenderOptions &options,
+                                                const std::shared_ptr<const core::Document> &previous)
 {
     text.replace(QChar::ParagraphSeparator, u'\n');
     const QByteArray utf8 = text.toUtf8();
-    return core::blocks(rust::Str(utf8.constData(), utf8.size()), options);
+    const rust::Str markdown(utf8.constData(), utf8.size());
+    return shared(previous ? core::reparse(*previous, markdown, options) : core::parse(markdown, options));
 }
 
 } // namespace
@@ -50,7 +61,7 @@ rust::Vec<core::Block> parseText(QString text, const core::RenderOptions &option
 struct MarkdownModel::ParseResult
 {
     quint64 serial;
-    rust::Vec<core::Block> blocks;
+    std::shared_ptr<const core::Document> parsed;
 };
 
 MarkdownModel::MarkdownModel(QTextDocument *document)
@@ -95,7 +106,7 @@ core::RenderOptions MarkdownModel::options() const
 const rust::Vec<core::Block> &MarkdownModel::blocks()
 {
     flush();
-    return m_blocks;
+    return m_parsed->blocks();
 }
 
 int MarkdownModel::blockAt(int line)
@@ -147,17 +158,18 @@ void MarkdownModel::flushInBackground()
     }
     m_job.running = true;
     m_job.again = false;
-    // The worker gets copies only: the text (toRawText is a deep copy), the
-    // options and the promise it shares with the watcher. The model may be
-    // gone by the time it finishes; then nobody watches the result.
+    // The worker gets copies and shared, immutable values only: the text
+    // (toRawText is a deep copy), the options, the last parse and the promise
+    // it shares with the watcher. The model may be gone by the time it
+    // finishes; then nobody watches the result.
     auto promise = std::make_shared<QPromise<std::shared_ptr<ParseResult>>>();
     promise->start();
     m_job.watcher->setFuture(promise->future());
-    QThreadPool::globalInstance()->start(
-        [promise, serial = m_inputSerial, text = m_doc->toRawText(), options = options()] {
-            promise->addResult(std::make_shared<ParseResult>(ParseResult{serial, parseText(text, options)}));
-            promise->finish();
-        });
+    QThreadPool::globalInstance()->start([promise, serial = m_inputSerial, text = m_doc->toRawText(),
+                                          options = options(), previous = m_parsed] {
+        promise->addResult(std::make_shared<ParseResult>(ParseResult{serial, parseText(text, options, previous)}));
+        promise->finish();
+    });
 }
 
 void MarkdownModel::backgroundParseDone()
@@ -168,7 +180,7 @@ void MarkdownModel::backgroundParseDone()
     // Only a parse of the text as it is now may replace the spans; one of
     // older text, or one that a synchronous flush() overtook, is dropped.
     if (result && result->serial == m_inputSerial && m_pending && !m_dirty) {
-        apply(std::move(result->blocks));
+        apply(result->parsed);
         Q_EMIT reparsed();
         return;
     }
@@ -233,18 +245,25 @@ void MarkdownModel::documentChanged(int from, int, int added)
 
 void MarkdownModel::reparse()
 {
-    apply(parseText(m_doc->toRawText(), options()));
+    // Small documents parse whole, as they always did.
+    const bool large = m_doc->characterCount() > backgroundParseChars;
+    apply(parseText(m_doc->toRawText(), options(), large ? m_parsed : nullptr));
 }
 
-void MarkdownModel::apply(rust::Vec<core::Block> &&blocks)
+void MarkdownModel::apply(std::shared_ptr<const core::Document> parsed)
 {
-    m_blocks = std::move(blocks);
+    // Freeing a large document's blocks takes milliseconds (about 3 ms at
+    // 10 MB): the thread pool does it.
+    if (m_parsed && m_parsed->blocks().size() > 4096)
+        QThreadPool::globalInstance()->start([old = std::move(m_parsed)] {});
+    m_parsed = std::move(parsed);
+    const rust::Vec<core::Block> &blocks = m_parsed->blocks();
     m_lineCount = m_doc->blockCount();
     m_spans.clear();
-    m_spans.reserve(m_blocks.size());
+    m_spans.reserve(blocks.size());
     int next = 0;
-    for (int i = 0; i < int(m_blocks.size()); ++i) {
-        const core::Block &b = m_blocks[i];
+    for (int i = 0; i < int(blocks.size()); ++i) {
+        const core::Block &b = blocks[i];
         const int first = qMax(int(b.first_line), next);
         const int last = int(qMin<size_t>(b.last_line, size_t(m_lineCount - 1)));
         if (last < first)

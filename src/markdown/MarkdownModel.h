@@ -52,7 +52,7 @@ public:
     // unless nothing usable is parsed yet.
     int spanAt(int line);
     // A block of the last parse (valid until the next reparsed signal).
-    const core::Block &parsedBlock(int index) const { return m_blocks[index]; }
+    const core::Block &parsedBlock(int index) const { return m_parsed->blocks()[index]; }
     // Bumped whenever spans() changes (edits and reparses).
     int revision() const { return m_revision; }
     // Bumped by every parse.
@@ -69,6 +69,9 @@ public:
     void flushInBackground();
     // A worker thread is parsing the document.
     bool isParsingInBackground() const { return m_job.running; }
+    // Whether the last parse only parsed the blocks around the edits again
+    // (see core::reparse); for tests.
+    bool lastParseSpliced() const { return m_parsed && m_parsed->spliced(); }
     static int reparseDelay() { return 120; }
     // Parsing costs about 18 ms per MB; past this many characters edit
     // pauses parse off the GUI thread.
@@ -90,12 +93,13 @@ private:
     struct ParseResult;
 
     void reparse();
-    void apply(rust::Vec<core::Block> &&blocks);
+    void apply(std::shared_ptr<const core::Document> parsed);
     void documentChanged(int from, int removed, int added);
     void backgroundParseDone();
 
     QTextDocument *m_doc;
-    rust::Vec<core::Block> m_blocks;
+    // The last parse; also what the next parse of a large document starts from.
+    std::shared_ptr<const core::Document> m_parsed;
     std::vector<Span> m_spans;
     QTimer m_timer;
     int m_lineCount = 0;      // Lines when m_spans were last made consistent.
