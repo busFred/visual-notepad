@@ -36,6 +36,36 @@ using namespace vn;
 
 namespace {
 
+quint32 crc32(const QByteArray &data)
+{
+    quint32 crc = 0xffffffffu;
+    for (const char byte : data) {
+        crc ^= quint8(byte);
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ (0xedb88320u & (~(crc & 1) + 1));
+    }
+    return ~crc;
+}
+
+void appendLittleEndian(QByteArray &out, quint32 value)
+{
+    for (int shift = 0; shift < 32; shift += 8)
+        out.append(char((value >> shift) & 0xff));
+}
+
+// One gzip member holding `data`. QtCore only has the zlib format
+// (qCompress: 4 bytes of size, the zlib header, the deflate stream, an
+// Adler-32), so the deflate stream is cut out of that and wrapped by hand.
+QByteArray gzipped(const QByteArray &data)
+{
+    const QByteArray zlib = qCompress(data, 9);
+    QByteArray out("\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff", 10);
+    out += zlib.mid(4 + 2, zlib.size() - 4 - 2 - 4);
+    appendLittleEndian(out, crc32(data));
+    appendLittleEndian(out, quint32(data.size()));
+    return out;
+}
+
 const char *sample = R"(---
 title: Project notes
 tags: demo
@@ -1215,6 +1245,17 @@ void TestVisualView::networkPathsAreNotOpened_data()
         false, false);
     row("style import", R"(<style>@import url("//{dir}/red.css");</style><p>xxxxxxxx</p>)", false, false);
     row("svg with network picture", "=network.svg", false, false);
+    // The same, gzip-compressed (.svgz): the network path cannot be seen
+    // without unpacking, QtSvg unpacks it by itself.
+    row("svgz with local picture", "=local.svgz", false, true);
+    row("svgz with data picture", "=data.svgz", false, true);
+    row("svgz without picture", "=shape.svgz", false, true);
+    row("svgz padded", "=padded.svgz", false, true);
+    row("svgz with network picture", "=network.svgz", false, false);
+    row("svgz in two members", "=members.svgz", false, false);
+    row("svgz named png", "=disguised.png", false, false);
+    row("svgz bomb", "=bomb.svgz", false, false);
+    row("svgz cut short", "=truncated.svgz", false, false);
 }
 
 void TestVisualView::networkPathsAreNotOpened()
@@ -1241,6 +1282,47 @@ void TestVisualView::networkPathsAreNotOpened()
     };
     writeSvg(QStringLiteral("local.svg"), QStringLiteral("red.png"));
     writeSvg(QStringLiteral("network.svg"), u"//" + folder + QStringLiteral("/red.png"));
+    // gzip-compressed variants.
+    const auto svgText = [](const QString &href, const QString &padding = {}) {
+        return QStringLiteral(R"(<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" )"
+                              R"(width="40" height="40"><!--%2--><image x="0" y="0" width="40" height="40" )"
+                              R"(xlink:href="%1"/></svg>)")
+            .arg(href, padding)
+            .toUtf8();
+    };
+    const auto writeFile = [&](const QString &name, const QByteArray &bytes) {
+        QFile file(dir.filePath(name));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write(bytes), bytes.size());
+    };
+    const QString networkHref = u"//" + folder + QStringLiteral("/red.png");
+    {
+        QFile redFile(dir.filePath(QStringLiteral("red.png")));
+        QVERIFY(redFile.open(QIODevice::ReadOnly));
+        const QByteArray dataHref = "data:image/png;base64," + redFile.readAll().toBase64();
+        // QtSvg takes a relative picture path of an .svgz from the working
+        // folder, not from the file's, so these paths are absolute.
+        const QString redPath = dir.filePath(QStringLiteral("red.png"));
+        writeFile(QStringLiteral("local.svgz"), gzipped(svgText(redPath)));
+        writeFile(QStringLiteral("data.svgz"), gzipped(svgText(QString::fromLatin1(dataHref))));
+        writeFile(QStringLiteral("shape.svgz"),
+                  gzipped(R"(<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">)"
+                          R"(<rect width="40" height="40" fill="#ff0000"/></svg>)"));
+        writeFile(QStringLiteral("padded.svgz"),
+                  gzipped(svgText(redPath, QString(1024 * 1024, u' '))));
+        writeFile(QStringLiteral("network.svgz"), gzipped(svgText(networkHref)));
+        writeFile(QStringLiteral("disguised.png"), gzipped(svgText(networkHref)));
+        // Cut after the first header's worth of bytes: not a whole file.
+        writeFile(QStringLiteral("truncated.svgz"), gzipped(svgText(networkHref)).left(40));
+        // The picture is local, but the SVG unpacks to more than the limit
+        // (a few kilobytes of gzip for 40 MiB).
+        writeFile(QStringLiteral("bomb.svgz"),
+                  gzipped(svgText(redPath, QString(40 * 1024 * 1024, u' '))));
+        // The network picture is in the second member, which QtSvg reads too.
+        const QByteArray whole = svgText(networkHref);
+        const qsizetype cut = whole.indexOf("<image");
+        writeFile(QStringLiteral("members.svgz"), gzipped(whole.left(cut)) + gzipped(whole.mid(cut)));
+    }
     source.replace(QStringLiteral("{dir}"), folder);
     source.replace(QStringLiteral("{encoded}"), QString(folder).replace(u'/', QStringLiteral("%2F")));
 
@@ -1274,6 +1356,8 @@ void TestVisualView::networkPathsAreNotOpened()
         const auto picture = rendered->pictureAt(QPointF(20, 20));
         QVERIFY(picture);
         QCOMPARE(rendered->pictureImage(*picture).isNull(), !loads);
+    } else if (source.contains(QLatin1String("disguised"))) {
+        // A .png by name: the picture is listed, but nothing was drawn (above).
     } else if (source.contains(QLatin1String("img")) || markdown) {
         // A click on a picture that did not load must not open it either.
         QCOMPARE(bool(rendered->pictureAt(QPointF(20, 20))), loads);
