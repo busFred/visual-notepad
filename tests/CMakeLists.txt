@@ -97,3 +97,8 @@ qt_add_executable(test_editor_grid test_editor_grid.cpp)
 target_link_libraries(test_editor_grid PRIVATE vn_app Qt6::Test)
 add_test(NAME editor_grid COMMAND test_editor_grid)
 set_tests_properties(editor_grid PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
+
+qt_add_executable(test_links test_links.cpp)
+target_link_libraries(test_links PRIVATE vn_app Qt6::Test)
+add_test(NAME links COMMAND test_links)
+set_tests_properties(links PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")

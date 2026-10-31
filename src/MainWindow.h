@@ -23,6 +23,7 @@ class QSplitter;
 class QTimer;
 class QToolButton;
 class QTreeWidget;
+class QUrl;
 template<typename T> class QFutureWatcher;
 
 namespace vn {
@@ -132,6 +133,13 @@ public:
     // Tests answer the conflict prompt through this instead of a dialog;
     // an empty function restores the dialog.
     static void setSaveConflictHandler(std::function<SaveConflictChoice(DocumentTab *)> handler);
+    // Links that would run a program (md::isLaunchable files, schemes other
+    // than http, https, mailto and file) ask first. Tests answer through the
+    // confirmer (given the path or URL shown; true opens) instead of a
+    // dialog, and catch what links hand to the OS through the opener instead
+    // of QDesktopServices::openUrl. Empty functions restore the defaults.
+    static void setLaunchConfirmer(std::function<bool(const QString &)> confirmer);
+    static void setUrlOpener(std::function<void(const QUrl &)> opener);
 
     // Outline bookkeeping, for tests. outlineParses() counts the documents
     // parsed for the outline (not the ones it served from its cache);
@@ -201,6 +209,9 @@ private:
     void onSettingChanged(const QString &key);
     void fillRecentMenu();
     void openLink(DocumentTab *tab, const QString &url);
+    // Asks before a link runs `target` (a native path or a URL).
+    bool confirmLaunch(const QString &target);
+    static void openUrl(const QUrl &url);
 
     // Auto save: writes a modified tab that has a path; failures only reach
     // the status bar.

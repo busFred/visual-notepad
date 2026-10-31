@@ -80,6 +80,13 @@ no bevels. Values live in `src/Theme.h`.
 - Status bar, Notepad-style right-aligned columns: position, selections,
   zoom, line ending, encoding, language (clickable), sizing grip.
 - Web links always prompt: Open, Copy, Cancel.
+- Links that would run a program warn first (Open Anyway / Don't Open,
+  default Don't Open, full path shown, never remembered): local files the OS
+  would launch (`md::isLaunchable`: a deny-list of program, script,
+  installer and shortcut suffixes, judged as Windows reads names, plus
+  execute-bit files that are not plain documents) and every scheme other
+  than http, https, mailto and file. Text files (scripts too) open in the
+  app; network paths (UNC, `file://host`) are refused outright.
 
 ## Preferences
 

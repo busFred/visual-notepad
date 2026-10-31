@@ -7,6 +7,10 @@
 #include <QRegularExpression>
 #include <QSet>
 
+#include <algorithm>
+#include <iterator>
+#include <string_view>
+
 namespace vn::md {
 
 namespace {
@@ -244,6 +248,94 @@ bool isNetworkPath(const QString &path)
     const auto slash = [](QChar c) { return c == u'/' || c == u'\\'; };
     const QString p = path.trimmed();
     return p.size() >= 2 && slash(p[0]) && slash(p[1]);
+}
+
+namespace {
+
+// Suffixes the OS runs, installs or follows (shortcuts) instead of showing
+// them as documents. A deny-list: links to anything here ask first.
+// Windows: executables, scripts for the built-in hosts (cmd, PowerShell,
+// Windows Script Host, mshta), installers, control panel and console
+// snap-ins, shortcuts and shell links, registry and setup files, packages,
+// compiled help, search and library descriptors, troubleshooter packs.
+// Linux/macOS: shell and interpreter scripts, self-extracting/AppImage
+// binaries, launchers (.desktop, .command, .terminal), bundles and
+// installers (.app, .pkg, .dmg, .deb, .rpm), Automator workflows/actions.
+constexpr std::string_view launchableSuffixes[] = {
+    // Windows
+    "exe", "com", "scr", "pif", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi", "msp",
+    "mst", "msc", "hta", "cpl", "lnk", "url", "reg", "jar", "dll", "sys", "inf", "appx", "appxbundle", "msix",
+    "msixbundle", "application", "gadget", "ws", "chm", "scf", "library-ms", "search-ms", "diagcab",
+    "settingcontent-ms",
+    // Linux / macOS
+    "sh", "bash", "zsh", "csh", "ksh", "run", "bin", "appimage", "desktop", "command", "app", "pkg", "dmg", "py",
+    "pl", "rb", "deb", "rpm", "workflow", "action", "terminal",
+};
+
+// Suffixes that stay documents even with an execute bit, which files on
+// FAT/NTFS/SMB mounts and from some archives get wholesale. Kept short: only
+// types every desktop opens in a viewer, never in an interpreter.
+constexpr std::string_view documentSuffixes[] = {
+    "md", "markdown", "txt", "png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "svgz", "ico", "tif", "tiff", "avif",
+    "pdf",
+};
+
+template<size_t N>
+bool listed(const std::string_view (&list)[N], const QString &suffix)
+{
+    const QByteArray lower = suffix.toLower().toUtf8();
+    const std::string_view s(lower.constData(), size_t(lower.size()));
+    return std::find(std::begin(list), std::end(list), s) != std::end(list);
+}
+
+// The file name as Windows resolves it: no trailing dots or spaces, no
+// "::$DATA" / ":stream:$DATA" stream type.
+QString windowsName(QString name)
+{
+    static const QRegularExpression streamType(QStringLiteral(":\\$DATA$"),
+                                               QRegularExpression::CaseInsensitiveOption);
+    for (;;) {
+        const qsizetype before = name.size();
+        while (name.endsWith(u'.') || name.endsWith(u' '))
+            name.chop(1);
+        name.remove(streamType);
+        while (name.endsWith(u':'))
+            name.chop(1);
+        if (name.size() == before)
+            return name;
+    }
+}
+
+bool hasLaunchableSuffix(const QString &path)
+{
+    const QString name = windowsName(path.section(QRegularExpression(QStringLiteral("[/\\\\]")), -1));
+    // "a.txt:evil.exe" is a stream of a.txt and "C:evil.exe" a file on a
+    // drive: check every part.
+    const QStringList parts = name.split(u':');
+    return std::any_of(parts.cbegin(), parts.cend(), [](const QString &part) {
+        const QString trimmed = windowsName(part);
+        const qsizetype dot = trimmed.lastIndexOf(u'.');
+        return dot >= 0 && listed(launchableSuffixes, trimmed.mid(dot + 1));
+    });
+}
+
+} // namespace
+
+bool isLaunchable(const QString &path)
+{
+    if (hasLaunchableSuffix(path))
+        return true; // Even a directory: a macOS .app is one.
+    const QFileInfo info(path);
+    // The end of a chain of symlinks: empty if it does not exist.
+    const QString target = info.isSymLink() ? info.canonicalFilePath() : QString();
+    if (!target.isEmpty() && hasLaunchableSuffix(target))
+        return true;
+    // These follow symlinks.
+    if (!info.exists() || info.isDir() || !info.isExecutable())
+        return false;
+    const QString name = windowsName(QFileInfo(target.isEmpty() ? path : target).fileName());
+    const qsizetype dot = name.lastIndexOf(u'.');
+    return dot < 0 || !listed(documentSuffixes, name.mid(dot + 1));
 }
 
 } // namespace vn::md
