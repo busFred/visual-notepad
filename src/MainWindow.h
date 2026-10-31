@@ -54,7 +54,16 @@ public:
     ~MainWindow() override;
 
     void newFile();
-    bool openFile(const QString &path);
+    // Shows `path` in a new tab, or the tab that already shows it. A file
+    // from TextFile::largeLoadBytes up loads on a worker thread without
+    // blocking the window: this returns true at once and the tab follows
+    // (tabs of such files appear in the order they were asked for; a failure
+    // is reported then). `opened` is called with the tab when it shows the
+    // file, at once for a small file; never if the load fails or the window
+    // closes first.
+    bool openFile(const QString &path, std::function<void(DocumentTab *)> opened = {});
+    // Whether files are still loading in the background.
+    bool isOpening() const { return !m_pendingOpens.isEmpty(); }
     // Takes ownership of a tab from another window.
     void adoptTab(DocumentTab *tab);
 
@@ -248,6 +257,18 @@ private:
     bool m_outlineJobSkipped = false;
     // Cached key::autoSave, read on every keystroke otherwise.
     QString m_autoSaveMode;
+
+    // Files loading on worker threads (openFile()), in the order asked.
+    struct PendingOpen
+    {
+        std::shared_ptr<TextFile> file;
+        QString path;
+        std::function<void(DocumentTab *)> opened;
+        bool finished = false;
+        bool ok = false;
+    };
+    void finishPendingOpens();
+    QList<std::shared_ptr<PendingOpen>> m_pendingOpens;
 
     QHash<EditorGroup *, QToolButton *> m_modeButtons;
     QActionGroup *m_modeGroup;

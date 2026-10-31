@@ -38,6 +38,11 @@ namespace vn {
 
 class DocumentTab;
 class MarkdownModel;
+// Private to TextFile.cpp: a decoded file, and the worker of loadAsync().
+namespace load {
+struct Decoded;
+struct Job;
+} // namespace load
 
 class TextFile : public QObject, public std::enable_shared_from_this<TextFile>
 {
@@ -61,6 +66,22 @@ public:
     // Returns false and sets errorString() on failure. Loading registers the
     // file under its path unless another file already is.
     bool load(const QString &path);
+    // load() for a file nobody shows yet (no views, no text), without
+    // blocking: a worker thread reads, decodes and builds the document, and
+    // loadFinished() follows from the event loop; until then the file is
+    // untouchable (it has no text, path or registry entry, and must not be
+    // given to a view). Meant for files too big to load synchronously
+    // (largeLoadBytes). On failure errorString() says why.
+    void loadAsync(const QString &path);
+    // Whether loadAsync() is still running.
+    bool isLoading() const;
+    // Stops loadAsync() and waits for the worker (a few ms); no loadFinished()
+    // follows and the file stays empty. Also what destroying the file does.
+    void cancelLoad();
+    // Whether a loadAsync() of `path` (any spelling of it) is running.
+    static bool isLoadingPath(const QString &path);
+    // The size from which callers should prefer loadAsync() to load().
+    static constexpr qint64 largeLoadBytes = 1024 * 1024;
     bool reopenWithEncoding(const Encoding &encoding);
     // Unsaved content from hot exit; the file is marked modified. The disk
     // baseline for conflict detection is what is on disk now unless
@@ -156,6 +177,8 @@ public:
     void syncHighlighting();
 
 Q_SIGNALS:
+    // loadAsync() ended; `ok` as load() returns it.
+    void loadFinished(bool ok);
     void modificationChanged(bool modified);
     void contentsChanged();
     // The text was replaced wholesale (load, backup, encoding reopen): views
@@ -174,6 +197,10 @@ Q_SIGNALS:
 private:
     TextFile();
     bool applyBytes(const QString &path, const QByteArray &bytes, const Encoding &encoding);
+    // The part of loading that follows decoding, with the text already in the
+    // document (loadAsync) or still to be set.
+    void applyDecoded(const QString &path, load::Decoded &decoded, bool documentBuilt);
+    void finishLoad();
     // Replaces the text by the changed middle only, as one undo step.
     void replaceText(const QString &content);
     void setPath(const QString &path);
@@ -190,7 +217,7 @@ private:
     // checkDisk() without updating the watches; the registry does that once
     // for a batch of checks.
     void compareWithDisk();
-    void updateHighlighting(const QString &content);
+    void updateHighlighting(bool highlightable);
     bool wantsHighlighting() const;
     friend class TextFileRegistry;
 
@@ -200,6 +227,7 @@ private:
     QTimer *m_linkTimer;
     QList<TextView::Diagnostic> m_diagnostics;
     QList<DocumentTab *> m_views;
+    std::unique_ptr<load::Job> m_load;
     bool m_indentationStale = false;
     QString m_path;
     QString m_error;

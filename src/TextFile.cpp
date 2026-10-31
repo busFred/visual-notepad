@@ -26,10 +26,12 @@
 #include <QSignalBlocker>
 #include <QTextCursor>
 #include <QTextDocument>
+#include <QThread>
 #include <QTimer>
 #include <QUrl>
 
 #include <algorithm>
+#include <atomic>
 
 namespace vn {
 
@@ -82,6 +84,12 @@ qint64 now()
     return clock.elapsed();
 }
 
+// Whether a text is small enough to be syntax highlighted (see largeFileChars).
+bool canHighlight(const QString &content)
+{
+    return content.size() <= largeFileChars && content.count(u'\n') < largeFileLines;
+}
+
 // The text with "\r\n" turned into "\n", and the line ending style the
 // first line ending decides (used on save).
 void normalizeLineEndings(QString &content, TextFile::LineEnding &lineEnding)
@@ -94,6 +102,104 @@ void normalizeLineEndings(QString &content, TextFile::LineEnding &lineEnding)
 }
 
 } // namespace
+
+namespace load {
+
+// A file's bytes, decoded and examined: everything load() works out before it
+// touches the document, so that it can run on a worker thread.
+struct Decoded
+{
+    QString content;
+    QString encoding;
+    TextFile::LineEnding lineEnding = TextFile::LineEnding::LF;
+    TextFile::DiskState disk;
+    bool highlightable = true;
+};
+
+Decoded decodeBytes(const QString &path, const QByteArray &bytes, const QString &encoding)
+{
+    Decoded decoded;
+    decoded.encoding = encoding;
+    decoded.content = encoding::decode(bytes, encoding);
+    normalizeLineEndings(decoded.content, decoded.lineEnding);
+    decoded.highlightable = canHighlight(decoded.content);
+    const QFileInfo info(path);
+    decoded.disk = {true, info.lastModified(), info.size(), hashOf(bytes)};
+    return decoded;
+}
+
+// Read and insert the file in pieces this big, so that a cancel is noticed
+// within a few milliseconds.
+constexpr qint64 readPieceBytes = 8 * 1024 * 1024;
+constexpr qsizetype insertPieceChars = 256 * 1024;
+
+// loadAsync()'s worker. While it runs, the file's document belongs to the
+// worker's thread and nothing else may touch it (see TextFile::loadAsync).
+struct Job
+{
+    QString path;
+    encoding::DetectOptions detect;
+    QTextDocument *doc = nullptr;
+    QThread *home = nullptr;
+    QThread *thread = nullptr;
+    std::atomic_bool cancel{false};
+    // Results, valid once the thread has finished.
+    bool ok = false;
+    QString error;
+    Decoded decoded;
+};
+
+void run(Job &job)
+{
+    // The document goes home whatever happens.
+    struct GiveBack
+    {
+        Job &job;
+        ~GiveBack() { job.doc->moveToThread(job.home); }
+    } giveBack{job};
+
+    QFile file(job.path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        job.error = file.errorString();
+        return;
+    }
+    QByteArray bytes;
+    bytes.reserve(file.size());
+    for (;;) {
+        if (job.cancel)
+            return;
+        const QByteArray piece = file.read(readPieceBytes);
+        if (piece.isEmpty())
+            break;
+        bytes += piece;
+    }
+    if (job.cancel)
+        return;
+    job.decoded = decodeBytes(job.path, bytes, encoding::detect(bytes, job.detect));
+    bytes = QByteArray();
+
+    // What QTextDocument::setPlainText() does, in pieces ending at a line end.
+    // No undo steps are recorded; the stack is empty afterwards, as there.
+    QTextDocument &doc = *job.doc;
+    doc.setUndoRedoEnabled(false);
+    QTextCursor cursor(&doc);
+    const QString &text = job.decoded.content;
+    for (qsizetype pos = 0; pos < text.size();) {
+        if (job.cancel)
+            return;
+        qsizetype end = std::min(text.size(), pos + insertPieceChars);
+        if (end < text.size()) {
+            const qsizetype lf = text.indexOf(u'\n', end);
+            end = lf < 0 ? text.size() : lf + 1;
+        }
+        cursor.insertText(text.mid(pos, end - pos));
+        pos = end;
+    }
+    job.decoded.content = QString();
+    job.ok = true;
+}
+
+} // namespace load
 
 // Every live TextFile, the path registry and the one file system watcher
 // they share (each watcher costs an inotify instance on Linux).
@@ -113,6 +219,7 @@ public:
     {
         m_files.removeAll(file);
         m_pendingChecks.remove(file);
+        m_loading.remove(file);
         unregister(file);
         updateWatches();
     }
@@ -137,6 +244,16 @@ public:
     }
 
     TextFile *find(const QString &path) const { return m_byKey.value(keyFor(path)); }
+
+    // Files whose loadAsync() has not finished, by path; they are not
+    // registered (and so not found) until it has.
+    void beginLoading(TextFile *file, const QString &path) { m_loading.insert(file, keyFor(path)); }
+    void endLoading(TextFile *file) { m_loading.remove(file); }
+    bool isLoading(const QString &path) const
+    {
+        const QString key = keyFor(path);
+        return !key.isEmpty() && std::any_of(m_loading.cbegin(), m_loading.cend(), [&](const QString &k) { return k == key; });
+    }
 
     // Registers the file under its current path if no other file has it.
     void rekey(TextFile *file)
@@ -272,6 +389,7 @@ private:
     QHash<TextFile *, qint64> m_pendingChecks;
     QList<TextFile *> m_files;
     QHash<QString, TextFile *> m_byKey;
+    QHash<TextFile *, QString> m_loading;
 };
 
 std::shared_ptr<TextFile> TextFile::create()
@@ -326,14 +444,15 @@ TextFile::TextFile()
             // the file, otherwise when a view is shown (applyPendingSettings).
             const bool seen = std::any_of(m_views.cbegin(), m_views.cend(),
                                           [](const DocumentTab *view) { return view->isVisible(); });
-            if (seen || m_views.isEmpty())
+            if (!isLoading() && (seen || m_views.isEmpty()))
                 refreshIndentation();
             else
                 m_indentationStale = true;
         }
         if (changedKey == QLatin1String(key::validateLinks)) {
             m_validateLinks = Settings::instance().flag(key::validateLinks);
-            checkLinks();
+            if (!isLoading())
+                checkLinks();
         }
     });
 
@@ -351,6 +470,7 @@ TextFile::TextFile()
 
 TextFile::~TextFile()
 {
+    cancelLoad();
     TextFileRegistry::instance().remove(this);
 }
 
@@ -404,24 +524,113 @@ bool TextFile::reopenWithEncoding(const Encoding &encoding)
 // Never fails on bad bytes: undecodable input becomes U+FFFD.
 bool TextFile::applyBytes(const QString &path, const QByteArray &bytes, const Encoding &encoding)
 {
-    QString content = encoding::decode(bytes, encoding);
-    normalizeLineEndings(content, m_lineEnding);
+    load::Decoded decoded = load::decodeBytes(path, bytes, encoding);
+    applyDecoded(path, decoded, false);
+    return true;
+}
 
-    m_encoding = encoding;
+void TextFile::applyDecoded(const QString &path, load::Decoded &decoded, bool documentBuilt)
+{
+    m_lineEnding = decoded.lineEnding;
+    m_encoding = decoded.encoding;
     setPath(path);
-    rememberDisk(bytes);
+    m_disk = decoded.disk;
     setOrphaned(false);
     setChangedOnDisk(false);
     m_languageOverridden = false;
     updateDefinition();
-    updateHighlighting(content);
-    m_doc->setPlainText(content);
+    if (documentBuilt) {
+        // The highlighter stays off: the first view that shows the source
+        // colours the whole text at once (syncHighlighting()).
+        m_highlighted = decoded.highlightable;
+    } else {
+        updateHighlighting(decoded.highlightable);
+        m_doc->setPlainText(decoded.content);
+    }
     m_doc->setModified(false);
     Q_EMIT contentReset();
     m_indentationOverridden = false;
     refreshIndentation();
     Q_EMIT formatChanged();
-    return true;
+}
+
+void TextFile::loadAsync(const QString &path)
+{
+    if (m_load)
+        return;
+    m_error.clear();
+    if (!m_views.isEmpty() || !m_doc->isEmpty()) {
+        // Not a fresh file: nobody may be told of half a document.
+        const bool ok = load(path);
+        QTimer::singleShot(0, this, [this, ok] { Q_EMIT loadFinished(ok); });
+        return;
+    }
+
+    auto job = std::make_unique<load::Job>();
+    job->path = path;
+    job->detect = encoding::detectOptions();
+    job->doc = m_doc;
+    job->home = thread();
+    // The document leaves this thread, with its layout and highlighter (its
+    // children). Nothing may hear of its changes meanwhile.
+    m_highlighter->setDocument(nullptr);
+    m_linkTimer->stop();
+    m_doc->setParent(nullptr);
+    m_doc->blockSignals(true);
+    m_doc->documentLayout()->blockSignals(true);
+    job->thread = QThread::create([worker = job.get()] { load::run(*worker); });
+    m_doc->moveToThread(job->thread);
+    connect(job->thread, &QThread::finished, this, &TextFile::finishLoad, Qt::QueuedConnection);
+    m_load = std::move(job);
+    TextFileRegistry::instance().beginLoading(this, path);
+    m_load->thread->start();
+}
+
+bool TextFile::isLoading() const
+{
+    return m_load != nullptr;
+}
+
+bool TextFile::isLoadingPath(const QString &path)
+{
+    return TextFileRegistry::instance().isLoading(path);
+}
+
+void TextFile::cancelLoad()
+{
+    if (!m_load)
+        return;
+    m_load->cancel = true;
+    finishLoad();
+}
+
+void TextFile::finishLoad()
+{
+    if (!m_load)
+        return;
+    const std::unique_ptr<load::Job> job = std::move(m_load);
+    job->thread->wait();
+    delete job->thread;
+    TextFileRegistry::instance().endLoading(this);
+
+    // The document is back, and ours again.
+    m_doc->setParent(this);
+    const bool cancelled = job->cancel;
+    const bool ok = job->ok && !cancelled;
+    if (!ok)
+        m_doc->clear();
+    m_doc->setUndoRedoEnabled(true);
+    m_doc->documentLayout()->blockSignals(false);
+    m_doc->blockSignals(false);
+    if (!ok) {
+        m_error = cancelled ? tr("Loading was canceled.") : job->error;
+        if (!cancelled)
+            Q_EMIT loadFinished(false);
+        return;
+    }
+    ++m_changeSerial;
+    applyDecoded(job->path, job->decoded, true);
+    Q_EMIT loadFinished(true);
 }
 
 void TextFile::loadBackup(const QString &path, const QString &content, const Encoding &encoding, LineEnding lineEnding)
@@ -437,7 +646,7 @@ void TextFile::loadBackup(const QString &path, const QString &content, const Enc
     }
     m_languageOverridden = false;
     updateDefinition();
-    updateHighlighting(content);
+    updateHighlighting(canHighlight(content));
     m_doc->setPlainText(content);
     Q_EMIT contentReset();
     m_doc->setModified(true);
@@ -448,9 +657,9 @@ void TextFile::loadBackup(const QString &path, const QString &content, const Enc
     scheduleDiskCheck();
 }
 
-void TextFile::updateHighlighting(const QString &content)
+void TextFile::updateHighlighting(bool highlightable)
 {
-    m_highlighted = content.size() <= largeFileChars && content.count(u'\n') < largeFileLines;
+    m_highlighted = highlightable;
     // Attached or detached before the text is set, so a highlighter that is
     // not wanted never sees it.
     const bool wanted = wantsHighlighting();
@@ -771,7 +980,7 @@ QString TextFile::displayName() const
 
 bool TextFile::isModified() const
 {
-    return m_doc->isModified();
+    return !isLoading() && m_doc->isModified();
 }
 
 bool TextFile::isMarkdown() const
@@ -787,6 +996,8 @@ QString TextFile::languageName() const
 
 QString TextFile::text() const
 {
+    if (isLoading())
+        return {};
     // toPlainText() would turn non-breaking spaces into spaces.
     QString text = m_doc->toRawText();
     text.replace(QChar::ParagraphSeparator, u'\n');
