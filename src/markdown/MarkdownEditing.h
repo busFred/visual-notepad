@@ -54,5 +54,10 @@ QString linkAt(const QList<LinkTarget> &targets, const QString &lineText, int li
 QString linkForFile(const QString &filePath, const QString &documentDir);
 // Percent-encodes characters that would end a Markdown destination.
 QString encodeDestination(const QString &path);
+// True for a path on another machine ("//host/share", "\\host\share", mixes
+// of the two, "\\?\UNC\..."). Opening one connects to the host; on Windows
+// over SMB, which hands it the user's password hash. Never open these for a
+// document.
+bool isNetworkPath(const QString &path);
 
 } // namespace vn::md

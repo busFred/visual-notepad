@@ -2024,6 +2024,8 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
     QString path = scheme == QLatin1String("file") ? target.toLocalFile()
                                                    : QUrl::fromPercentEncoding(url.section(u'#', 0, 0).toUtf8());
     const QString fragment = url.contains(u'#') ? url.section(u'#', 1) : QString();
+    if (md::isNetworkPath(path)) // Not even a look: on Windows that is an SMB login.
+        return;
     if (QFileInfo(path).isRelative() && !tab->path().isEmpty())
         path = QFileInfo(tab->path()).absoluteDir().filePath(path);
     if (!QFileInfo::exists(path)) {

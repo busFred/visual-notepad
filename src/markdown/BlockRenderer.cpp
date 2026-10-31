@@ -1,6 +1,7 @@
 #include "BlockRenderer.h"
 
 #include "../Theme.h"
+#include "MarkdownEditing.h"
 #include "MathRenderer.h"
 
 #include <KSyntaxHighlighting/Definition>
@@ -16,11 +17,13 @@
 #include <QImageReader>
 #include <QPainter>
 #include <QPainterPath>
+#include <QRegularExpression>
 #include <QSet>
 #include <QTextBlock>
 #include <QTextLayout>
 #include <QThreadPool>
 #include <QUrl>
+#include <QXmlStreamReader>
 
 #include <algorithm>
 #include <atomic>
@@ -56,6 +59,45 @@ QImage cachedMath(const QString &tex, const math::Style &style)
     return image;
 }
 
+// True if the SVG at `path` names a file on another machine, which the SVG
+// plugin would open by itself: <image href> pictures and xml-stylesheet
+// style sheets. Read the way QtSvg reads it.
+bool svgNamesNetworkPath(const QString &path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+    static const QRegularExpression href(QStringLiteral(R"(href\s*=\s*["']([^"']*))"),
+                                         QRegularExpression::CaseInsensitiveOption);
+    QXmlStreamReader xml(&file);
+    xml.setNamespaceProcessing(false);
+    while (!xml.atEnd()) {
+        const QXmlStreamReader::TokenType token = xml.readNext();
+        if (token == QXmlStreamReader::ProcessingInstruction) {
+            const QRegularExpressionMatch match = href.matchView(xml.processingInstructionData());
+            if (match.hasMatch() && md::isNetworkPath(match.captured(1)))
+                return true;
+        } else if (token == QXmlStreamReader::StartElement) {
+            for (const QXmlStreamAttribute &attribute : xml.attributes()) {
+                const QStringView name = attribute.qualifiedName();
+                if ((name == u"href" || name.endsWith(u":href")) && md::isNetworkPath(attribute.value().toString()))
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
+// A picture file, unless it is an SVG that would reach another machine.
+QImage readImage(const QString &path)
+{
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    if (reader.format().startsWith("svg") && svgNamesNetworkPath(path))
+        return {};
+    return reader.read();
+}
+
 // Local pictures, read and scaled to the column, by file version and size.
 QImage cachedLocalImage(const QString &path, qreal width, qreal dpr)
 {
@@ -69,9 +111,7 @@ QImage cachedLocalImage(const QString &path, qreal width, qreal dpr)
                         + path;
     if (const QImage *hit = cache.object(key))
         return *hit;
-    QImageReader reader(path);
-    reader.setAutoTransform(true);
-    QImage image = reader.read();
+    QImage image = readImage(path);
     if (image.isNull())
         return image; // Not cached: the file may appear later.
     // One image pixel per logical pixel, shrunk to fit the column.
@@ -86,9 +126,7 @@ QImage cachedLocalImage(const QString &path, qreal width, qreal dpr)
 // A picture file at full size, for the zoom viewer.
 QImage fullSizeImage(const QString &path)
 {
-    QImageReader reader(path);
-    reader.setAutoTransform(true);
-    return reader.read();
+    return readImage(path);
 }
 
 // Mermaid diagrams by theme, scale and code; filled by worker threads.
@@ -157,6 +195,21 @@ bool mermaidDiagram(const QString &code, const RenderContext &context, Diagram *
     return false;
 }
 
+// True for a picture or style sheet source on another machine:
+// "//host/x.png", "file://host/x.png", "file:////host/x.png",
+// "%2F%2Fhost/x.png", "\\host\x.png". On Windows opening one is an SMB
+// connection that hands the host the user's password hash.
+bool namesOtherMachine(const QUrl &url)
+{
+    const QString scheme = url.scheme();
+    const bool file = scheme == QLatin1String("file");
+    if (!file && scheme.size() > 1)
+        return false; // Not a file (web pictures); single letters are Windows drives.
+    if ((scheme.isEmpty() || file) && !url.host().isEmpty())
+        return true;
+    return md::isNetworkPath(file ? url.toLocalFile() : QUrl::fromPercentEncoding(url.toString().toUtf8()));
+}
+
 // Rich text with images resolved locally: math placeholders and files.
 class ResourceDocument : public QTextDocument
 {
@@ -191,6 +244,28 @@ public:
         }
     }
 
+    // Pictures on other machines lose their source before layout: when
+    // loadResource() declines one, Qt's image handler opens the source
+    // itself (and looks for an "@2x" file next to it on high-DPI screens).
+    void dropNetworkImages()
+    {
+        for (QTextBlock block = begin(); block.isValid(); block = block.next()) {
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                const QTextFragment fragment = it.fragment();
+                if (!fragment.charFormat().isImageFormat())
+                    continue;
+                QTextImageFormat format = fragment.charFormat().toImageFormat();
+                if (!namesOtherMachine(QUrl(format.name())))
+                    continue;
+                format.setName(QStringLiteral("vn-blocked:")); // Neither a file nor a host; shows as broken.
+                QTextCursor cursor(this);
+                cursor.setPosition(fragment.position());
+                cursor.setPosition(fragment.position() + fragment.length(), QTextCursor::KeepAnchor);
+                cursor.mergeCharFormat(format);
+            }
+        }
+    }
+
     // The file a picture's source names, or empty (math, remote pictures).
     QString pathOf(const QString &source) const
     {
@@ -200,8 +275,10 @@ public:
 protected:
     QVariant loadResource(int type, const QUrl &url) override
     {
+        // Style sheets (<link>, @import) and the rest: the base class would
+        // open any path, even on another machine. The app sets its own.
         if (type != QTextDocument::ImageResource)
-            return QTextDocument::loadResource(type, url);
+            return QVariant();
         const QString name = url.toString();
         if (name.startsWith(QLatin1String("vn-math"))) {
             const bool display = name.startsWith(QLatin1String("vn-math-display:"));
@@ -233,6 +310,8 @@ private:
 
     QString localPath(const QUrl &url) const
     {
+        if (namesOtherMachine(url))
+            return {};
         if (url.scheme() == QLatin1String("file"))
             return url.toLocalFile();
         if (!url.scheme().isEmpty() && url.scheme().size() > 1) // Windows drive letters parse as schemes.
@@ -401,6 +480,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         doc->setDefaultFont(context.font);
         doc->setDefaultStyleSheet(styleSheet(context));
         doc->setHtml(QString::fromUtf8(block.html.data(), block.html.size()));
+        doc->dropNetworkImages();
         doc->fitImages(context.width);
         doc->setTextWidth(context.width);
         r.m_height = doc->size().height() + blockGap;

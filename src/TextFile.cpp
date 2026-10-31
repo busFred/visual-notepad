@@ -872,8 +872,9 @@ QList<TextView::Diagnostic> TextFile::brokenLinks() const
                 report();
             continue;
         }
-        // "/x" is relative to a workspace root, which this app doesn't have.
-        if (path.startsWith(u'/'))
+        // "/x" is relative to a workspace root, which this app doesn't have;
+        // "\\host\share" is on another machine, never touched for a check.
+        if (path.startsWith(u'/') || md::isNetworkPath(path))
             continue;
         const QString file = QDir::isAbsolutePath(path) ? path : (m_path.isEmpty() ? QString() : dir.filePath(path));
         if (file.isEmpty())
