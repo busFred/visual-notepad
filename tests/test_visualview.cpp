@@ -37,6 +37,7 @@
 #include <QTextDocument>
 #include <QThreadPool>
 #include <QToolTip>
+#include <QUrl>
 #include <QWheelEvent>
 
 using namespace vn;
@@ -1658,9 +1659,18 @@ void TestVisualView::rawPictureNamesAreNotOpened()
     }
     QImage red(40, 40, QImage::Format_RGB32);
     red.fill(Qt::red);
-    const QString redPath = dir.filePath(file);
-    QVERIFY(QDir().mkpath(QFileInfo(redPath).absolutePath()));
-    QVERIFY2(red.save(redPath, "PNG"), qPrintable(redPath));
+#ifdef Q_OS_WIN
+    // The names are UNC paths (making them would reach for host "probe"),
+    // "file:" folders, which NTFS cannot have, or streams: not local files
+    // here. What is checked is that none of them is read.
+    if (!loads)
+        file.clear();
+#endif
+    if (!file.isEmpty()) {
+        const QString redPath = dir.filePath(file);
+        QVERIFY(QDir().mkpath(QFileInfo(redPath).absolutePath()));
+        QVERIFY2(red.save(redPath, "PNG"), qPrintable(redPath));
+    }
 
     RenderContext ctx;
     ctx.font = theme::textFont();
@@ -1691,9 +1701,12 @@ void TestVisualView::rawPictureNamesAreNotOpened()
 
 void TestVisualView::networkPathsAreNotOpened_data()
 {
-    // %1 is the picture folder without its leading slash: on Linux "//%1"
-    // names the same local folder as "/%1", so a path that slipped through
-    // would paint red. On Windows it would be an SMB connection to a host.
+    // {dir} is the picture folder without its leading slash: on Linux
+    // "//{dir}" names the same local folder as "/{dir}", so a path that
+    // slipped through would paint red. On Windows it would be an SMB
+    // connection to a host. {path} is the folder as an absolute path and
+    // {url} as a file URL ("C:/..." and "file:///C:/..." on Windows, where
+    // "/{dir}" would be "/:/Users/...").
     QTest::addColumn<QString>("source");
     QTest::addColumn<bool>("markdown");
     QTest::addColumn<bool>("loads");
@@ -1705,8 +1718,8 @@ void TestVisualView::networkPathsAreNotOpened_data()
         QTest::newRow(name) << s << markdown << loads;
     };
     row("relative", "=red.png", false, true);
-    row("absolute", "=/{dir}/red.png", false, true);
-    row("file url", "=file:///{dir}/red.png", false, true);
+    row("absolute", "={path}/red.png", false, true);
+    row("file url", "={url}/red.png", false, true);
     row("markdown relative", "![](red.png)", true, true);
     row("svg with local picture", "=local.svg", false, true);
     row("host", "=//{dir}/red.png", false, false);
@@ -1722,14 +1735,14 @@ void TestVisualView::networkPathsAreNotOpened_data()
         false);
     row("link style sheet", R"(<link rel="stylesheet" type="text/css" href="//{dir}/red.css"><p>xxxxxxxx</p>)", false,
         false);
-    row("link local style sheet", R"(<link rel="stylesheet" type="text/css" href="/{dir}/red.css"><p>xxxxxxxx</p>)",
+    row("link local style sheet", R"(<link rel="stylesheet" type="text/css" href="{path}/red.css"><p>xxxxxxxx</p>)",
         false, false);
     row("style import", R"(<style>@import url("//{dir}/red.css");</style><p>xxxxxxxx</p>)", false, false);
     row("svg with network picture", "=network.svg", false, false);
     // Declined, an SVG named by an absolute path would be opened by Qt's
     // image handler itself (QtSvg then loads the picture it names).
-    row("absolute svg with network picture", "=/{dir}/network.svg", false, false);
-    row("file url svg with network picture", "=file:///{dir}/network.svg", false, false);
+    row("absolute svg with network picture", "={path}/network.svg", false, false);
+    row("file url svg with network picture", "={url}/network.svg", false, false);
     // The same, gzip-compressed (.svgz): the network path cannot be seen
     // without unpacking, QtSvg unpacks it by itself.
     row("svgz with local picture", "=local.svgz", false, true);
@@ -1810,6 +1823,8 @@ void TestVisualView::networkPathsAreNotOpened()
     }
     source.replace(QStringLiteral("{dir}"), folder);
     source.replace(QStringLiteral("{encoded}"), QString(folder).replace(u'/', QStringLiteral("%2F")));
+    source.replace(QStringLiteral("{path}"), dir.path());
+    source.replace(QStringLiteral("{url}"), QUrl::fromLocalFile(dir.path()).toString());
 
     RenderContext ctx;
     ctx.font = theme::textFont();
