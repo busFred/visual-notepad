@@ -12,9 +12,37 @@ use comrak::{Arena, parse_document};
 use crate::ffi::{Block, BlockKind, RenderOptions};
 use crate::{links, md};
 
+mod incremental;
 mod qt_html;
 
+pub use incremental::{Document, reparse};
+
 pub fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block> {
+    parse(markdown, options).blocks
+}
+
+/// What the incremental parser needs to know about a block besides the
+/// block itself.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Meta {
+    /// Slugs of the headings rendered into the block (before any `-N`
+    /// suffix), in order.
+    slugs: Vec<String>,
+    /// Byte offsets in `html` of the source line numbers of task checkboxes
+    /// (`vn-task:N`), or `None` when they are not known (the HTML was
+    /// rewritten after rendering).
+    tasks: Option<Vec<usize>>,
+}
+
+pub(crate) struct Parse {
+    pub blocks: Vec<Block>,
+    pub meta: Vec<Meta>,
+    /// Byte offset just past the front matter (and a leading BOM), if any.
+    pub front_matter_end: Option<usize>,
+}
+
+/// Parses and renders a whole document.
+pub(crate) fn parse(markdown: &str, options: &RenderOptions) -> Parse {
     let arena = Arena::new();
     let root = parse_document(
         &arena,
@@ -40,103 +68,68 @@ pub fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block> {
         numbers.entry(name).or_insert(i + 1);
     }
 
-    let mut renderer = Html {
-        options,
-        footnotes: &numbers,
-        out: String::with_capacity(4096),
-        inline_math: Vec::new(),
-        slugs: HashMap::new(),
-        base_line: 0,
-        depth: 0,
-        raw_html: false,
-    };
-
+    let mut renderer = Html::new(options, &numbers, 0, HashMap::new());
+    let mut front_matter_end = None;
     let mut result = Vec::with_capacity(root.children().count());
     for node in root.children() {
         let (first_line, last_line) = md::line_range(node);
         for flag in covered.iter_mut().take(last_line + 1).skip(first_line) {
             *flag = true;
         }
-        let mut block = Block {
-            kind: BlockKind::Html,
-            first_line,
-            last_line,
-            html: String::new(),
-            lang: String::new(),
-            text: String::new(),
-            inline_math: Vec::new(),
-        };
-        let data = node.data();
-        match &data.value {
-            NodeValue::CodeBlock(code) => {
-                block.kind = BlockKind::Code;
-                block.lang = code
-                    .info
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or_default()
-                    .to_string();
-                block.text = strip_newline(&code.literal).to_string();
-            }
-            NodeValue::FrontMatter(raw) => {
-                front_matter(&mut block, &front_matter_body(raw), options)
-            }
-            _ => {
-                if let Some(tex) = display_math(node) {
-                    block.kind = BlockKind::Math;
-                    block.text = tex;
-                } else {
-                    renderer.out.clear();
-                    renderer.inline_math.clear();
-                    renderer.base_line = first_line;
-                    renderer.raw_html = false;
-                    renderer.node(node);
-                    // Copy rather than move: the scratch buffer keeps its
-                    // capacity for the next block, and the copy is exact.
-                    // Without raw HTML, nesting is bounded by MAX_DEPTH.
-                    block.html = renderer
-                        .raw_html
-                        .then(|| qt_html::limit_nesting(&renderer.out))
-                        .flatten()
-                        .unwrap_or_else(|| renderer.out.clone());
-                    block.inline_math = std::mem::take(&mut renderer.inline_math);
-                }
-            }
+        if let NodeValue::FrontMatter(raw) = &node.data().value {
+            // comrak skips one BOM before looking for front matter.
+            let bom = markdown.len() - markdown.strip_prefix('\u{feff}').unwrap_or(markdown).len();
+            front_matter_end = Some(bom + raw.len());
         }
-        result.push(block);
+        result.push(renderer.block(node, first_line, last_line));
     }
 
     // Definitions are not in the tree; they are the leftover lines.
     for def in links::definitions(markdown, &starts, &covered) {
-        result.push(Block {
-            kind: BlockKind::Hidden,
-            first_line: def.first_line,
-            last_line: def.last_line,
-            html: String::new(),
-            lang: String::new(),
-            text: String::new(),
-            inline_math: Vec::new(),
-        });
+        result.push((
+            hidden_block(def.first_line, def.last_line),
+            Meta {
+                slugs: Vec::new(),
+                tasks: Some(Vec::new()),
+            },
+        ));
     }
-    sort_by_line(result)
+    let (blocks, meta) = sort_by_line(result).into_iter().unzip();
+    Parse {
+        blocks,
+        meta,
+        front_matter_end,
+    }
+}
+
+fn hidden_block(first_line: usize, last_line: usize) -> Block {
+    Block {
+        kind: BlockKind::Hidden,
+        first_line,
+        last_line,
+        html: String::new(),
+        lang: String::new(),
+        text: String::new(),
+        inline_math: Vec::new(),
+    }
 }
 
 /// Stable sort by first line. Only footnote definitions (moved to the end by
 /// comrak) and link definitions (appended) are out of place, so most
 /// documents are checked and returned as they are; otherwise the large
 /// blocks are not moved around by the sort, only (line, index) keys.
-fn sort_by_line(blocks: Vec<Block>) -> Vec<Block> {
-    if blocks.is_sorted_by_key(|b| b.first_line) {
+fn sort_by_line(blocks: Vec<(Block, Meta)>) -> Vec<(Block, Meta)> {
+    if blocks.is_sorted_by_key(|b| b.0.first_line) {
         return blocks;
     }
     // The index makes the keys unique, which gives the stable order.
     let mut keys: Vec<(usize, usize)> = blocks
         .iter()
         .enumerate()
-        .map(|(i, b)| (b.first_line, i))
+        .map(|(i, b)| (b.0.first_line, i))
         .collect();
     keys.sort_unstable();
-    let mut slots: Vec<Option<Block>> = blocks.into_iter().map(Some).collect();
+    let mut slots: Vec<Option<(Block, Meta)>> = blocks.into_iter().map(Some).collect();
     keys.into_iter()
         .filter_map(|(_, i)| slots[i].take())
         .collect()
@@ -277,9 +270,112 @@ struct Html<'a> {
     depth: usize,
     /// Whether the block's HTML includes raw HTML from the document.
     raw_html: bool,
+    /// Added to the parsed source lines to get the document's (the
+    /// incremental parser parses part of the document).
+    line_offset: usize,
+    /// Slugs of the headings in the block being rendered, see `Meta`.
+    heading_slugs: Vec<String>,
+    /// Offsets in `out` of the task line numbers, see `Meta`.
+    tasks: Vec<usize>,
 }
 
-impl Html<'_> {
+impl<'r> Html<'r> {
+    fn new(
+        options: &'r RenderOptions,
+        footnotes: &'r HashMap<String, usize>,
+        line_offset: usize,
+        slugs: HashMap<String, usize>,
+    ) -> Self {
+        Html {
+            options,
+            footnotes,
+            out: String::with_capacity(4096),
+            inline_math: Vec::new(),
+            slugs,
+            base_line: 0,
+            depth: 0,
+            raw_html: false,
+            line_offset,
+            heading_slugs: Vec::new(),
+            tasks: Vec::new(),
+        }
+    }
+
+    /// The block for a top-level node with its (parsed) line range.
+    fn block<'a>(
+        &mut self,
+        node: &'a AstNode<'a>,
+        first_line: usize,
+        last_line: usize,
+    ) -> (Block, Meta) {
+        let mut block = Block {
+            kind: BlockKind::Html,
+            first_line: first_line + self.line_offset,
+            last_line: last_line + self.line_offset,
+            html: String::new(),
+            lang: String::new(),
+            text: String::new(),
+            inline_math: Vec::new(),
+        };
+        let mut meta = Meta {
+            slugs: Vec::new(),
+            tasks: Some(Vec::new()),
+        };
+        let data = node.data();
+        match &data.value {
+            NodeValue::CodeBlock(code) => {
+                block.kind = BlockKind::Code;
+                block.lang = code
+                    .info
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                block.text = strip_newline(&code.literal).to_string();
+            }
+            NodeValue::FrontMatter(raw) => {
+                front_matter(&mut block, &front_matter_body(raw), self.options)
+            }
+            _ => {
+                if let Some(tex) = display_math(node) {
+                    block.kind = BlockKind::Math;
+                    block.text = tex;
+                } else {
+                    self.out.clear();
+                    self.inline_math.clear();
+                    self.heading_slugs.clear();
+                    self.tasks.clear();
+                    self.base_line = first_line;
+                    self.raw_html = false;
+                    self.node(node);
+                    // Copy rather than move: the scratch buffer keeps its
+                    // capacity for the next block, and the copy is exact.
+                    // Without raw HTML, nesting is bounded by MAX_DEPTH.
+                    match self
+                        .raw_html
+                        .then(|| qt_html::limit_nesting(&self.out))
+                        .flatten()
+                    {
+                        Some(limited) => {
+                            block.html = limited;
+                            // Offsets into the HTML before escaping.
+                            if !self.tasks.is_empty() {
+                                meta.tasks = None;
+                            }
+                        }
+                        None => {
+                            block.html = self.out.clone();
+                            meta.tasks = Some(std::mem::take(&mut self.tasks));
+                        }
+                    }
+                    block.inline_math = std::mem::take(&mut self.inline_math);
+                    meta.slugs = std::mem::take(&mut self.heading_slugs);
+                }
+            }
+        }
+        (block, meta)
+    }
+
     /// Children, with runs of text merged so that the typographer sees whole
     /// sentences.
     fn children<'a>(&mut self, node: &'a AstNode<'a>) {
@@ -418,6 +514,7 @@ impl Html<'_> {
                 let mut plain = String::new();
                 md::plain_text(node, &mut plain);
                 let base = slug(&plain);
+                self.heading_slugs.push(base.clone());
                 let seen = match self.slugs.get_mut(&base) {
                     Some(count) => {
                         *count += 1;
@@ -580,10 +677,12 @@ impl Html<'_> {
         self.out.push_str("<li>");
         self.marker(node);
         if let NodeValue::TaskItem(task) = &node.data().value {
-            let line = node.data().sourcepos.start.line.saturating_sub(1);
+            let line = node.data().sourcepos.start.line.saturating_sub(1) + self.line_offset;
+            self.out.push_str("<a class=\"task\" href=\"vn-task:");
+            self.tasks.push(self.out.len());
             let _ = write!(
                 self.out,
-                "<a class=\"task\" href=\"vn-task:{line}\">{}</a> ",
+                "{line}\">{}</a> ",
                 if task.symbol.is_some() {
                     "\u{2611}"
                 } else {

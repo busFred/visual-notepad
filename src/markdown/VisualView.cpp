@@ -79,11 +79,12 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
         clearRenderCache();
         relayout();
     });
-    // Typing settled: one visible view asks for the reparse, every view
-    // then rebuilds its rows (hidden ones when shown).
+    // Typing settled: one visible view asks for the reparse (off the GUI
+    // thread for a large document), every view then rebuilds its rows
+    // (hidden ones when shown).
     connect(model, &MarkdownModel::reparseDue, this, [this] {
         if (isVisible())
-            m_model->flush();
+            m_model->flushInBackground();
     });
     connect(model, &MarkdownModel::reparsed, this, &VisualView::relayout);
     connect(&DiagramNotifier::instance(), &DiagramNotifier::ready, this, &VisualView::diagramsReady);
