@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <future>
 
 namespace vn {
 
@@ -116,7 +117,9 @@ struct Decoded
     bool highlightable = true;
 };
 
-Decoded decodeBytes(const QString &path, const QByteArray &bytes, const QString &encoding)
+// With `hash` false the disk state has no hash yet: the caller takes it
+// itself, alongside other work.
+Decoded decodeBytes(const QString &path, const QByteArray &bytes, const QString &encoding, bool hash = true)
 {
     Decoded decoded;
     decoded.encoding = encoding;
@@ -124,7 +127,7 @@ Decoded decodeBytes(const QString &path, const QByteArray &bytes, const QString 
     normalizeLineEndings(decoded.content, decoded.lineEnding);
     decoded.highlightable = canHighlight(decoded.content);
     const QFileInfo info(path);
-    decoded.disk = {true, info.lastModified(), info.size(), hashOf(bytes)};
+    decoded.disk = {true, info.lastModified(), info.size(), hash ? hashOf(bytes) : QByteArray()};
     return decoded;
 }
 
@@ -175,7 +178,11 @@ void run(Job &job)
     }
     if (job.cancel)
         return;
-    job.decoded = decodeBytes(job.path, bytes, encoding::detect(bytes, job.detect));
+    // The SHA-1 of ten megabytes takes as long as decoding them: do both at
+    // once (the future's copy of the bytes shares them), and building the
+    // document goes on while it finishes.
+    auto hash = std::async(std::launch::async, [bytes] { return hashOf(bytes); });
+    job.decoded = decodeBytes(job.path, bytes, encoding::detect(bytes, job.detect), false);
     bytes = QByteArray();
 
     // What QTextDocument::setPlainText() does, in pieces ending at a line end.
@@ -196,6 +203,7 @@ void run(Job &job)
         pos = end;
     }
     job.decoded.content = QString();
+    job.decoded.disk.hash = hash.get();
     job.ok = true;
 }
 
