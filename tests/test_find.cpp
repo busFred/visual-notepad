@@ -5,11 +5,18 @@
 #include "editor/Search.h"
 #include "editor/TextView.h"
 
+#include <QElapsedTimer>
+#include <QLabel>
 #include <QLineEdit>
 #include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextDocument>
+#include <QTextTable>
+#include <QTimer>
+#include <QToolButton>
+
+#include <atomic>
 
 using namespace vn;
 
@@ -36,8 +43,19 @@ private Q_SLOTS:
     void findAllReportsRanges();
     void enterBeforeDebounceUsesTypedQuery();
     void replaceAllManyMatchesIsOneUndoStep();
+    void textSnapshotSearchMatchesDocumentSearch();
+    void bigDocumentsSearchOffTheGuiThread_data();
+    void bigDocumentsSearchOffTheGuiThread();
+    void staleResultsAreDropped();
+    void closingCancelsTheSearch();
+    void navigationWaitsForTheSearch();
+    void replaceAllWaitsForTheSearch();
+    void catastrophicRegexKeepsTheGuiResponsive();
 
 private:
+    // Sets the Aa, ab and .* toggles.
+    void setOptions(bool matchCase, bool word, bool regex);
+    void waitForSearch();
     QTextDocument *m_doc = nullptr;
     TextView *m_view = nullptr;
     FindBar *m_bar = nullptr;
@@ -328,6 +346,390 @@ void TestFind::replaceAllManyMatchesIsOneUndoStep()
     QCOMPARE(m_bar->matchCount(), 0);
     m_view->undo();
     QCOMPARE(m_doc->toPlainText(), original);
+}
+
+namespace {
+
+using R = search::Range;
+
+// About `chars` characters of lines in the shapes the search cares about:
+// repeated words, empty lines, tabs, no-break spaces, one long line.
+QString makeText(int chars)
+{
+    QString text;
+    text.reserve(chars + 200);
+    int n = 0;
+    while (text.size() < chars) {
+        switch (n % 9) {
+        case 0:
+            text += QStringLiteral("## Section %1: notes on topic %1\n").arg(n);
+            break;
+        case 1:
+            text += QStringLiteral("The cat and the Hat, the end of the line %1\n").arg(n);
+            break;
+        case 2:
+            text += QLatin1Char('\n');
+            break;
+        case 3:
+            text += QStringLiteral("\tindented section %1 with a category and cat nbsp\n").arg(n);
+            break;
+        case 4:
+            text += QStringLiteral("foo-bar foo_bar FOO bar(baz) k%1=v%1 end\n").arg(n);
+            break;
+        case 5:
+            text += QStringLiteral("été Café café 中文 %1 end\n").arg(n);
+            break;
+        case 6:
+            if (n % 450 == 6)
+                text += QString(3000, QLatin1Char('x')) + QStringLiteral(" the end\n");
+            else
+                text += QStringLiteral("plain words only %1\n").arg(n);
+            break;
+        case 7:
+            text += QStringLiteral("a line with a separator the %1\n").arg(n);
+            break;
+        default:
+            text += QStringLiteral("last line of the group %1\n").arg(n);
+            break;
+        }
+        ++n;
+    }
+    return text;
+}
+
+struct Combo
+{
+    const char *pattern;
+    bool matchCase;
+    bool word;
+    bool regex;
+};
+
+const Combo combos[] = {
+    {"section", false, false, false},
+    {"Section", true, false, false},
+    {"the", false, true, false},
+    {"cat", true, true, false},
+    {"zzzz-not-there", false, false, false},
+    {"café", false, false, false},
+    {"section \\d+", false, false, true},
+    {"\\bthe\\b", false, false, true},
+    {"^#+ ", false, false, true},
+    {"end$", false, false, true},
+    {"(foo|bar)+", false, true, true},
+    {"line\\n", false, false, true},
+    {"x{5,}", false, false, true},
+    {"t\\w*", true, true, true},
+    {"b*", false, false, true},
+};
+
+} // namespace
+
+void TestFind::setOptions(bool matchCase, bool word, bool regex)
+{
+    for (QToolButton *button : m_bar->findChildren<QToolButton *>(QStringLiteral("FindOption"))) {
+        if (button->text() == QLatin1String("Aa"))
+            button->setChecked(matchCase);
+        else if (button->text() == QLatin1String("ab"))
+            button->setChecked(word);
+        else if (button->text() == QLatin1String(".*"))
+            button->setChecked(regex);
+    }
+}
+
+void TestFind::waitForSearch()
+{
+    QTRY_VERIFY_WITH_TIMEOUT(!m_bar->isSearching(), 30000);
+}
+
+void TestFind::textSnapshotSearchMatchesDocumentSearch()
+{
+    // A document with a table: its cells and frame boundaries are blocks too.
+    m_doc->setPlainText(makeText(20000));
+    QTextCursor cursor(m_doc);
+    cursor.setPosition(500);
+    QTextTable *table = cursor.insertTable(3, 3);
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column)
+            table->cellAt(row, column).firstCursorPosition().insertText(QStringLiteral("the cell %1 %2").arg(row).arg(column));
+    }
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(QStringLiteral("\nlast the"));
+    const QString raw = m_doc->toRawText();
+    QCOMPARE(raw.size(), m_doc->characterCount() - 1);
+    for (const Combo &c : combos) {
+        const search::Options options{QString::fromUtf8(c.pattern), c.matchCase, c.word, c.regex};
+        const search::Compiled compiled(options);
+        for (const QList<int> &scope :
+             {QList<int>{-1, -1}, QList<int>{0, 700}, QList<int>{650, 9000}, QList<int>{19000, -1}}) {
+            const QList<R> expected = search::findAll(m_doc, compiled, scope[0], scope[1]);
+            QVERIFY2(search::findAllInText(raw, compiled, scope[0], scope[1]) == expected, c.pattern);
+        }
+    }
+    // A set flag stops the scan.
+    std::atomic<bool> cancel{true};
+    QVERIFY(search::findAllInText(raw, search::Compiled(search::Options{QStringLiteral("the")}), -1, -1, &cancel)
+                .isEmpty());
+}
+
+void TestFind::bigDocumentsSearchOffTheGuiThread_data()
+{
+    QTest::addColumn<int>("chars");
+    QTest::newRow("1 MB") << 1000000;
+    QTest::newRow("10 MB") << 10000000;
+}
+
+void TestFind::bigDocumentsSearchOffTheGuiThread()
+{
+    QFETCH(int, chars);
+    m_doc->setPlainText(makeText(chars));
+    for (const Combo &c : combos) {
+        m_bar->close();
+        m_view->setTextCursor(QTextCursor(m_doc));
+        m_bar->open(false);
+        waitForSearch();
+        setOptions(c.matchCase, c.word, c.regex);
+        waitForSearch();
+        const search::Options options{QString::fromUtf8(c.pattern), c.matchCase, c.word, c.regex};
+        const QList<R> expected = search::findAll(m_doc, options);
+        m_bar->setQuery(options.pattern);
+        // The search runs on a worker; the GUI thread is free meanwhile.
+        QVERIFY2(m_bar->isSearching(), c.pattern);
+        waitForSearch();
+        QVERIFY2(m_bar->matchCount() == expected.size(), c.pattern);
+        // The current match is the first at or after the caret.
+        QCOMPARE(m_bar->currentMatch(), expected.isEmpty() ? -1 : 0);
+        if (expected.size() > 1) {
+            m_bar->findNext();
+            QVERIFY(!m_bar->isSearching());
+            QCOMPARE(m_view->textCursor().selectionStart(), expected[0].start);
+            QCOMPARE(m_view->textCursor().selectionEnd(), expected[0].end);
+            m_bar->findNext();
+            QCOMPARE(m_view->textCursor().selectionStart(), expected[1].start);
+            m_bar->findPrevious();
+            m_bar->findPrevious(); // Wraps to the last.
+            QCOMPARE(m_view->textCursor().selectionStart(), expected.last().start);
+        }
+    }
+}
+
+void TestFind::staleResultsAreDropped()
+{
+    const QString text = makeText(1000000);
+    m_doc->setPlainText(text);
+    m_view->setTextCursor(QTextCursor(m_doc));
+    m_bar->open(false);
+    const search::Options section{QStringLiteral("section")};
+    const QList<R> sections = search::findAll(m_doc, section);
+    QVERIFY(!sections.isEmpty());
+
+    // A newer query replaces a search in flight.
+    m_bar->setQuery(QStringLiteral("cat"));
+    QVERIFY(m_bar->isSearching());
+    m_bar->setQuery(QStringLiteral("section"));
+    waitForSearch();
+    QCOMPARE(m_bar->matchCount(), int(sections.size()));
+
+    // So does typing: only the query that was last typed is searched for.
+    m_bar->findField()->clear();
+    QTest::keyClicks(m_bar->findField(), QStringLiteral("cat"));
+    QTest::qWait(150); // The debounce fires and the search starts.
+    QTest::keyClicks(m_bar->findField(), QStringLiteral("egory"));
+    QTest::qWait(150);
+    m_bar->findField()->clear();
+    QTest::keyClicks(m_bar->findField(), QStringLiteral("section"));
+    QTRY_VERIFY_WITH_TIMEOUT(!m_bar->isSearching() && m_bar->matchCount() == sections.size(), 30000);
+    QTest::qWait(300); // Nothing late replaces it.
+    QCOMPARE(m_bar->matchCount(), int(sections.size()));
+
+    // An edit makes the search of the old text useless: its matches are never
+    // shown, even though its worker may finish later.
+    m_bar->setQuery(QStringLiteral("section"));
+    QVERIFY(m_bar->isSearching());
+    m_doc->setPlainText(QString(text).replace(QLatin1String("section"), QLatin1String("sektion"), Qt::CaseInsensitive));
+    QVERIFY(!m_bar->isSearching());
+    QCOMPARE(m_bar->matchCount(), int(sections.size())); // The old ones stay until the new search ends.
+    QTRY_COMPARE_WITH_TIMEOUT(m_bar->matchCount(), 0, 30000);
+    QTest::qWait(300);
+    QCOMPARE(m_bar->matchCount(), 0);
+
+    // An edit that moves the matches.
+    m_doc->setPlainText(text);
+    QTRY_COMPARE_WITH_TIMEOUT(m_bar->matchCount(), int(sections.size()), 30000);
+    QTextCursor edit(m_doc);
+    edit.insertText(QStringLiteral("section section\n"));
+    QTRY_COMPARE_WITH_TIMEOUT(m_bar->matchCount(), int(sections.size()) + 2, 30000);
+    waitForSearch();
+    QCOMPARE(m_bar->matchCount(), int(search::findAll(m_doc, section).size()));
+}
+
+void TestFind::closingCancelsTheSearch()
+{
+    m_doc->setPlainText(makeText(1000000));
+    QTextCursor caret(m_doc);
+    caret.setPosition(10);
+    m_view->setTextCursor(caret);
+    m_bar->open(false);
+    m_bar->setQuery(QStringLiteral("section"));
+    QVERIFY(m_bar->isSearching());
+    // Navigation waiting for the search goes with it.
+    m_bar->findNext();
+    m_bar->close();
+    QVERIFY(!m_bar->isSearching());
+    QTest::qWait(500);
+    QCOMPARE(m_bar->matchCount(), 0);
+    QCOMPARE(m_view->textCursor().position(), 10);
+    QVERIFY(!m_view->textCursor().hasSelection());
+
+    // The bar searches again when it is reopened.
+    m_bar->open(false);
+    waitForSearch();
+    QVERIFY(m_bar->matchCount() > 0);
+
+    // Deleting the bar with a search in flight is harmless.
+    m_bar->setQuery(QStringLiteral("the"));
+    QVERIFY(m_bar->isSearching());
+    delete m_bar;
+    m_bar = nullptr;
+    QTest::qWait(500);
+}
+
+void TestFind::navigationWaitsForTheSearch()
+{
+    m_doc->setPlainText(makeText(1000000));
+    m_view->setTextCursor(QTextCursor(m_doc));
+    m_bar->open(false);
+    // Enter right after typing, as in enterBeforeDebounceUsesTypedQuery: the
+    // search selects the first match and Enter then steps to the second.
+    QTest::keyClicks(m_bar->findField(), QStringLiteral("cat"));
+    QTest::keyClick(m_bar->findField(), Qt::Key_Return);
+    QVERIFY(m_bar->isSearching());
+    QVERIFY(!m_view->textCursor().hasSelection()); // Waiting, not blocking.
+    waitForSearch();
+    const QList<R> cats = search::findAll(m_doc, search::Options{QStringLiteral("cat")});
+    QCOMPARE(m_bar->matchCount(), int(cats.size()));
+    QCOMPARE(m_view->textCursor().selectionStart(), cats[1].start);
+    QCOMPARE(m_bar->currentMatch(), 1);
+
+    // Several steps queued behind one search all happen, in order.
+    setOptions(false, true, false);
+    waitForSearch();
+    const QList<R> words = search::findAll(m_doc, search::Options{QStringLiteral("the"), false, true, false});
+    m_view->setTextCursor(QTextCursor(m_doc));
+    m_bar->close();
+    m_bar->open(false);
+    m_bar->setQuery(QStringLiteral("the"));
+    QVERIFY(m_bar->isSearching());
+    m_bar->findNext();
+    m_bar->findNext();
+    m_bar->findNext();
+    m_bar->findPrevious();
+    QVERIFY(!m_view->textCursor().hasSelection());
+    waitForSearch();
+    QCOMPARE(m_view->textCursor().selectionStart(), words[1].start);
+
+    // Replace waits too, then moves on to the next match.
+    setOptions(false, false, false);
+    waitForSearch();
+    m_bar->close();
+    m_view->setTextCursor(QTextCursor(m_doc));
+    m_bar->open(true);
+    m_bar->setQuery(QStringLiteral("cat"));
+    m_bar->replaceField()->setText(QStringLiteral("dog"));
+    waitForSearch();
+    m_bar->findNext(); // Selects the first.
+    QCOMPARE(m_view->textCursor().selectionStart(), cats[0].start);
+    m_bar->setQuery(QStringLiteral("cat")); // A search in flight again.
+    QVERIFY(m_bar->isSearching());
+    m_bar->replaceOne();
+    waitForSearch();
+    const QString after = m_doc->toPlainText();
+    QCOMPARE(after.count(QLatin1String("dog")), 1);
+    QCOMPARE(after.count(QLatin1String("cat"), Qt::CaseInsensitive), int(cats.size()) - 1);
+    QCOMPARE(m_view->textCursor().selectionStart(), cats[1].start);
+}
+
+void TestFind::replaceAllWaitsForTheSearch()
+{
+    const QString original = makeText(1000000).replace(QChar(0x00a0), QLatin1Char(' ')).replace(QChar(0x2028), QLatin1Char(' '));
+    m_doc->setPlainText(original);
+    m_bar->open(true);
+    m_bar->replaceField()->setText(QStringLiteral("<S>"));
+    m_bar->setQuery(QStringLiteral("section"));
+    QVERIFY(m_bar->isSearching());
+    m_bar->replaceAll();
+    QVERIFY(m_doc->toPlainText() == original); // Not yet.
+    waitForSearch();
+    const QString expected = QString(original).replace(QLatin1String("section"), QLatin1String("<S>"), Qt::CaseInsensitive);
+    QVERIFY(m_doc->toPlainText() == expected);
+    m_view->undo();
+    QVERIFY(m_doc->toPlainText() == original);
+
+    // Regex groups, with the replacement computed from the original text.
+    setOptions(false, false, true);
+    waitForSearch();
+    m_bar->setQuery(QStringLiteral("(k)(\\d+)=v(\\d+)"));
+    m_bar->replaceField()->setText(QStringLiteral("$2:$1:$3"));
+    m_bar->replaceAll();
+    waitForSearch();
+    const QString regexExpected = QString(original).replace(QRegularExpression(QStringLiteral("(k)(\\d+)=v(\\d+)")), QStringLiteral("\\2:\\1:\\3"));
+    QVERIFY(m_doc->toPlainText() == regexExpected);
+}
+
+void TestFind::catastrophicRegexKeepsTheGuiResponsive()
+{
+    // (a+)+$ backtracks exponentially on a line of a's ending in something
+    // else. PCRE gives up on each such line after ten million steps (about 30
+    // ms), so many of them make a search of seconds.
+    QString text = makeText(300000);
+    for (int i = 0; i < 200; ++i)
+        text += QString(30, QLatin1Char('a')) + QStringLiteral("!\n");
+    m_doc->setPlainText(text);
+    m_view->setTextCursor(QTextCursor(m_doc));
+    m_bar->open(false);
+    setOptions(false, false, true);
+    waitForSearch();
+
+    qint64 longestGap = 0;
+    int ticks = 0;
+    QElapsedTimer sinceTick;
+    sinceTick.start();
+    QTimer ticker;
+    ticker.setInterval(5);
+    connect(&ticker, &QTimer::timeout, this, [&] {
+        longestGap = qMax(longestGap, sinceTick.restart());
+        ++ticks;
+    });
+    ticker.start();
+
+    QElapsedTimer total;
+    total.start();
+    m_bar->setQuery(QStringLiteral("(a+)+$"));
+    QVERIFY(m_bar->isSearching());
+    QVERIFY(total.elapsed() < 100); // Starting it does not wait for it.
+    const QLabel *count = m_bar->findChild<QLabel *>(QStringLiteral("FindCount"));
+    bool sawBusy = false;
+    while (m_bar->isSearching() && total.elapsed() < 60000) {
+        QTest::qWait(10);
+        sawBusy = sawBusy || count->text() == QStringLiteral("…");
+    }
+    ticker.stop();
+    QVERIFY(!m_bar->isSearching());
+    // The search took long, the GUI thread went on, and the counter said so.
+    QVERIFY2(total.elapsed() > 500, qPrintable(QString::number(total.elapsed())));
+    QVERIFY(ticks > total.elapsed() / 50);
+    QVERIFY2(longestGap < 150, qPrintable(QString::number(longestGap)));
+    QVERIFY(sawBusy);
+
+    // A new query does not wait for the slow one: it is cancelled between lines.
+    total.restart();
+    m_bar->setQuery(QStringLiteral("(a+)+$"));
+    QVERIFY(m_bar->isSearching());
+    m_bar->setQuery(QStringLiteral("section"));
+    waitForSearch();
+    QVERIFY(total.elapsed() < 1500);
+    QVERIFY(m_bar->matchCount() > 0);
+    QVERIFY(count->text() != QStringLiteral("…"));
 }
 
 // Keep tests away from the user's settings file.
