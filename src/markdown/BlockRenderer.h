@@ -92,6 +92,9 @@ public:
     // It at full size; null if it cannot be read.
     QImage pictureImage(const Picture &picture) const;
 
+    // For tests: picture files read (and decoded) from disk so far.
+    static int pictureFileReads();
+
     // Rough memory use in KiB, for caches.
     int cost() const;
 

@@ -170,6 +170,7 @@ private Q_SLOTS:
     void oversizedDiagramsRenderOnce();
     void onlyParseSettingsReparse();
     void wideImagesShrinkToColumn();
+    void decodedPicturesServeEveryWidth();
     void clickEnlargesPicture();
     void networkPaths();
     void networkPathsAreNotOpened_data();
@@ -893,6 +894,93 @@ void TestVisualView::wideImagesShrinkToColumn()
     QCOMPARE(picturePoint->title, QStringLiteral("wide.png"));
     QCOMPARE(rendered->pictureImage(*picturePoint).size(), QSize(2000, 500)); // Full size.
     QVERIFY(!rendered->pictureAt(QPointF(200, 190)));
+}
+
+// An <img> block of the given HTML in a folder, painted at a width on white.
+static QImage paintHtml(const QString &html, const QString &folder, qreal width, qreal dpr = 1)
+{
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.width = width;
+    ctx.devicePixelRatio = dpr;
+    ctx.baseDirectory = folder;
+    core::Block block;
+    block.kind = core::BlockKind::Html;
+    const QByteArray utf8 = html.toUtf8();
+    block.html = rust::String(utf8.constData(), utf8.size());
+    const auto rendered = RenderedBlock::create(block, html, ctx);
+    QImage image(QSize(int(width * dpr), qMax(1, int(rendered->height() * dpr))), QImage::Format_RGB32);
+    image.setDevicePixelRatio(dpr);
+    image.fill(Qt::white);
+    QPainter painter(&image);
+    rendered->paint(painter, QPointF(0, 0), width);
+    return image;
+}
+
+void TestVisualView::decodedPicturesServeEveryWidth()
+{
+    QTemporaryDir dir;
+    // Not a flat colour, so scaling it shows in every pixel.
+    QImage picture(1600, 400, QImage::Format_RGB32);
+    for (int y = 0; y < picture.height(); ++y)
+        for (int x = 0; x < picture.width(); ++x)
+            picture.setPixel(x, y, qRgb(x % 256, (x / 7 + y) % 256, (x * y) % 256));
+    const QString png = dir.filePath(QStringLiteral("a.png"));
+    const QString copy = dir.filePath(QStringLiteral("b.png"));
+    QVERIFY(picture.save(png));
+    QVERIFY(QFile::copy(png, copy));
+    QFile svg(dir.filePath(QStringLiteral("v.svg")));
+    QVERIFY(svg.open(QIODevice::WriteOnly));
+    svg.write(R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="900" height="300"><defs>)svg"
+              R"svg(<linearGradient id="g"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs>)svg"
+              R"svg(<circle cx="450" cy="150" r="140" fill="url(#g)"/></svg>)svg");
+    svg.close();
+    const QString a = QStringLiteral("<p><img src=\"a.png\"></p>");
+    const QString b = QStringLiteral("<p><img src=\"b.png\"></p>");
+    const QString v = QStringLiteral("<p><img src=\"v.svg\"></p>");
+
+    // A new width scales the picture read before: no second read.
+    const int start = RenderedBlock::pictureFileReads();
+    const QImage first = paintHtml(a, dir.path(), 400);
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 1);
+    const QImage second = paintHtml(a, dir.path(), 500);
+    paintHtml(a, dir.path(), 640, 1.5);
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 1);
+    QVERIFY(first != second);
+    // Same pixels as a picture read afresh at that width (a copy of the file
+    // is another file, so it is read and then scaled by itself).
+    QCOMPARE(paintHtml(b, dir.path(), 500), second);
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 2);
+    QCOMPARE(paintHtml(b, dir.path(), 400), first);
+    QCOMPARE(paintHtml(b, dir.path(), 700), paintHtml(a, dir.path(), 700));
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 2);
+    // The scaled picture is the decoded one scaled, as always.
+    const QImage expected = QImage(png).scaledToWidth(500, Qt::SmoothTransformation);
+    QVERIFY(second.height() >= expected.height());
+    QCOMPARE(second.copy(0, 0, expected.width(), expected.height()).convertToFormat(QImage::Format_RGB32),
+             expected.convertToFormat(QImage::Format_RGB32));
+
+    // A changed file is read again.
+    QImage red(1600, 400, QImage::Format_RGB32);
+    red.fill(Qt::red);
+    QVERIFY(red.save(png));
+    QFile file(png);
+    QVERIFY(file.open(QIODevice::ReadWrite));
+    QVERIFY(file.setFileTime(QDateTime::currentDateTime().addSecs(60), QFileDevice::FileModificationTime));
+    file.close();
+    const int before = RenderedBlock::pictureFileReads();
+    QVERIFY(countColor(paintHtml(a, dir.path(), 500), Qt::red) > 1000);
+    QCOMPARE(RenderedBlock::pictureFileReads(), before + 1);
+
+    // A vector picture is read once as well, and still drawn at every width.
+    const int svgStart = RenderedBlock::pictureFileReads();
+    const QImage small = paintHtml(v, dir.path(), 300);
+    const QImage large = paintHtml(v, dir.path(), 600);
+    QCOMPARE(RenderedBlock::pictureFileReads(), svgStart + 1);
+    QVERIFY(countColor(small, Qt::white) < small.width() * small.height());
+    QVERIFY(small != large);
+    QVERIFY(large.height() > small.height());
 }
 
 void TestVisualView::clickEnlargesPicture()

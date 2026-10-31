@@ -88,9 +88,13 @@ bool svgNamesNetworkPath(const QString &path)
     return false;
 }
 
+// Picture files read, for tests.
+std::atomic<int> localImageReads{0};
+
 // A picture file, unless it is an SVG that would reach another machine.
 QImage readImage(const QString &path)
 {
+    ++localImageReads;
     QImageReader reader(path);
     reader.setAutoTransform(true);
     if (reader.format().startsWith("svg") && svgNamesNetworkPath(path))
@@ -99,21 +103,29 @@ QImage readImage(const QString &path)
 }
 
 // Local pictures, read and scaled to the column, by file version and size.
+// Decoding is far slower than scaling (77 ms against 1 ms for a 4000 by 1200
+// PNG) and every new window width needs a new size, so the decoded files are
+// kept too, by file version, until their total size passes a limit. SVGs are
+// kept as decoded as well: they are read at their own size, never at the
+// column's, so a bigger or smaller column scales the same pixels either way.
 QImage cachedLocalImage(const QString &path, qreal width, qreal dpr)
 {
-    static QCache<QString, QImage> cache(64 * 1024); // KiB
+    static QCache<QString, QImage> cache(64 * 1024);      // KiB
+    static QCache<QString, QImage> originals(128 * 1024); // KiB
     const QFileInfo info(path);
-    const QString key = QStringLiteral("%1|%2|%3|%4|")
-                            .arg(info.lastModified().toMSecsSinceEpoch())
-                            .arg(info.size())
-                            .arg(width)
-                            .arg(dpr)
-                        + path;
+    const QString version = QStringLiteral("%1|%2|").arg(info.lastModified().toMSecsSinceEpoch()).arg(info.size()) + path;
+    const QString key = QStringLiteral("%1|%2|").arg(width).arg(dpr) + version;
     if (const QImage *hit = cache.object(key))
         return *hit;
-    QImage image = readImage(path);
-    if (image.isNull())
-        return image; // Not cached: the file may appear later.
+    QImage image;
+    if (const QImage *original = originals.object(version)) {
+        image = *original;
+    } else {
+        image = readImage(path);
+        if (image.isNull())
+            return image; // Not cached: the file may appear later.
+        originals.insert(version, new QImage(image), imageCost(image));
+    }
     // One image pixel per logical pixel, shrunk to fit the column.
     if (image.width() > width) {
         image = image.scaledToWidth(int(width * dpr), Qt::SmoothTransformation);
@@ -393,6 +405,11 @@ std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString
 }
 
 } // namespace
+
+int RenderedBlock::pictureFileReads()
+{
+    return localImageReads;
+}
 
 int DiagramNotifier::renderCount()
 {
