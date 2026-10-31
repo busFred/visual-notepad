@@ -181,6 +181,10 @@ public:
     };
     void formatMarkdown(MarkdownFormat format);
 
+    // The colours of the whole text changed (the highlighter ran) without a
+    // text change.
+    void formatsChanged();
+
 Q_SIGNALS:
     void cursorPositionChanged();
     void selectionChanged();

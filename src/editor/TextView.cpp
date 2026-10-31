@@ -484,6 +484,11 @@ void TextView::relayout()
     viewport()->update();
 }
 
+void TextView::formatsChanged()
+{
+    relayout();
+}
+
 QTextOption TextView::textOption() const
 {
     QTextOption option;

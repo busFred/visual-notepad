@@ -33,15 +33,18 @@
 #include <QUrl>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFutureWatcher>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPainter>
+#include <QPromise>
 #include <QSizeGrip>
 #include "EvenSplitter.h"
 #include <QSplitter>
 #include <QStatusBar>
+#include <QThreadPool>
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -58,7 +61,25 @@ namespace {
 
 constexpr int outlineLineRole = Qt::UserRole;
 constexpr int outlineWidth = 200;
+// Parsing the headings costs about 12 ms per MB. Past this many characters
+// (a few ms) it runs off the GUI thread, so that a pause in typing does not
+// freeze the window.
+constexpr qsizetype outlineThreadChars = 256 * 1024;
 constexpr int zoomStepPercent = 10;
+
+// The headings of a Markdown text. Plain Rust and Qt value types only, so it
+// also runs on a worker thread.
+QList<OutlineHeading> parseHeadings(const QString &text)
+{
+    const QByteArray utf8 = text.toUtf8();
+    const auto headings = core::outline(rust::Str(utf8.constData(), utf8.size()));
+    QList<OutlineHeading> result;
+    result.reserve(qsizetype(headings.size()));
+    for (const auto &heading : headings)
+        result.append({heading.level, static_cast<int>(heading.line),
+                       QString::fromUtf8(heading.text.data(), heading.text.size())});
+    return result;
+}
 
 QString productName()
 {
@@ -147,6 +168,7 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_root(new EvenSplitter(Qt::Horizontal, this))
     , m_outlineTimer(new QTimer(this))
+    , m_outlineWatcher(new QFutureWatcher<OutlineSnapshot>(this))
 {
     setWindowTitle(productName());
     resize(1100, 720);
@@ -173,6 +195,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_outlineTimer->setSingleShot(true);
     m_outlineTimer->setInterval(250);
     connect(m_outlineTimer, &QTimer::timeout, this, &MainWindow::updateOutline);
+    connect(m_outlineWatcher, &QFutureWatcher<OutlineSnapshot>::finished, this, &MainWindow::finishOutlineJob);
 
     createActions();
     createOutline();
@@ -1930,25 +1953,113 @@ void MainWindow::updateOutline()
     // after switching back to the tab it was built for: kept.
     if (m_outlineDock->isHidden() || (m_outlineFile == file && m_outlineSerial == file->changeSerial()))
         return;
-    m_outlineFile = file;
-    m_outlineSerial = file->changeSerial();
-    m_outline->clear();
+    if (const OutlineSnapshot *cached = cachedOutline(file)) {
+        showOutline(file, *cached);
+        return;
+    }
+    if (file->document()->characterCount() > outlineThreadChars) {
+        // The old outline stays while the same file is parsed again; another
+        // file's does not.
+        if (m_outlineFile != file) {
+            m_outline->clear();
+            m_outlineFile = nullptr;
+        }
+        startOutlineJob(tab);
+        return;
+    }
+    showOutline(file, outlineOf(tab));
+}
 
-    const QByteArray utf8 = tab->text().toUtf8();
-    const auto headings = core::outline(rust::Str(utf8.constData(), utf8.size()));
+const OutlineSnapshot &MainWindow::outlineOf(DocumentTab *tab)
+{
+    TextFile *file = tab->file();
+    if (const OutlineSnapshot *cached = cachedOutline(file))
+        return *cached;
+    ++m_outlineParses;
+    return cacheOutline(file, {file->changeSerial(), parseHeadings(tab->text())});
+}
+
+const OutlineSnapshot *MainWindow::cachedOutline(const TextFile *file) const
+{
+    const auto it = m_outlineCache.constFind(file);
+    // The pointer is null for a file that closed and whose address was reused.
+    if (it == m_outlineCache.constEnd() || it->file != file || it->snapshot.serial != file->changeSerial())
+        return nullptr;
+    return &it->snapshot;
+}
+
+const OutlineSnapshot &MainWindow::cacheOutline(TextFile *file, const OutlineSnapshot &snapshot)
+{
+    for (auto it = m_outlineCache.begin(); it != m_outlineCache.end();) {
+        if (it->file)
+            ++it;
+        else
+            it = m_outlineCache.erase(it);
+    }
+    CachedOutline &entry = m_outlineCache[file];
+    entry.file = file;
+    entry.snapshot = snapshot;
+    return entry.snapshot;
+}
+
+void MainWindow::showOutline(TextFile *file, const OutlineSnapshot &snapshot)
+{
+    m_outlineFile = file;
+    m_outlineSerial = snapshot.serial;
+    m_outline->clear();
 
     // Nest each heading under the nearest previous heading of lower level.
     QList<QPair<int, QTreeWidgetItem *>> stack;
-    for (const auto &heading : headings) {
-        const int level = heading.level;
-        while (!stack.isEmpty() && stack.last().first >= level)
+    for (const OutlineHeading &heading : snapshot.headings) {
+        while (!stack.isEmpty() && stack.last().first >= heading.level)
             stack.removeLast();
         auto *item = stack.isEmpty() ? new QTreeWidgetItem(m_outline) : new QTreeWidgetItem(stack.last().second);
-        item->setText(0, QString::fromUtf8(heading.text.data(), heading.text.size()));
-        item->setData(0, outlineLineRole, static_cast<int>(heading.line));
-        stack.append({level, item});
+        item->setText(0, heading.text);
+        item->setData(0, outlineLineRole, heading.line);
+        stack.append({heading.level, item});
     }
     m_outline->expandAll();
+}
+
+void MainWindow::startOutlineJob(DocumentTab *tab)
+{
+    if (m_outlineJobRunning) {
+        m_outlineJobSkipped = true;
+        return;
+    }
+    m_outlineJobRunning = true;
+    m_outlineJobSkipped = false;
+    m_outlineJobFile = tab->file();
+    ++m_outlineParses;
+    // The text is read here; QPromise is not copyable, the pool function must be.
+    auto promise = std::make_shared<QPromise<OutlineSnapshot>>();
+    promise->start();
+    m_outlineWatcher->setFuture(promise->future());
+    QThreadPool::globalInstance()->start(
+        [promise, serial = tab->file()->changeSerial(), text = tab->text()] {
+            promise->addResult(OutlineSnapshot{serial, parseHeadings(text)});
+            promise->finish();
+        });
+}
+
+void MainWindow::finishOutlineJob()
+{
+    m_outlineJobRunning = false;
+    TextFile *file = m_outlineJobFile;
+    m_outlineJobFile = nullptr;
+    if (file) {
+        const OutlineSnapshot snapshot = m_outlineWatcher->result();
+        cacheOutline(file, snapshot);
+        DocumentTab *tab = currentTab();
+        // Shown even when edits have made it a little old: newer than what is
+        // there. The timer (or the skipped request) builds the next one.
+        if (tab && tab->file() == file && tab->isMarkdown() && !m_outlineDock->isHidden())
+            showOutline(file, snapshot);
+    }
+    if (m_outlineJobSkipped) {
+        m_outlineJobSkipped = false;
+        updateOutline();
+    }
 }
 
 void MainWindow::updateOutlineVisibility()
@@ -1971,25 +2082,23 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
             const rust::String slug = core::heading_slug(rust::Str(utf8.constData(), utf8.size()));
             return QString::fromUtf8(slug.data(), slug.size());
         };
-        const QString text = tab->text();
         int line = -1;
         if (anchor.startsWith(QLatin1String("fn-"))) {
-            const QStringList lines = text.split(u'\n');
+            const QStringList lines = tab->text().split(u'\n');
             for (int i = 0; i < lines.size() && line < 0; ++i) {
                 if (lines[i].startsWith(QLatin1String("[^"))
                     && slugOf(lines[i].section(u']', 0, 0).mid(2).toLower()) == anchor.mid(3))
                     line = i + 1;
             }
         } else {
-            const QByteArray utf8 = text.toUtf8();
             QHash<QString, int> seen;
-            for (const auto &heading : core::outline(rust::Str(utf8.constData(), utf8.size()))) {
-                QString slug = slugOf(QString::fromUtf8(heading.text.data(), heading.text.size()));
+            for (const OutlineHeading &heading : outlineOf(tab).headings) {
+                QString slug = slugOf(heading.text);
                 const int n = seen[slug]++;
                 if (n > 0)
                     slug += u'-' + QString::number(n);
                 if (slug == anchor) {
-                    line = int(heading.line);
+                    line = heading.line;
                     break;
                 }
             }

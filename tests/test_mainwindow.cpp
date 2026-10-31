@@ -23,6 +23,82 @@
 #include <QTest>
 #include <QTreeWidget>
 
+#include "TextFile.h"
+#include "vn_core_bridge/lib.h"
+
+#include <QElapsedTimer>
+
+#include <functional>
+
+namespace {
+
+// The outline as text, one heading per line, indented by depth:
+// "<depth> <text> @<line>".
+QString dumpOutline(const QTreeWidget *outline)
+{
+    QString out;
+    std::function<void(const QTreeWidgetItem *, int)> walk = [&](const QTreeWidgetItem *item, int depth) {
+        out += QStringLiteral("%1 %2 @%3\n").arg(depth).arg(item->text(0)).arg(item->data(0, Qt::UserRole).toInt());
+        for (int i = 0; i < item->childCount(); ++i)
+            walk(item->child(i), depth + 1);
+    };
+    for (int i = 0; i < outline->topLevelItemCount(); ++i)
+        walk(outline->topLevelItem(i), 0);
+    return out;
+}
+
+// What the outline showed before it was cached and parsed off the GUI
+// thread: core::outline of the text, each heading nested under the nearest
+// previous one of lower level.
+QString referenceOutline(const QString &text)
+{
+    const QByteArray utf8 = text.toUtf8();
+    QString out;
+    QList<int> levels;
+    for (const auto &heading : vn::core::outline(rust::Str(utf8.constData(), utf8.size()))) {
+        while (!levels.isEmpty() && levels.last() >= heading.level)
+            levels.removeLast();
+        out += QStringLiteral("%1 %2 @%3\n")
+                   .arg(levels.size())
+                   .arg(QString::fromUtf8(heading.text.data(), heading.text.size()))
+                   .arg(static_cast<int>(heading.line));
+        levels.append(heading.level);
+    }
+    return out;
+}
+
+QByteArray readSource(const char *relative)
+{
+    QFile file(QStringLiteral(VN_SOURCE_DIR "/") + QLatin1String(relative));
+    return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+}
+
+QString firstHeading(const QTreeWidget *outline)
+{
+    return outline->topLevelItemCount() ? outline->topLevelItem(0)->text(0) : QString();
+}
+
+// Spins the event loop until the outline's worker thread has been started
+// (not until it is done: that is only noticed by the next event loop pass).
+bool waitUntilBusy(const vn::MainWindow &window)
+{
+    QElapsedTimer timer;
+    timer.start();
+    while (!window.outlineBusy() && timer.elapsed() < 5000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    return window.outlineBusy();
+}
+
+// Every awkward kind of heading (and not-heading) at once.
+const char trickyDocument[] =
+    "---\ntitle: x\n---\n# One\n\nSetext Two\n==========\n\nSetext Three\n------------\n\n## Dup\n\n## Dup\n\n### Dup\n\n"
+    "> # Quoted *em* `code` [link](x) $x^2$ ![img](a.png)\n\n- # In list\n- text\n\n```\n# not a heading\n```\n\n"
+    "~~~\n# nor this\n~~~\n\n<div>\n# html\n</div>\n\n#Not a heading\n\n####### seven\n\n   ## Indented ##\n\n"
+    "# Trailing hashes ###\n\n## \xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E heading\n\n| a | b |\n|---|---|\n| # c | d |\n\n"
+    "#### Deep\n\n# Last\n";
+
+} // namespace
+
 class TestMainWindow : public QObject
 {
     Q_OBJECT
@@ -31,6 +107,9 @@ private Q_SLOTS:
     void initTestCase();
     void markdownShowsOutline();
     void textFileHidesOutline();
+    void outlineMatchesCore();
+    void outlineIsKeptPerTab();
+    void largeOutlineIsParsedOffThread();
     void crlfIsPreserved();
     void fileDropOnEmptyWindowOpensIt();
     void fileDropOnTextTabOpensIt();
@@ -107,6 +186,150 @@ void TestMainWindow::textFileHidesOutline()
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     QVERIFY(!window.findChild<QDockWidget *>()->isVisible());
+}
+
+// The cached, threaded outline shows exactly what core::outline always gave:
+// the repo's own documents, a document with every awkward heading, and
+// documents past the size where parsing moves to a worker thread.
+void TestMainWindow::outlineMatchesCore()
+{
+    QList<QByteArray> corpus{readSource("README.md"), readSource("docs/design.md"), QByteArray(trickyDocument)};
+    QByteArray generated;
+    for (int i = 0; i < 60; ++i)
+        generated += QByteArray("## Section ") + QByteArray::number(i % 7) + "\n\ntext *with* markup\n\n### Part\n\n"
+                     + "Title " + QByteArray::number(i) + "\n-----\n\n";
+    corpus << generated << QByteArray(trickyDocument).repeated(2000) << generated.repeated(40);
+    QVERIFY(!corpus[0].isEmpty() && !corpus[1].isEmpty());
+    QVERIFY(corpus[4].size() > 600'000); // parsed on a worker thread
+    QVERIFY(corpus[2].size() < 20'000);  // parsed directly
+
+    vn::MainWindow window;
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *outline = window.findChild<QTreeWidget *>();
+    QVERIFY(outline);
+    for (int i = 0; i < corpus.size(); ++i) {
+        const QString path = write(QStringLiteral("corpus%1.md").arg(i), corpus[i]);
+        QVERIFY(window.openFile(path));
+        QTRY_VERIFY(!window.outlineBusy());
+        const QString expected = referenceOutline(window.currentTab()->text());
+        QVERIFY2(!expected.isEmpty(), qPrintable(path));
+        QCOMPARE(dumpOutline(outline), expected);
+    }
+    // Back on each of them: from the cache, the same.
+    const int parses = window.outlineParses();
+    for (int i = 0; i < corpus.size(); ++i) {
+        window.setCurrentTabIndex(i);
+        QVERIFY(!window.outlineBusy());
+        QCOMPARE(dumpOutline(outline), referenceOutline(window.currentTab()->text()));
+    }
+    QCOMPARE(window.outlineParses(), parses);
+    // The awkward document keeps its details.
+    window.setCurrentTabIndex(2);
+    const QString tricky = dumpOutline(outline);
+    QVERIFY(tricky.contains(QStringLiteral("Setext Three @9")));
+    QVERIFY(tricky.contains(QStringLiteral("Dup @")));
+    QVERIFY(!tricky.contains(QStringLiteral("not a heading")));
+}
+
+// Switching tabs, toggling the outline and formatting changes parse nothing;
+// only an edit does, once, however often the tabs are switched afterwards.
+void TestMainWindow::outlineIsKeptPerTab()
+{
+    const QString a = write(QStringLiteral("keep-a.md"), "# Alpha\n\n## One\n");
+    const QString b = write(QStringLiteral("keep-b.md"), "# Beta\n\n## Two\n\n## Three\n");
+    vn::MainWindow window;
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *outline = window.findChild<QTreeWidget *>();
+    QVERIFY(window.openFile(a));
+    QVERIFY(window.openFile(b));
+    QCOMPARE(window.outlineParses(), 2);
+    QCOMPARE(outline->topLevelItem(0)->text(0), QStringLiteral("Beta"));
+
+    for (int i = 0; i < 6; ++i) {
+        window.setCurrentTabIndex(i % 2);
+        QCOMPARE(outline->topLevelItem(0)->text(0), i % 2 ? QStringLiteral("Beta") : QStringLiteral("Alpha"));
+        QCOMPARE(outline->topLevelItem(0)->childCount(), i % 2 ? 2 : 1);
+    }
+    QCOMPARE(window.outlineParses(), 2);
+
+    // Hidden and shown again with the text unchanged.
+    vn::Settings::instance().setValue(vn::key::outline, false);
+    QVERIFY(window.findChild<QDockWidget *>()->isHidden());
+    vn::Settings::instance().setValue(vn::key::outline, true);
+    QCOMPARE(outline->topLevelItemCount(), 1);
+    QCOMPARE(window.outlineParses(), 2);
+
+    // An edit of the shown tab: rebuilt after the pause, once.
+    vn::DocumentTab *tab = window.currentTab();
+    QTextCursor end(tab->document());
+    end.movePosition(QTextCursor::End);
+    end.insertText(QStringLiteral("\n## Four\n"));
+    QTRY_COMPARE(outline->topLevelItem(0)->childCount(), 3);
+    QCOMPARE(window.outlineParses(), 3);
+    QCOMPARE(dumpOutline(outline), referenceOutline(tab->text()));
+
+    // An edit made while the outline is hidden: parsed when it is shown.
+    vn::Settings::instance().setValue(vn::key::outline, false);
+    end.insertText(QStringLiteral("\n# Five\n"));
+    QCOMPARE(window.outlineParses(), 3);
+    vn::Settings::instance().setValue(vn::key::outline, true);
+    QCOMPARE(window.outlineParses(), 4);
+    QCOMPARE(dumpOutline(outline), referenceOutline(tab->text()));
+
+    // The other tab is still cached; going back and forth costs nothing.
+    for (int i = 0; i < 4; ++i)
+        window.setCurrentTabIndex((i + 1) % 2);
+    QCOMPARE(window.outlineParses(), 4);
+    QCOMPARE(dumpOutline(outline), referenceOutline(window.currentTab()->text()));
+
+    // Closing a tab and opening a file in its place cannot revive its outline.
+    QVERIFY(window.closeTabs(window.currentTabIndex(), vn::MainWindow::CloseScope::This));
+    QVERIFY(window.openFile(write(QStringLiteral("keep-c.md"), "# Gamma\n")));
+    QCOMPARE(outline->topLevelItem(0)->text(0), QStringLiteral("Gamma"));
+}
+
+// A big document is parsed off the GUI thread. The old outline stays while
+// the same file is parsed again, another file's is cleared, and a result that
+// edits have outdated is followed by the current one.
+void TestMainWindow::largeOutlineIsParsedOffThread()
+{
+    QByteArray big;
+    for (int i = 0; i < 20000; ++i)
+        big += "## Heading " + QByteArray::number(i) + "\n\nsome text in a paragraph of the document\n\n";
+    QVERIFY(big.size() > 600'000);
+    const QString path = write(QStringLiteral("big.md"), big);
+    const QString small = write(QStringLiteral("small.md"), "# Small\n");
+    vn::MainWindow window;
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *outline = window.findChild<QTreeWidget *>();
+    QVERIFY(window.openFile(small));
+    QVERIFY(window.openFile(path));
+    QVERIFY(window.outlineBusy());
+    QCOMPARE(outline->topLevelItemCount(), 0); // not the small file's
+    QTRY_VERIFY(!window.outlineBusy());
+    QCOMPARE(outline->topLevelItemCount(), 20000);
+
+    // Edits while a new parse runs.
+    vn::DocumentTab *tab = window.currentTab();
+    QTextCursor(tab->document()).insertText(QStringLiteral("# First\n"));
+    QVERIFY(waitUntilBusy(window));
+    QTextCursor(tab->document()).insertText(QStringLiteral("# Second\n"));
+    QTRY_COMPARE_WITH_TIMEOUT(firstHeading(outline), QStringLiteral("Second"), 10000);
+    QTRY_VERIFY(!window.outlineBusy());
+    QCOMPARE(dumpOutline(outline), referenceOutline(tab->text()));
+
+    // Switching away mid-parse and back ends with the right outline.
+    QTextCursor(tab->document()).insertText(QStringLiteral("# Third\n"));
+    QVERIFY(waitUntilBusy(window));
+    window.setCurrentTabIndex(0);
+    QCOMPARE(firstHeading(outline), QStringLiteral("Small"));
+    window.setCurrentTabIndex(1);
+    QTRY_COMPARE_WITH_TIMEOUT(firstHeading(outline), QStringLiteral("Third"), 10000);
+    QTRY_VERIFY(!window.outlineBusy());
+    QCOMPARE(dumpOutline(outline), referenceOutline(tab->text()));
 }
 
 void TestMainWindow::crlfIsPreserved()

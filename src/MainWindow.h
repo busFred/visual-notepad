@@ -23,11 +23,27 @@ class QSplitter;
 class QTimer;
 class QToolButton;
 class QTreeWidget;
+template<typename T> class QFutureWatcher;
 
 namespace vn {
 
 class EditorGroup;
 class EvenSplitter;
+
+// One heading of the outline: what core::outline returns, as Qt types.
+struct OutlineHeading
+{
+    int level;
+    int line;
+    QString text;
+};
+
+// The outline of a file's text as it was at TextFile::changeSerial() `serial`.
+struct OutlineSnapshot
+{
+    quint64 serial = 0;
+    QList<OutlineHeading> headings;
+};
 
 class MainWindow : public QMainWindow
 {
@@ -108,6 +124,12 @@ public:
     // an empty function restores the dialog.
     static void setSaveConflictHandler(std::function<SaveConflictChoice(DocumentTab *)> handler);
 
+    // Outline bookkeeping, for tests. outlineParses() counts the documents
+    // parsed for the outline (not the ones it served from its cache);
+    // outlineBusy() is true while a large document is parsed off the GUI thread.
+    int outlineParses() const { return m_outlineParses; }
+    bool outlineBusy() const { return m_outlineJobRunning; }
+
 protected:
     bool event(QEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
@@ -183,6 +205,14 @@ private:
     void updateStatus();
     void updateOutline();
     void updateOutlineVisibility();
+    void showOutline(TextFile *file, const OutlineSnapshot &snapshot);
+    void startOutlineJob(DocumentTab *tab);
+    void finishOutlineJob();
+    // The headings of `tab`'s text: from the cache while the text is
+    // unchanged, otherwise parsed (and cached).
+    const OutlineSnapshot &outlineOf(DocumentTab *tab);
+    const OutlineSnapshot *cachedOutline(const TextFile *file) const;
+    const OutlineSnapshot &cacheOutline(TextFile *file, const OutlineSnapshot &snapshot);
     void updateModeControls();
 
     QPointer<DocumentTab> m_previousTab;
@@ -200,6 +230,22 @@ private:
     // What the outline shows: the file and its TextFile::changeSerial().
     QPointer<TextFile> m_outlineFile;
     quint64 m_outlineSerial = 0;
+    // The last outline of every file, so that switching tabs, or rebuilding
+    // for text that did not change, parses nothing.
+    // Entries of closed files are dropped when the next one is added.
+    struct CachedOutline
+    {
+        QPointer<TextFile> file;
+        OutlineSnapshot snapshot;
+    };
+    QHash<const TextFile *, CachedOutline> m_outlineCache;
+    int m_outlineParses = 0;
+    // Large documents are parsed on a worker thread, one at a time.
+    QFutureWatcher<OutlineSnapshot> *m_outlineWatcher;
+    QPointer<TextFile> m_outlineJobFile;
+    bool m_outlineJobRunning = false;
+    // A rebuild was asked for while the job ran.
+    bool m_outlineJobSkipped = false;
     // Cached key::autoSave, read on every keystroke otherwise.
     QString m_autoSaveMode;
 
