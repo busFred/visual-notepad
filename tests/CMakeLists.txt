@@ -11,6 +11,9 @@ set_tests_properties(mainwindow PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TES
 
 add_test(NAME core COMMAND cargo test --manifest-path ${PROJECT_SOURCE_DIR}/core/Cargo.toml
                            --target-dir ${CMAKE_BINARY_DIR}/cargo-test)
+# The test compiles the crate and its dependencies first (optimised even in
+# Debug), which outlasts CI's per-test --timeout on small runners.
+set_tests_properties(core PROPERTIES TIMEOUT 600)
 
 qt_add_executable(test_textview test_textview.cpp)
 target_link_libraries(test_textview PRIVATE vn_app Qt6::Test)
