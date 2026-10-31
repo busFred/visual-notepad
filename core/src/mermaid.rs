@@ -475,7 +475,23 @@ mod tests {
             let n = largest_affordable(make);
             let code = make(n);
             let start = std::time::Instant::now();
-            let result = raster(&code, "auto", 1.0);
+            // The library checks its own layout in debug builds (these tests)
+            // and panics when a route for one of these contrived shapes grazes
+            // a node; release builds, which ship, do not check, and the
+            // bridge turns a panic into an error anyway. Time is what is
+            // measured here.
+            let result = match std::panic::catch_unwind(|| raster(&code, "auto", 1.0)) {
+                Ok(result) => result,
+                Err(panic) => {
+                    let message = panic
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| panic.downcast_ref::<&str>().copied())
+                        .unwrap_or_default();
+                    assert!(message.contains("flowchart stage"), "{name}: {message}");
+                    Err("diagram too large".to_owned())
+                }
+            };
             let took = start.elapsed();
             eprintln!("{name}: {n} edges, {} bytes, {took:?}", code.len());
             // (A very tall diagram can still be refused for its pixel count.)

@@ -703,7 +703,6 @@ void TestSession::autoSaveOnFocusChange()
     QCOMPARE(m_prompts, 0);
 }
 
-#ifdef Q_OS_UNIX
 void TestSession::recoveryDataIsPrivate()
 {
 #ifndef Q_OS_UNIX
@@ -750,6 +749,7 @@ void TestSession::recoveryDataIsPrivate()
 #endif
 }
 
+#ifdef Q_OS_UNIX
 void TestSession::sigtermBacksUp()
 {
     MainWindow *window = makeWindow();
