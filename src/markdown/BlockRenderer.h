@@ -92,7 +92,10 @@ public:
     // It at full size; null if it cannot be read.
     QImage pictureImage(const Picture &picture) const;
 
-    // Rough memory use in KiB, for caches.
+    // For tests: picture files read (and decoded) from disk so far.
+    static int pictureFileReads();
+
+    // Memory use in KiB (about, but not under), for caches.
     int cost() const;
 
     // Where source lines start in the rendering: (line offset from the
@@ -113,6 +116,7 @@ private:
     QString m_error;
     qreal m_height = 0;
     qreal m_width = 0; // Of the column it was made for.
+    qsizetype m_pictureBytes = 0; // Of the pictures in the rich text.
     QString m_diagramCode; // Mermaid source; null for other blocks.
     QString m_diagramTheme;
     bool m_centered = false;

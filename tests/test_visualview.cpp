@@ -15,7 +15,10 @@
 #include <KSyntaxHighlighting/SyntaxHighlighter>
 #include <KSyntaxHighlighting/Theme>
 
+#include <QAbstractTextDocumentLayout>
 #include <QApplication>
+#include <QPainterPath>
+#include <QSet>
 #include <QFile>
 #include <QPainter>
 #include <QRegularExpression>
@@ -170,6 +173,10 @@ private Q_SLOTS:
     void oversizedDiagramsRenderOnce();
     void onlyParseSettingsReparse();
     void wideImagesShrinkToColumn();
+    void decodedPicturesServeEveryWidth();
+    void codeBlocksArePaintedAsTheStockHighlighterDoes_data();
+    void codeBlocksArePaintedAsTheStockHighlighterDoes();
+    void renderCostCountsPicturesAndText();
     void clickEnlargesPicture();
     void networkPaths();
     void networkPathsAreNotOpened_data();
@@ -893,6 +900,215 @@ void TestVisualView::wideImagesShrinkToColumn()
     QCOMPARE(picturePoint->title, QStringLiteral("wide.png"));
     QCOMPARE(rendered->pictureImage(*picturePoint).size(), QSize(2000, 500)); // Full size.
     QVERIFY(!rendered->pictureAt(QPointF(200, 190)));
+}
+
+// An <img> block of the given HTML in a folder, painted at a width on white.
+static QImage paintHtml(const QString &html, const QString &folder, qreal width, qreal dpr = 1)
+{
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.width = width;
+    ctx.devicePixelRatio = dpr;
+    ctx.baseDirectory = folder;
+    core::Block block;
+    block.kind = core::BlockKind::Html;
+    const QByteArray utf8 = html.toUtf8();
+    block.html = rust::String(utf8.constData(), utf8.size());
+    const auto rendered = RenderedBlock::create(block, html, ctx);
+    QImage image(QSize(int(width * dpr), qMax(1, int(rendered->height() * dpr))), QImage::Format_RGB32);
+    image.setDevicePixelRatio(dpr);
+    image.fill(Qt::white);
+    QPainter painter(&image);
+    rendered->paint(painter, QPointF(0, 0), width);
+    return image;
+}
+
+void TestVisualView::decodedPicturesServeEveryWidth()
+{
+    QTemporaryDir dir;
+    // Not a flat colour, so scaling it shows in every pixel.
+    QImage picture(1600, 400, QImage::Format_RGB32);
+    for (int y = 0; y < picture.height(); ++y)
+        for (int x = 0; x < picture.width(); ++x)
+            picture.setPixel(x, y, qRgb(x % 256, (x / 7 + y) % 256, (x * y) % 256));
+    const QString png = dir.filePath(QStringLiteral("a.png"));
+    const QString copy = dir.filePath(QStringLiteral("b.png"));
+    QVERIFY(picture.save(png));
+    QVERIFY(QFile::copy(png, copy));
+    QFile svg(dir.filePath(QStringLiteral("v.svg")));
+    QVERIFY(svg.open(QIODevice::WriteOnly));
+    svg.write(R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="900" height="300"><defs>)svg"
+              R"svg(<linearGradient id="g"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs>)svg"
+              R"svg(<circle cx="450" cy="150" r="140" fill="url(#g)"/></svg>)svg");
+    svg.close();
+    const QString a = QStringLiteral("<p><img src=\"a.png\"></p>");
+    const QString b = QStringLiteral("<p><img src=\"b.png\"></p>");
+    const QString v = QStringLiteral("<p><img src=\"v.svg\"></p>");
+
+    // A new width scales the picture read before: no second read.
+    const int start = RenderedBlock::pictureFileReads();
+    const QImage first = paintHtml(a, dir.path(), 400);
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 1);
+    const QImage second = paintHtml(a, dir.path(), 500);
+    paintHtml(a, dir.path(), 640, 1.5);
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 1);
+    QVERIFY(first != second);
+    // Same pixels as a picture read afresh at that width (a copy of the file
+    // is another file, so it is read and then scaled by itself).
+    QCOMPARE(paintHtml(b, dir.path(), 500), second);
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 2);
+    QCOMPARE(paintHtml(b, dir.path(), 400), first);
+    QCOMPARE(paintHtml(b, dir.path(), 700), paintHtml(a, dir.path(), 700));
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 2);
+    // The scaled picture is the decoded one scaled, as always.
+    const QImage expected = QImage(png).scaledToWidth(500, Qt::SmoothTransformation);
+    QVERIFY(second.height() >= expected.height());
+    QCOMPARE(second.copy(0, 0, expected.width(), expected.height()).convertToFormat(QImage::Format_RGB32),
+             expected.convertToFormat(QImage::Format_RGB32));
+
+    // A changed file is read again.
+    QImage red(1600, 400, QImage::Format_RGB32);
+    red.fill(Qt::red);
+    QVERIFY(red.save(png));
+    QFile file(png);
+    QVERIFY(file.open(QIODevice::ReadWrite));
+    QVERIFY(file.setFileTime(QDateTime::currentDateTime().addSecs(60), QFileDevice::FileModificationTime));
+    file.close();
+    const int before = RenderedBlock::pictureFileReads();
+    QVERIFY(countColor(paintHtml(a, dir.path(), 500), Qt::red) > 1000);
+    QCOMPARE(RenderedBlock::pictureFileReads(), before + 1);
+
+    // A vector picture is read once as well, and still drawn at every width.
+    const int svgStart = RenderedBlock::pictureFileReads();
+    const QImage small = paintHtml(v, dir.path(), 300);
+    const QImage large = paintHtml(v, dir.path(), 600);
+    QCOMPARE(RenderedBlock::pictureFileReads(), svgStart + 1);
+    QVERIFY(countColor(small, Qt::white) < small.width() * small.height());
+    QVERIFY(small != large);
+    QVERIFY(large.height() > small.height());
+}
+
+void TestVisualView::codeBlocksArePaintedAsTheStockHighlighterDoes_data()
+{
+    QTest::addColumn<QString>("language");
+    QTest::addColumn<QString>("code");
+    QTest::newRow("python") << "python"
+                            << "def f(x):\n    # a comment\n    return [x * k for k in range(10) if k % 2 == 0]\n";
+    QTest::newRow("cpp") << "cpp"
+                         << "#include <vector>\nint main() {\n  std::vector<int> v{1, 2}; // two\n  return v[0] > 1 ? 0 : 1;\n}\n";
+    QTest::newRow("json") << "json" << "{\"a\": [1, 2.5, true, null], \"b\": {\"c\": \"text\"}}\n";
+    QTest::newRow("rust") << "rust" << "fn main() {\n    let s = \"hi\"; /* c */\n    println!(\"{}\", s);\n}\n";
+    QTest::newRow("bash") << "bash" << "for f in *.md; do echo \"$f\" | sed 's/a/b/'; done\n";
+    QTest::newRow("markdown") << "markdown" << "# Title\n\n*emphasis* **strong** `code` [link](http://x.y)\n- item\n";
+    QTest::newRow("wrapping") << "text" << QString(300, u'w') + QStringLiteral(" and some more words to wrap\n");
+    QTest::newRow("unknown language") << "no-such-language" << "plain text\n";
+    QTest::newRow("none") << "" << "no language at all\n";
+}
+
+void TestVisualView::codeBlocksArePaintedAsTheStockHighlighterDoes()
+{
+    QFETCH(QString, language);
+    QFETCH(QString, code);
+    const QString source = QStringLiteral("```%1\n%2```").arg(language, code);
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.width = 360;
+    core::Block block;
+    block.kind = core::BlockKind::Code;
+    const QByteArray lang = language.toUtf8();
+    const QByteArray text = code.toUtf8();
+    block.lang = rust::String(lang.constData(), lang.size());
+    block.text = rust::String(text.constData(), text.size());
+    const auto rendered = RenderedBlock::create(block, source, ctx);
+    QCOMPARE(rendered->kind(), RenderedBlock::Kind::Code);
+
+    // The same document the way the stock KSyntaxHighlighting highlighter
+    // does it, drawn the way RenderedBlock::paint does.
+    QTextDocument reference;
+    reference.setDocumentMargin(0);
+    reference.setDefaultFont(ctx.codeFont);
+    QTextOption option;
+    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    reference.setDefaultTextOption(option);
+    reference.setPlainText(source);
+    reference.setTextWidth(ctx.width - 20);
+    KSyntaxHighlighting::SyntaxHighlighter highlighter(&reference);
+    highlighter.setTheme(theme::syntaxTheme());
+    highlighter.setDefinition(theme::syntaxRepository().definitionForName(QStringLiteral("Markdown")));
+    highlighter.rehighlight();
+
+    const QSize size(int(ctx.width), int(rendered->height()));
+    QImage actual(size, QImage::Format_RGB32);
+    QImage expected(size, QImage::Format_RGB32);
+    actual.fill(Qt::white);
+    expected.fill(Qt::white);
+    {
+        QPainter painter(&actual);
+        rendered->paint(painter, QPointF(0, 0), ctx.width);
+    }
+    {
+        QPainter painter(&expected);
+        QPainterPath box;
+        box.addRoundedRect(QRectF(QPointF(0, 0), QSizeF(ctx.width, rendered->height() - 4)), 3, 3);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.fillPath(box, theme::color(theme::Role::codeBlock));
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.translate(10, 5);
+        QAbstractTextDocumentLayout::PaintContext paint;
+        paint.palette.setColor(QPalette::Text, theme::color(theme::Role::text));
+        reference.documentLayout()->draw(&painter, paint);
+    }
+    QCOMPARE(reference.size().height() + 10 + 4, rendered->height());
+    QVERIFY(actual == expected);
+    // Highlighted, not plain: more than the text colour and the box.
+    QSet<QRgb> colors;
+    for (int y = 0; y < actual.height(); ++y)
+        for (int x = 0; x < actual.width(); ++x)
+            colors.insert(actual.pixel(x, y));
+    if (language == QLatin1String("python") || language == QLatin1String("cpp"))
+        QVERIFY(colors.size() > 20);
+}
+
+void TestVisualView::renderCostCountsPicturesAndText()
+{
+    QTemporaryDir dir;
+    QImage picture(1000, 500, QImage::Format_RGB32); // 2000 KiB.
+    picture.fill(Qt::blue);
+    QVERIFY(picture.save(dir.filePath(QStringLiteral("p.png"))));
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.width = 1200; // Wide enough to keep the picture at full size.
+    ctx.baseDirectory = dir.path();
+    const auto cost = [&](const QString &html) {
+        core::Block block;
+        block.kind = core::BlockKind::Html;
+        const QByteArray utf8 = html.toUtf8();
+        block.html = rust::String(utf8.constData(), utf8.size());
+        return RenderedBlock::create(block, html, ctx)->cost();
+    };
+    const int text = cost(QStringLiteral("<p>some words</p>"));
+    // A paragraph takes tens of KiB, not bytes.
+    QVERIFY2(text >= 30, qPrintable(QString::number(text)));
+    const int one = cost(QStringLiteral("<p>some words <img src=\"p.png\"></p>"));
+    QVERIFY2(one - text >= 1900 && one - text < 2200, qPrintable(QString::number(one - text)));
+    // A narrower column shrinks the picture, and its cost.
+    ctx.width = 250;
+    const int narrow = cost(QStringLiteral("<p>some words <img src=\"p.png\"></p>"));
+    QVERIFY2(narrow - text < 500, qPrintable(QString::number(narrow - text)));
+    QVERIFY(narrow < one);
+    // Text counts by its length, in code and prose.
+    QVERIFY(cost(QStringLiteral("<p>%1</p>").arg(QString(16000, u'x'))) - text > 800);
+    // A highlighted code block is no smaller than its text.
+    core::Block code;
+    code.kind = core::BlockKind::Code;
+    const QString body(QString(4000, u'y'));
+    const QString fenced = QStringLiteral("```\n%1\n```").arg(body);
+    const QByteArray utf8 = body.toUtf8();
+    code.text = rust::String(utf8.constData(), utf8.size());
+    QVERIFY(RenderedBlock::create(code, fenced, ctx)->cost() > 400);
 }
 
 void TestVisualView::clickEnlargesPicture()

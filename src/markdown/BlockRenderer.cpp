@@ -5,6 +5,7 @@
 #include "MathRenderer.h"
 
 #include <KSyntaxHighlighting/Definition>
+#include <KSyntaxHighlighting/Format>
 #include <KSyntaxHighlighting/Repository>
 #include <KSyntaxHighlighting/SyntaxHighlighter>
 #include <KSyntaxHighlighting/Theme>
@@ -14,6 +15,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QHash>
 #include <QImageReader>
 #include <QPainter>
 #include <QPainterPath>
@@ -88,9 +90,13 @@ bool svgNamesNetworkPath(const QString &path)
     return false;
 }
 
+// Picture files read, for tests.
+std::atomic<int> localImageReads{0};
+
 // A picture file, unless it is an SVG that would reach another machine.
 QImage readImage(const QString &path)
 {
+    ++localImageReads;
     QImageReader reader(path);
     reader.setAutoTransform(true);
     if (reader.format().startsWith("svg") && svgNamesNetworkPath(path))
@@ -99,21 +105,29 @@ QImage readImage(const QString &path)
 }
 
 // Local pictures, read and scaled to the column, by file version and size.
+// Decoding is far slower than scaling (77 ms against 1 ms for a 4000 by 1200
+// PNG) and every new window width needs a new size, so the decoded files are
+// kept too, by file version, until their total size passes a limit. SVGs are
+// kept as decoded as well: they are read at their own size, never at the
+// column's, so a bigger or smaller column scales the same pixels either way.
 QImage cachedLocalImage(const QString &path, qreal width, qreal dpr)
 {
-    static QCache<QString, QImage> cache(64 * 1024); // KiB
+    static QCache<QString, QImage> cache(64 * 1024);      // KiB
+    static QCache<QString, QImage> originals(128 * 1024); // KiB
     const QFileInfo info(path);
-    const QString key = QStringLiteral("%1|%2|%3|%4|")
-                            .arg(info.lastModified().toMSecsSinceEpoch())
-                            .arg(info.size())
-                            .arg(width)
-                            .arg(dpr)
-                        + path;
+    const QString version = QStringLiteral("%1|%2|").arg(info.lastModified().toMSecsSinceEpoch()).arg(info.size()) + path;
+    const QString key = QStringLiteral("%1|%2|").arg(width).arg(dpr) + version;
     if (const QImage *hit = cache.object(key))
         return *hit;
-    QImage image = readImage(path);
-    if (image.isNull())
-        return image; // Not cached: the file may appear later.
+    QImage image;
+    if (const QImage *original = originals.object(version)) {
+        image = *original;
+    } else {
+        image = readImage(path);
+        if (image.isNull())
+            return image; // Not cached: the file may appear later.
+        originals.insert(version, new QImage(image), imageCost(image));
+    }
     // One image pixel per logical pixel, shrunk to fit the column.
     if (image.width() > width) {
         image = image.scaledToWidth(int(width * dpr), Qt::SmoothTransformation);
@@ -266,6 +280,9 @@ public:
         }
     }
 
+    // Bytes of the pictures (math, files) the document has resolved so far.
+    qsizetype pictureBytes() const { return m_pictureBytes; }
+
     // The file a picture's source names, or empty (math, remote pictures).
     QString pathOf(const QString &source) const
     {
@@ -304,6 +321,7 @@ private:
     // loads; without this every paint would load the picture again.
     QVariant keep(int type, const QUrl &url, const QImage &image)
     {
+        m_pictureBytes += image.sizeInBytes();
         addResource(type, url, image);
         return image;
     }
@@ -324,6 +342,7 @@ private:
 
     RenderContext m_context;
     QStringList m_math;
+    qsizetype m_pictureBytes = 0;
 };
 
 QString hex(theme::Role role)
@@ -374,6 +393,52 @@ div.footnote { font-size: %12px; color: #444444; }
     return lastSheet;
 }
 
+// The Qt format of a syntax format. The stock SyntaxHighlighter works these
+// out for every format of its definition and of each definition that one
+// includes, in every highlighter: for Markdown (which includes the fenced
+// languages) thousands of them, 0.2 ms and 280 KiB for each code block. The
+// theme is the same for all blocks and a block uses a few formats, so they
+// are made on demand and shared. Built as KSyntaxHighlighting does.
+QTextCharFormat sharedTextFormat(const KSyntaxHighlighting::Format &format, const KSyntaxHighlighting::Theme &theme)
+{
+    static QHash<int, QTextCharFormat> formats; // By format id, which is unique in the repository.
+    static QString formatsTheme;
+    if (formatsTheme != theme.name()) {
+        formats.clear();
+        formatsTheme = theme.name();
+    }
+    if (const auto it = formats.constFind(format.id()); it != formats.constEnd())
+        return *it;
+    QTextCharFormat tf;
+    // Always set the foreground color to avoid palette issues.
+    tf.setForeground(format.textColor(theme));
+    if (format.hasBackgroundColor(theme))
+        tf.setBackground(format.backgroundColor(theme));
+    if (format.isBold(theme))
+        tf.setFontWeight(QFont::Bold);
+    if (format.isItalic(theme))
+        tf.setFontItalic(true);
+    if (format.isUnderline(theme))
+        tf.setFontUnderline(true);
+    if (format.isStrikeThrough(theme))
+        tf.setFontStrikeOut(true);
+    formats.insert(format.id(), tf);
+    return tf;
+}
+
+class CodeHighlighter : public KSyntaxHighlighting::SyntaxHighlighter
+{
+public:
+    using KSyntaxHighlighting::SyntaxHighlighter::SyntaxHighlighter;
+
+protected:
+    void applyFormat(int offset, int length, const KSyntaxHighlighting::Format &format) override
+    {
+        if (length > 0)
+            setFormat(offset, length, sharedTextFormat(format, theme()));
+    }
+};
+
 std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString &definition,
                                             const RenderContext &context, qreal width)
 {
@@ -385,14 +450,19 @@ std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString
     doc->setDefaultTextOption(option);
     doc->setPlainText(source);
     doc->setTextWidth(width);
-    auto *highlighter = new KSyntaxHighlighting::SyntaxHighlighter(doc.get());
+    auto *highlighter = new CodeHighlighter(doc.get());
     highlighter->setTheme(theme::syntaxTheme());
+    // Highlights the whole text by itself when the definition changes.
     highlighter->setDefinition(theme::syntaxRepository().definitionForName(definition));
-    highlighter->rehighlight();
     return doc;
 }
 
 } // namespace
+
+int RenderedBlock::pictureFileReads()
+{
+    return localImageReads;
+}
 
 int DiagramNotifier::renderCount()
 {
@@ -484,6 +554,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         doc->fitImages(context.width);
         doc->setTextWidth(context.width);
         r.m_height = doc->size().height() + blockGap;
+        r.m_pictureBytes = doc->pictureBytes(); // Resolved by the layout.
         r.m_doc = std::move(doc);
         r.collectLineAnchors(0);
         return result;
@@ -654,12 +725,20 @@ QString RenderedBlock::renderedText() const
 
 int RenderedBlock::cost() const
 {
-    // Laid-out text takes very roughly 128 bytes a character.
+    // Laid-out text measured on the heap: rich text takes some 40 KiB of
+    // document structures plus about 64 bytes a character, a highlighted
+    // code block 20 KiB plus about 100 bytes a character. Pictures in the
+    // text are whole images (often shared with the picture caches, which
+    // still keeps them alive when this block is dropped, so it is a bit
+    // generous).
     int kib = 1;
     if (!m_image.isNull())
         kib += int(m_image.sizeInBytes() / 1024);
-    if (m_doc)
-        kib += m_doc->characterCount() / 8;
+    kib += int(m_pictureBytes / 1024);
+    if (m_doc) {
+        const int characters = m_doc->characterCount();
+        kib += m_kind == Kind::Code ? 20 + characters / 10 : 40 + characters / 16;
+    }
     return kib;
 }
 
