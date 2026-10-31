@@ -82,6 +82,14 @@ QImage cachedLocalImage(const QString &path, qreal width, qreal dpr)
     return image;
 }
 
+// A picture file at full size, for the zoom viewer.
+QImage fullSizeImage(const QString &path)
+{
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    return reader.read();
+}
+
 // Mermaid diagrams by theme, scale and code; filled by worker threads.
 struct Diagram
 {
@@ -144,6 +152,35 @@ public:
     {
         for (const auto &tex : block.inline_math)
             m_math.append(QString::fromUtf8(tex.data(), tex.size()));
+    }
+
+    // Pictures wider than the column (an explicit width="1060" in the HTML)
+    // shrink to it, keeping their proportions.
+    void fitImages(qreal width)
+    {
+        for (QTextBlock block = begin(); block.isValid(); block = block.next()) {
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                const QTextFragment fragment = it.fragment();
+                if (!fragment.charFormat().isImageFormat())
+                    continue;
+                QTextImageFormat format = fragment.charFormat().toImageFormat();
+                if (format.width() <= width)
+                    continue;
+                if (format.height() > 0)
+                    format.setHeight(format.height() * width / format.width());
+                format.setWidth(width);
+                QTextCursor cursor(this);
+                cursor.setPosition(fragment.position());
+                cursor.setPosition(fragment.position() + fragment.length(), QTextCursor::KeepAnchor);
+                cursor.mergeCharFormat(format);
+            }
+        }
+    }
+
+    // The file a picture's source names, or empty (math, remote pictures).
+    QString pathOf(const QString &source) const
+    {
+        return source.startsWith(QLatin1String("vn-math")) ? QString() : localPath(QUrl(source));
     }
 
 protected:
@@ -276,6 +313,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
 {
     auto result = std::unique_ptr<RenderedBlock>(new RenderedBlock);
     RenderedBlock &r = *result;
+    r.m_width = context.width;
     const QString lang = QString::fromUtf8(block.lang.data(), block.lang.size()).trimmed();
     const QString text = QString::fromUtf8(block.text.data(), block.text.size());
 
@@ -305,6 +343,8 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
             if (!r.m_image.isNull()) {
                 r.m_kind = Kind::Image;
                 r.m_centered = true;
+                r.m_diagramCode = text;
+                r.m_diagramTheme = context.mermaidTheme;
                 const qreal w = r.m_image.width() / r.m_image.devicePixelRatio();
                 if (w > context.width) // Shrink wide diagrams to fit.
                     r.m_image.setDevicePixelRatio(r.m_image.devicePixelRatio() * w / context.width);
@@ -337,6 +377,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         doc->setDefaultFont(context.font);
         doc->setDefaultStyleSheet(styleSheet(context));
         doc->setHtml(QString::fromUtf8(block.html.data(), block.html.size()));
+        doc->fitImages(context.width);
         doc->setTextWidth(context.width);
         r.m_height = doc->size().height() + blockGap;
         r.m_doc = std::move(doc);
@@ -458,6 +499,46 @@ QString RenderedBlock::anchorAt(const QPointF &point) const
     if (m_kind != Kind::Rich)
         return {};
     return m_doc->documentLayout()->anchorAt(point - contentOffset());
+}
+
+std::optional<RenderedBlock::Picture> RenderedBlock::pictureAt(const QPointF &point) const
+{
+    if (m_kind == Kind::Image) {
+        const QSizeF size = m_image.size() / m_image.devicePixelRatio();
+        // paint() centres these in the column.
+        const qreal x = m_centered ? qMax<qreal>(0, (m_width - size.width()) / 2) : 0;
+        if (!QRectF(QPointF(x, codePadY), size).contains(point))
+            return std::nullopt;
+        return Picture{m_diagramCode.isNull() ? QObject::tr("Equation") : QObject::tr("Diagram"), {}};
+    }
+    if (m_kind != Kind::Rich)
+        return std::nullopt;
+    const QString source = m_doc->documentLayout()->imageAt(point);
+    const QString path = source.isEmpty() ? QString() : static_cast<const ResourceDocument *>(m_doc.get())->pathOf(source);
+    if (path.isEmpty())
+        return std::nullopt;
+    return Picture{QFileInfo(path).fileName(), path};
+}
+
+QImage RenderedBlock::pictureImage(const Picture &picture) const
+{
+    if (!picture.path.isEmpty())
+        return fullSizeImage(picture.path);
+    if (!m_diagramCode.isNull()) {
+        // The diagram is vector: render it larger rather than magnify pixels.
+        try {
+            const QByteArray code = m_diagramCode.toUtf8();
+            const QByteArray theme = m_diagramTheme.toUtf8();
+            const core::RgbaImage raw = core::mermaid_image(rust::Str(code.constData(), code.size()),
+                                                            rust::Str(theme.constData(), theme.size()), 3.0f);
+            return QImage(raw.pixels.data(), int(raw.width), int(raw.height), int(raw.width) * 4,
+                          QImage::Format_RGBA8888_Premultiplied).copy();
+        } catch (const std::exception &) { // rust::Error
+        }
+    }
+    QImage image = m_image;
+    image.setDevicePixelRatio(1);
+    return image;
 }
 
 QString RenderedBlock::renderedText() const

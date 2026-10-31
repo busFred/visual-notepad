@@ -2,6 +2,7 @@
 
 #include "../Settings.h"
 #include "../Theme.h"
+#include "ImageViewer.h"
 #include "MarkdownModel.h"
 
 #include <QApplication>
@@ -485,12 +486,37 @@ bool VisualView::renderedRowPressed(const Row &r, const QPointF &point, QMouseEv
         return false;
     const QString anchor = block->anchorAt(point);
     if (anchor.isEmpty())
-        return false;
+        return openPicture(block, point, event);
     if (anchor.startsWith(QLatin1String("vn-task:"))) {
         toggleTask(anchor.section(u':', 1).toInt());
         return true;
     }
     Q_EMIT linkActivated(anchor);
+    return true;
+}
+
+bool VisualView::zoomClick(const QMouseEvent *event) const
+{
+    // Read-only, a click is free to enlarge; editable, a click opens the
+    // block's source, so it takes the link modifier (as for links in source).
+    const auto mods = event->modifiers() & ~Qt::KeypadModifier;
+    return isReadOnly() ? mods == Qt::NoModifier : mods == linkModifier();
+}
+
+bool VisualView::openPicture(const RenderedBlock *block, const QPointF &point, const QMouseEvent *event)
+{
+    if (!zoomClick(event))
+        return false;
+    const auto picture = block->pictureAt(point);
+    if (!picture)
+        return false;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const QImage image = block->pictureImage(*picture);
+    QApplication::restoreOverrideCursor();
+    if (image.isNull())
+        return false;
+    // Closes itself; the window is the parent so it stays on top of this tab.
+    (new ImageViewer(image, picture->title, window()))->show();
     return true;
 }
 
@@ -533,11 +559,15 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
         qreal top = 0;
         const int index = rowAt(event->position().y(), &top);
         QString anchor;
+        bool zoomable = false;
         if (index >= 0 && row(index).rendered) {
-            if (const RenderedBlock *block = renderedForRow(row(index)))
-                anchor = block->anchorAt(QPointF(event->position().x() - textLeft(), event->position().y() - top));
+            if (const RenderedBlock *block = renderedForRow(row(index))) {
+                const QPointF point(event->position().x() - textLeft(), event->position().y() - top);
+                anchor = block->anchorAt(point);
+                zoomable = anchor.isEmpty() && zoomClick(event) && block->pictureAt(point);
+            }
         }
-        viewport()->setCursor(anchor.isEmpty() ? Qt::IBeamCursor : Qt::PointingHandCursor);
+        viewport()->setCursor(anchor.isEmpty() && !zoomable ? Qt::IBeamCursor : Qt::PointingHandCursor);
         if (!anchor.isEmpty() && !anchor.startsWith(QLatin1String("vn-task:")))
             QToolTip::showText(event->globalPosition().toPoint(), anchor, viewport());
         else

@@ -213,6 +213,8 @@ protected:
     virtual void rowsMayHaveChanged() {}
     // A press on a rendered row; return true to consume it (e.g. a link).
     virtual bool renderedRowPressed(const Row &row, const QPointF &point, QMouseEvent *event);
+    // The modifier that follows links (the other one adds carets).
+    Qt::KeyboardModifier linkModifier() const;
     // Where source lines start inside a row of the given height: (line, y)
     // pairs ascending in both. {firstLine, 0} and {lastLine + 1, height} are
     // implied; lines between anchors are spread evenly. The default adds
@@ -328,7 +330,6 @@ private:
     // Merged [first, last] line ranges covered by the carets.
     QList<std::pair<int, int>> caretLineRanges() const;
     // Markdown helpers.
-    Qt::KeyboardModifier linkModifier() const;
     QString linkAtPosition(int position);
     bool continueList(Caret &caret);
     void insertFileLinks(const QStringList &files);

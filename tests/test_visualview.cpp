@@ -5,6 +5,7 @@
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
 #include "markdown/BlockRenderer.h"
+#include "markdown/ImageViewer.h"
 #include "markdown/MarkdownModel.h"
 #include "markdown/VisualView.h"
 #include "editor/TextView.h"
@@ -17,6 +18,7 @@
 #include <QApplication>
 #include <QPainter>
 #include <QRegularExpression>
+#include <QSlider>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -165,6 +167,8 @@ private Q_SLOTS:
     void caretMovesDontReparse();
     void diagramsRenderInBackground();
     void onlyParseSettingsReparse();
+    void wideImagesShrinkToColumn();
+    void clickEnlargesPicture();
 
 private:
     // Source and preview of longDocument(), side by side; the source has
@@ -816,6 +820,83 @@ void TestVisualView::onlyParseSettingsReparse()
     m_view->grab();
     QCOMPARE(m_model->parseGeneration(), generation + 1);
     settings.setValue(key::breaks, breaks);
+}
+
+void TestVisualView::wideImagesShrinkToColumn()
+{
+    QTemporaryDir dir;
+    QImage picture(2000, 500, QImage::Format_RGB32);
+    picture.fill(Qt::red);
+    QVERIFY(picture.save(dir.filePath(QStringLiteral("wide.png"))));
+    const QString source = QStringLiteral("<p align=\"center\"><img src=\"wide.png\" width=\"1060\"></p>");
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.width = 400;
+    ctx.baseDirectory = dir.path();
+    core::Block block;
+    block.kind = core::BlockKind::Html;
+    const QByteArray html = source.toUtf8();
+    block.html = rust::String(html.constData(), html.size());
+    const auto rendered = RenderedBlock::create(block, source, ctx);
+    // 400 wide keeps the 4:1 shape: 100 high (160 in the paragraph's line
+    // height); at the stated 1060 wide it would be over 400.
+    QVERIFY2(rendered->height() < 200, qPrintable(QString::number(rendered->height())));
+    QVERIFY(rendered->height() > 100);
+    const auto picturePoint = rendered->pictureAt(QPointF(200, 50));
+    QVERIFY(picturePoint);
+    QCOMPARE(picturePoint->title, QStringLiteral("wide.png"));
+    QCOMPARE(rendered->pictureImage(*picturePoint).size(), QSize(2000, 500)); // Full size.
+    QVERIFY(!rendered->pictureAt(QPointF(200, 190)));
+}
+
+void TestVisualView::clickEnlargesPicture()
+{
+    // Math is the picture in the sample; find its row.
+    const auto &blocks = m_model->blocks();
+    QCOMPARE(blocks[10].kind, core::BlockKind::Math);
+    m_view->setReadOnly(true);
+    m_view->grab();
+    const int line = int(blocks[10].first_line);
+    int y = -1;
+    for (int probe = 0; probe < m_view->viewport()->height() && y < 0; probe += 2) {
+        // Where the cursor turns to a pointing hand, a click would zoom.
+        QTest::mouseMove(m_view->viewport(), QPoint(m_view->viewport()->width() / 2, probe));
+        if (m_view->viewport()->cursor().shape() == Qt::PointingHandCursor)
+            y = probe;
+    }
+    Q_UNUSED(line);
+    QVERIFY(y >= 0);
+    QVERIFY(m_view->window()->findChildren<ImageViewer *>().isEmpty());
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(m_view->viewport()->width() / 2, y));
+    const auto viewers = m_view->window()->findChildren<ImageViewer *>();
+    QCOMPARE(viewers.size(), 1);
+    ImageViewer *viewer = viewers.first();
+    const qreal fitted = viewer->scale();
+    if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
+        viewer->grab().save(dir + QStringLiteral("/image-viewer.png"));
+    viewer->zoomAt(QPointF(viewer->width() / 2.0, viewer->height() / 2.0), 2);
+    QVERIFY(viewer->scale() >= fitted); // Never below the fitted size.
+    viewer->fit();
+    QCOMPARE(viewer->scale(), fitted);
+    // The slider zooms between the fitted size and the maximum, and follows other zooms.
+    auto *slider = viewer->findChild<QSlider *>();
+    QVERIFY(slider);
+    QCOMPARE(slider->value(), 0);
+    slider->setValue(slider->maximum());
+    QVERIFY(viewer->scale() > 10);
+    slider->setValue(slider->minimum());
+    QCOMPARE(viewer->scale(), fitted);
+    viewer->zoomAt(QPointF(viewer->width() / 2.0, viewer->height() / 2.0), 2);
+    QVERIFY(slider->value() > 0);
+    viewer->fit();
+    QCOMPARE(slider->value(), 0);
+    viewer->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    // Editable: a plain click edits instead.
+    m_view->setReadOnly(false);
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(m_view->viewport()->width() / 2, y));
+    QVERIFY(m_view->window()->findChildren<ImageViewer *>().isEmpty());
 }
 
 // Keep tests away from the user's settings file.

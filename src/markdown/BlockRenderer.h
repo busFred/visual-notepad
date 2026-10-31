@@ -14,6 +14,7 @@
 #include <QTextDocument>
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -74,6 +75,19 @@ public:
     QString renderedText() const;
     // A Mermaid diagram still rendering: shown as its source for now.
     bool isPending() const { return m_pending; }
+
+    // A picture the viewer can enlarge: a local file (path), or a generated
+    // one (math, diagram; empty path).
+    struct Picture
+    {
+        QString title;
+        QString path;
+    };
+    // The picture at a point relative to the block's top-left; cheap.
+    std::optional<Picture> pictureAt(const QPointF &point) const;
+    // It at full size; null if it cannot be read.
+    QImage pictureImage(const Picture &picture) const;
+
     // Rough memory use in KiB, for caches.
     int cost() const;
 
@@ -94,6 +108,9 @@ private:
     QImage m_image;
     QString m_error;
     qreal m_height = 0;
+    qreal m_width = 0; // Of the column it was made for.
+    QString m_diagramCode; // Mermaid source; null for other blocks.
+    QString m_diagramTheme;
     bool m_centered = false;
     bool m_pending = false;
     std::vector<LineAnchor> m_lineAnchors;

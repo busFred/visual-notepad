@@ -82,6 +82,8 @@ private:
     const RenderedBlock *renderedForRow(const Row &row);
     int spanForRow(const Row &row) const;
     void toggleTask(int line);
+    bool zoomClick(const QMouseEvent *event) const;
+    bool openPicture(const RenderedBlock *block, const QPointF &point, const QMouseEvent *event);
     RenderedSelection selectionForRow(const Row &row, const RenderedBlock *block, const QString &source) const;
     void clearRenderCache();
     void diagramsReady();
