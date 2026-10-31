@@ -188,6 +188,7 @@ private Q_SLOTS:
     void ordinaryBlocksIgnoreTheLayoutLimits();
     void longRunsWrapTheSameWithTheLimits();
     void scrollingKeepsOnlyRecentRenders();
+    void decodedPictureCacheSurvivesRoundsOfMorePictures();
 
 private:
     // Source and preview of longDocument(), side by side; the source has
@@ -1431,6 +1432,54 @@ void TestVisualView::scrollingKeepsOnlyRecentRenders()
     // Blocks come back the way they were.
     bar->setValue(0);
     QCOMPARE(m_view->grab().toImage(), top);
+}
+
+// More pictures than the decoded-picture cache holds, shown one after the
+// other at every new window width: the ones that fit keep serving, instead
+// of all being pushed out just before they are needed again.
+void TestVisualView::decodedPictureCacheSurvivesRoundsOfMorePictures()
+{
+    QTemporaryDir dir;
+    QStringList blocks;
+    for (int n = 0; n < 6; ++n) {
+        QImage picture(300, 200, QImage::Format_RGB32);
+        for (int y = 0; y < picture.height(); ++y)
+            for (int x = 0; x < picture.width(); ++x)
+                picture.setPixel(x, y, qRgb((x * 7 + n * 40) % 256, (y * 5 + x / 3) % 256, (x * y + n) % 256));
+        QVERIFY(picture.save(dir.filePath(QStringLiteral("p%1.png").arg(n))));
+        blocks << QStringLiteral("<p><img src=\"p%1.png\"></p>").arg(n);
+    }
+    // Four of the six fit (held as 24 bit: 176 KiB each).
+    RenderedBlock::setDecodedPictureLimitKiB(4 * 176 + 8);
+    const auto round = [&](int width) {
+        const int start = RenderedBlock::pictureFileReads();
+        QList<QImage> images;
+        for (const QString &html : std::as_const(blocks))
+            images << paintHtml(html, dir.path(), width);
+        return std::pair(RenderedBlock::pictureFileReads() - start, images);
+    };
+    QCOMPARE(round(290).first, 6);
+    for (int width = 280; width >= 250; width -= 10) {
+        const auto [reads, images] = round(width);
+        QCOMPARE(reads, 2);
+        // The same pixels whether the picture was kept or read again.
+        for (int n = 0; n < 6; ++n) {
+            const QImage expected = QImage(dir.filePath(QStringLiteral("p%1.png").arg(n))).scaledToWidth(width, Qt::SmoothTransformation);
+            QCOMPARE(images[n].copy(0, 0, expected.width(), expected.height()).convertToFormat(QImage::Format_RGB32),
+                     expected.convertToFormat(QImage::Format_RGB32));
+        }
+    }
+    // A few pictures looked at again and again are kept after all.
+    blocks = blocks.mid(4);
+    int last = -1;
+    for (int width = 240; width >= 200 && last != 0; width -= 10) {
+        const int start = RenderedBlock::pictureFileReads();
+        for (const QString &html : std::as_const(blocks))
+            paintHtml(html, dir.path(), width);
+        last = RenderedBlock::pictureFileReads() - start;
+    }
+    QCOMPARE(last, 0);
+    RenderedBlock::setDecodedPictureLimitKiB(128 * 1024);
 }
 
 // Keep tests away from the user's settings file.

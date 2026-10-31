@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <deque>
 
 namespace vn {
 
@@ -106,29 +107,134 @@ QImage readImage(const QString &path)
     return reader.read();
 }
 
+// Decoded picture files, by file version, for as long as their total size
+// stays within a limit. Decoding is far slower than scaling (100 ms against
+// 1 ms for a 3000 by 2000 PNG) and every new window width needs a new size.
+// GUI thread only.
+//
+// Opaque pictures are kept as 24 bit RGB, a quarter smaller; they are widened
+// again for scaling (which converts them anyway), so the scaled pixels are
+// the same.
+//
+// A page with more big pictures than fit, shown picture after picture again
+// and again (every window width), would take every picture out of a plain
+// least-recently-used cache just before it is needed again: no read is ever
+// saved. So when the cache is full, a picture only replaces older ones if it
+// is asked for again soon after it was last read (within as many requests as
+// the cache holds pictures, the way a few pictures being looked at are); a
+// picture read for the first time in a longer round leaves the cache as it
+// is, so the pictures in it keep serving rounds.
+class DecodedPictures
+{
+public:
+    void setLimitKiB(qsizetype kib)
+    {
+        m_limit = kib;
+        evictFor(0);
+    }
+
+    QImage find(const QString &version)
+    {
+        ++m_requests;
+        const auto it = m_entries.find(version);
+        if (it == m_entries.end())
+            return {};
+        it->used = ++m_clock;
+        return it->compact ? it->image.convertToFormat(QImage::Format_RGB32) : it->image;
+    }
+
+    // `image` was just read because find() had nothing.
+    void insert(const QString &version, const QImage &image)
+    {
+        const bool compact = image.format() == QImage::Format_RGB32;
+        const qsizetype kib = compact ? imageCost(image) * 3 / 4 : imageCost(image);
+        if (kib > m_limit)
+            return; // Does not fit at all.
+        bool again = false;
+        for (auto it = m_reads.begin(); it != m_reads.end(); ++it) {
+            if (it->first == version) {
+                again = m_requests - it->second <= qMax<quint64>(4, m_entries.size());
+                m_reads.erase(it);
+                break;
+            }
+        }
+        m_reads.push_back({version, m_requests});
+        if (m_reads.size() > 64)
+            m_reads.pop_front();
+        if (m_kib + kib > m_limit && !again)
+            return; // Full, and not shown to be wanted again soon.
+        evictFor(kib);
+        Entry entry;
+        entry.compact = compact;
+        entry.image = compact ? image.convertToFormat(QImage::Format_RGB888) : image;
+        entry.kib = imageCost(entry.image);
+        entry.used = ++m_clock;
+        m_kib += entry.kib;
+        m_entries.insert(version, entry);
+    }
+
+    void clear()
+    {
+        m_entries.clear();
+        m_reads.clear();
+        m_kib = 0;
+    }
+
+private:
+    struct Entry
+    {
+        QImage image;
+        qsizetype kib = 0;
+        quint64 used = 0;
+        bool compact = false;
+    };
+
+    // Least recently used out until `kib` more fit.
+    void evictFor(qsizetype kib)
+    {
+        while (m_kib + kib > m_limit && !m_entries.isEmpty()) {
+            auto oldest = m_entries.begin();
+            for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
+                if (it->used < oldest->used)
+                    oldest = it;
+            }
+            m_kib -= oldest->kib;
+            m_entries.erase(oldest);
+        }
+    }
+
+    QHash<QString, Entry> m_entries;
+    std::deque<std::pair<QString, quint64>> m_reads; // Versions read lately, with the request count then.
+    quint64 m_requests = 0;
+    qsizetype m_kib = 0;
+    qsizetype m_limit = 128 * 1024; // KiB
+    quint64 m_clock = 0;
+};
+
+DecodedPictures &decodedPictures()
+{
+    static DecodedPictures pictures;
+    return pictures;
+}
+
 // Local pictures, read and scaled to the column, by file version and size.
-// Decoding is far slower than scaling (77 ms against 1 ms for a 4000 by 1200
-// PNG) and every new window width needs a new size, so the decoded files are
-// kept too, by file version, until their total size passes a limit. SVGs are
-// kept as decoded as well: they are read at their own size, never at the
-// column's, so a bigger or smaller column scales the same pixels either way.
+// The decoded files are kept too (see above). SVGs are kept as decoded as
+// well: they are read at their own size, never at the column's, so a bigger
+// or smaller column scales the same pixels either way.
 QImage cachedLocalImage(const QString &path, qreal width, qreal dpr)
 {
-    static QCache<QString, QImage> cache(64 * 1024);      // KiB
-    static QCache<QString, QImage> originals(128 * 1024); // KiB
+    static QCache<QString, QImage> cache(64 * 1024); // KiB
     const QFileInfo info(path);
     const QString version = QStringLiteral("%1|%2|").arg(info.lastModified().toMSecsSinceEpoch()).arg(info.size()) + path;
     const QString key = QStringLiteral("%1|%2|").arg(width).arg(dpr) + version;
     if (const QImage *hit = cache.object(key))
         return *hit;
-    QImage image;
-    if (const QImage *original = originals.object(version)) {
-        image = *original;
-    } else {
+    QImage image = decodedPictures().find(version);
+    if (image.isNull()) {
         image = readImage(path);
         if (image.isNull())
             return image; // Not cached: the file may appear later.
-        originals.insert(version, new QImage(image), imageCost(image));
+        decodedPictures().insert(version, image);
     }
     // One image pixel per logical pixel, shrunk to fit the column.
     if (image.width() > width) {
@@ -673,6 +779,11 @@ std::unique_ptr<RenderedBlock> RenderedBlock::codeBox(std::unique_ptr<RenderedBl
     r.m_height = r.m_doc->size().height() + 2 * codePadY + blockGap;
     r.collectLineAnchors(int(source.count(u'\n')) + 1);
     return result;
+}
+
+void RenderedBlock::setDecodedPictureLimitKiB(int kib)
+{
+    decodedPictures().setLimitKiB(kib);
 }
 
 int RenderedBlock::guardedBlockCount()
