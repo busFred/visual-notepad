@@ -239,6 +239,9 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           # The offscreen plugin has no font database of its own on Windows.
           QT_QPA_FONTDIR: C:\Windows\Fonts
+          # Without a console QtTest writes its log with OutputDebugString,
+          # not to stdout: ctest would show nothing of a failure.
+          QT_FORCE_STDERR_LOGGING: 1
         run: ctest --test-dir build --output-on-failure
 
       - name: Deploy

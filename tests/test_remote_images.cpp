@@ -258,6 +258,12 @@ void TestRemoteImages::init()
 
 void TestRemoteImages::cleanup()
 {
+    if (QTest::currentTestFailed() && m_stub) {
+        // What reached the stub, for failures only seen on another system.
+        qInfo() << "stub requests:" << m_stub->requests << "hung:" << m_stub->hung << "sent:" << m_stub->sent;
+        for (const QByteArray &head : std::as_const(m_stub->headers))
+            qInfo().noquote() << "request head:" << QString::fromLatin1(head).replace(QLatin1String("\r\n"), QLatin1String(" | "));
+    }
     RemoteImages::setAllowLocalHostsForTests(true);
     RemoteImages::instance().clear();
     m_doc.reset();
