@@ -42,6 +42,8 @@ add_library(vn_app STATIC
     src/EvenSplitter.h
     src/MainWindow.cpp
     src/MainWindow.h
+    src/PlainText.cpp
+    src/PlainText.h
     src/PreferencesDialog.cpp
     src/PreferencesDialog.h
     src/Session.cpp

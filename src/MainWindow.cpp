@@ -2,6 +2,7 @@
 
 #include "Commands.h"
 #include "EditorGroup.h"
+#include "PlainText.h"
 #include "PreferencesDialog.h"
 #include "Session.h"
 #include "Settings.h"
@@ -628,6 +629,7 @@ void MainWindow::createStatusBar()
     bool first = true;
     for (QLabel **label : {&m_position, &m_indentation, &m_zoom, &m_lineEnding, &m_encoding, &m_language}) {
         *label = new StatusCell(!first, this);
+        (*label)->setTextFormat(Qt::PlainText);
         statusBar()->addPermanentWidget(*label);
         first = false;
     }
@@ -1071,8 +1073,8 @@ bool MainWindow::openFile(const QString &path, std::function<void(DocumentTab *)
         }
         if (!file->load(path)) {
             Settings::instance().removeRecentFile(path);
-            QMessageBox::warning(this, tr("Open File"),
-                                 tr("Could not open %1:\n%2").arg(QDir::toNativeSeparators(path), file->errorString()));
+            plainWarning(this, tr("Open File"),
+                         tr("Could not open %1:\n%2").arg(QDir::toNativeSeparators(path), file->errorString()));
             return false;
         }
     }
@@ -1094,9 +1096,9 @@ void MainWindow::finishPendingOpens()
             statusBar()->clearMessage();
         if (!entry->ok) {
             Settings::instance().removeRecentFile(entry->path);
-            QMessageBox::warning(this, tr("Open File"),
-                                 tr("Could not open %1:\n%2")
-                                     .arg(QDir::toNativeSeparators(entry->path), entry->file->errorString()));
+            plainWarning(this, tr("Open File"),
+                         tr("Could not open %1:\n%2")
+                             .arg(QDir::toNativeSeparators(entry->path), entry->file->errorString()));
             continue;
         }
         // Another window may have opened the same file meanwhile.
@@ -1266,6 +1268,7 @@ MainWindow::SaveConflictChoice MainWindow::askSaveConflict(DocumentTab *tab)
                     tr("%1 has been changed on disk since you opened or last saved it.").arg(tab->displayName()),
                     QMessageBox::NoButton, this);
     box.setInformativeText(tr("Overwrite it with your version, or revert to the version on disk and lose your changes?"));
+    makePlainText(box); // Names the file.
     QPushButton *overwrite = box.addButton(tr("&Overwrite"), QMessageBox::AcceptRole);
     QPushButton *revert = box.addButton(tr("&Revert"), QMessageBox::DestructiveRole);
     box.addButton(QMessageBox::Cancel);
@@ -1294,8 +1297,8 @@ bool MainWindow::resolveSaveConflict(DocumentTab *tab)
         return false;
     }
     if (!ok)
-        QMessageBox::warning(this, tr("Save"), tr("Could not save %1:\n%2")
-                                                   .arg(QDir::toNativeSeparators(file->path()), file->errorString()));
+        plainWarning(this, tr("Save"), tr("Could not save %1:\n%2")
+                                           .arg(QDir::toNativeSeparators(file->path()), file->errorString()));
     return ok;
 }
 
@@ -1306,8 +1309,8 @@ bool MainWindow::save(DocumentTab *tab)
     if (!tab->save(tab->path())) {
         if (tab->file()->hasSaveConflict())
             return resolveSaveConflict(tab);
-        QMessageBox::warning(this, tr("Save"), tr("Could not save %1:\n%2")
-                                                   .arg(QDir::toNativeSeparators(tab->path()), tab->errorString()));
+        plainWarning(this, tr("Save"), tr("Could not save %1:\n%2")
+                                           .arg(QDir::toNativeSeparators(tab->path()), tab->errorString()));
         return false;
     }
     updateTabTitle(tab);
@@ -1321,8 +1324,8 @@ bool MainWindow::saveAs(DocumentTab *tab)
     if (path.isEmpty())
         return false;
     if (!tab->save(path)) {
-        QMessageBox::warning(this, tr("Save As"),
-                             tr("Could not save %1:\n%2").arg(QDir::toNativeSeparators(path), tab->errorString()));
+        plainWarning(this, tr("Save As"),
+                     tr("Could not save %1:\n%2").arg(QDir::toNativeSeparators(path), tab->errorString()));
         return false;
     }
     updateTabTitle(tab);
@@ -1346,6 +1349,7 @@ bool MainWindow::confirmDiscard(DocumentTab *tab)
     // "Do&&n't Save"); Esc cancels.
     box.button(QMessageBox::Save)->setText(tr("&Save"));
     box.button(QMessageBox::Discard)->setText(tr("Do&n't Save"));
+    makePlainText(box); // Names the file.
     if (auto *label = box.findChild<QLabel *>(QStringLiteral("qt_msgbox_label"))) {
         // A larger question on the left with room around it, buttons below.
         QFont font = label->font();
@@ -1597,12 +1601,13 @@ bool MainWindow::reopenWithEncoding(DocumentTab *tab, const DocumentTab::Encodin
                         QMessageBox::Discard | QMessageBox::Cancel, this);
         box.button(QMessageBox::Discard)->setText(tr("&Discard"));
         box.setDefaultButton(QMessageBox::Cancel);
+        makePlainText(box); // Names the file.
         if (box.exec() != QMessageBox::Discard)
             return false;
         tab->document()->setModified(false);
     }
     if (!tab->reopenWithEncoding(encoding)) {
-        QMessageBox::warning(this, tr("Reopen with Encoding"), tab->errorString());
+        plainWarning(this, tr("Reopen with Encoding"), tab->errorString());
         return false;
     }
     return true;
@@ -2038,7 +2043,7 @@ void MainWindow::updateTabTitle(DocumentTab *tab)
     // VS Code marks an editor whose file was deleted on disk.
     const QString name = tab->file()->isOrphaned() ? tr("%1 (deleted)").arg(tab->displayName()) : tab->displayName();
     group->setTabText(index, tab->isModified() ? QStringLiteral("● ") + name : name);
-    group->setTabToolTip(index, QDir::toNativeSeparators(tab->path()));
+    group->setTabToolTip(index, tab->path().isEmpty() ? QString() : plainToolTip(QDir::toNativeSeparators(tab->path()), 4096));
     if (tab == currentTab())
         setWindowTitle(tr("%1 — %2").arg(name, productName()));
 }
@@ -2244,7 +2249,10 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
         QMessageBox box(QMessageBox::Information, productName(),
                         tr("Do you want %1 to open the external website?").arg(productName()), QMessageBox::NoButton,
                         this);
-        box.setInformativeText(url);
+        // The address as written (Copy takes all of it): plain text without
+        // links, or markup in it would load pictures and links in it open.
+        box.setInformativeText(elideMiddle(url, 400));
+        makePlainText(box);
         QPushButton *open = box.addButton(tr("Open"), QMessageBox::AcceptRole);
         QPushButton *copy = box.addButton(tr("Copy"), QMessageBox::ActionRole);
         box.addButton(QMessageBox::Cancel);
@@ -2274,7 +2282,7 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
     if (QFileInfo(path).isRelative() && !tab->path().isEmpty())
         path = QFileInfo(tab->path()).absoluteDir().filePath(path);
     if (!QFileInfo::exists(path)) {
-        QMessageBox::warning(this, productName(), tr("The file %1 does not exist.").arg(QDir::toNativeSeparators(path)));
+        plainWarning(this, productName(), tr("The file %1 does not exist.").arg(QDir::toNativeSeparators(path)));
         return;
     }
     const QMimeType mime = QMimeDatabase().mimeTypeForFile(path);

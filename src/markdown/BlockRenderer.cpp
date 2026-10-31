@@ -390,6 +390,20 @@ bool mayLoadPictures(const QString &html)
            || html.contains(QLatin1String("style"), Qt::CaseInsensitive);
 }
 
+// The picture Qt's image handler shows for one it cannot read.
+QImage brokenPicture()
+{
+    static const QImage image = [] {
+        QImage icon(QStringLiteral(":/qt-project.org/styles/commonstyle/images/file-16.png"));
+        if (icon.isNull()) {
+            icon = QImage(1, 1, QImage::Format_ARGB32_Premultiplied);
+            icon.fill(Qt::transparent);
+        }
+        return icon;
+    }();
+    return image;
+}
+
 // Rich text with images resolved here: math placeholders, files, and
 // downloads when the user agreed to them. A listing document only collects
 // the web addresses Qt asks for: every picture is a blank stand-in, so
@@ -439,7 +453,7 @@ public:
                 if (!fragment.charFormat().isImageFormat())
                     continue;
                 QTextImageFormat format = fragment.charFormat().toImageFormat();
-                if (!namesOtherMachine(QUrl(format.name())))
+                if (allowedPictureName(format.name()))
                     continue;
                 format.setName(QStringLiteral("vn-blocked:")); // Neither a file nor a host; shows as broken.
                 QTextCursor cursor(this);
@@ -508,9 +522,33 @@ protected:
         if (path.isEmpty())
             return QVariant();
         const QImage image = cachedLocalImage(path, m_context.width, m_context.devicePixelRatio);
-        if (image.isNull())
-            return QVariant();
+        if (image.isNull()) {
+            // Declined, Qt's image handler would read the file itself (an SVG
+            // naming another machine included): show what it shows then.
+            return QFileInfo::exists(path) ? keep(type, url, brokenPicture()) : QVariant();
+        }
         return keep(type, url, image);
+    }
+
+    // Whether Qt may be given a picture name: those made here (math, the
+    // blocked stand-in), web addresses (asked for only with consent), data
+    // URLs, and files localPath() accepts. Anything else, invalid URLs above
+    // all (Qt's image handler opens their text as a file name), is not.
+    bool allowedPictureName(const QString &name) const
+    {
+        static const QRegularExpression internal(QStringLiteral("^(vn-math(-display)?:\\d+|vn-blocked:)$"));
+        if (md::mayNameOtherMachine(name))
+            return false;
+        const QUrl url(name);
+        if (!url.isValid())
+            return false;
+        if (internal.match(name).hasMatch())
+            return true;
+        if (RemoteImages::isWebUrl(url))
+            return !url.host().isEmpty();
+        if (url.scheme() == QLatin1String("data"))
+            return true;
+        return !localPath(url).isEmpty();
     }
 
 private:
@@ -563,7 +601,7 @@ private:
 
     QString localPath(const QUrl &url) const
     {
-        if (namesOtherMachine(url))
+        if (!url.isValid() || namesOtherMachine(url) || md::mayNameOtherMachine(url.toString()))
             return {};
         if (url.scheme() == QLatin1String("file"))
             return url.toLocalFile();

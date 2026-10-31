@@ -2,6 +2,7 @@
 // save renderings.
 #include "DocumentTab.h"
 #include "MainWindow.h"
+#include "PlainText.h"
 #include "Settings.h"
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
@@ -22,9 +23,12 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QElapsedTimer>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QPainter>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QSlider>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -32,6 +36,7 @@
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QThreadPool>
+#include <QToolTip>
 #include <QWheelEvent>
 
 using namespace vn;
@@ -264,6 +269,10 @@ private Q_SLOTS:
     void renderCostCountsPicturesAndText();
     void clickEnlargesPicture();
     void networkPaths();
+    void plainToolTipText();
+    void linkToolTipsArePlainText();
+    void rawPictureNamesAreNotOpened_data();
+    void rawPictureNamesAreNotOpened();
     void networkPathsAreNotOpened_data();
     void networkPathsAreNotOpened();
     void hugeBlocksFallBackToTheirSource_data();
@@ -1495,6 +1504,167 @@ void TestVisualView::networkPaths()
     for (const char *path : {"x.png", "img/x.png", "../x.png", "/home/user/x.png", "C:/Users/x.png", "C:\\Users\\x.png",
                              "/", ""})
         QVERIFY2(!md::isNetworkPath(QString::fromUtf8(path)), path);
+
+    // Every reading of a name: as written, decoded once or twice, file: URLs.
+    for (const char *name :
+         {"//host/s/a:b.png", "\\\\host\\share\\a:b.png", "\\\\host\\s\\x.png:z", "\\\\host@SSL\\s\\a:b.png",
+          "%5C%5Chost%5Cs%5Ca:b.png", "%2F%2Fhost%2Fs%2Fa.png", "%255C%255Chost%255Cs%255Ca.png",
+          "%252F%252Fhost/a.png", "file://host/s/a.png", "file:////host/s/a.png", "FILE:\\\\host\\s\\a.png",
+          "file:/\\host\\s\\a.png", "file:///\\\\host\\s\\a.png", "file:%5C%5Chost%5Ca.png", " \t\\\\host\\x.png"})
+        QVERIFY2(md::mayNameOtherMachine(QString::fromUtf8(name)), name);
+    for (const char *name : {"x.png", "img/a:b.png", "/home/user/x.png", "C:/Users/x.png", "C:\\Users\\x.png",
+                             "file:///home/user/x.png", "file:/home/user/x.png", "file:///C:/x.png",
+                             "https://example.com//x.png", "data:image/png;base64,AAAA", "vn-math:0", "%41.png", ""})
+        QVERIFY2(!md::mayNameOtherMachine(QString::fromUtf8(name)), name);
+}
+
+void TestVisualView::plainToolTipText()
+{
+    const QString img = QStringLiteral("<img src=\"//h/s/x.png\">");
+    QCOMPARE(plainToolTip(img), QStringLiteral("<p style='white-space:pre'>&lt;img src=&quot;//h/s/x.png&quot;&gt;</p>"));
+    QCOMPARE(plainToolTip(QStringLiteral("<b>bold</b> & co")),
+             QStringLiteral("<p style='white-space:pre'>&lt;b&gt;bold&lt;/b&gt; &amp; co</p>"));
+    // Shown as written: what the tooltip displays is the text itself.
+    for (const QString &text : {img, QStringLiteral("a  <b>b</b>\n<i>c</i>"), QStringLiteral("mailto:a<img src=//h/s/x.png>")}) {
+        QTextDocument shown;
+        shown.setHtml(plainToolTip(text));
+        QCOMPARE(shown.toPlainText(), text);
+        for (QTextBlock block = shown.begin(); block.isValid(); block = block.next())
+            for (auto it = block.begin(); !it.atEnd(); ++it)
+                QVERIFY(!it.fragment().charFormat().isImageFormat() && !it.fragment().charFormat().isAnchor());
+    }
+    // Capped, the cut marked; surrogate pairs stay whole.
+    const QString longText(2000, u'x');
+    QTextDocument capped;
+    capped.setHtml(plainToolTip(longText));
+    QCOMPARE(capped.toPlainText(), QString(512, u'x') + QChar(0x2026));
+    QCOMPARE(plainToolTip(QStringLiteral("short"), 3), QStringLiteral("<p style='white-space:pre'>sho\u2026</p>"));
+    const QString emoji = QString(511, u'x') + QStringLiteral("😀😀");
+    QVERIFY(plainToolTip(emoji).contains(QString(511, u'x') + QChar(0x2026)));
+    QCOMPARE(plainToolTip(QString(512, u'y')), QStringLiteral("<p style='white-space:pre'>") + QString(512, u'y')
+                                                   + QStringLiteral("</p>"));
+
+    QCOMPARE(elideMiddle(QStringLiteral("abcdefghij"), 20), QStringLiteral("abcdefghij"));
+    QCOMPARE(elideMiddle(QStringLiteral("abcdefghij"), 5), QStringLiteral("ab\u2026ij"));
+    QCOMPARE(elideMiddle(QStringLiteral("abcdefghij"), 6), QStringLiteral("abc\u2026ij"));
+    QCOMPARE(elideMiddle(QString(1000, u'z'), 400).size(), 400);
+}
+
+void TestVisualView::linkToolTipsArePlainText()
+{
+    // A link whose address is markup: hovering it must show the address,
+    // not load the picture it names. On Linux "//{dir}" is the local
+    // folder, so a picture that loaded would paint red.
+    QTemporaryDir dir;
+    QImage red(40, 40, QImage::Format_RGB32);
+    red.fill(Qt::red);
+    QVERIFY(red.save(dir.filePath(QStringLiteral("red.png"))));
+    const QString href = QStringLiteral("x<img src=\"//%1/red.png\" width=\"40\" height=\"40\">").arg(dir.path().mid(1));
+    QString escaped = href.toHtmlEscaped();
+    m_doc->setPlainText(QStringLiteral("<p><a href=\"%1\">linklinklinklinklinklinklinklink</a></p>\n").arg(escaped));
+    m_model->flush();
+    m_view->clearFocus(); // Everything rendered.
+    QToolTip::hideText();
+    bool shown = false;
+    for (int y = 0; y < 120 && !shown; y += 3) {
+        for (int x = 20; x < 400 && !shown; x += 6) {
+            QTest::mouseMove(m_view->viewport(), QPoint(x, y));
+            shown = QToolTip::isVisible();
+        }
+    }
+    QVERIFY(shown);
+    QCOMPARE(QToolTip::text(), plainToolTip(href));
+    QWidget *tip = nullptr;
+    for (QWidget *w : QApplication::topLevelWidgets()) {
+        if (w->inherits("QTipLabel") && w->isVisible())
+            tip = w;
+    }
+    QVERIFY(tip);
+    QCOMPARE(countColor(tip->grab().toImage(), Qt::red), 0);
+    QToolTip::hideText();
+}
+
+void TestVisualView::rawPictureNamesAreNotOpened_data()
+{
+    // Names that are not valid URLs (a ':' before the first '/'): Qt's image
+    // handler opens them as written, file names in the working folder, and
+    // looks for "@2x" files next to them on high-DPI screens. On Windows a
+    // name starting "\\" is an SMB connection to a host. On Linux the
+    // backslashes are part of a file name: each is made, red, in the working
+    // folder (and "//{dir}" is the folder itself), so a name that slipped
+    // through would paint red.
+    QTest::addColumn<QString>("name");
+    QTest::addColumn<QString>("file"); // Made red in the folder.
+    QTest::addColumn<qreal>("dpr");
+    QTest::addColumn<bool>("loads");
+    const auto row = [](const char *tag, const char *name, const char *file, qreal dpr = 1, bool loads = false) {
+        QTest::newRow(tag) << QString::fromUtf8(name) << QString::fromUtf8(file) << dpr << loads;
+    };
+    row("control", "red.png", "red.png", 1, true);
+    row("control 2x", "red.png", "red.png", 2, true);
+    row("unc colon", R"(\\probe\share\a:b.png)", R"(\\probe\share\a:b.png)");
+    row("unc stream", R"(\\probe\s\x.png:z)", R"(\\probe\s\x.png:z)");
+    row("unc ssl", R"(\\probe@SSL\s\a:b.png)", R"(\\probe@SSL\s\a:b.png)");
+    row("unc 2x", R"(\\probe\share\a:b.png)", R"(\\probe\share\a:b@2x.png)", 2);
+    row("mixed slashes", R"(\/probe\s\a:b.png)", R"(\/probe\s\a:b.png)");
+    row("encoded unc", "%5C%5Cprobe%5Cs%5Ca:b.png", "%5C%5Cprobe%5Cs%5Ca:b.png");
+    row("encoded slashes", "%2F%2Fprobe%2Fs%2Fa:b.png", "%2F%2Fprobe%2Fs%2Fa:b.png");
+    row("double encoded", "%255C%255Cprobe%255Cs%255Ca:b.png", "%255C%255Cprobe%255Cs%255Ca:b.png");
+    row("file unc", R"(file:\\probe\s\a:b.png)", R"(file:\\probe\s\a:b.png)");
+    row("slashes colon", "//{dir}/a:b.png", "a:b.png");
+    row("slashes colon 2x", "//{dir}/a:b.png", "a:b@2x.png", 2);
+    row("file host", "file://{dir}/a.png", "a.png");
+    row("file host colon", "file://{dir}/a:b.png", "a:b.png");
+    row("encoded host", "%2F%2F{encoded}%2Fa:b.png", "%2F%2F{encoded}%2Fa:b.png");
+}
+
+void TestVisualView::rawPictureNamesAreNotOpened()
+{
+    QFETCH(QString, name);
+    QFETCH(QString, file);
+    QFETCH(qreal, dpr);
+    QFETCH(bool, loads);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString previous = QDir::currentPath();
+    QVERIFY(QDir::setCurrent(dir.path()));
+    const auto restore = qScopeGuard([&] { QDir::setCurrent(previous); });
+    const QString folder = dir.path().mid(1);
+    for (QString *s : {&name, &file}) {
+        s->replace(QStringLiteral("{dir}"), folder);
+        s->replace(QStringLiteral("{encoded}"), QString(folder).replace(u'/', QStringLiteral("%2F")));
+    }
+    QImage red(40, 40, QImage::Format_RGB32);
+    red.fill(Qt::red);
+    const QString redPath = dir.filePath(file);
+    QVERIFY(QDir().mkpath(QFileInfo(redPath).absolutePath()));
+    QVERIFY2(red.save(redPath, "PNG"), qPrintable(redPath));
+
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.width = 400;
+    ctx.devicePixelRatio = dpr;
+    ctx.baseDirectory = dir.path();
+    core::Block block;
+    block.kind = core::BlockKind::Html;
+    const QByteArray html = QStringLiteral(R"(<p><img src="%1" width="40" height="40"></p>)").arg(name).toUtf8();
+    block.html = rust::String(html.constData(), html.size());
+    const int reads = RenderedBlock::pictureFileReads();
+    const auto rendered = RenderedBlock::create(block, QString::fromUtf8(html), ctx);
+    QImage image(int(ctx.width * dpr), qMax(1, int(rendered->height() * dpr)), QImage::Format_RGB32);
+    image.setDevicePixelRatio(dpr);
+    image.fill(Qt::white);
+    {
+        QPainter painter(&image);
+        rendered->paint(painter, QPointF(0, 0), ctx.width);
+    }
+    QCOMPARE(countColor(image, Qt::red) > 0, loads);
+    QCOMPARE(bool(rendered->pictureAt(QPointF(20, 20))), loads);
+    if (!loads)
+        QCOMPARE(RenderedBlock::pictureFileReads(), reads);
+    // Listing the pictures for the remote-image banner opens nothing either.
+    QVERIFY(RenderedBlock::remoteImages(block, ctx).isEmpty());
 }
 
 void TestVisualView::networkPathsAreNotOpened_data()
@@ -1534,6 +1704,10 @@ void TestVisualView::networkPathsAreNotOpened_data()
         false, false);
     row("style import", R"(<style>@import url("//{dir}/red.css");</style><p>xxxxxxxx</p>)", false, false);
     row("svg with network picture", "=network.svg", false, false);
+    // Declined, an SVG named by an absolute path would be opened by Qt's
+    // image handler itself (QtSvg then loads the picture it names).
+    row("absolute svg with network picture", "=/{dir}/network.svg", false, false);
+    row("file url svg with network picture", "=file:///{dir}/network.svg", false, false);
     // The same, gzip-compressed (.svgz): the network path cannot be seen
     // without unpacking, QtSvg unpacks it by itself.
     row("svgz with local picture", "=local.svgz", false, true);

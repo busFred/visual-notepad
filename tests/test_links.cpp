@@ -11,12 +11,15 @@
 #include <QApplication>
 #include <QDir>
 #include <QFile>
+#include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
 #include <QUrl>
+
+#include <functional>
 
 using vn::DocumentTab;
 using vn::MainWindow;
@@ -42,12 +45,17 @@ private Q_SLOTS:
     void webLinksKeepTheirPrompt();
     void networkTargetsAreRefused_data();
     void networkTargetsAreRefused();
+    void promptsShowAddressesAsText_data();
+    void promptsShowAddressesAsText();
+    void longAddressesAreElided();
 
 private:
     QString write(const QString &name, const QByteArray &content);
     DocumentTab *openDocument(MainWindow &window);
     // Clicks `button` of the next message box (the web link prompt).
     static void answerNextBox(const QString &button);
+    // Calls `inspect` with the next message box, then closes it unanswered.
+    static void inspectNextBox(std::function<void(QMessageBox *)> inspect);
 
     QTemporaryDir m_dir;
     QStringList m_asked;
@@ -119,6 +127,22 @@ void TestLinks::answerNextBox(const QString &button)
                 return;
             }
         }
+    });
+    timer->start();
+}
+
+void TestLinks::inspectNextBox(std::function<void(QMessageBox *)> inspect)
+{
+    auto *timer = new QTimer;
+    timer->setInterval(10);
+    QObject::connect(timer, &QTimer::timeout, timer, [timer, inspect] {
+        auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        if (!box)
+            return;
+        timer->deleteLater();
+        timer->stop();
+        inspect(box);
+        box->reject();
     });
     timer->start();
 }
@@ -358,6 +382,78 @@ void TestLinks::networkTargetsAreRefused()
     QVERIFY(m_asked.isEmpty());
     QVERIFY(m_opened.isEmpty());
     QCOMPARE(window.tabCount(), 1);
+}
+
+void TestLinks::promptsShowAddressesAsText_data()
+{
+    // Markup in a link's address: shown as rich text, an <img> would load
+    // (on Windows from another machine, over SMB) and an <a> would be a link
+    // the OS opens without asking. On Linux "//{dir}" is the local folder: a
+    // picture that loaded would paint red.
+    QTest::addColumn<QString>("link");
+    QTest::addColumn<QString>("shown"); // A label's text; {missing}: the "does not exist" message.
+    // Not a raw string: moc reads the "//" in one as a comment.
+    const QString markup =
+        QStringLiteral("<img src=\"//{dir}/red.png\" width=\"40\" height=\"40\"><a href=\"https://e.example/\">x</a>");
+    QTest::newRow("mailto") << u"mailto:a" + markup << u"mailto:a" + markup;
+    QTest::newRow("https") << u"https://example.com/" + markup << u"https://example.com/" + markup;
+    QTest::newRow("missing file") << u"x" + markup + u".md" << QStringLiteral("{missing}");
+}
+
+void TestLinks::promptsShowAddressesAsText()
+{
+    QFETCH(QString, link);
+    QFETCH(QString, shown);
+    QImage red(40, 40, QImage::Format_RGB32);
+    red.fill(Qt::red);
+    QVERIFY(red.save(m_dir.filePath(QStringLiteral("red.png"))));
+    const QString folder = m_dir.path().mid(1);
+    link.replace(QStringLiteral("{dir}"), folder);
+    shown.replace(QStringLiteral("{dir}"), folder);
+    shown.replace(QStringLiteral("{missing}"),
+                  QStringLiteral("The file %1 does not exist.").arg(QDir::toNativeSeparators(m_dir.filePath(link))));
+    MainWindow window;
+    DocumentTab *tab = openDocument(window);
+    QVERIFY(tab);
+    bool inspected = false;
+    QStringList texts;
+    int redPixels = 0;
+    bool plain = true;
+    inspectNextBox([&](QMessageBox *box) {
+        inspected = true;
+        plain = box->textFormat() == Qt::PlainText;
+        for (QLabel *label : box->findChildren<QLabel *>()) {
+            plain = plain && label->textFormat() == Qt::PlainText && !label->openExternalLinks()
+                    && !(label->textInteractionFlags() & (Qt::LinksAccessibleByMouse | Qt::LinksAccessibleByKeyboard));
+            texts.append(label->text());
+        }
+        const QImage image = box->grab().toImage();
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x)
+                redPixels += QColor(image.pixel(x, y)) == QColor(Qt::red);
+    });
+    Q_EMIT tab->linkActivated(link);
+    QVERIFY(inspected);
+    QVERIFY(plain);
+    QVERIFY2(texts.contains(shown), qPrintable(texts.join(u'|')));
+    QCOMPARE(redPixels, 0);
+    QVERIFY(m_opened.isEmpty());
+}
+
+void TestLinks::longAddressesAreElided()
+{
+    MainWindow window;
+    DocumentTab *tab = openDocument(window);
+    QVERIFY(tab);
+    const QString url = QStringLiteral("https://example.com/") + QString(2000, u'a') + QStringLiteral("/end");
+    QString informative;
+    inspectNextBox([&](QMessageBox *box) { informative = box->informativeText(); });
+    Q_EMIT tab->linkActivated(url);
+    QCOMPARE(informative.size(), 400);
+    QVERIFY(informative.startsWith(QLatin1String("https://example.com/aaa")));
+    QVERIFY(informative.endsWith(QLatin1String("aaa/end")));
+    QVERIFY(informative.contains(QChar(0x2026)));
+    QVERIFY(m_opened.isEmpty());
 }
 
 // Keep tests away from the user's settings file.

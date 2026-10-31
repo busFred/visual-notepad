@@ -1,6 +1,7 @@
 #include "WelcomeView.h"
 
 #include "Commands.h"
+#include "PlainText.h"
 #include "Settings.h"
 #include "Theme.h"
 
@@ -137,8 +138,9 @@ void WelcomeView::rebuild()
         const QFileInfo info(path);
         auto *row = new QHBoxLayout;
         auto *link = linkButton(info.fileName(), this);
-        link->setToolTip(QDir::toNativeSeparators(path));
+        link->setToolTip(plainToolTip(QDir::toNativeSeparators(path), 4096));
         auto *folder = new QLabel(QDir::toNativeSeparators(info.absolutePath()), this);
+        folder->setTextFormat(Qt::PlainText);
         folder->setObjectName(QStringLiteral("WelcomeKey"));
         folder->setMaximumWidth(320);
         folder->setText(folder->fontMetrics().elidedText(folder->text(), Qt::ElideMiddle, 320));

@@ -2,6 +2,7 @@
 // formatting, pasting images and files, link rewriting, link checking and
 // Ctrl+Click.
 #include "DocumentTab.h"
+#include "PlainText.h"
 #include "Settings.h"
 #include "Theme.h"
 #include "editor/TextView.h"
@@ -598,7 +599,8 @@ void TestMarkdownEditing::diagnosticTooltip()
         QCoreApplication::sendEvent(viewport, &help);
     }
     QVERIFY(QToolTip::isVisible());
-    QCOMPARE(QToolTip::text(), QStringLiteral("Link target not found: missing.md"));
+    // Plain text: link targets come from the document.
+    QCOMPARE(QToolTip::text(), vn::plainToolTip(QStringLiteral("Link target not found: missing.md")));
     QToolTip::hideText();
 }
 

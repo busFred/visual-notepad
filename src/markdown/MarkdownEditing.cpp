@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QSet>
+#include <QUrl>
 
 #include <algorithm>
 #include <iterator>
@@ -248,6 +249,34 @@ bool isNetworkPath(const QString &path)
     const auto slash = [](QChar c) { return c == u'/' || c == u'\\'; };
     const QString p = path.trimmed();
     return p.size() >= 2 && slash(p[0]) && slash(p[1]);
+}
+
+bool mayNameOtherMachine(const QString &name)
+{
+    QString s = name.trimmed();
+    for (int round = 0; round < 3; ++round) {
+        if (isNetworkPath(s))
+            return true;
+        // "file:" read by hand (QUrl rejects some that Qt still opens): a
+        // host after "file://", or a path that names one.
+        if (s.startsWith(QLatin1String("file:"), Qt::CaseInsensitive)) {
+            QStringView rest = QStringView(s).mid(5);
+            if (rest.startsWith(QLatin1String("//"))) {
+                rest = rest.mid(2);
+                const qsizetype end = rest.indexOf(u'/');
+                if (!rest.left(end < 0 ? rest.size() : end).trimmed().isEmpty())
+                    return true; // A host.
+                rest = rest.mid(end < 0 ? rest.size() : end);
+            }
+            if (isNetworkPath(rest.toString()))
+                return true;
+        }
+        const QUrl url(s);
+        if (url.isLocalFile() && (!url.host().isEmpty() || isNetworkPath(url.toLocalFile())))
+            return true;
+        s = QUrl::fromPercentEncoding(s.toUtf8()).trimmed();
+    }
+    return false;
 }
 
 namespace {

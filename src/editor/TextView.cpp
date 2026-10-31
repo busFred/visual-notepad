@@ -1,5 +1,6 @@
 #include "TextView.h"
 
+#include "../PlainText.h"
 #include "../Settings.h"
 #include "../Theme.h"
 #include "DocumentLayout.h"
@@ -1223,7 +1224,7 @@ bool TextView::event(QEvent *event)
         if (index >= 0 && !row(index).rendered) {
             const QString message = diagnosticAt(positionAt(help->pos()));
             if (!message.isEmpty()) {
-                QToolTip::showText(help->globalPos(), message, viewport());
+                QToolTip::showText(help->globalPos(), plainToolTip(message), viewport()); // Names link targets.
                 return true;
             }
         }
@@ -3156,8 +3157,8 @@ void TextView::pasteImage(const QImage &image)
                               : QDir::isAbsolutePath(folder) ? folder
                                                              : QDir(documentDir).filePath(folder);
     if (!QDir().mkpath(targetDir)) {
-        QMessageBox::warning(this, QApplication::applicationDisplayName(),
-                             tr("Could not create the folder %1.").arg(QDir::toNativeSeparators(targetDir)));
+        plainWarning(this, QApplication::applicationDisplayName(),
+                     tr("Could not create the folder %1.").arg(QDir::toNativeSeparators(targetDir)));
         return;
     }
     const QString base = QStringLiteral("image-") + QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
@@ -3165,8 +3166,8 @@ void TextView::pasteImage(const QImage &image)
     for (int n = 2; QFileInfo::exists(path); ++n)
         path = QDir(targetDir).filePath(base + u'-' + QString::number(n) + QStringLiteral(".png"));
     if (!image.save(path, "PNG")) {
-        QMessageBox::warning(this, QApplication::applicationDisplayName(),
-                             tr("Could not save the image to %1.").arg(QDir::toNativeSeparators(path)));
+        plainWarning(this, QApplication::applicationDisplayName(),
+                     tr("Could not save the image to %1.").arg(QDir::toNativeSeparators(path)));
         return;
     }
     insertTextAtCarets(md::linkForFile(path, documentDir));

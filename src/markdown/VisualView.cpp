@@ -1,5 +1,6 @@
 #include "VisualView.h"
 
+#include "../PlainText.h"
 #include "../Settings.h"
 #include "../Theme.h"
 #include "ImageViewer.h"
@@ -251,6 +252,7 @@ void VisualView::updateRemoteBanner()
         layout->setSpacing(8);
         m_bannerText = new QLabel(m_banner);
         m_bannerText->setWordWrap(true);
+        m_bannerText->setTextFormat(Qt::PlainText); // Host names come from the document.
         layout->addWidget(m_bannerText, 1);
         const auto addButton = [&](const QString &text, MarkdownModel::RemoteConsent consent) {
             auto *button = new QPushButton(text, m_banner);
@@ -285,8 +287,9 @@ void VisualView::updateRemoteBanner()
         text += tr(" and %n more host(s)", "", shown.size() - maxShown);
     m_bannerText->setText(tr("%n remote image(s) from %1. Load them only if you trust the links in this file.", "",
                              int(urls.size())).arg(text));
-    m_bannerText->setToolTip(shown.join(u'\n') + QLatin1String("\n\n")
-                             + tr("Pictures on this computer or the local network are never loaded."));
+    m_bannerText->setToolTip(plainToolTip(shown.join(u'\n') + QLatin1String("\n\n")
+                                          + tr("Pictures on this computer or the local network are never loaded."),
+                                          4096));
     m_banner->show();
     layoutBanner();
 }
@@ -747,7 +750,7 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
         }
         viewport()->setCursor(anchor.isEmpty() && !zoomable ? Qt::IBeamCursor : Qt::PointingHandCursor);
         if (!anchor.isEmpty() && !anchor.startsWith(QLatin1String("vn-task:")))
-            QToolTip::showText(event->globalPosition().toPoint(), anchor, viewport());
+            QToolTip::showText(event->globalPosition().toPoint(), plainToolTip(anchor), viewport());
         else
             QToolTip::hideText();
     }

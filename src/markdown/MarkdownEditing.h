@@ -59,6 +59,12 @@ QString encodeDestination(const QString &path);
 // over SMB, which hands it the user's password hash. Never open these for a
 // document.
 bool isNetworkPath(const QString &path);
+// True if a picture or link name from a document may reach another machine
+// in any reading Qt or the OS gives it: as written, percent-decoded once or
+// twice, and as a file: URL ("file://host/x", "file:////host/x",
+// "file:\\host\x"), with either slash. "@2x" variants share the start, so
+// they are covered too.
+bool mayNameOtherMachine(const QString &name);
 // True if handing local `path` to the OS (QDesktopServices) could run a
 // program rather than show a document: a launchable suffix (see
 // launchableSuffixes in the .cpp; case-insensitive, ignoring what Windows
