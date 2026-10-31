@@ -214,8 +214,11 @@ MainWindow::MainWindow(QWidget *parent)
 MainWindow::~MainWindow()
 {
     // Stop the loads: no tab will come, and a worker must not outlive its file.
-    for (const auto &entry : std::as_const(m_pendingOpens))
-        entry->file->cancelLoad();
+    // A file another window restores too (restoreLater()) loads on for it.
+    for (const auto &entry : std::as_const(m_pendingOpens)) {
+        if (entry->file.use_count() == 1)
+            entry->file->cancelLoad();
+    }
     m_pendingOpens.clear();
     SessionManager::instance().unregisterWindow(this);
     // Child widgets are destroyed after this destructor; stop them signalling
@@ -895,7 +898,8 @@ QString orientationName(Qt::Orientation orientation)
 
 } // namespace
 
-QJsonObject MainWindow::saveNode(QWidget *node, const QHash<DocumentTab *, int> &ids) const
+QJsonObject MainWindow::saveNode(QWidget *node, const QHash<DocumentTab *, int> &ids,
+                                 const QHash<const void *, int> &pending) const
 {
     // Like VS Code's serialized grid (gridview.ts ISerializedNode): branches
     // with their orientation, children and sizes; leaves are groups.
@@ -907,14 +911,35 @@ QJsonObject MainWindow::saveNode(QWidget *node, const QHash<DocumentTab *, int> 
             if (it != ids.constEnd())
                 tabs.append(*it);
         }
-        object[QStringLiteral("tabs")] = tabs;
         object[QStringLiteral("current")] = ids.value(group->currentTab(), -1);
+        // Tabs still loading for this group, in their places.
+        for (const auto &entry : m_pendingOpens) {
+            const auto id = pending.constFind(entry.get());
+            if (id == pending.constEnd() || entry->group != group)
+                continue;
+            qsizetype at = tabs.size();
+            for (const QPointer<DocumentTab> &next : entry->before) {
+                const auto nextId = next ? ids.constFind(next.data()) : ids.constEnd();
+                if (nextId == ids.constEnd())
+                    continue;
+                for (qsizetype i = 0; i < at; ++i) {
+                    if (tabs.at(i).toInt() == *nextId) {
+                        at = i;
+                        break;
+                    }
+                }
+            }
+            tabs.insert(at, *id);
+            if (entry->current)
+                object[QStringLiteral("current")] = *id;
+        }
+        object[QStringLiteral("tabs")] = tabs;
     } else if (auto *splitter = qobject_cast<QSplitter *>(node)) {
         QJsonArray children;
         QJsonArray sizes;
         const QList<int> current = splitter->sizes();
         for (int i = 0; i < splitter->count(); ++i) {
-            children.append(saveNode(splitter->widget(i), ids));
+            children.append(saveNode(splitter->widget(i), ids, pending));
             sizes.append(current.value(i));
         }
         object[QStringLiteral("orientation")] = orientationName(splitter->orientation());
@@ -924,10 +949,10 @@ QJsonObject MainWindow::saveNode(QWidget *node, const QHash<DocumentTab *, int> 
     return object;
 }
 
-QJsonObject MainWindow::saveGrid(const QHash<DocumentTab *, int> &ids) const
+QJsonObject MainWindow::saveGrid(const QHash<DocumentTab *, int> &ids, const QHash<const void *, int> &pending) const
 {
     QJsonObject grid;
-    grid[QStringLiteral("root")] = saveNode(m_root, ids);
+    grid[QStringLiteral("root")] = saveNode(m_root, ids, pending);
     grid[QStringLiteral("active")] = int(groups().indexOf(m_activeGroup));
     return grid;
 }
@@ -953,15 +978,38 @@ void MainWindow::restoreNode(const QJsonObject &node, EvenSplitter *parent, cons
     }
     EditorGroup *group = createGroup();
     parent->addWidget(group);
-    for (const QJsonValue &id : node.value(QStringLiteral("tabs")).toArray()) {
-        DocumentTab *tab = tabs.value(id.toInt());
-        if (tab && !placed.contains(tab)) {
-            addTab(tab, group);
-            placed.insert(tab);
+    for (const QJsonValue &id : node.value(QStringLiteral("tabs")).toArray())
+        placeRestored(id.toInt(), group, tabs, placed);
+    const int currentId = node.value(QStringLiteral("current")).toInt(-1);
+    if (DocumentTab *current = tabs.value(currentId)) {
+        group->setCurrentIndex(group->indexOf(current));
+    } else {
+        for (const auto &entry : std::as_const(m_pendingOpens)) {
+            if (entry->restoreId == currentId && entry->group == group)
+                entry->current = true;
         }
     }
-    if (DocumentTab *current = tabs.value(node.value(QStringLiteral("current")).toInt(-1)))
-        group->setCurrentIndex(group->indexOf(current));
+}
+
+void MainWindow::placeRestored(int id, EditorGroup *group, const QMap<int, DocumentTab *> &tabs,
+                               QSet<DocumentTab *> &placed)
+{
+    if (DocumentTab *tab = tabs.value(id); tab && !placed.contains(tab)) {
+        addTab(tab, group);
+        placed.insert(tab);
+        // Tabs still loading that came before it go before it.
+        for (const auto &entry : std::as_const(m_pendingOpens)) {
+            if (entry->restoreId >= 0 && entry->group == group)
+                entry->before.append(tab);
+        }
+        return;
+    }
+    for (const auto &entry : std::as_const(m_pendingOpens)) {
+        if (entry->restoreId == id && !entry->group) {
+            entry->group = group;
+            entry->order = m_restoreOrder++;
+        }
+    }
 }
 
 void MainWindow::restoreGrid(const QJsonObject &grid, const QMap<int, DocumentTab *> &tabs)
@@ -996,10 +1044,14 @@ void MainWindow::restoreGrid(const QJsonObject &grid, const QMap<int, DocumentTa
     EditorGroup *active = all.value(grid.value(QStringLiteral("active")).toInt(-1));
     if (!active)
         active = m_activeGroup ? m_activeGroup : all.value(0);
-    for (auto it = tabs.cbegin(); it != tabs.cend(); ++it) {
-        if (it.value() && !placed.contains(it.value()))
-            addTab(it.value(), active);
+    QList<int> ids = tabs.keys();
+    for (const auto &entry : std::as_const(m_pendingOpens)) {
+        if (entry->restoreId >= 0)
+            ids.append(entry->restoreId);
     }
+    std::sort(ids.begin(), ids.end());
+    for (int id : std::as_const(ids))
+        placeRestored(id, active, tabs, placed);
     // Forced: the active group may have been removed above.
     m_activeGroup = nullptr;
     activateGroup(active);
@@ -1055,17 +1107,7 @@ bool MainWindow::openFile(const QString &path, std::function<void(DocumentTab *)
             pending->file = file;
             pending->path = path;
             pending->opened = std::move(opened);
-            m_pendingOpens.append(pending);
-            // Cancelled with the window (~MainWindow); the entry holds the file.
-            connect(file.get(), &TextFile::loadFinished, this,
-                    [this, weak = std::weak_ptr<PendingOpen>(pending)](bool ok) {
-                        if (const auto entry = weak.lock()) {
-                            entry->finished = true;
-                            entry->ok = ok;
-                        }
-                        finishPendingOpens();
-                    });
-            statusBar()->showMessage(tr("Opening %1...").arg(QDir::toNativeSeparators(path)));
+            watchLoad(pending);
             file->loadAsync(path);
             return true;
         }
@@ -1084,12 +1126,104 @@ bool MainWindow::openFile(const QString &path, std::function<void(DocumentTab *)
     return true;
 }
 
-// Tabs for the files that have loaded, but not past one still loading that
-// was asked for earlier.
+void MainWindow::watchLoad(const std::shared_ptr<PendingOpen> &pending)
+{
+    m_pendingOpens.append(pending);
+    // Cancelled with the window (~MainWindow); the entry holds the file.
+    connect(pending->file.get(), &TextFile::loadFinished, this,
+            [this, weak = std::weak_ptr<PendingOpen>(pending)](bool ok) {
+                if (const auto entry = weak.lock()) {
+                    entry->finished = true;
+                    entry->ok = ok;
+                }
+                finishPendingOpens();
+            });
+    statusBar()->showMessage(tr("Opening %1...").arg(QDir::toNativeSeparators(pending->path)));
+}
+
+void MainWindow::restoreLater(int id, const std::shared_ptr<TextFile> &file, const QString &path,
+                              const QJsonObject &entry, std::function<void(DocumentTab *)> prepare)
+{
+    auto pending = std::make_shared<PendingOpen>();
+    pending->file = file;
+    pending->path = path;
+    pending->opened = std::move(prepare);
+    pending->restoreId = id;
+    pending->sessionEntry = entry;
+    watchLoad(pending);
+}
+
+QList<MainWindow::PendingSessionTab> MainWindow::pendingSessionTabs() const
+{
+    QList<PendingSessionTab> tabs;
+    for (const auto &entry : m_pendingOpens) {
+        if (entry->restoreId >= 0)
+            tabs.append({entry.get(), entry->sessionEntry});
+    }
+    return tabs;
+}
+
+void MainWindow::addRestoredTab(const PendingOpen &entry)
+{
+    // The file is registered now, unless a file of that path was meanwhile.
+    std::shared_ptr<TextFile> file = TextFile::find(entry.path);
+    auto *tab = new DocumentTab(file ? file : entry.file);
+    if (entry.opened)
+        entry.opened(tab);
+    EditorGroup *group = entry.group && groups().contains(entry.group) ? entry.group.data() : m_activeGroup;
+    int index = -1;
+    for (const QPointer<DocumentTab> &next : entry.before) {
+        if (next && groupOf(next) == group) {
+            const int at = group->indexOf(next);
+            index = index < 0 ? at : qMin(index, at);
+        }
+    }
+    // addTab() shows and focuses the tab; one restored late only shows if it
+    // was its group's current one, and takes nothing else from the user.
+    EditorGroup *active = m_activeGroup;
+    DocumentTab *shown = group->currentTab();
+    const QPointer<QWidget> focus = QApplication::focusWidget();
+    addTab(tab, group, index);
+    // Those still loading that come before it go before it.
+    for (const auto &other : std::as_const(m_pendingOpens)) {
+        if (other->restoreId >= 0 && other->group == group && other->order < entry.order)
+            other->before.append(tab);
+    }
+    if (!entry.current && shown)
+        group->setCurrentIndex(group->indexOf(shown));
+    // Focus first: it makes its group the active one.
+    if (focus && focus->isVisible())
+        focus->setFocus();
+    if (active && groups().contains(active))
+        activateGroup(active);
+}
+
+// Tabs for the files that have loaded: a restored one, which has its place,
+// as soon as it has (one per turn of the event loop, so that a session of big
+// files does not set up all their tabs at once); an opened one not past one
+// still loading that was asked for earlier.
 void MainWindow::finishPendingOpens()
 {
-    while (!m_pendingOpens.isEmpty() && m_pendingOpens.first()->finished) {
-        const std::shared_ptr<PendingOpen> entry = m_pendingOpens.takeFirst();
+    const auto restored = std::find_if(m_pendingOpens.begin(), m_pendingOpens.end(), [](const auto &entry) {
+        return entry->restoreId >= 0 && entry->finished;
+    });
+    if (restored != m_pendingOpens.end()) {
+        const std::shared_ptr<PendingOpen> entry = *restored;
+        m_pendingOpens.erase(restored);
+        if (m_pendingOpens.isEmpty())
+            statusBar()->clearMessage();
+        // A file that cannot be read is left out, as at restore.
+        if (entry->ok)
+            addRestoredTab(*entry);
+        QTimer::singleShot(0, this, &MainWindow::finishPendingOpens);
+    }
+    for (;;) {
+        const auto next = std::find_if(m_pendingOpens.begin(), m_pendingOpens.end(),
+                                       [](const auto &entry) { return entry->restoreId < 0; });
+        if (next == m_pendingOpens.end() || !(*next)->finished)
+            break;
+        const std::shared_ptr<PendingOpen> entry = *next;
+        m_pendingOpens.erase(next);
         if (m_pendingOpens.isEmpty())
             statusBar()->clearMessage();
         if (!entry->ok) {

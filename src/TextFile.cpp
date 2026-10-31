@@ -160,6 +160,11 @@ void run(Job &job)
         ~GiveBack() { job.doc->moveToThread(job.home); }
     } giveBack{job};
 
+    // What the disk said before the read: a change while it runs then shows
+    // as one to the check that follows the load.
+    const QFileInfo before(job.path);
+    const QDateTime modified = before.lastModified();
+    const qint64 size = before.size();
     QFile file(job.path);
     if (!file.open(QIODevice::ReadOnly)) {
         job.error = file.errorString();
@@ -182,6 +187,8 @@ void run(Job &job)
     // document goes on while it finishes.
     auto hash = std::async(std::launch::async, [bytes] { return hashOf(bytes); });
     job.decoded = decodeBytes(job.path, bytes, encoding::detect(bytes, job.detect), false);
+    job.decoded.disk.modified = modified;
+    job.decoded.disk.size = size;
     bytes = QByteArray();
 
     // What QTextDocument::setPlainText() does, in pieces ending at a line end.
@@ -648,6 +655,8 @@ void TextFile::finishLoad()
     }
     ++m_changeSerial;
     applyDecoded(job->path, job->decoded, true);
+    // Nothing watched the file while it loaded.
+    scheduleDiskCheck();
     Q_EMIT loadFinished(true);
 }
 

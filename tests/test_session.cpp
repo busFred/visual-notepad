@@ -2,15 +2,20 @@
 // directory live in a temporary directory; modal prompts are watched by a
 // timer that answers Discard and counts them.
 #include "DocumentTab.h"
+#include "EditorGroup.h"
 #include "MainWindow.h"
 #include "Session.h"
 #include "Settings.h"
+#include "TextFile.h"
 #include "Theme.h"
 #include "WelcomeView.h"
 #include "editor/TextView.h"
 
 #include <QApplication>
 #include <QDir>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPointer>
@@ -48,6 +53,10 @@ private Q_SLOTS:
     void encodingNameIsRestored();
     void indentationIsRestored();
     void missingFileIsSkipped();
+    void bigFilesRestoreInTheBackground();
+    void crashWhileRestoringKeepsTheSession();
+    void fileChangedWhileRestoringIsReloaded();
+    void closingAWindowWhileRestoring();
     void autoSaveAfterDelay();
     void autoSaveOnFocusChange();
 #ifdef Q_OS_UNIX
@@ -61,6 +70,10 @@ private:
     static QByteArray read(const QString &path);
     static void append(DocumentTab *tab, const QString &text);
     static int cursorLine(DocumentTab *tab);
+    static QByteArray bigText(const QByteArray &prefix);
+    static QStringList pathsOf(EditorGroup *group);
+    // The paths session.json lists for its first window, in grid order.
+    static QList<QStringList> storedGroups();
     int backupCount() const;
     void closeWindows();
 
@@ -145,6 +158,47 @@ void TestSession::append(DocumentTab *tab, const QString &text)
 int TestSession::cursorLine(DocumentTab *tab)
 {
     return tab->editor()->textCursor().blockNumber();
+}
+
+// Big enough to load off the GUI thread.
+QByteArray TestSession::bigText(const QByteArray &prefix)
+{
+    QByteArray text;
+    for (int i = 0; text.size() < TextFile::largeLoadBytes + 100'000; ++i)
+        text += prefix + " line " + QByteArray::number(i) + " with some words to make it longer\n";
+    return text;
+}
+
+QStringList TestSession::pathsOf(EditorGroup *group)
+{
+    QStringList paths;
+    for (int i = 0; i < group->count(); ++i)
+        paths.append(group->tab(i)->path());
+    return paths;
+}
+
+QList<QStringList> TestSession::storedGroups()
+{
+    const QJsonObject window = QJsonDocument::fromJson(read(SessionManager::dataDir() + QStringLiteral("/session.json")))
+                                   .object()
+                                   .value(QStringLiteral("windows"))
+                                   .toArray()
+                                   .at(0)
+                                   .toObject();
+    const QJsonArray tabs = window.value(QStringLiteral("tabs")).toArray();
+    QList<QStringList> groups;
+    const auto collect = [&](const auto &self, const QJsonObject &node) -> void {
+        if (node.contains(QStringLiteral("tabs"))) {
+            QStringList paths;
+            for (const QJsonValue &id : node.value(QStringLiteral("tabs")).toArray())
+                paths.append(tabs.at(id.toInt()).toObject().value(QStringLiteral("path")).toString());
+            groups.append(paths);
+        }
+        for (const QJsonValue &child : node.value(QStringLiteral("children")).toArray())
+            self(self, child.toObject());
+    };
+    collect(collect, window.value(QStringLiteral("grid")).toObject().value(QStringLiteral("root")).toObject());
+    return groups;
 }
 
 int TestSession::backupCount() const
@@ -445,6 +499,159 @@ void TestSession::missingFileIsSkipped()
     const QList<DocumentTab *> tabs = SessionManager::instance().windows().at(0)->tabs();
     QCOMPARE(tabs.size(), 1);
     QCOMPARE(tabs.at(0)->path(), kept);
+}
+
+// Big files of a session load off the GUI thread: restore() returns with
+// the small ones, and each big one's tab comes once it has loaded, in its
+// place (group, order, current tab) with its mode, language, caret and
+// scroll position. The session meanwhile keeps them where they were.
+void TestSession::bigFilesRestoreInTheBackground()
+{
+    Settings::instance().setValue(key::restoreSession, true);
+    const QString a = write("a.md", "# a\n");
+    const QString big1 = write("big1.md", bigText("first"));
+    const QString c = write("c.txt", "c\n");
+    const QString big2 = write("big2.txt", bigText("second"));
+    const QString d = write("d.txt", "d\n");
+
+    MainWindow *window = makeWindow();
+    QVERIFY(window->openFile(a));
+    QVERIFY(window->openFile(big1));
+    QTRY_COMPARE_WITH_TIMEOUT(window->tabCount(), 2, 10000);
+    QVERIFY(window->openFile(c));
+    EditorGroup *right = window->addGroup(window->mainGroup(), MainWindow::SplitDirection::Right);
+    window->activateGroup(right);
+    QVERIFY(window->openFile(big2));
+    QTRY_COMPARE_WITH_TIMEOUT(window->tabCount(), 4, 10000);
+    QVERIFY(window->openFile(d));
+    DocumentTab *tab1 = window->mainGroup()->tab(1);
+    QCOMPARE(tab1->path(), big1);
+    window->mainGroup()->setCurrentIndex(1);
+    tab1->setViewMode(Mode::Source);
+    tab1->setLanguage(QStringLiteral("Python"));
+    tab1->goToLine(3000);
+    const int top1 = tab1->sourceView()->topLine();
+    QVERIFY(top1 > 0);
+    right->setCurrentIndex(0); // big2
+    window->mainGroup()->setCurrentIndex(0);
+    window->activateGroup(window->mainGroup());
+    QVERIFY(SessionManager::instance().quit());
+    closeWindows();
+
+    QVERIFY(SessionManager::instance().restore());
+    const QList<MainWindow *> windows = SessionManager::instance().windows();
+    QCOMPARE(windows.size(), 1);
+    MainWindow *restored = windows.at(0);
+    // The small files are there at once, the big ones are loading.
+    QCOMPARE(restored->groups().size(), 2);
+    QCOMPARE(pathsOf(restored->groups().at(0)), (QStringList{a, c}));
+    QCOMPARE(pathsOf(restored->groups().at(1)), (QStringList{d}));
+    QVERIFY(TextFile::isLoadingPath(big1));
+    QVERIFY(TextFile::isLoadingPath(big2));
+    // restore() wrote the session again: with the loading tabs in place.
+    QCOMPARE(storedGroups(), (QList<QStringList>{{a, big1, c}, {big2, d}}));
+
+    QTRY_COMPARE_WITH_TIMEOUT(restored->tabCount(), 5, 10000);
+    QCOMPARE(pathsOf(restored->groups().at(0)), (QStringList{a, big1, c}));
+    QCOMPARE(pathsOf(restored->groups().at(1)), (QStringList{big2, d}));
+    // Current tabs as they were.
+    QCOMPARE(restored->groups().at(0)->currentTab()->path(), a);
+    QCOMPARE(restored->groups().at(1)->currentTab()->path(), big2);
+    DocumentTab *back1 = restored->groups().at(0)->tab(1);
+    QCOMPARE(back1->viewMode(), Mode::Source);
+    QVERIFY(back1->languageOverridden());
+    QCOMPARE(back1->definitionName(), QStringLiteral("Python"));
+    QCOMPARE(cursorLine(back1), 2999);
+    QVERIFY(!back1->isModified());
+    QCOMPARE(back1->text().toUtf8(), read(big1));
+    QTRY_COMPARE(back1->sourceView()->topLine(), top1);
+    QCOMPARE(restored->groups().at(1)->tab(0)->text().toUtf8(), read(big2));
+}
+
+// A session written while its big files are still loading has them, so a
+// crash (or quit) then loses no tab; they come back on the next start.
+void TestSession::crashWhileRestoringKeepsTheSession()
+{
+    Settings::instance().setValue(key::restoreSession, true);
+    const QString small = write("small.txt", "small\n");
+    const QString big = write("big.md", bigText("big"));
+    MainWindow *window = makeWindow();
+    QVERIFY(window->openFile(big));
+    QTRY_COMPARE_WITH_TIMEOUT(window->tabCount(), 1, 10000);
+    QVERIFY(window->openFile(small));
+    QVERIFY(SessionManager::instance().quit());
+    closeWindows();
+
+    for (int round = 0; round < 2; ++round) {
+        QVERIFY(SessionManager::instance().restore());
+        QCOMPARE(SessionManager::instance().windows().at(0)->tabCount(), 1);
+        QVERIFY(TextFile::isLoadingPath(big));
+        // Saved while loading; then a crash: no close events, the load stops.
+        SessionManager::instance().saveSession();
+        closeWindows();
+        QVERIFY(!TextFile::isLoadingPath(big));
+        QCOMPARE(storedGroups(), (QList<QStringList>{{big, small}}));
+        QCOMPARE(read(big), bigText("big")); // Never written to.
+    }
+    QVERIFY(SessionManager::instance().restore());
+    MainWindow *restored = SessionManager::instance().windows().at(0);
+    QTRY_COMPARE_WITH_TIMEOUT(restored->tabCount(), 2, 10000);
+    QCOMPARE(pathsOf(restored->mainGroup()), (QStringList{big, small}));
+    QCOMPARE(restored->tabs().at(0)->text().toUtf8(), bigText("big"));
+}
+
+// A file changed on disk while it loads for the restore ends up with what
+// is on disk now.
+void TestSession::fileChangedWhileRestoringIsReloaded()
+{
+    Settings::instance().setValue(key::restoreSession, true);
+    const QString big = write("changing.md", bigText("before"));
+    MainWindow *window = makeWindow();
+    QVERIFY(window->openFile(big));
+    QTRY_COMPARE_WITH_TIMEOUT(window->tabCount(), 1, 10000);
+    QVERIFY(SessionManager::instance().quit());
+    closeWindows();
+
+    QVERIFY(SessionManager::instance().restore());
+    QVERIFY(TextFile::isLoadingPath(big));
+    const QByteArray after = bigText("after, longer");
+    QCOMPARE(write("changing.md", after), big);
+    MainWindow *restored = SessionManager::instance().windows().at(0);
+    QTRY_COMPARE_WITH_TIMEOUT(restored->tabCount(), 1, 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(restored->tabs().at(0)->text().toUtf8(), after, 10000);
+    QVERIFY(!restored->tabs().at(0)->isModified());
+}
+
+// Closing a window whose big files still load stops their loads, but not one
+// another window restores too; that window gets its tab.
+void TestSession::closingAWindowWhileRestoring()
+{
+    Settings::instance().setValue(key::restoreSession, true);
+    const QString shared = write("shared.md", bigText("shared"));
+    const QString own = write("own.md", bigText("own"));
+    MainWindow *first = makeWindow();
+    QVERIFY(first->openFile(shared));
+    QVERIFY(first->openFile(own));
+    QTRY_COMPARE_WITH_TIMEOUT(first->tabCount(), 2, 10000);
+    MainWindow *second = makeWindow();
+    QVERIFY(second->openFile(shared));
+    QCOMPARE(second->tabCount(), 1);
+    QVERIFY(SessionManager::instance().quit());
+    closeWindows();
+
+    QVERIFY(SessionManager::instance().restore());
+    const QList<MainWindow *> windows = SessionManager::instance().windows();
+    QCOMPARE(windows.size(), 2);
+    QVERIFY(windows.at(0)->isOpening());
+    delete windows.at(0);
+    QVERIFY(!TextFile::isLoadingPath(own));
+    QVERIFY(TextFile::isLoadingPath(shared));
+    MainWindow *left = SessionManager::instance().windows().at(0);
+    QTRY_COMPARE_WITH_TIMEOUT(left->tabCount(), 1, 10000);
+    QCOMPARE(left->tabs().at(0)->path(), shared);
+    QCOMPARE(left->tabs().at(0)->text().toUtf8(), bigText("shared"));
+    QTest::qWait(50); // The stopped load reports nothing.
+    QCOMPARE(left->tabCount(), 1);
 }
 
 void TestSession::autoSaveAfterDelay()
