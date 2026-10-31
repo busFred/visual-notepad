@@ -94,6 +94,11 @@ public:
 
     // For tests: picture files read (and decoded) from disk so far.
     static int pictureFileReads();
+    // For tests: blocks shown as their source because rich text would take
+    // too long to lay them out, and a switch for those limits (and the
+    // code box's: no highlighting of huge text, wrapping anywhere).
+    static int guardedBlockCount();
+    static void setLayoutGuardEnabled(bool on);
 
     // Memory use in KiB (about, but not under), for caches.
     int cost() const;
@@ -107,6 +112,8 @@ public:
     const std::vector<LineAnchor> &lineAnchors() const { return m_lineAnchors; }
 
 private:
+    static std::unique_ptr<RenderedBlock> codeBox(std::unique_ptr<RenderedBlock> result, const QString &source,
+                                                  const RenderContext &context);
     QPointF contentOffset() const;
     void collectLineAnchors(int sourceLines);
 
