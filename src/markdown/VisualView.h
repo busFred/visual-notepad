@@ -71,6 +71,7 @@ protected:
     void changeEvent(QEvent *event) override;
     void focusInEvent(QFocusEvent *event) override;
     void showEvent(QShowEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
     void focusOutEvent(QFocusEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
@@ -129,6 +130,11 @@ private:
     QSet<int> m_expandedBlocks; // Span indices.
     QSet<int> m_partSpans;      // Spans shown in parts (see RenderedBlock::createPart).
     bool m_rowsStale = true;
+    // The rows are the source, line by line, while the model parses the
+    // document for the first time (see rebuildRows).
+    bool m_standIn = false;
+    // Rows were built from a parse since the view was last shown.
+    bool m_showsParse = false;
     // What m_rows were built from, so caret moves that open or close
     // nothing don't rebuild them.
     int m_rowsRevision = -1;

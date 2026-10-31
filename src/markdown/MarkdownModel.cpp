@@ -127,7 +127,7 @@ int MarkdownModel::blockAt(int line)
 const std::vector<MarkdownModel::Span> &MarkdownModel::spans()
 {
     // Silent: the caller is a view rebuilding its rows from this.
-    if (m_dirty)
+    if (m_dirty && !m_awaiting)
         reparse();
     return m_spans;
 }
@@ -152,7 +152,8 @@ void MarkdownModel::flush()
 
 void MarkdownModel::flushInBackground()
 {
-    if (!m_dirty && !m_pending)
+    // (A parse the views wait for is on its way.)
+    if ((!m_dirty && !m_pending) || m_awaiting)
         return;
     // Unusable spans can't wait: the views need them now. Small documents
     // parse in a few milliseconds.
@@ -160,6 +161,24 @@ void MarkdownModel::flushInBackground()
         flush();
         return;
     }
+    startJob();
+}
+
+bool MarkdownModel::parseInBackground()
+{
+    if (m_awaiting)
+        return true;
+    if (!m_dirty || m_doc->characterCount() <= backgroundShowChars)
+        return false;
+    m_awaiting = true;
+    m_spans.clear();
+    ++m_revision;
+    startJob();
+    return true;
+}
+
+void MarkdownModel::startJob()
+{
     if (m_job.running) {
         m_job.again = true;
         return;
@@ -174,7 +193,7 @@ void MarkdownModel::flushInBackground()
     promise->start();
     m_job.watcher->setFuture(promise->future());
     QThreadPool::globalInstance()->start([promise, serial = m_inputSerial, text = m_doc->toRawText(),
-                                          options = options(), previous = m_parsed] {
+                                          options = options(), previous = previousParse()] {
         promise->addResult(std::make_shared<ParseResult>(ParseResult{serial, parseText(text, options, previous)}));
         promise->finish();
     });
@@ -187,9 +206,17 @@ void MarkdownModel::backgroundParseDone()
         m_job.watcher->future().resultCount() > 0 ? m_job.watcher->result() : nullptr;
     // Only a parse of the text as it is now may replace the spans; one of
     // older text, or one that a synchronous flush() overtook, is dropped.
-    if (result && result->serial == m_inputSerial && m_pending && !m_dirty) {
+    if (result && result->serial == m_inputSerial && (m_pending || m_awaiting)) {
         apply(result->parsed);
         Q_EMIT reparsed();
+        return;
+    }
+    if (m_awaiting) {
+        // The views still wait: parse the text as it is now, starting from
+        // this result (only the blocks around the edits are parsed again).
+        if (result && result->serial != m_inputSerial)
+            m_draft = result->parsed;
+        startJob();
         return;
     }
     if (m_job.again)
@@ -255,7 +282,7 @@ void MarkdownModel::reparse()
 {
     // Small documents parse whole, as they always did.
     const bool large = m_doc->characterCount() > backgroundParseChars;
-    apply(parseText(m_doc->toRawText(), options(), large ? m_parsed : nullptr));
+    apply(parseText(m_doc->toRawText(), options(), large ? previousParse() : nullptr));
 }
 
 void MarkdownModel::apply(std::shared_ptr<const core::Document> parsed)
@@ -265,6 +292,8 @@ void MarkdownModel::apply(std::shared_ptr<const core::Document> parsed)
     if (m_parsed && m_parsed->blocks().size() > 4096)
         QThreadPool::globalInstance()->start([old = std::move(m_parsed)] {});
     m_parsed = std::move(parsed);
+    m_draft.reset();
+    m_awaiting = false;
     const rust::Vec<core::Block> &blocks = m_parsed->blocks();
     m_lineCount = m_doc->blockCount();
     m_spans.clear();

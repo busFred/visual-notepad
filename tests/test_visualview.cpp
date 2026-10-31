@@ -125,12 +125,12 @@ QString longDocument()
     return text;
 }
 
-// A document over MarkdownModel::backgroundParseChars: sections of a heading,
-// a paragraph, a task list and a code block.
-QString largeDocument()
+// A document over MarkdownModel::backgroundParseChars (or `chars`): sections
+// of a heading, a paragraph, a task list and a code block.
+QString largeDocument(qsizetype chars = MarkdownModel::backgroundParseChars + 4096)
 {
     QString text;
-    for (int i = 0; text.size() <= MarkdownModel::backgroundParseChars + 4096; ++i)
+    for (int i = 0; text.size() <= chars; ++i)
         text += QStringLiteral("## Section %1\n\nA paragraph with *emphasis* and `code` number %1.\n\n"
                                "- [ ] task %1\n- item\n\n```\ncode %1\n```\n\n")
                     .arg(i);
@@ -175,6 +175,7 @@ class ProbeView : public VisualView
 {
 public:
     using VisualView::VisualView;
+    using VisualView::rowCount;
 
     int lineAt(qreal y)
     {
@@ -287,6 +288,10 @@ private Q_SLOTS:
     void clippedPaintsMatchWholePaints();
     void longCodeBoxPartsLookLikeTheBox();
     void longCodeBoxesShowInParts();
+    void largeDocumentsShowTheirSourceUntilParsed();
+    void editsWhileShowingTheSourceAreParsed();
+    void flushWhileShowingTheSource();
+    void switchingToVisualShowsTheSourceFirst();
 
 private:
     // Source and preview of longDocument(), side by side; the source has
@@ -2045,6 +2050,154 @@ void TestVisualView::longCodeBoxesShowInParts()
     QCOMPARE(unit.selectionStart(), doc.findBlockByNumber(codeFirst).position());
     QCOMPARE(unit.selectionEnd(), doc.findBlockByNumber(codeLast + 1).position());
     QCOMPARE(reference.unitAt(doc.findBlockByNumber(codeFirst + 5000).position()).selectionEnd(), unit.selectionEnd());
+}
+
+// A document over MarkdownModel::backgroundShowChars shown with nothing
+// parsed: the view doesn't wait for the parse, it shows the source line by
+// line until the worker is done, then the rendered blocks at the same place.
+// A smaller one is rendered at once.
+void TestVisualView::largeDocumentsShowTheirSourceUntilParsed()
+{
+    m_view->hide();
+    QTextDocument small;
+    small.setDocumentLayout(new DocumentLayout(&small));
+    small.setPlainText(largeDocument());
+    auto *smallModel = new MarkdownModel(&small);
+    ProbeView smallView(smallModel);
+    smallView.resize(600, 500);
+    smallView.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&smallView));
+    QVERIFY(!smallModel->hasPendingEdits());
+    QVERIFY(smallView.lineIsRendered(13)); // Section 1's paragraph.
+
+    QTextDocument doc;
+    doc.setDocumentLayout(new DocumentLayout(&doc));
+    doc.setPlainText(largeDocument(MarkdownModel::backgroundShowChars + 4096));
+    auto *model = new MarkdownModel(&doc);
+    int reparsed = 0;
+    connect(model, &MarkdownModel::reparsed, this, [&] { ++reparsed; });
+    ProbeView view(model);
+    view.resize(600, 500);
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    QVERIFY(model->isAwaitingParse());
+    QVERIFY(model->isParsingInBackground());
+    QCOMPARE(model->parseGeneration(), 0);
+    QVERIFY(view.rowsConsistent());
+    QCOMPARE(view.rowCount(), doc.blockCount());
+    QVERIFY(!view.lineIsRendered(13));
+    QVERIFY(!view.grab().isNull());
+    // Scrolled meanwhile: the same line stays at the top.
+    const int line = 4000 * 11 + 2; // A section's paragraph.
+    view.scrollToLine(line);
+    QTRY_VERIFY(!model->hasPendingEdits());
+    QCOMPARE(reparsed, 1);
+    QVERIFY(!model->isAwaitingParse());
+    QVERIFY(view.rowsConsistent());
+    QVERIFY(view.rowCount() < doc.blockCount());
+    QVERIFY(view.lineIsRendered(13));
+    QVERIFY(view.lineIsRendered(line));
+    QCOMPARE(view.topLine(), line);
+    QVERIFY(matchesFreshParse(*model));
+    QCOMPARE(model->parseGeneration(), 1);
+}
+
+// Typing in the source the view shows while the worker parses: its result is
+// of older text, so the text as it is then is parsed from it, until the
+// parse is of the text as it is.
+void TestVisualView::editsWhileShowingTheSourceAreParsed()
+{
+    m_view->hide();
+    QTextDocument doc;
+    doc.setDocumentLayout(new DocumentLayout(&doc));
+    doc.setPlainText(largeDocument(MarkdownModel::backgroundShowChars + 4096));
+    auto *model = new MarkdownModel(&doc);
+    int applied = 0;
+    connect(model, &MarkdownModel::reparsed, this, [&] {
+        QVERIFY(matchesFreshParse(*model));
+        ++applied;
+    });
+    ProbeView view(model);
+    view.resize(600, 500);
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    view.setFocus();
+    QVERIFY(model->isAwaitingParse());
+    QTextCursor c(doc.findBlockByNumber(2));
+    c.insertText(QStringLiteral("Typed "));
+    QVERIFY(view.rowsConsistent());
+    QVERIFY(!view.lineIsRendered(2));
+    c.setPosition(doc.findBlockByNumber(50).position());
+    c.insertText(QStringLiteral("# Inserted\n\n"));
+    QVERIFY(view.rowsConsistent());
+    QCOMPARE(view.rowCount(), doc.blockCount());
+    QTRY_VERIFY(!model->hasPendingEdits());
+    QTRY_VERIFY(!model->isParsingInBackground());
+    QCOMPARE(applied, 1);
+    QVERIFY(view.rowsConsistent());
+    QVERIFY(QString::fromUtf8(model->blocks()[1].html.data(), model->blocks()[1].html.size())
+                .startsWith(QStringLiteral("<p>Typed A paragraph")));
+    const core::Block &heading = model->blocks()[model->blockAt(50)];
+    QVERIFY(QString::fromUtf8(heading.html.data(), heading.html.size()).contains(QStringLiteral("Inserted</h1>")));
+}
+
+// Something that needs the blocks now (a click on a task box, a test) parses
+// at once; the worker's result then changes nothing.
+void TestVisualView::flushWhileShowingTheSource()
+{
+    m_view->hide();
+    QTextDocument doc;
+    doc.setDocumentLayout(new DocumentLayout(&doc));
+    doc.setPlainText(largeDocument(MarkdownModel::backgroundShowChars + 4096));
+    auto *model = new MarkdownModel(&doc);
+    ProbeView view(model);
+    view.resize(600, 500);
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    QVERIFY(model->isAwaitingParse());
+    model->flush();
+    QVERIFY(!model->isAwaitingParse());
+    QCOMPARE(model->parseGeneration(), 1);
+    QVERIFY(matchesFreshParse(*model));
+    QVERIFY(view.lineIsRendered(13));
+    QVERIFY(view.rowsConsistent());
+    QTRY_VERIFY(!model->isParsingInBackground());
+    QTest::qWait(20);
+    QCOMPARE(model->parseGeneration(), 1);
+    QVERIFY(matchesFreshParse(*model));
+}
+
+// Opening a large Markdown file in Source mode, then switching to Visual:
+// the switch doesn't wait for the parse, and the caret stays in view.
+void TestVisualView::switchingToVisualShowsTheSourceFirst()
+{
+    m_view->hide();
+    QTemporaryDir dir;
+    QFile file(dir.filePath(QStringLiteral("large.md")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(largeDocument(MarkdownModel::backgroundShowChars + 4096).toUtf8());
+    file.close();
+    DocumentTab tab;
+    QVERIFY(tab.load(file.fileName()));
+    tab.setViewMode(DocumentTab::ViewMode::Source);
+    tab.resize(900, 600);
+    tab.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&tab));
+    QTextDocument *doc = tab.document();
+    const int line = doc->blockCount() / 2;
+    tab.editor()->setTextCursor(QTextCursor(doc->findBlockByNumber(line)));
+    MarkdownModel *model = tab.file()->markdownModel();
+    tab.setViewMode(DocumentTab::ViewMode::Visual);
+    QVERIFY(model->isAwaitingParse());
+    QVERIFY(!tab.grab().isNull());
+    QTRY_VERIFY(!model->hasPendingEdits());
+    QVERIFY(matchesFreshParse(*model));
+    VisualView *visual = tab.visualView();
+    QCOMPARE(visual->textCursor().blockNumber(), line);
+    // In view: on a line from the top one to the last one that shows.
+    QVERIFY(!visual->grab().isNull());
+    QVERIFY(visual->topLine() <= line);
+    QVERIFY(line - visual->topLine() < 100);
 }
 
 // Keep tests away from the user's settings file.

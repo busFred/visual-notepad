@@ -180,11 +180,20 @@ void VisualView::rowsMayHaveChanged()
 void VisualView::showEvent(QShowEvent *event)
 {
     TextView::showEvent(event);
-    // Edits made while hidden are parsed once now rather than shown stale.
-    m_model->flush();
+    // Edits made while hidden are parsed once now rather than shown stale,
+    // but a large document with nothing usable parsed is parsed on a worker
+    // (its source shows meanwhile).
+    if (m_model->hasUsableSpans() || !m_model->parseInBackground())
+        m_model->flush();
     if (m_rowsStale)
         relayout();
     updateRemoteBanner();
+}
+
+void VisualView::hideEvent(QHideEvent *event)
+{
+    TextView::hideEvent(event);
+    m_showsParse = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +319,40 @@ void VisualView::resizeEvent(QResizeEvent *event)
 void VisualView::rebuildRows()
 {
     const int lines = document()->blockCount();
+    // Shown before a large document is parsed: its source stands in, line
+    // by line, until the worker is done (see MarkdownModel::parseInBackground).
+    if (m_model->isAwaitingParse()
+        || (!m_model->hasUsableSpans() && !m_showsParse && m_model->parseInBackground())) {
+        if (m_standIn && int(m_lineToRow.size()) == lines)
+            return;
+        m_rows.clear();
+        m_rows.reserve(lines);
+        m_lineToRow.resize(lines);
+        for (int line = 0; line < lines; ++line) {
+            m_lineToRow[line] = line;
+            m_rows.push_back({{line, line, false}, -1});
+        }
+        m_expandedBlocks.clear();
+        m_partSpans.clear();
+        m_rowsExpanded.clear();
+        m_rowsStale = false;
+        m_rowsRevision = -1;
+        m_standIn = true;
+        return;
+    }
+    // The rendered rows that replace the stand-in keep its place: the same
+    // source line at the top, and the caret in view if it was.
+    qreal standInTop = -1;
+    bool caretShown = false;
+    if (m_standIn) {
+        m_standIn = false;
+        standInTop = topLinePosition();
+        qreal top = 0;
+        const int bottom = rowAt(viewport()->height() - 1, &top);
+        const int caret = textCursor().blockNumber();
+        caretShown = caret >= topLine() && (bottom < 0 || caret <= row(bottom).lastLine);
+    }
+    m_showsParse = true;
     const auto &spans = m_model->spans();
 
     // Blocks open for editing only while this view has focus, so a document
@@ -403,6 +446,11 @@ void VisualView::rebuildRows()
     m_rowsStale = false;
     m_rowsRevision = m_model->revision();
     m_rowsExpanded = std::move(expanded);
+    if (standInTop >= 0) {
+        scrollToLinePosition(standInTop);
+        if (caretShown)
+            ensureCursorVisible();
+    }
 }
 
 int VisualView::rowCount() const
