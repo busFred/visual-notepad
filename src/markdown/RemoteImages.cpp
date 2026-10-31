@@ -5,7 +5,6 @@
 #include <QNetworkProxy>
 #include <QNetworkReply>
 #include <QNetworkRequest>
-#include <QRegularExpression>
 
 namespace vn {
 
@@ -64,6 +63,7 @@ RemoteImages::~RemoteImages() = default;
 
 RemoteImages::RemoteImages()
     : m_cache(cacheKiB)
+    , m_decoded(decodedCacheKiB)
 {
     m_manager.setRedirectPolicy(QNetworkRequest::ManualRedirectPolicy);
     m_manager.setProxyFactory(new ProxyFactory);
@@ -84,26 +84,6 @@ bool RemoteImages::redirectAllowed(const QUrl &from, const QUrl &to)
     return !(from.scheme() == QLatin1String("https") && to.scheme() != QLatin1String("https"));
 }
 
-QStringList RemoteImages::imageUrls(const QString &html)
-{
-    // What Qt's rich text loads as pictures: <img src>, background
-    // attributes, and url() in styles.
-    static const QRegularExpression pattern(
-        QStringLiteral(R"re((?<![\w-])(?:src|background)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))|url\(\s*["']?([^"')\s]+))re"),
-        QRegularExpression::CaseInsensitiveOption);
-    QStringList urls;
-    for (auto it = pattern.globalMatch(html); it.hasNext();) {
-        const QRegularExpressionMatch match = it.next();
-        QString text;
-        for (int group = 1; group <= 4 && text.isEmpty(); ++group)
-            text = match.captured(group).trimmed();
-        text.replace(QLatin1String("&amp;"), QLatin1String("&"));
-        if (isWebUrl(QUrl(text)) && !urls.contains(text))
-            urls.append(text);
-    }
-    return urls;
-}
-
 RemoteImages::State RemoteImages::state(const QUrl &url) const
 {
     const QString key = cacheKey(url);
@@ -119,7 +99,10 @@ RemoteImages::State RemoteImages::request(const QUrl &url)
     if (const State s = state(url); s != State::Missing)
         return s;
     const QString key = cacheKey(url);
-    if (!redirectAllowed(QUrl(), url) || ++m_attempts[key] > maxAttempts) {
+    if (!redirectAllowed(QUrl(), url) || (!m_seen.contains(key) && m_seen.size() >= maxAddresses))
+        return State::Failed; // Not remembered: there is no end to those.
+    m_seen.insert(key);
+    if (++m_attempts[key] > maxAttempts) {
         m_failed.insert(key);
         return State::Failed;
     }
@@ -131,8 +114,18 @@ RemoteImages::State RemoteImages::request(const QUrl &url)
 
 QImage RemoteImages::fullImage(const QUrl &url) const
 {
-    const QByteArray *data = m_cache.object(cacheKey(url));
-    return data ? decode(*data) : QImage();
+    const QString key = cacheKey(url);
+    if (!m_cache.contains(key))
+        return {};
+    if (const QImage *hit = m_decoded.object(key))
+        return *hit;
+    const QByteArray *data = m_cache.object(key);
+    if (!data)
+        return {};
+    const QImage image = decode(*data);
+    if (!image.isNull())
+        m_decoded.insert(key, new QImage(image), qMax<qsizetype>(1, image.sizeInBytes() / 1024));
+    return image;
 }
 
 void RemoteImages::clearFailures()
@@ -156,6 +149,8 @@ void RemoteImages::clear()
     m_failed.clear();
     m_attempts.clear();
     m_cache.clear();
+    m_decoded.clear();
+    m_seen.clear();
     m_notify.stop();
     ++m_generation;
 }
@@ -181,7 +176,7 @@ void RemoteImages::pump()
                 if (job->reply)
                     job->reply->abort();
                 else
-                    finish(job.get(), false);
+                    finish(job.get(), QImage());
                 return;
             }
         });
@@ -199,7 +194,7 @@ void RemoteImages::send(Job *job)
     request.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
     request.setAttribute(QNetworkRequest::CacheSaveControlAttribute, false);
     request.setTransferTimeout(m_timeout);
-    request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("VisualNotepad/" VN_VERSION));
+    request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("Mozilla/5.0 (compatible; VisualNotepad)"));
     request.setRawHeader("Accept", "image/*");
 
     job->data.clear();
@@ -252,13 +247,13 @@ void RemoteImages::onFinished(Job *job)
 {
     QNetworkReply *reply = job->reply;
     if (job->rejected)
-        return finish(job, false);
+        return finish(job, QImage());
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     if (status >= 300 && status < 400) {
         const QUrl location = reply->attribute(QNetworkRequest::RedirectionTargetAttribute).toUrl();
         const QUrl target = job->current.resolved(location);
         if (location.isEmpty() || !redirectAllowed(job->current, target) || ++job->redirects > maxRedirects)
-            return finish(job, false);
+            return finish(job, QImage());
         releaseReply(job);
         job->current = target;
         return send(job);
@@ -266,15 +261,20 @@ void RemoteImages::onFinished(Job *job)
     if (reply->isOpen())
         job->data += reply->readAll();
     if (reply->error() != QNetworkReply::NoError || status != 200 || job->data.size() > maxImageBytes)
-        return finish(job, false);
-    finish(job, !decode(job->data).isNull());
+        return finish(job, QImage());
+    finish(job, decode(job->data));
 }
 
-void RemoteImages::finish(Job *job, bool ok)
+void RemoteImages::finish(Job *job, const QImage &image)
 {
     const QString key = cacheKey(job->url);
-    if (ok)
+    bool ok = !image.isNull();
+    if (ok) {
+        // Decoded once, here; the encoded bytes stay for evictions from the decoded cache.
         ok = m_cache.insert(key, new QByteArray(job->data), qMax<qsizetype>(1, job->data.size() / 1024));
+        if (ok)
+            m_decoded.insert(key, new QImage(image), qMax<qsizetype>(1, image.sizeInBytes() / 1024));
+    }
     m_loading.remove(key);
     if (!ok)
         m_failed.insert(key);

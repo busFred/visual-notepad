@@ -185,10 +185,9 @@ void VisualView::updateRemoteBanner()
         if (m_remoteUrlsGeneration != m_model->parseGeneration()) {
             m_remoteUrls.clear();
             QSet<QString> seen;
+            const RenderContext ctx = context();
             for (const core::Block &block : m_model->blocks()) {
-                if (block.kind != core::BlockKind::Html)
-                    continue;
-                for (const QString &url : RemoteImages::imageUrls(QString::fromUtf8(block.html.data(), block.html.size()))) {
+                for (const QString &url : RenderedBlock::remoteImages(block, ctx)) {
                     if (!seen.contains(url)) {
                         seen.insert(url);
                         m_remoteUrls.append(url);

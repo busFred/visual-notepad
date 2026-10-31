@@ -11,6 +11,7 @@
 #include <QPair>
 #include <QPointF>
 #include <QString>
+#include <QStringList>
 #include <QTextDocument>
 
 #include <memory>
@@ -66,6 +67,10 @@ public:
 
     static std::unique_ptr<RenderedBlock> create(const core::Block &block, const QString &source,
                                                  const RenderContext &context);
+    // The distinct http(s) addresses of the pictures an HTML block asks Qt for
+    // when it is laid out and painted (entities and styles decoded by Qt
+    // itself), whether or not downloads are allowed. Nothing is requested.
+    static QStringList remoteImages(const core::Block &block, const RenderContext &context);
 
     Kind kind() const { return m_kind; }
     qreal height() const { return m_height; }

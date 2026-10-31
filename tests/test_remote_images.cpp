@@ -10,6 +10,7 @@
 #include "markdown/VisualView.h"
 
 #include <QBuffer>
+#include <algorithm>
 #include <QFrame>
 #include <QLabel>
 #include <QPushButton>
@@ -78,7 +79,7 @@ private:
             const QString path = line.value(1);
             // Other programs on this machine probe new listening ports; only
             // requests of the app count.
-            if (buffer->left(end).contains("VisualNotepad/")) {
+            if (buffer->left(end).contains("VisualNotepad)")) {
                 requests.append(path);
                 headers.append(buffer->left(end));
             }
@@ -184,7 +185,8 @@ private Q_SLOTS:
     void init();
     void cleanup();
 
-    void findsImageAddresses();
+    void findsWhatQtWillRequest();
+    void entityEncodedAddressesAreListedAndFetchedOnlyAfterConsent();
     void redirectRules();
     void nothingIsRequestedWithoutConsent();
     void downloadsAfterConsent();
@@ -195,6 +197,7 @@ private Q_SLOTS:
     void sendsNoCookiesAndNoCredentials();
     void limitsConcurrentDownloads();
     void stalledDownloadTimesOut();
+    void capsDistinctAddresses();
     void viewAsksBeforeLoading();
     void dontLoadNeverContacts();
     void neverPreferenceDoesNotAsk();
@@ -252,22 +255,88 @@ QPushButton *TestRemoteImages::button(QWidget *parent, const QString &text)
     return nullptr;
 }
 
-void TestRemoteImages::findsImageAddresses()
+namespace {
+
+core::Block htmlBlock(const QString &html)
 {
-    const QString html = QStringLiteral(
-        "<p><img src=\"https://img.shields.io/badge/a-b-green.svg?x=1&amp;y=2\" alt=\"badge\">"
-        "<IMG SRC='http://example.com/a.png'> <img src=\"http://example.com/a.png\">"
-        "<img src=http://bare.example/c.gif>"
-        "<img src=\"local/pic.png\"><img src=\"ftp://example.com/f.png\"><img src=\"file:///etc/passwd\">"
-        "<img data-src=\"http://lazy.example/l.png\">"
-        "<a href=\"http://example.com/page\">link</a></p>"
-        "<table background=\"http://bg.example/t.png\"><tr><td style=\"background-image: url('https://css.example/b.png')\">"
-        "x</td></tr></table>");
-    QCOMPARE(RemoteImages::imageUrls(html),
-             (QStringList{QStringLiteral("https://img.shields.io/badge/a-b-green.svg?x=1&y=2"),
-                          QStringLiteral("http://example.com/a.png"), QStringLiteral("http://bare.example/c.gif"),
-                          QStringLiteral("http://bg.example/t.png"), QStringLiteral("https://css.example/b.png")}));
-    QVERIFY(RemoteImages::imageUrls(QStringLiteral("<p>no pictures, see http://example.com</p>")).isEmpty());
+    core::Block block;
+    block.kind = core::BlockKind::Html;
+    const QByteArray utf8 = html.toUtf8();
+    block.html = rust::String(utf8.constData(), utf8.size());
+    return block;
+}
+
+// Pictures asked for in many spellings; the numbered files exist on the stub.
+QString tricky(const QString &host)
+{
+    return QStringLiteral(
+               "<p><img src=\"&#104;ttp://%1/ok1.png\"> <img src=\"&#x68;ttp://%1/ok2.png\">"
+               "<img src=\"http&colon;//%1/ok3.png\"> <IMG SRC='http://%1/ok4.png?a=1&amp;b=2'>"
+               "<img src=\"&#104;&#116;&#116;&#112;&#58;&#47;&#47;%1/ok5.png\">"
+               "<img src=\"ftp://%1/no.png\"><img src=\"local/pic.png\"><img data-src=\"http://%1/lazy.png\">"
+               "<a href=\"http://%1/page\">link</a></p>"
+               "<table background=\"http://%1/ok6.png\"><tr><td>x</td></tr></table>"
+               "<p style=\"background-image: url('http://%1/ok7.png')\">styled</p>"
+               "<table><tr><td style=\"background-image: url(&#104;ttp://%1/ok8.png)\">cell</td></tr></table>")
+        .arg(host);
+}
+
+} // namespace
+
+void TestRemoteImages::findsWhatQtWillRequest()
+{
+    const QString host = m_stub->host();
+    const RenderContext ctx = context(false);
+    const QStringList found = RenderedBlock::remoteImages(htmlBlock(tricky(host)), ctx);
+    // Whatever the spelling, what Qt decodes and asks for is listed: numeric
+    // entities, background attributes and styles (even with entities in them).
+    const auto has = [&](const char *name) {
+        return std::any_of(found.begin(), found.end(), [&](const QString &url) {
+            return url.startsWith(QStringLiteral("http://%1/%2.png").arg(host, QString::fromLatin1(name)));
+        });
+    };
+    for (const char *name : {"ok1", "ok2", "ok4", "ok5", "ok6", "ok7", "ok8"})
+        QVERIFY2(has(name), name);
+    QVERIFY(!has("ok3")); // &colon; is not decoded by Qt, so it is no address.
+    // Not requested by Qt, so not listed (and never fetched).
+    for (const QString &url : found) {
+        QVERIFY(!url.contains(QLatin1String("lazy")));
+        QVERIFY(!url.contains(QLatin1String("no.png")));
+        QVERIFY(!url.contains(QLatin1String("/page")));
+    }
+    QVERIFY(RenderedBlock::remoteImages(htmlBlock(QStringLiteral("<p>no pictures, see http://example.com</p>")), ctx).isEmpty());
+    QVERIFY(m_stub->requests.isEmpty());
+}
+
+void TestRemoteImages::entityEncodedAddressesAreListedAndFetchedOnlyAfterConsent()
+{
+    const QString host = m_stub->host();
+    const QString html = tricky(host);
+    const QStringList listed = RenderedBlock::remoteImages(htmlBlock(html), context(false));
+    QVERIFY(listed.size() >= 5);
+    const auto view = openView(html + QLatin1String("\n"));
+    auto *banner = view->findChild<QFrame *>(QStringLiteral("RemoteImageBanner"));
+    QVERIFY(banner && banner->isVisible());
+    const QString text = banner->findChild<QLabel *>()->text();
+    QVERIFY2(text.contains(QStringLiteral("%1 (%2)").arg(host).arg(listed.size())), qPrintable(text));
+    view->grab();
+    QTest::qWait(400);
+    QVERIFY(m_stub->requests.isEmpty());
+
+    QTest::mouseClick(button(banner, QStringLiteral("Load images")), Qt::LeftButton);
+    QTRY_VERIFY(m_stub->requests.size() >= listed.size());
+    view->grab();
+    QTest::qWait(500);
+    view->grab();
+    // Everything fetched is something the banner listed, and nothing else.
+    QStringList fetched;
+    for (const QString &path : std::as_const(m_stub->requests))
+        fetched.append(QStringLiteral("http://%1%2").arg(host, path));
+    for (const QString &url : std::as_const(fetched))
+        QVERIFY2(listed.contains(url), qPrintable(url));
+    // And all of it, backgrounds included, was fetched.
+    for (const QString &url : listed)
+        QVERIFY2(fetched.contains(url), qPrintable(url));
 }
 
 void TestRemoteImages::redirectRules()
@@ -408,6 +477,7 @@ void TestRemoteImages::sendsNoCookiesAndNoCredentials()
         QVERIFY(!lower.contains("authorization:"));
         QVERIFY(!lower.contains("referer:"));
         QVERIFY(lower.contains("accept: image/*"));
+        QVERIFY(lower.contains("user-agent: mozilla/5.0 (compatible; visualnotepad)")); // No version.
     }
 }
 
@@ -426,6 +496,21 @@ void TestRemoteImages::stalledDownloadTimesOut()
     const QUrl url = m_stub->url(QStringLiteral("/hang"));
     RemoteImages::instance().request(url);
     QTRY_COMPARE_WITH_TIMEOUT(RemoteImages::instance().state(url), RemoteImages::State::Failed, 5000);
+}
+
+void TestRemoteImages::capsDistinctAddresses()
+{
+    for (int i = 0; i < RemoteImages::maxAddresses; ++i)
+        QCOMPARE(RemoteImages::instance().request(m_stub->url(QStringLiteral("/ok-%1.png").arg(i))), RemoteImages::State::Loading);
+    const QUrl beyond = m_stub->url(QStringLiteral("/ok-beyond.png"));
+    QCOMPARE(RemoteImages::instance().request(beyond), RemoteImages::State::Failed);
+    QTRY_COMPARE_WITH_TIMEOUT(m_stub->requests.size(), RemoteImages::maxAddresses, 15000);
+    QTest::qWait(200);
+    QCOMPARE(m_stub->requests.size(), RemoteImages::maxAddresses);
+    QVERIFY(!m_stub->requests.contains(QStringLiteral("/ok-beyond.png")));
+    // Known addresses keep working; a placeholder stays for the rest.
+    QCOMPARE(RemoteImages::instance().request(m_stub->url(QStringLiteral("/ok-0.png"))), RemoteImages::State::Loaded);
+    QVERIFY(!renderHtml(imageTag(beyond), context(true))->isPending());
 }
 
 void TestRemoteImages::viewAsksBeforeLoading()

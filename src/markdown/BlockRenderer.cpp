@@ -17,6 +17,7 @@
 #include <QImageReader>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPicture>
 #include <QSet>
 #include <QTextBlock>
 #include <QTextLayout>
@@ -165,6 +166,15 @@ bool mermaidDiagram(const QString &code, const RenderContext &context, Diagram *
     return false;
 }
 
+// Whether HTML can make Qt ask for a picture: an img tag, a background
+// attribute or a style. (Tag and attribute names are never entity-encoded.)
+bool mayLoadPictures(const QString &html)
+{
+    return html.contains(QLatin1String("<img"), Qt::CaseInsensitive)
+           || html.contains(QLatin1String("background"), Qt::CaseInsensitive)
+           || html.contains(QLatin1String("style"), Qt::CaseInsensitive);
+}
+
 // Rich text with images resolved here: math placeholders, files, and
 // downloads when the user agreed to them.
 class ResourceDocument : public QTextDocument
@@ -202,6 +212,16 @@ public:
 
     // Some picture is still downloading.
     bool hasPendingDownload() const { return m_pending; }
+    // Every http(s) address asked for so far, allowed or not.
+    const QStringList &remoteUrls() const { return m_remote; }
+    // Pictures behind backgrounds are only asked for when painting: paint
+    // once, into nothing.
+    void loadPaintedPictures()
+    {
+        QPicture picture;
+        QPainter painter(&picture);
+        documentLayout()->draw(&painter, QAbstractTextDocumentLayout::PaintContext());
+    }
 
     // The file a picture's source names, or empty (math, remote pictures).
     QString pathOf(const QString &source) const
@@ -259,6 +279,8 @@ private:
     // pending until it ends.
     QVariant remoteImage(int type, const QUrl &url)
     {
+        if (const QString address = url.toString(); !m_remote.contains(address))
+            m_remote.append(address);
         if (!m_context.allowRemoteImages)
             return QVariant();
         RemoteImages &remote = RemoteImages::instance();
@@ -289,6 +311,7 @@ private:
 
     RenderContext m_context;
     QStringList m_math;
+    QStringList m_remote;
     bool m_pending = false;
 };
 
@@ -439,12 +462,30 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         doc->fitImages(context.width);
         doc->setTextWidth(context.width);
         r.m_height = doc->size().height() + blockGap;
+        if (context.allowRemoteImages && mayLoadPictures(QString::fromUtf8(block.html.data(), block.html.size())))
+            doc->loadPaintedPictures();
         r.m_pending = doc->hasPendingDownload();
         r.m_doc = std::move(doc);
         r.collectLineAnchors(0);
         return result;
     }
     }
+}
+
+QStringList RenderedBlock::remoteImages(const core::Block &block, const RenderContext &context)
+{
+    const QString html = QString::fromUtf8(block.html.data(), block.html.size());
+    if (block.kind != core::BlockKind::Html || !mayLoadPictures(html))
+        return {};
+    RenderContext asking = context;
+    asking.allowRemoteImages = false;
+    ResourceDocument doc(block, asking);
+    doc.setDocumentMargin(0);
+    doc.setDefaultFont(context.font);
+    doc.setHtml(html);
+    doc.setTextWidth(context.width);
+    doc.loadPaintedPictures();
+    return doc.remoteUrls();
 }
 
 void RenderedBlock::collectLineAnchors(int sourceLines)

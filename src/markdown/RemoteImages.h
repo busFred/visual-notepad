@@ -37,6 +37,9 @@ public:
     // Times one address may be fetched in a session, so pictures evicted from
     // a full cache cannot make a document download in a loop.
     static constexpr int maxAttempts = 3;
+    // Distinct addresses fetched in a session; further pictures stay missing.
+    static constexpr int maxAddresses = 200;
+    static constexpr int decodedCacheKiB = 32 * 1024;
 
     static RemoteImages &instance();
 
@@ -45,16 +48,14 @@ public:
     // Whether a redirect from one address to another may be followed: web
     // addresses with a host and no credentials, and never from https to http.
     static bool redirectAllowed(const QUrl &from, const QUrl &to);
-    // The distinct http(s) addresses of the pictures an HTML fragment would
-    // load (img src, background, CSS url()), in order of appearance.
-    static QStringList imageUrls(const QString &html);
 
     enum class State { Missing, Loading, Loaded, Failed };
     State state(const QUrl &url) const;
     // Starts downloading unless it was tried; returns the state afterwards.
     // Only call this for documents the user agreed to.
     State request(const QUrl &url);
-    // A downloaded picture at full size; null unless Loaded.
+    // A downloaded picture at full size; null unless Loaded. Decoded once
+    // (when it arrives), then kept in a bounded cache of decoded pictures.
     QImage fullImage(const QUrl &url) const;
     // Failed addresses may be tried again (the user asked to load).
     void clearFailures();
@@ -77,12 +78,14 @@ private:
     void pump();
     void send(Job *job);
     void onFinished(Job *job);
-    void finish(Job *job, bool ok);
+    void finish(Job *job, const QImage &image);
     void releaseReply(Job *job);
     void notify();
 
     QNetworkAccessManager m_manager;
     QCache<QString, QByteArray> m_cache; // Encoded pictures by address, KiB.
+    mutable QCache<QString, QImage> m_decoded; // Their decoded form, KiB.
+    QSet<QString> m_seen;                // Every address asked for.
     QSet<QString> m_loading;             // Queued and running.
     QSet<QString> m_failed;
     QHash<QString, int> m_attempts;
