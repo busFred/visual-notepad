@@ -130,12 +130,12 @@ QString longDocument()
     return text;
 }
 
-// A document over MarkdownModel::backgroundParseChars: sections of a heading,
-// a paragraph, a task list and a code block.
-QString largeDocument()
+// A document over MarkdownModel::backgroundParseChars (or `chars`): sections
+// of a heading, a paragraph, a task list and a code block.
+QString largeDocument(qsizetype chars = MarkdownModel::backgroundParseChars + 4096)
 {
     QString text;
-    for (int i = 0; text.size() <= MarkdownModel::backgroundParseChars + 4096; ++i)
+    for (int i = 0; text.size() <= chars; ++i)
         text += QStringLiteral("## Section %1\n\nA paragraph with *emphasis* and `code` number %1.\n\n"
                                "- [ ] task %1\n- item\n\n```\ncode %1\n```\n\n")
                     .arg(i);
@@ -180,6 +180,7 @@ class ProbeView : public VisualView
 {
 public:
     using VisualView::VisualView;
+    using VisualView::rowCount;
 
     int lineAt(qreal y)
     {
@@ -209,6 +210,17 @@ public:
     }
 
     bool lineIsRendered(int line) const { return row(rowOfLine(line)).rendered; }
+
+    // The rendered rows that show some line of [first, last].
+    int renderedRowsOver(int first, int last) const
+    {
+        int rows = 0;
+        for (int i = rowOfLine(first); i <= rowOfLine(last); ++i)
+            rows += row(i).rendered;
+        return rows;
+    }
+
+    QTextCursor unitAt(int position) const { return lineUnitAt(position); }
 };
 
 void wheel(TextView *view, qreal dy)
@@ -282,6 +294,15 @@ private Q_SLOTS:
     void longRunsWrapTheSameWithTheLimits();
     void scrollingKeepsOnlyRecentRenders();
     void decodedPictureCacheSurvivesRoundsOfMorePictures();
+    void blocksOverTheBudgetAreRenderedOnce();
+    void clippedPaintsMatchWholePaints();
+    void longCodeBoxPartsLookLikeTheBox();
+    void longCodeBoxesShowInParts();
+    void largeDocumentsShowTheirSourceUntilParsed();
+    void editsWhileShowingTheSourceAreParsed();
+    void flushWhileShowingTheSource();
+    void switchingToVisualShowsTheSourceFirst();
+    void switchingToVisualRendersAtTheFinalWidthOnly();
 
 private:
     // Source and preview of longDocument(), side by side; the source has
@@ -2158,6 +2179,364 @@ void TestVisualView::decodedPictureCacheSurvivesRoundsOfMorePictures()
     }
     QCOMPARE(last, 0);
     RenderedBlock::setDecodedPictureLimitKiB(128 * 1024);
+}
+
+// A block too big for the render cache (about 56 MiB laid out), shown with
+// others: the view keeps what it shows rather than making the big one again
+// for each of the others.
+void TestVisualView::blocksOverTheBudgetAreRenderedOnce()
+{
+    m_doc->setPlainText(QStringLiteral("# Title\n\n") + repeated(QStringLiteral("word%1"), 90000, QStringLiteral(" "))
+                        + QStringLiteral("\n\nAfter.\n"));
+    m_view->clearFocus();
+    m_model->flush();
+    QVERIFY(!m_view->grab().isNull());
+    const int made = m_view->renderCount();
+    QVERIFY(made >= 3);
+    for (int i = 0; i < 3; ++i) {
+        m_view->viewport()->update();
+        QVERIFY(!m_view->grab().isNull());
+    }
+    QCOMPARE(m_view->renderCount(), made);
+}
+
+namespace {
+
+// A block painted into a window of it, starting `top` pixels down, either
+// clipped to the window (as views paint) or not at all.
+QImage paintWindow(const RenderedBlock &block, qreal top, bool clipped, qreal width = 548)
+{
+    QImage image(QSize(int(width), 300), QImage::Format_RGB32);
+    image.fill(Qt::white);
+    QPainter painter(&image);
+    if (clipped)
+        painter.setClipRect(image.rect());
+    block.paint(painter, QPointF(0, -top), width);
+    return image;
+}
+
+} // namespace
+
+// Blocks far taller than the window draw only what shows, and that the same.
+void TestVisualView::clippedPaintsMatchWholePaints()
+{
+    const QStringList documents = {
+        QStringLiteral("```cpp\n") + repeated(QStringLiteral("int x%1 = f(%1, \"abc\");"), 3000, newline) + QStringLiteral("\n```"),
+        repeated(QStringLiteral("- item %1 with *emphasis* and `code`"), 1500, newline),
+        QStringLiteral("| a | b |\n|---|---|\n") + repeated(QStringLiteral("| r%1 | **x** |"), 1000, newline),
+    };
+    for (const QString &markdown : documents) {
+        const auto block = renderFirstBlock(markdown);
+        QVERIFY(block->height() > 10000);
+        for (const qreal top : {0.0, 777.5, block->height() / 2, block->height() - 200}) {
+            QVERIFY2(paintWindow(*block, top, true) == paintWindow(*block, top, false),
+                     qPrintable(QStringLiteral("%1 at %2").arg(markdown.left(20)).arg(top)));
+        }
+    }
+}
+
+namespace {
+
+// A fenced block too long to highlight: 12 000 lines of 40 characters.
+QString longCodeBlock()
+{
+    return QStringLiteral("```\n") + repeated(QStringLiteral("value_%1 = compute(value_%1 - 1) + 1;   "), 12000, newline)
+           + QStringLiteral("\n```");
+}
+
+} // namespace
+
+// The parts of a long code box, one under the other, paint what the whole box
+// does, wherever they start (row tops are fractional while scrolling).
+void TestVisualView::longCodeBoxPartsLookLikeTheBox()
+{
+    const QString markdown = longCodeBlock();
+    const QByteArray utf8 = markdown.toUtf8();
+    const rust::Vec<core::Block> blocks = core::blocks(rust::Str(utf8.constData(), utf8.size()),
+                                                       core::RenderOptions{false, true, true, true, 1});
+    QVERIFY(RenderedBlock::isLongCodeBox(blocks.at(0), markdown.size()));
+    const auto whole = renderFirstBlock(markdown);
+    const QStringList lines = markdown.split(u'\n');
+    std::vector<std::unique_ptr<RenderedBlock>> parts;
+    std::vector<qreal> tops;
+    qreal height = 0;
+    for (int first = 0; first < lines.size(); first += RenderedBlock::partLines) {
+        const int count = qMin(RenderedBlock::partLines, int(lines.size()) - first);
+        RenderedBlock::Part part;
+        part.first = first == 0;
+        part.last = first + count == lines.size();
+        part.wrapAnywhere = RenderedBlock::wrapsAnywhere(markdown);
+        RenderContext ctx;
+        ctx.font = theme::textFont();
+        ctx.codeFont = theme::editorFont();
+        ctx.width = 548;
+        parts.push_back(RenderedBlock::createPart(lines.mid(first, count).join(newline), part, ctx));
+        // Line anchors, moved into the whole box, are the box's.
+        for (const auto &[line, y] : parts.back()->lineAnchors()) {
+            const auto it = std::find_if(whole->lineAnchors().begin(), whole->lineAnchors().end(),
+                                         [&](const auto &anchor) { return anchor.first == first + line; });
+            QVERIFY(it != whole->lineAnchors().end());
+            QVERIFY(qAbs(it->second - (height + y)) < 0.01);
+        }
+        tops.push_back(height);
+        height += parts.back()->height();
+    }
+    QVERIFY(parts.size() > 50);
+    QVERIFY(qAbs(height - whole->height()) < 0.01);
+    const qreal offset = 0.37;
+    const qreal width = 548;
+    for (const qreal top : {0.0, tops[1] - 150, tops[1] - 149.5, tops[30] - 123.25, height - 300}) {
+        QImage expected(QSize(int(width), 300), QImage::Format_RGB32);
+        expected.fill(Qt::white);
+        QImage actual = expected;
+        {
+            QPainter painter(&expected);
+            painter.setClipRect(expected.rect());
+            whole->paint(painter, QPointF(0, offset - top), width);
+        }
+        {
+            QPainter painter(&actual);
+            painter.setClipRect(actual.rect());
+            for (size_t i = 0; i < parts.size(); ++i) {
+                if (tops[i] + parts[i]->height() > top && tops[i] < top + 300)
+                    parts[i]->paint(painter, QPointF(0, offset - top + tops[i]), width);
+            }
+        }
+        QVERIFY2(actual == expected, qPrintable(QStringLiteral("at %1").arg(top)));
+    }
+}
+
+// In a view, a long code box is rows of parts: only those on screen are laid
+// out, and it shows, scrolls, hit-tests, selects and triple-clicks as the
+// whole box did.
+void TestVisualView::longCodeBoxesShowInParts()
+{
+    m_view->hide();
+    const QString text = QStringLiteral("# Long code\n\n") + longCodeBlock() + QStringLiteral("\n\nAfter.\n");
+    QTextDocument doc;
+    doc.setDocumentLayout(new DocumentLayout(&doc));
+    doc.setPlainText(text);
+    auto *model = new MarkdownModel(&doc);
+    ProbeView view(model);
+    RenderedBlock::setPartsEnabled(false);
+    ProbeView reference(model);
+    reference.resize(600, 500);
+    reference.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&reference));
+    reference.grab();
+    RenderedBlock::setPartsEnabled(true);
+    view.resize(600, 500);
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    const int codeFirst = 2;
+    const int codeLast = codeFirst + 12001;
+    QCOMPARE(view.renderedRowsOver(codeFirst, codeLast), (12002 + RenderedBlock::partLines - 1) / RenderedBlock::partLines);
+    QCOMPARE(reference.renderedRowsOver(codeFirst, codeLast), 1);
+    QVERIFY(!view.grab().isNull());
+    QVERIFY2(view.memoizedRenderCount() < 8, qPrintable(QString::number(view.memoizedRenderCount())));
+    // A selection over the edge of two parts, seen at the same place in both.
+    QTextCursor selection(doc.findBlockByNumber(codeFirst + 590));
+    selection.setPosition(doc.findBlockByNumber(codeFirst + 610).position() + 7, QTextCursor::KeepAnchor);
+    view.setTextCursor(selection);
+    reference.setTextCursor(selection);
+    view.clearFocus();
+    reference.clearFocus();
+    for (const qreal position : {0.0, codeFirst + 585.5, codeFirst + 6000.25, qreal(codeLast - 10)}) {
+        view.scrollToLinePosition(position);
+        reference.scrollToLinePosition(position);
+        QCOMPARE(view.topLinePosition(), reference.topLinePosition());
+        // (The scroll bars differ: one row a part gives the bar finer steps.)
+        QVERIFY2(view.viewport()->grab().toImage() == reference.viewport()->grab().toImage(),
+                 qPrintable(QString::number(position)));
+        for (int y = 0; y < 500; y += 23)
+            QCOMPARE(view.lineAt(y), reference.lineAt(y));
+    }
+    // A triple click takes the whole box, not a part.
+    const QTextCursor unit = view.unitAt(doc.findBlockByNumber(codeFirst + 5000).position());
+    QCOMPARE(unit.selectionStart(), doc.findBlockByNumber(codeFirst).position());
+    QCOMPARE(unit.selectionEnd(), doc.findBlockByNumber(codeLast + 1).position());
+    QCOMPARE(reference.unitAt(doc.findBlockByNumber(codeFirst + 5000).position()).selectionEnd(), unit.selectionEnd());
+}
+
+// A document over MarkdownModel::backgroundShowChars shown with nothing
+// parsed: the view doesn't wait for the parse, it shows the source line by
+// line until the worker is done, then the rendered blocks at the same place.
+// A smaller one is rendered at once.
+void TestVisualView::largeDocumentsShowTheirSourceUntilParsed()
+{
+    m_view->hide();
+    QTextDocument small;
+    small.setDocumentLayout(new DocumentLayout(&small));
+    small.setPlainText(largeDocument());
+    auto *smallModel = new MarkdownModel(&small);
+    ProbeView smallView(smallModel);
+    smallView.resize(600, 500);
+    smallView.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&smallView));
+    QVERIFY(!smallModel->hasPendingEdits());
+    QVERIFY(smallView.lineIsRendered(13)); // Section 1's paragraph.
+
+    QTextDocument doc;
+    doc.setDocumentLayout(new DocumentLayout(&doc));
+    doc.setPlainText(largeDocument(MarkdownModel::backgroundShowChars + 4096));
+    auto *model = new MarkdownModel(&doc);
+    int reparsed = 0;
+    connect(model, &MarkdownModel::reparsed, this, [&] { ++reparsed; });
+    ProbeView view(model);
+    view.resize(600, 500);
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    QVERIFY(model->isAwaitingParse());
+    QVERIFY(model->isParsingInBackground());
+    QCOMPARE(model->parseGeneration(), 0);
+    QVERIFY(view.rowsConsistent());
+    QCOMPARE(view.rowCount(), doc.blockCount());
+    QVERIFY(!view.lineIsRendered(13));
+    QVERIFY(!view.grab().isNull());
+    // Scrolled meanwhile: the same line stays at the top.
+    const int line = 4000 * 11 + 2; // A section's paragraph.
+    view.scrollToLine(line);
+    QTRY_VERIFY(!model->hasPendingEdits());
+    QCOMPARE(reparsed, 1);
+    QVERIFY(!model->isAwaitingParse());
+    QVERIFY(view.rowsConsistent());
+    QVERIFY(view.rowCount() < doc.blockCount());
+    QVERIFY(view.lineIsRendered(13));
+    QVERIFY(view.lineIsRendered(line));
+    QCOMPARE(view.topLine(), line);
+    QVERIFY(matchesFreshParse(*model));
+    QCOMPARE(model->parseGeneration(), 1);
+}
+
+// Typing in the source the view shows while the worker parses: its result is
+// of older text, so the text as it is then is parsed from it, until the
+// parse is of the text as it is.
+void TestVisualView::editsWhileShowingTheSourceAreParsed()
+{
+    m_view->hide();
+    QTextDocument doc;
+    doc.setDocumentLayout(new DocumentLayout(&doc));
+    doc.setPlainText(largeDocument(MarkdownModel::backgroundShowChars + 4096));
+    auto *model = new MarkdownModel(&doc);
+    int applied = 0;
+    connect(model, &MarkdownModel::reparsed, this, [&] {
+        QVERIFY(matchesFreshParse(*model));
+        ++applied;
+    });
+    ProbeView view(model);
+    view.resize(600, 500);
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    view.setFocus();
+    QVERIFY(model->isAwaitingParse());
+    QTextCursor c(doc.findBlockByNumber(2));
+    c.insertText(QStringLiteral("Typed "));
+    QVERIFY(view.rowsConsistent());
+    QVERIFY(!view.lineIsRendered(2));
+    c.setPosition(doc.findBlockByNumber(50).position());
+    c.insertText(QStringLiteral("# Inserted\n\n"));
+    QVERIFY(view.rowsConsistent());
+    QCOMPARE(view.rowCount(), doc.blockCount());
+    QTRY_VERIFY(!model->hasPendingEdits());
+    QTRY_VERIFY(!model->isParsingInBackground());
+    QCOMPARE(applied, 1);
+    QVERIFY(view.rowsConsistent());
+    QVERIFY(QString::fromUtf8(model->blocks()[1].html.data(), model->blocks()[1].html.size())
+                .startsWith(QStringLiteral("<p>Typed A paragraph")));
+    const core::Block &heading = model->blocks()[model->blockAt(50)];
+    QVERIFY(QString::fromUtf8(heading.html.data(), heading.html.size()).contains(QStringLiteral("Inserted</h1>")));
+}
+
+// Something that needs the blocks now (a click on a task box, a test) parses
+// at once; the worker's result then changes nothing.
+void TestVisualView::flushWhileShowingTheSource()
+{
+    m_view->hide();
+    QTextDocument doc;
+    doc.setDocumentLayout(new DocumentLayout(&doc));
+    doc.setPlainText(largeDocument(MarkdownModel::backgroundShowChars + 4096));
+    auto *model = new MarkdownModel(&doc);
+    ProbeView view(model);
+    view.resize(600, 500);
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    QVERIFY(model->isAwaitingParse());
+    model->flush();
+    QVERIFY(!model->isAwaitingParse());
+    QCOMPARE(model->parseGeneration(), 1);
+    QVERIFY(matchesFreshParse(*model));
+    QVERIFY(view.lineIsRendered(13));
+    QVERIFY(view.rowsConsistent());
+    QTRY_VERIFY(!model->isParsingInBackground());
+    QTest::qWait(20);
+    QCOMPARE(model->parseGeneration(), 1);
+    QVERIFY(matchesFreshParse(*model));
+}
+
+// Opening a large Markdown file in Source mode, then switching to Visual:
+// the switch doesn't wait for the parse, and the caret stays in view.
+void TestVisualView::switchingToVisualShowsTheSourceFirst()
+{
+    m_view->hide();
+    QTemporaryDir dir;
+    QFile file(dir.filePath(QStringLiteral("large.md")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(largeDocument(MarkdownModel::backgroundShowChars + 4096).toUtf8());
+    file.close();
+    DocumentTab tab;
+    QVERIFY(tab.load(file.fileName()));
+    tab.setViewMode(DocumentTab::ViewMode::Source);
+    tab.resize(900, 600);
+    tab.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&tab));
+    QTextDocument *doc = tab.document();
+    const int line = doc->blockCount() / 2;
+    tab.editor()->setTextCursor(QTextCursor(doc->findBlockByNumber(line)));
+    MarkdownModel *model = tab.file()->markdownModel();
+    tab.setViewMode(DocumentTab::ViewMode::Visual);
+    QVERIFY(model->isAwaitingParse());
+    QVERIFY(!tab.grab().isNull());
+    QTRY_VERIFY(!model->hasPendingEdits());
+    QVERIFY(matchesFreshParse(*model));
+    VisualView *visual = tab.visualView();
+    QCOMPARE(visual->textCursor().blockNumber(), line);
+    // In view: on a line from the top one to the last one that shows.
+    QVERIFY(!visual->grab().isNull());
+    QVERIFY(visual->topLine() <= line);
+    QVERIFY(line - visual->topLine() < 100);
+}
+
+// A mode switch shows the visual view in half the tab first (the splitter
+// still holds the source view), at a width it keeps only until the layout
+// catches up: blocks are rendered once, at the width that is painted, and
+// the caret carried over from the source stays in view.
+void TestVisualView::switchingToVisualRendersAtTheFinalWidthOnly()
+{
+    m_view->hide();
+    QTemporaryDir dir;
+    QFile file(dir.filePath(QStringLiteral("doc.md")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(largeDocument(60000).toUtf8());
+    file.close();
+    DocumentTab tab;
+    QVERIFY(tab.load(file.fileName()));
+    tab.setViewMode(DocumentTab::ViewMode::Source);
+    tab.resize(900, 600);
+    tab.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&tab));
+    QTextDocument *doc = tab.document();
+    const int line = doc->blockCount() / 2 + 2;
+    tab.editor()->setTextCursor(QTextCursor(doc->findBlockByNumber(line)));
+    tab.setViewMode(DocumentTab::ViewMode::Visual);
+    // As the event loop goes on: the layout first, then the paint.
+    QCoreApplication::sendPostedEvents();
+    VisualView *visual = tab.visualView();
+    QVERIFY(!visual->grab().isNull());
+    QVERIFY(visual->renderCount() > 3);
+    QCOMPARE(visual->renderCount(), visual->memoizedRenderCount());
+    QCOMPARE(visual->textCursor().blockNumber(), line);
+    QVERIFY(visual->topLine() <= line);
+    QVERIFY(line - visual->topLine() < 40);
 }
 
 // Keep tests away from the user's settings file.

@@ -71,6 +71,18 @@ public:
     void flushInBackground();
     // A worker thread is parsing the document.
     bool isParsingInBackground() const { return m_job.running; }
+    // Whether spans() can be read without parsing the whole document first
+    // (false before the first parse, after big edits and parse settings).
+    bool hasUsableSpans() const { return !m_dirty; }
+    // For a view about to show a document whose spans are unusable: a large
+    // one (see backgroundShowChars) is parsed on a worker thread instead, and
+    // spans() is empty until reparsed is emitted (the view shows the source
+    // meanwhile); returns whether it is (or already was). A smaller one is
+    // left to spans(), which parses it at once. Edits made meanwhile are
+    // parsed after, from the worker's result; flush() still parses at once.
+    bool parseInBackground();
+    // parseInBackground() is under way: spans() is empty, not out of date.
+    bool isAwaitingParse() const { return m_awaiting; }
     // Whether the last parse only parsed the blocks around the edits again
     // (see core::reparse); for tests.
     bool lastParseSpliced() const { return m_parsed && m_parsed->spliced(); }
@@ -78,6 +90,9 @@ public:
     // Parsing costs about 18 ms per MB; past this many characters edit
     // pauses parse off the GUI thread.
     static constexpr qsizetype backgroundParseChars = 256 * 1024;
+    // Past this many characters a view being shown doesn't wait for the
+    // first parse (see parseInBackground); smaller ones show rendered at once.
+    static constexpr qsizetype backgroundShowChars = 1024 * 1024;
 
     // Bumped whenever rendering options change, so views drop cached renders.
     int optionsRevision() const { return m_optionsRevision; }
@@ -105,16 +120,23 @@ private:
     void reparse();
     void apply(std::shared_ptr<const core::Document> parsed);
     void documentChanged(int from, int removed, int added);
+    void startJob();
     void backgroundParseDone();
+    // What the next parse starts from: the newest parse, applied or not.
+    std::shared_ptr<const core::Document> previousParse() const { return m_draft ? m_draft : m_parsed; }
 
     QTextDocument *m_doc;
     // The last parse; also what the next parse of a large document starts from.
     std::shared_ptr<const core::Document> m_parsed;
+    // A worker's parse of text edited before it could be applied, kept for
+    // the next parse to start from while the spans wait (see m_awaiting).
+    std::shared_ptr<const core::Document> m_draft;
     std::vector<Span> m_spans;
     QTimer m_timer;
     int m_lineCount = 0;      // Lines when m_spans were last made consistent.
     bool m_dirty = true;      // Spans unusable: parse before reading them.
     bool m_pending = false;   // Spans shifted by edits, a reparse is due.
+    bool m_awaiting = false;  // Unusable spans emptied for a worker's parse.
     int m_revision = 0;
     int m_parseGeneration = 0;
     int m_optionsRevision = 0;

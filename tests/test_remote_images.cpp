@@ -208,6 +208,7 @@ private Q_SLOTS:
     void cleanup();
 
     void findsWhatQtWillRequest();
+    void findsNamesSpelledWithFoldingLetters();
     void entityEncodedAddressesAreListedAndFetchedOnlyAfterConsent();
     void redirectRules();
     void nothingIsRequestedWithoutConsent();
@@ -335,6 +336,20 @@ void TestRemoteImages::findsWhatQtWillRequest()
         QVERIFY(!url.contains(QLatin1String("/page")));
     }
     QVERIFY(RenderedBlock::remoteImages(htmlBlock(QStringLiteral("<p>no pictures, see http://example.com</p>")), ctx).isEmpty());
+    QVERIFY(m_stub->requests.isEmpty());
+}
+
+// Qt matches tag and attribute names ignoring case by Unicode rules, where
+// the Kelvin sign is a "k" and the long s an "s": the quick look at the
+// HTML's bytes for names that load pictures must not miss those.
+void TestRemoteImages::findsNamesSpelledWithFoldingLetters()
+{
+    const QString host = m_stub->host();
+    const RenderContext ctx = context(false);
+    const QString kelvin = QStringLiteral("<table><tr><td bac\u212Aground=\"http://%1/k.png\">x</td></tr></table>").arg(host);
+    QCOMPARE(RenderedBlock::remoteImages(htmlBlock(kelvin), ctx), QStringList{QStringLiteral("http://%1/k.png").arg(host)});
+    const QString longS = QStringLiteral("<\u017Ftyle>p { background-image: url(http://%1/s.png) }</\u017Ftyle><p>x</p>").arg(host);
+    QCOMPARE(RenderedBlock::remoteImages(htmlBlock(longS), ctx), QStringList{QStringLiteral("http://%1/s.png").arg(host)});
     QVERIFY(m_stub->requests.isEmpty());
 }
 

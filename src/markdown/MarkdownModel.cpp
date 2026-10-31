@@ -10,9 +10,24 @@
 
 #include <algorithm>
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 namespace vn {
 
 namespace {
+
+// Gives memory freed by a large parse back to the system. glibc keeps what
+// is freed in each thread's arena for later; the text copies, the trees and
+// the old blocks of a parse of a 10 MB document come to some 100 MB, which
+// would stay with the process. Takes a few milliseconds; worker threads only.
+void releaseFreedMemory()
+{
+#if defined(__GLIBC__)
+    malloc_trim(0);
+#endif
+}
 
 // Edits over more lines than this (pastes, replace all, reloads) mark the
 // spans unusable instead: the next read reparses, as one big edit costs a
@@ -51,6 +66,9 @@ std::shared_ptr<const core::Document> parseText(QString text, const core::Render
 {
     text.replace(QChar::ParagraphSeparator, u'\n');
     const QByteArray utf8 = text.toUtf8();
+    // Twice the size of the UTF-8: gone before the parse (the core keeps a
+    // copy of the text too).
+    text = QString();
     const rust::Str markdown(utf8.constData(), utf8.size());
     return shared(previous ? core::reparse(*previous, markdown, options) : core::parse(markdown, options));
 }
@@ -127,7 +145,7 @@ int MarkdownModel::blockAt(int line)
 const std::vector<MarkdownModel::Span> &MarkdownModel::spans()
 {
     // Silent: the caller is a view rebuilding its rows from this.
-    if (m_dirty)
+    if (m_dirty && !m_awaiting)
         reparse();
     return m_spans;
 }
@@ -152,7 +170,8 @@ void MarkdownModel::flush()
 
 void MarkdownModel::flushInBackground()
 {
-    if (!m_dirty && !m_pending)
+    // (A parse the views wait for is on its way.)
+    if ((!m_dirty && !m_pending) || m_awaiting)
         return;
     // Unusable spans can't wait: the views need them now. Small documents
     // parse in a few milliseconds.
@@ -160,6 +179,24 @@ void MarkdownModel::flushInBackground()
         flush();
         return;
     }
+    startJob();
+}
+
+bool MarkdownModel::parseInBackground()
+{
+    if (m_awaiting)
+        return true;
+    if (!m_dirty || m_doc->characterCount() <= backgroundShowChars)
+        return false;
+    m_awaiting = true;
+    m_spans.clear();
+    ++m_revision;
+    startJob();
+    return true;
+}
+
+void MarkdownModel::startJob()
+{
     if (m_job.running) {
         m_job.again = true;
         return;
@@ -174,8 +211,12 @@ void MarkdownModel::flushInBackground()
     promise->start();
     m_job.watcher->setFuture(promise->future());
     QThreadPool::globalInstance()->start([promise, serial = m_inputSerial, text = m_doc->toRawText(),
-                                          options = options(), previous = m_parsed] {
-        promise->addResult(std::make_shared<ParseResult>(ParseResult{serial, parseText(text, options, previous)}));
+                                          options = options(), previous = previousParse()]() mutable {
+        // (Moved: a copy would be detached by parseText, one more of it.)
+        auto result = std::make_shared<ParseResult>(ParseResult{serial, parseText(std::move(text), options, previous)});
+        previous.reset();
+        releaseFreedMemory();
+        promise->addResult(std::move(result));
         promise->finish();
     });
 }
@@ -187,9 +228,17 @@ void MarkdownModel::backgroundParseDone()
         m_job.watcher->future().resultCount() > 0 ? m_job.watcher->result() : nullptr;
     // Only a parse of the text as it is now may replace the spans; one of
     // older text, or one that a synchronous flush() overtook, is dropped.
-    if (result && result->serial == m_inputSerial && m_pending && !m_dirty) {
+    if (result && result->serial == m_inputSerial && (m_pending || m_awaiting)) {
         apply(result->parsed);
         Q_EMIT reparsed();
+        return;
+    }
+    if (m_awaiting) {
+        // The views still wait: parse the text as it is now, starting from
+        // this result (only the blocks around the edits are parsed again).
+        if (result && result->serial != m_inputSerial)
+            m_draft = result->parsed;
+        startJob();
         return;
     }
     if (m_job.again)
@@ -255,16 +304,22 @@ void MarkdownModel::reparse()
 {
     // Small documents parse whole, as they always did.
     const bool large = m_doc->characterCount() > backgroundParseChars;
-    apply(parseText(m_doc->toRawText(), options(), large ? m_parsed : nullptr));
+    apply(parseText(m_doc->toRawText(), options(), large ? previousParse() : nullptr));
 }
 
 void MarkdownModel::apply(std::shared_ptr<const core::Document> parsed)
 {
     // Freeing a large document's blocks takes milliseconds (about 3 ms at
-    // 10 MB): the thread pool does it.
-    if (m_parsed && m_parsed->blocks().size() > 4096)
-        QThreadPool::globalInstance()->start([old = std::move(m_parsed)] {});
+    // 10 MB): the thread pool does it, and gives the memory back.
+    if (m_parsed && m_parsed->blocks().size() > 4096) {
+        QThreadPool::globalInstance()->start([old = std::move(m_parsed)]() mutable {
+            old.reset();
+            releaseFreedMemory();
+        });
+    }
     m_parsed = std::move(parsed);
+    m_draft.reset();
+    m_awaiting = false;
     const rust::Vec<core::Block> &blocks = m_parsed->blocks();
     m_lineCount = m_doc->blockCount();
     m_spans.clear();

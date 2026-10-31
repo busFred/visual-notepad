@@ -675,6 +675,8 @@ bool namesOtherMachine(const QUrl &url)
 
 // Whether HTML can make Qt ask for a picture: an img tag, a background
 // attribute or a style. (Tag and attribute names are never entity-encoded.)
+// Qt matches names ignoring case, by Unicode rules: the long s and the Kelvin
+// sign count as "s" and "k".
 bool mayLoadPictures(const QString &html)
 {
     return html.contains(QLatin1String("<img"), Qt::CaseInsensitive)
@@ -694,6 +696,42 @@ QImage brokenPicture()
         return icon;
     }();
     return image;
+}
+
+// The same answer from the UTF-8 bytes, without making a QString (a scan
+// of every block's HTML for remote pictures does this for each block): the
+// names in ASCII letters of either case, and the text above for HTML with a
+// character that folds to an ASCII letter.
+bool mayLoadPictures(QByteArrayView html)
+{
+    const char *text = html.data();
+    const qsizetype size = html.size();
+    const auto at = [&](qsizetype i, QLatin1StringView word) {
+        return size - i >= word.size() && qstrnicmp(text + i, word.data(), size_t(word.size())) == 0;
+    };
+    for (qsizetype i = 0; i < size; ++i) {
+        switch (text[i] | 0x20) {
+        case '<':
+            if (at(i, "<img"_L1))
+                return true;
+            break;
+        case 'b':
+            if (at(i, "background"_L1))
+                return true;
+            break;
+        case 's':
+            if (at(i, "style"_L1))
+                return true;
+            break;
+        default:
+            // U+017F (long s) is C5 BF, U+212A (Kelvin sign) E2 84 AA.
+            if ((text[i] == '\xC5' || text[i] == '\xE2')
+                && (html.sliced(i).startsWith("\xC5\xBF") || html.sliced(i).startsWith("\xE2\x84\xAA")))
+                return mayLoadPictures(QString::fromUtf8(html));
+            break;
+        }
+    }
+    return false;
 }
 
 // Rich text with images resolved here: math placeholders, files, and
@@ -1030,6 +1068,7 @@ constexpr qsizetype highlightMax = 400 * 1000; // Characters; highlighting costs
 
 std::atomic<bool> layoutGuard{true};
 std::atomic<int> guardedBlocks{0};
+std::atomic<bool> partsEnabled{true};
 
 bool isOneOf(QLatin1StringView name, std::initializer_list<QLatin1StringView> names)
 {
@@ -1170,24 +1209,33 @@ double runSquaresOf(const QString &text)
     return sum + double(run) * double(run);
 }
 
+// Long runs of text with no place to break: wrapping at a boundary first and
+// then anywhere rescans the run for every line (see the limits above).
+// Wrapping anywhere puts the lines in the same places for such a run.
+bool wrapsCodeAnywhere(const QString &source)
+{
+    return layoutGuard && runSquaresOf(source) > codeRunSquares;
+}
+
+// A huge block is not highlighted: that costs twice the layout.
+bool highlightsCode(qsizetype sourceChars)
+{
+    return !layoutGuard || sourceChars <= highlightMax;
+}
+
 std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString &definition,
-                                            const RenderContext &context, qreal width)
+                                            const RenderContext &context, qreal width, bool wrapAnywhere,
+                                            bool highlight)
 {
     auto doc = std::make_unique<QTextDocument>();
     doc->setDocumentMargin(0);
     doc->setDefaultFont(context.codeFont);
-    const bool guard = layoutGuard;
     QTextOption option;
-    // Long runs of text with no place to break: wrapping at a boundary first
-    // and then anywhere rescans the run for every line (see the limits above).
-    // Wrapping anywhere puts the lines in the same places for such a run.
-    option.setWrapMode(guard && runSquaresOf(source) > codeRunSquares ? QTextOption::WrapAnywhere
-                                                                       : QTextOption::WrapAtWordBoundaryOrAnywhere);
+    option.setWrapMode(wrapAnywhere ? QTextOption::WrapAnywhere : QTextOption::WrapAtWordBoundaryOrAnywhere);
     doc->setDefaultTextOption(option);
     doc->setPlainText(source);
     doc->setTextWidth(width);
-    // A huge block is not highlighted: that costs twice the layout.
-    if (guard && source.size() > highlightMax)
+    if (!highlight)
         return doc;
     auto *highlighter = new CodeHighlighter(doc.get());
     highlighter->setTheme(theme::syntaxTheme());
@@ -1247,7 +1295,8 @@ std::unique_ptr<RenderedBlock> RenderedBlock::codeBox(std::unique_ptr<RenderedBl
 {
     RenderedBlock &r = *result;
     r.m_kind = Kind::Code;
-    r.m_doc = codeDocument(source, QStringLiteral("Markdown"), context, context.width - 2 * codePadX);
+    r.m_doc = codeDocument(source, QStringLiteral("Markdown"), context, context.width - 2 * codePadX,
+                           wrapsCodeAnywhere(source), highlightsCode(source.size()));
     if (!r.m_error.isEmpty()) {
         QTextCursor end(r.m_doc.get());
         end.movePosition(QTextCursor::End);
@@ -1256,6 +1305,55 @@ std::unique_ptr<RenderedBlock> RenderedBlock::codeBox(std::unique_ptr<RenderedBl
         end.insertText(QStringLiteral("\n") + QObject::tr("Diagram error: %1").arg(r.m_error), errorFormat);
     }
     r.m_height = r.m_doc->size().height() + 2 * codePadY + blockGap;
+    r.collectLineAnchors(int(source.count(u'\n')) + 1);
+    return result;
+}
+
+void RenderedBlock::setPartsEnabled(bool on)
+{
+    partsEnabled = on;
+}
+
+bool RenderedBlock::isLongCodeBox(const core::Block &block, qsizetype sourceChars)
+{
+    if (!partsEnabled || highlightsCode(sourceChars))
+        return false;
+    switch (block.kind) {
+    case core::BlockKind::Code:
+        // Not a Mermaid diagram (an image, or its source with the error below).
+        return QString::fromUtf8(block.lang.data(), block.lang.size()).trimmed().compare(QLatin1String("mermaid"),
+                                                                                       Qt::CaseInsensitive) != 0;
+    case core::BlockKind::FrontMatter:
+        return true;
+    case core::BlockKind::Html:
+        return tooHeavyForRichText(block.html.data(), block.html.size());
+    default:
+        return false;
+    }
+}
+
+bool RenderedBlock::wrapsAnywhere(const QString &source)
+{
+    return wrapsCodeAnywhere(source);
+}
+
+std::unique_ptr<RenderedBlock> RenderedBlock::createPart(const QString &source, const Part &part,
+                                                         const RenderContext &context)
+{
+    auto result = std::unique_ptr<RenderedBlock>(new RenderedBlock);
+    RenderedBlock &r = *result;
+    r.m_width = context.width;
+    r.m_kind = Kind::Code;
+    r.m_part = part;
+    // As codeBox() makes the whole box: the same text options, unhighlighted.
+    // A part above another ends in its last line break, so that a selection
+    // that runs on shows it as the box does; the empty line after it is
+    // below the part.
+    r.m_doc = codeDocument(part.last ? source : source + u'\n', QString(), context, context.width - 2 * codePadX,
+                           part.wrapAnywhere, false);
+    const qreal textHeight = part.last ? r.m_doc->size().height()
+                                       : r.m_doc->documentLayout()->blockBoundingRect(r.m_doc->lastBlock()).top();
+    r.m_height = textHeight + (part.first ? codePadY : 0) + (part.last ? codePadY + blockGap : 0);
     r.collectLineAnchors(int(source.count(u'\n')) + 1);
     return result;
 }
@@ -1341,7 +1439,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         doc->setTextWidth(context.width);
         r.m_height = doc->size().height() + blockGap;
         // Backgrounds are asked for when painted: start their downloads now.
-        if (context.allowRemoteImages && mayLoadPictures(html))
+        if (context.allowRemoteImages && mayLoadPictures(QByteArrayView(block.html.data(), qsizetype(block.html.size()))))
             doc->loadPaintedPictures();
         r.m_pending = doc->hasPendingDownload();
         r.m_pictureBytes = doc->pictureBytes(); // Resolved by the layout (and the dry paint).
@@ -1352,13 +1450,17 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
     }
 }
 
+bool RenderedBlock::mayAskForPictures(const core::Block &block)
+{
+    return block.kind == core::BlockKind::Html
+           && mayLoadPictures(QByteArrayView(block.html.data(), qsizetype(block.html.size())));
+}
+
 QStringList RenderedBlock::remoteImages(const core::Block &block, const RenderContext &context)
 {
-    if (block.kind != core::BlockKind::Html)
+    if (!mayAskForPictures(block))
         return {};
     const QString html = QString::fromUtf8(block.html.data(), block.html.size());
-    if (!mayLoadPictures(html))
-        return {};
     // Shown as its source (see create()): it asks for no pictures, and laying
     // it out would take as long as create() avoids.
     if (layoutGuard && tooHeavyForRichText(block.html.data(), block.html.size()))
@@ -1413,7 +1515,7 @@ void RenderedBlock::collectLineAnchors(int sourceLines)
 
 QPointF RenderedBlock::contentOffset() const
 {
-    return m_kind == Kind::Code ? QPointF(codePadX, codePadY) : QPointF(0, 0);
+    return m_kind == Kind::Code ? QPointF(codePadX, m_part.first ? codePadY : 0) : QPointF(0, 0);
 }
 
 void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width, const RenderedSelection &selection) const
@@ -1443,9 +1545,17 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
         return;
     }
     case Kind::Code: {
+        // A part of a box (see createPart) paints the part of the whole box
+        // that it covers: the box runs on past the edges it shares with the
+        // other parts.
+        constexpr qreal radius = 3;
+        const qreal top = m_part.first ? topLeft.y() : topLeft.y() - 2 * radius;
+        const qreal bottom = m_part.last ? topLeft.y() + m_height - blockGap : topLeft.y() + m_height + 2 * radius;
         QPainterPath box;
-        box.addRoundedRect(QRectF(topLeft, QSizeF(width, m_height - blockGap)), 3, 3);
+        box.addRoundedRect(QRectF(topLeft.x(), top, width, bottom - top), radius, radius);
         painter.save();
+        if (!m_part.first || !m_part.last)
+            painter.setClipRect(QRectF(topLeft, QSizeF(width, m_height)), Qt::IntersectClip);
         painter.setRenderHint(QPainter::Antialiasing);
         painter.fillPath(box, theme::color(theme::Role::codeBlock));
         painter.restore();
@@ -1455,6 +1565,10 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
         painter.save();
         painter.translate(topLeft + contentOffset());
         QAbstractTextDocumentLayout::PaintContext ctx;
+        // Only what shows: a block can be far taller than the window, and
+        // the layout draws every line it is not told to skip.
+        if (painter.hasClipping())
+            ctx.clip = painter.clipBoundingRect();
         ctx.palette.setColor(QPalette::Text, theme::color(theme::Role::text));
         const QColor selectionText = theme::color(theme::Role::selectionText);
         for (const auto &range : selection.ranges) {

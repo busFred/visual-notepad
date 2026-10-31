@@ -20,6 +20,7 @@
 #include <QToolTip>
 
 #include <algorithm>
+#include <optional>
 
 namespace vn {
 
@@ -32,9 +33,12 @@ constexpr qreal activeBarInset = 10;
 // Render cache budget per view, in KiB (see RenderedBlock::cost).
 constexpr int renderCacheKiB = 48 * 1024;
 // Renders the view keeps in hand besides the cache (see rendered()): a screen
-// shows a few dozen blocks, at most a few hundred.
-constexpr int spanRenderMax = 512;
-constexpr int spanRenderKiB = 16 * 1024;
+// shows a few dozen blocks, at most a few hundred. What the last paint showed
+// is kept even past the budget (one block alone may be over it), up to a
+// hard limit on their number.
+constexpr int renderMax = 512;
+constexpr int renderKiB = 16 * 1024;
+constexpr int renderHardMax = 2 * renderMax;
 
 bool sameChar(QChar a, QChar b)
 {
@@ -125,25 +129,14 @@ void VisualView::clearRenderCache()
 {
     m_cache.clear();
     m_pendingKeys.clear();
-    resetSpanRenders(0);
+    resetRenders();
 }
 
-void VisualView::resetSpanRenders(size_t spans)
+void VisualView::resetRenders()
 {
-    m_spanRenders.assign(spans, {});
-    m_spanRenderOrder.clear();
-    m_spanRenderCount = 0;
-    m_spanRenderKiB = 0;
-}
-
-void VisualView::dropSpanRender(int span)
-{
-    Render &render = m_spanRenders[span];
-    if (!render.block)
-        return;
-    --m_spanRenderCount;
-    m_spanRenderKiB -= render.cost;
-    render = {};
+    m_renders.clear();
+    m_renderOrder.clear();
+    m_renderKiB = 0;
 }
 
 void VisualView::asyncRenderReady()
@@ -155,10 +148,14 @@ void VisualView::asyncRenderReady()
     for (const QString &key : std::as_const(m_pendingKeys))
         m_cache.remove(key);
     m_pendingKeys.clear();
-    for (size_t i = 0; i < m_spanRenders.size(); ++i) {
-        if (m_spanRenders[i].block && m_spanRenders[i].block->isPending())
-            dropSpanRender(int(i));
-    }
+    std::erase_if(m_renderOrder, [this](int line) {
+        const auto it = m_renders.find(line);
+        if (!it->second.block->isPending())
+            return false;
+        m_renderKiB -= it->second.cost;
+        m_renders.erase(it);
+        return true;
+    });
     relayout();
 }
 
@@ -185,11 +182,21 @@ void VisualView::rowsMayHaveChanged()
 void VisualView::showEvent(QShowEvent *event)
 {
     TextView::showEvent(event);
-    // Edits made while hidden are parsed once now rather than shown stale.
-    m_model->flush();
+    // Edits made while hidden are parsed once now rather than shown stale,
+    // but a large document with nothing usable parsed is parsed on a worker
+    // (its source shows meanwhile).
+    if (m_model->hasUsableSpans() || !m_model->parseInBackground())
+        m_model->flush();
     if (m_rowsStale)
         relayout();
     updateRemoteBanner();
+}
+
+void VisualView::hideEvent(QHideEvent *event)
+{
+    TextView::hideEvent(event);
+    m_showsParse = false;
+    m_unpainted = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +223,8 @@ void VisualView::updateRemoteBanner()
             const RenderContext ctx = context();
             for (int i = 0, n = m_model->parsedBlockCount(); i < n; ++i) {
                 const core::Block &block = m_model->parsedBlock(i);
-                if (block.kind != core::BlockKind::Html)
+                // (Most blocks can't ask for any: no need to keep their scans.)
+                if (!RenderedBlock::mayAskForPictures(block))
                     continue;
                 const size_t hash = qHash(QByteArrayView(block.html.data(), qsizetype(block.html.size())));
                 const auto known = m_remoteScans.constFind(hash);
@@ -317,6 +325,34 @@ void VisualView::resizeEvent(QResizeEvent *event)
 void VisualView::rebuildRows()
 {
     const int lines = document()->blockCount();
+    // Shown before a large document is parsed: its source stands in, line
+    // by line, until the worker is done (see MarkdownModel::parseInBackground).
+    if (m_model->isAwaitingParse()
+        || (!m_model->hasUsableSpans() && !m_showsParse && m_model->parseInBackground())) {
+        if (m_standIn && int(m_lineToRow.size()) == lines)
+            return;
+        m_rows.clear();
+        m_rows.reserve(lines);
+        m_lineToRow.resize(lines);
+        for (int line = 0; line < lines; ++line) {
+            m_lineToRow[line] = line;
+            m_rows.push_back({{line, line, false}, -1});
+        }
+        m_expandedBlocks.clear();
+        m_partSpans.clear();
+        m_rowsExpanded.clear();
+        m_rowsStale = false;
+        m_rowsRevision = -1;
+        m_standIn = true;
+        return;
+    }
+    // The rendered rows that replace the stand-in keep its place.
+    std::optional<Place> standInPlace;
+    if (m_standIn) {
+        standInPlace = place();
+        m_standIn = false;
+    }
+    m_showsParse = true;
     const auto &spans = m_model->spans();
 
     // Blocks open for editing only while this view has focus, so a document
@@ -357,6 +393,7 @@ void VisualView::rebuildRows()
     m_rows.clear();
     m_rows.reserve(spans.size() * 2 + 16);
     m_expandedBlocks.clear();
+    m_partSpans.clear();
     m_lineToRow.assign(lines, 0);
     // Queries come in ascending line order, so one pass over the ranges.
     size_t next = 0;
@@ -383,6 +420,15 @@ void VisualView::rebuildRows()
                     m_lineToRow[l] = int(m_rows.size());
                     m_rows.push_back({{l, l, false}, int(s)});
                 }
+            } else if (madeInParts(int(s))) {
+                // A row a part, so that only the parts on screen are laid out.
+                m_partSpans.insert(int(s));
+                for (int from = line; from <= last; from += RenderedBlock::partLines) {
+                    const int to = qMin(last, from + RenderedBlock::partLines - 1);
+                    for (int l = from; l <= to; ++l)
+                        m_lineToRow[l] = int(m_rows.size());
+                    m_rows.push_back({{from, to, true}, int(s)});
+                }
             } else {
                 for (int l = line; l <= last; ++l)
                     m_lineToRow[l] = int(m_rows.size());
@@ -400,6 +446,23 @@ void VisualView::rebuildRows()
     m_rowsStale = false;
     m_rowsRevision = m_model->revision();
     m_rowsExpanded = std::move(expanded);
+    if (standInPlace)
+        restorePlace(*standInPlace);
+}
+
+VisualView::Place VisualView::place()
+{
+    qreal top = 0;
+    const int bottom = rowAt(viewport()->height() - 1, &top);
+    const int caret = textCursor().blockNumber();
+    return {topLinePosition(), caret >= topLine() && (bottom < 0 || caret <= row(bottom).lastLine)};
+}
+
+void VisualView::restorePlace(const Place &place)
+{
+    scrollToLinePosition(place.top);
+    if (place.caretShown)
+        ensureCursorVisible();
 }
 
 int VisualView::rowCount() const
@@ -445,8 +508,39 @@ RenderContext VisualView::context() const
     return ctx;
 }
 
-const RenderedBlock *VisualView::rendered(int index)
+VisualView::LongBox &VisualView::longBox(int blockIndex)
 {
+    if (m_longBoxesGeneration != m_model->parseGeneration()) {
+        m_longBoxes.clear();
+        m_longBoxesGeneration = m_model->parseGeneration();
+    }
+    return m_longBoxes[blockIndex];
+}
+
+bool VisualView::madeInParts(int s)
+{
+    const MarkdownModel::Span &span = m_model->spans()[s];
+    const int blockIndex = span.block >= 0 ? span.block : span.previous;
+    if (blockIndex < 0 || span.last - span.first < RenderedBlock::partLines)
+        return false;
+    QTextDocument *doc = document();
+    const QTextBlock last = doc->findBlockByNumber(qMin(span.last, doc->blockCount() - 1));
+    // As long as sourceText(span.first, span.last).
+    const qsizetype chars = last.position() + last.length() - 1 - doc->findBlockByNumber(span.first).position();
+    const core::Block &block = m_model->parsedBlock(blockIndex);
+    // A parsed block's lines are its own until the next parse; a stand-in's
+    // were edited since.
+    if (span.block < 0)
+        return RenderedBlock::isLongCodeBox(block, chars);
+    LongBox &box = longBox(blockIndex);
+    if (box.parts == -1)
+        box.parts = RenderedBlock::isLongCodeBox(block, chars);
+    return box.parts == 1;
+}
+
+const VisualView::Render *VisualView::rendered(const Row &r)
+{
+    const int index = spanForRow(r);
     const auto &spans = m_model->spans();
     if (index < 0 || index >= int(spans.size()))
         return nullptr;
@@ -457,19 +551,40 @@ const RenderedBlock *VisualView::rendered(int index)
         return nullptr;
 
     const RenderContext ctx = context();
-    if (m_spanRendersRevision != m_model->revision() || m_spanRendersWidth != ctx.width
-        || m_spanRendersDpr != ctx.devicePixelRatio || m_spanRenders.size() != spans.size()) {
-        resetSpanRenders(spans.size());
-        m_spanRendersRevision = m_model->revision();
-        m_spanRendersWidth = ctx.width;
-        m_spanRendersDpr = ctx.devicePixelRatio;
+    if (m_rendersRevision != m_model->revision() || m_rendersWidth != ctx.width
+        || m_rendersDpr != ctx.devicePixelRatio) {
+        resetRenders();
+        m_rendersRevision = m_model->revision();
+        m_rendersWidth = ctx.width;
+        m_rendersDpr = ctx.devicePixelRatio;
     }
-    Render &memo = m_spanRenders[index];
-    if (memo.block)
-        return memo.block.get();
+    if (const auto it = m_renders.find(r.firstLine); it != m_renders.end()) {
+        it->second.used = m_frame;
+        return &it->second;
+    }
 
     const core::Block &block = m_model->parsedBlock(blockIndex);
-    const QString source = m_model->sourceText(span.first, span.last);
+    // A part of a long code box: the lines of the row, and where it sits in the box.
+    const bool inParts = m_partSpans.contains(index);
+    RenderedBlock::Part part;
+    QString source;
+    if (inParts) {
+        source = m_model->sourceText(r.firstLine, r.lastLine);
+        part.first = r.firstLine == span.first;
+        part.last = r.lastLine >= qMin(span.last, document()->blockCount() - 1);
+        int wrap = -1;
+        LongBox *box = span.block >= 0 ? &longBox(blockIndex) : nullptr;
+        if (box)
+            wrap = box->wrap;
+        if (wrap == -1) {
+            wrap = RenderedBlock::wrapsAnywhere(m_model->sourceText(span.first, span.last));
+            if (box)
+                box->wrap = wrap;
+        }
+        part.wrapAnywhere = wrap == 1;
+    } else {
+        source = m_model->sourceText(span.first, span.last);
+    }
     // Identical blocks render identically, so the source (by hash, checked
     // on a hit) is the key. A stand-in pairs an old parse with new source:
     // never mistake it for the real render of that source.
@@ -483,52 +598,107 @@ const RenderedBlock *VisualView::rendered(int index)
                       .arg(ctx.devicePixelRatio)
                       .arg(source.size())
                       .arg(qHash(source));
-    if (span.block < 0)
+    if (inParts)
+        key += QStringLiteral("|part:%1%2%3").arg(int(part.first)).arg(int(part.last)).arg(int(part.wrapAnywhere));
+    else if (span.block < 0)
         key += QStringLiteral("|stale:%1:%2").arg(m_model->parseGeneration()).arg(blockIndex);
+    Render memo;
     const Render *hit = m_cache.object(key);
     if (hit && hit->source == source) {
         memo = *hit;
     } else {
-        const std::shared_ptr<RenderedBlock> created(RenderedBlock::create(block, source, ctx));
+        const std::shared_ptr<RenderedBlock> created(inParts ? RenderedBlock::createPart(source, part, ctx)
+                                                             : RenderedBlock::create(block, source, ctx));
         const int cost = created->cost() + int(source.size() / 512);
+        ++m_renderCount;
         memo = {source, key, created, cost};
         if (created->isPending())
             m_pendingKeys.insert(key);
         m_cache.insert(key, new Render(memo), cost);
     }
+    memo.used = m_frame;
+    Render &kept = m_renders[r.firstLine] = std::move(memo);
     // Keep the memos of the latest renders only: the cache holds the rest
     // within its budget, while memos on every block seen would keep them all
-    // alive, however far the view has scrolled on.
-    m_spanRenderOrder.push_back(index);
-    ++m_spanRenderCount;
-    m_spanRenderKiB += memo.cost;
-    while (m_spanRenderOrder.size() > 1 && m_spanRenderOrder.front() != index
-           && (m_spanRenderCount > spanRenderMax || m_spanRenderKiB > spanRenderKiB)) {
-        dropSpanRender(m_spanRenderOrder.front());
-        m_spanRenderOrder.pop_front();
+    // alive, however far the view has scrolled on. Those the paint in
+    // progress asked for stay, though, or one block over the budget would be
+    // made again for every other block shown with it.
+    m_renderOrder.push_back(r.firstLine);
+    m_renderKiB += kept.cost;
+    for (size_t rotated = 0; rotated < m_renderOrder.size()
+                             && (int(m_renders.size()) > renderMax || m_renderKiB > renderKiB);) {
+        const int oldest = m_renderOrder.front();
+        m_renderOrder.pop_front();
+        const auto it = m_renders.find(oldest);
+        if (oldest == r.firstLine || (it->second.used == m_frame && int(m_renders.size()) <= renderHardMax)) {
+            m_renderOrder.push_back(oldest);
+            ++rotated;
+            continue;
+        }
+        m_renderKiB -= it->second.cost;
+        m_renders.erase(it);
     }
-    return memo.block.get();
+    return &kept;
 }
 
 const RenderedBlock *VisualView::renderedForRow(const Row &r)
 {
-    return rendered(spanForRow(r));
+    const Render *render = rendered(r);
+    return render ? render->block.get() : nullptr;
+}
+
+const VisualView::Render *VisualView::memoized(const Row &r) const
+{
+    if (m_rendersRevision != m_model->revision() || m_rendersWidth != textWidth()
+        || m_rendersDpr != devicePixelRatioF())
+        return nullptr;
+    const auto it = m_renders.find(r.firstLine);
+    return it != m_renders.end() ? &it->second : nullptr;
 }
 
 qreal VisualView::renderedRowHeight(const Row &r, qreal)
 {
-    const int s = spanForRow(r);
-    if (s < 0)
+    if (spanForRow(r) < 0)
         return lineHeight() * gapRowFactor;
-    const RenderedBlock *block = rendered(s);
+    // Before the first paint the width may change yet (a splitter lays out
+    // a view it shows after showing it, and a mode switch shows it in a
+    // half first): blocks not rendered at this width are measured roughly,
+    // and rendered at the width the paint finds (see paintEvent).
+    if (m_unpainted) {
+        if (const Render *render = memoized(r))
+            return render->block->height();
+        m_estimated = true;
+        return lineHeight() * (r.lastLine - r.firstLine + 1);
+    }
+    const RenderedBlock *block = renderedForRow(r);
     return block ? block->height() : lineHeight();
 }
 
 void VisualView::paintRenderedRow(QPainter &painter, const Row &r, const QRectF &rect)
 {
-    const int s = spanForRow(r);
-    if (const RenderedBlock *block = rendered(s))
-        block->paint(painter, rect.topLeft(), rect.width(), selectionForRow(r, block, m_spanRenders[s].source));
+    if (const Render *render = rendered(r)) {
+        const RenderedBlock *block = render->block.get();
+        block->paint(painter, rect.topLeft(), rect.width(), selectionForRow(r, block, render->source));
+    }
+}
+
+void VisualView::paintEvent(QPaintEvent *event)
+{
+    if (m_unpainted) {
+        // The rough heights give way to the real ones, at the same place:
+        // the same source line at the top, and the caret in view if it was.
+        std::optional<Place> estimatedPlace;
+        if (m_estimated)
+            estimatedPlace = place();
+        m_unpainted = false;
+        m_estimated = false;
+        if (estimatedPlace) {
+            relayout();
+            restorePlace(*estimatedPlace);
+        }
+    }
+    ++m_frame;
+    TextView::paintEvent(event);
 }
 
 RenderedSelection VisualView::selectionForRow(const Row &r, const RenderedBlock *block, const QString &source) const
@@ -560,8 +730,9 @@ RenderedSelection VisualView::selectionForRow(const Row &r, const RenderedBlock 
             break;
         }
         case RenderedBlock::Kind::Code:
-            // The code box is a plain-text copy of the source.
-            result.ranges.append({qMax(a, rowStart) - rowStart, qMin(b, rowEnd) - rowStart});
+            // The code box is a plain-text copy of the source (a part of one
+            // has the line break after it too).
+            result.ranges.append({qMax(a, rowStart) - rowStart, qMin(b, rowEnd + 1) - rowStart});
             break;
         case RenderedBlock::Kind::Rich: {
             // Only a selection end inside the block needs the (linear) mapping.
@@ -582,9 +753,20 @@ RenderedSelection VisualView::selectionForRow(const Row &r, const RenderedBlock 
 
 QTextCursor VisualView::lineUnitAt(int position) const
 {
-    // A rendered block is one paragraph however many source lines it has.
+    // A rendered block is one paragraph however many source lines it has
+    // (and rows it is made in).
     const QTextBlock b = document()->findBlock(position);
-    const Row r = row(rowOfLine(b.blockNumber()));
+    const int index = rowOfLine(b.blockNumber());
+    Row r = row(index);
+    if (r.rendered && index < int(m_rows.size()) && m_partSpans.contains(m_rows[index].span)) {
+        int first = index;
+        int last = index;
+        while (first > 0 && m_rows[first - 1].span == m_rows[index].span)
+            --first;
+        while (last + 1 < int(m_rows.size()) && m_rows[last + 1].span == m_rows[index].span)
+            ++last;
+        r = {m_rows[first].row.firstLine, m_rows[last].row.lastLine, true};
+    }
     if (!r.rendered || r.lastLine <= r.firstLine)
         return TextView::lineUnitAt(position);
     const QTextBlock last = document()->findBlockByNumber(r.lastLine);
@@ -625,9 +807,10 @@ int VisualView::hitTestRenderedRow(const Row &r, const QPointF &point)
     QTextDocument *doc = document();
     const QTextBlock first = doc->findBlockByNumber(r.firstLine);
     const int s = spanForRow(r);
-    const RenderedBlock *block = rendered(s);
-    if (s < 0 || !block)
+    const Render *render = rendered(r);
+    if (s < 0 || !render)
         return first.position();
+    const RenderedBlock *block = render->block.get();
 
     const MarkdownModel::Span &span = m_model->spans()[s];
     const auto &info = m_model->parsedBlock(span.block >= 0 ? span.block : span.previous);
@@ -636,7 +819,7 @@ int VisualView::hitTestRenderedRow(const Row &r, const QPointF &point)
         const int pos = block->hitTest(point);
         if (pos < 0)
             return first.position();
-        return first.position() + sourceOffsetFor(block->renderedText().left(pos), m_spanRenders[s].source);
+        return first.position() + sourceOffsetFor(block->renderedText().left(pos), render->source);
     }
     case core::BlockKind::Code:
     case core::BlockKind::FrontMatter: {
@@ -707,6 +890,9 @@ std::vector<TextView::LineAnchor> VisualView::rowLineAnchors(const Row &r, qreal
     // their table rows, list items and code lines are.
     std::vector<LineAnchor> anchors;
     if (!r.rendered || r.lastLine == r.firstLine)
+        return anchors;
+    // (Rough heights spread the lines evenly; see renderedRowHeight.)
+    if (m_unpainted && !memoized(r))
         return anchors;
     if (const RenderedBlock *block = renderedForRow(r)) {
         for (const auto &[offset, y] : block->lineAnchors())

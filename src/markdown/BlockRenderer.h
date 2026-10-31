@@ -71,10 +71,34 @@ public:
 
     static std::unique_ptr<RenderedBlock> create(const core::Block &block, const QString &source,
                                                  const RenderContext &context);
+
+    // A code box too long to highlight (code, front matter, a block too heavy
+    // for rich text: see create) can be made in parts of partLines source
+    // lines instead, painted one under the other, so that a view lays out
+    // and keeps only the parts it shows. Together they look like the box.
+    static constexpr int partLines = 200;
+    // Whether create() makes such a box of the block with this much source.
+    static bool isLongCodeBox(const core::Block &block, qsizetype sourceChars);
+    // For tests: off, isLongCodeBox() says no (views make every box whole).
+    static void setPartsEnabled(bool on);
+    // Whether the box wraps its lines anywhere; decided on its whole source.
+    static bool wrapsAnywhere(const QString &source);
+    struct Part
+    {
+        bool first = true; // Has the top of the box.
+        bool last = true;  // Has the bottom.
+        bool wrapAnywhere = false;
+    };
+    // A part, from the lines of the source it covers.
+    static std::unique_ptr<RenderedBlock> createPart(const QString &source, const Part &part,
+                                                     const RenderContext &context);
     // The distinct http(s) addresses of the pictures an HTML block asks Qt for
     // when it is laid out and painted (entities and styles decoded by Qt
     // itself), whether or not downloads are allowed. Nothing is requested.
     static QStringList remoteImages(const core::Block &block, const RenderContext &context);
+    // False if remoteImages() is sure to be empty without laying the block
+    // out (it has no picture, background or style at all). Quick.
+    static bool mayAskForPictures(const core::Block &block);
 
     Kind kind() const { return m_kind; }
     qreal height() const { return m_height; }
@@ -141,6 +165,7 @@ private:
     QString m_diagramTheme;
     bool m_centered = false;
     bool m_pending = false;
+    Part m_part; // Of a code box; the whole box by default.
     std::vector<LineAnchor> m_lineAnchors;
     mutable QString m_renderedText; // Cached; null until asked for.
 };

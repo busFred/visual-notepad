@@ -156,7 +156,7 @@ use render::Document;
 
 fn parse(markdown: &str, options: &ffi::RenderOptions) -> Box<Document> {
     guarded(
-        || Box::new(Document::parse(markdown, options)),
+        || Box::new(Document::parse_large(markdown, options)),
         || Box::new(Document::unparsed(markdown, unparsed_blocks(markdown))),
     )
 }
