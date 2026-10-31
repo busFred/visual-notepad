@@ -2,6 +2,7 @@
 //! and Mermaid diagrams. Exposed to C++ through the cxx bridge below.
 
 mod format;
+mod gzip;
 mod links;
 mod md;
 mod mermaid;
@@ -96,7 +97,14 @@ mod ffi {
         fn rebase_links(text: &str, from_dir: &str, to_dir: &str) -> String;
         /// Destinations of inline links, images and definitions, in order.
         fn link_targets(markdown: &str) -> Vec<LinkTarget>;
+        /// Contents of gzip data (all members), or nothing if it is not valid
+        /// gzip or longer than `limit` bytes.
+        fn gunzip_bounded(data: &[u8], limit: usize) -> Vec<u8>;
     }
+}
+
+fn gunzip_bounded(data: &[u8], limit: usize) -> Vec<u8> {
+    gzip::gunzip_bounded(data, limit)
 }
 
 fn blocks(markdown: &str, options: &ffi::RenderOptions) -> Vec<ffi::Block> {

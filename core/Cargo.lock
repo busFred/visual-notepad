@@ -1018,6 +1018,7 @@ version = "0.0.7"
 dependencies = [
  "comrak",
  "cxx",
+ "flate2",
  "mermaid-rs-renderer",
  "resvg",
 ]
