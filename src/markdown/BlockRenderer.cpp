@@ -11,6 +11,7 @@
 #include <KSyntaxHighlighting/Theme>
 
 #include <QAbstractTextDocumentLayout>
+#include <QBuffer>
 #include <QCache>
 #include <QDateTime>
 #include <QDir>
@@ -61,17 +62,38 @@ QImage cachedMath(const QString &tex, const math::Style &style)
     return image;
 }
 
+// Largest SVG, once unpacked, that is scanned and opened. Pictures that are
+// shown in a column are far smaller; a gzip bomb is not.
+constexpr qint64 maxSvgBytes = 32 * 1024 * 1024;
+
 // True if the SVG at `path` names a file on another machine, which the SVG
 // plugin would open by itself: <image href> pictures and xml-stylesheet
-// style sheets. Read the way QtSvg reads it.
+// style sheets. Read the way QtSvg reads it: a file that starts with the gzip
+// magic is an .svgz, unpacked (every member) before it is parsed. One that
+// cannot be unpacked, or is too big, counts as naming one: it is not opened.
 bool svgNamesNetworkPath(const QString &path)
 {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly))
         return false;
+    QBuffer unpacked;
+    QIODevice *source = &file;
+    if (file.peek(2) == "\x1f\x8b") {
+        const QByteArray packed = file.read(maxSvgBytes + 1);
+        if (packed.size() > maxSvgBytes)
+            return true;
+        const rust::Vec<uint8_t> text = core::gunzip_bounded(
+            rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t *>(packed.constData()), size_t(packed.size())),
+            size_t(maxSvgBytes));
+        if (text.empty())
+            return true;
+        unpacked.setData(reinterpret_cast<const char *>(text.data()), qsizetype(text.size()));
+        unpacked.open(QIODevice::ReadOnly);
+        source = &unpacked;
+    }
     static const QRegularExpression href(QStringLiteral(R"(href\s*=\s*["']([^"']*))"),
                                          QRegularExpression::CaseInsensitiveOption);
-    QXmlStreamReader xml(&file);
+    QXmlStreamReader xml(source);
     xml.setNamespaceProcessing(false);
     while (!xml.atEnd()) {
         const QXmlStreamReader::TokenType token = xml.readNext();
