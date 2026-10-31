@@ -28,6 +28,7 @@
 #include <QTest>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QThreadPool>
 #include <QWheelEvent>
 
 using namespace vn;
@@ -89,6 +90,50 @@ QString longDocument()
     text += QStringLiteral("\nA closing paragraph that is long enough to wrap over more than one line in "
                            "the preview, so the end of the document is not a single short line.\n");
     return text;
+}
+
+// A document over MarkdownModel::backgroundParseChars: sections of a heading,
+// a paragraph, a task list and a code block.
+QString largeDocument()
+{
+    QString text;
+    for (int i = 0; text.size() <= MarkdownModel::backgroundParseChars + 4096; ++i)
+        text += QStringLiteral("## Section %1\n\nA paragraph with *emphasis* and `code` number %1.\n\n"
+                               "- [ ] task %1\n- item\n\n```\ncode %1\n```\n\n")
+                    .arg(i);
+    return text;
+}
+
+bool sameBlock(const core::Block &a, const core::Block &b)
+{
+    if (a.kind != b.kind || a.first_line != b.first_line || a.last_line != b.last_line || a.html != b.html
+        || a.lang != b.lang || a.text != b.text || a.inline_math.size() != b.inline_math.size())
+        return false;
+    for (size_t i = 0; i < a.inline_math.size(); ++i) {
+        if (a.inline_math[i] != b.inline_math[i])
+            return false;
+    }
+    return true;
+}
+
+// Whether the model's blocks are exactly a fresh parse of its document (the
+// model must have no pending edits, or blocks() would parse).
+bool matchesFreshParse(MarkdownModel &model)
+{
+    if (model.hasPendingEdits())
+        return false;
+    QString text = model.document()->toRawText();
+    text.replace(QChar::ParagraphSeparator, u'\n');
+    const QByteArray utf8 = text.toUtf8();
+    const auto fresh = core::blocks(rust::Str(utf8.constData(), utf8.size()), model.options());
+    const auto &blocks = model.blocks();
+    if (blocks.size() != fresh.size())
+        return false;
+    for (size_t i = 0; i < fresh.size(); ++i) {
+        if (!sameBlock(blocks[i], fresh[i]))
+            return false;
+    }
+    return true;
 }
 
 // Exposes the hit test, to read which source line is drawn at a point
@@ -172,6 +217,11 @@ private Q_SLOTS:
     void diagramsRenderInBackground();
     void oversizedDiagramsRenderOnce();
     void onlyParseSettingsReparse();
+    void largeDocumentsParseInBackground();
+    void editsDuringBackgroundParseAreKept();
+    void flushOvertakesBackgroundParse();
+    void modelDeletedDuringBackgroundParse();
+    void modeSwitchDuringBackgroundParse();
     void wideImagesShrinkToColumn();
     void decodedPicturesServeEveryWidth();
     void codeBlocksArePaintedAsTheStockHighlighterDoes_data();
@@ -872,6 +922,168 @@ void TestVisualView::onlyParseSettingsReparse()
     m_view->grab();
     QCOMPARE(m_model->parseGeneration(), generation + 1);
     settings.setValue(key::breaks, breaks);
+}
+
+void TestVisualView::largeDocumentsParseInBackground()
+{
+    m_view->hide();
+    QTextDocument doc;
+    doc.setDocumentLayout(new DocumentLayout(&doc));
+    doc.setPlainText(largeDocument());
+    auto *model = new MarkdownModel(&doc);
+    ProbeView view(model);
+    view.resize(600, 500);
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    QVERIFY(matchesFreshParse(*model));
+    const int generation = model->parseGeneration();
+    // Connected after the view: sees what the view's request started.
+    bool background = false;
+    connect(model, &MarkdownModel::reparseDue, this, [&] { background = model->isParsingInBackground(); });
+    int checked = 0;
+    connect(model, &MarkdownModel::reparsed, this, [&] {
+        QVERIFY(matchesFreshParse(*model));
+        ++checked;
+    });
+    QTextCursor c(doc.findBlockByNumber(2));
+    c.insertText(QStringLiteral("Typed "));
+    QVERIFY(view.rowsConsistent());
+    QVERIFY(view.lineIsRendered(2)); // The old render stands in meanwhile.
+    QTRY_VERIFY(!model->hasPendingEdits());
+    QVERIFY(background);
+    QCOMPARE(checked, 1);
+    QCOMPARE(model->parseGeneration(), generation + 1);
+    QVERIFY(view.rowsConsistent());
+    QVERIFY(QString::fromUtf8(model->blocks()[1].html.data(), model->blocks()[1].html.size())
+                .startsWith(QStringLiteral("<p>Typed A paragraph")));
+}
+
+void TestVisualView::editsDuringBackgroundParseAreKept()
+{
+    m_view->hide();
+    QTextDocument doc;
+    doc.setDocumentLayout(new DocumentLayout(&doc));
+    doc.setPlainText(largeDocument());
+    auto *model = new MarkdownModel(&doc);
+    ProbeView view(model);
+    view.resize(600, 500);
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    model->blocks();
+    const int generation = model->parseGeneration();
+    // Every parse that is applied matches the document as it is then.
+    int applied = 0;
+    connect(model, &MarkdownModel::reparsed, this, [&] {
+        QVERIFY(matchesFreshParse(*model));
+        ++applied;
+    });
+    QTextCursor c(doc.findBlockByNumber(2));
+    c.insertText(QStringLiteral("Edited "));
+    model->flushInBackground();
+    QVERIFY(model->isParsingInBackground());
+    // Edits while the worker parses the older text: a heading near the top
+    // that moves every block below it, and text deleted further down.
+    c.setPosition(doc.findBlockByNumber(4).position());
+    c.insertText(QStringLiteral("# Inserted\n\n"));
+    QVERIFY(view.rowsConsistent());
+    c.setPosition(doc.findBlockByNumber(20).position());
+    c.setPosition(doc.findBlockByNumber(31).position(), QTextCursor::KeepAnchor);
+    c.removeSelectedText();
+    QVERIFY(view.rowsConsistent());
+    QVERIFY(model->hasPendingEdits());
+    // The stale result is dropped; the pause after the last edit parses again.
+    QTRY_VERIFY(!model->hasPendingEdits());
+    QTRY_VERIFY(!model->isParsingInBackground());
+    QCOMPARE(applied, 1);
+    QCOMPARE(model->parseGeneration(), generation + 1);
+    QVERIFY(matchesFreshParse(*model));
+    QVERIFY(view.rowsConsistent());
+    const core::Block &heading = model->blocks()[model->blockAt(4)];
+    QVERIFY(QString::fromUtf8(heading.html.data(), heading.html.size()).contains(QStringLiteral("Inserted</h1>")));
+}
+
+void TestVisualView::flushOvertakesBackgroundParse()
+{
+    m_view->hide();
+    QTextDocument doc;
+    doc.setDocumentLayout(new DocumentLayout(&doc));
+    doc.setPlainText(largeDocument());
+    MarkdownModel *model = new MarkdownModel(&doc);
+    model->blocks();
+    const int generation = model->parseGeneration();
+    QTextCursor c(doc.findBlockByNumber(0));
+    c.insertText(QStringLiteral("# Top\n\n"));
+    model->flushInBackground();
+    QVERIFY(model->isParsingInBackground());
+    c.setPosition(2);
+    c.insertText(QStringLiteral("More "));
+    // A click (say on a task box) wants the current blocks now: flush() parses
+    // the document as it is, without waiting for the worker.
+    model->flush();
+    QCOMPARE(model->parseGeneration(), generation + 1);
+    QVERIFY(matchesFreshParse(*model));
+    // The worker's result, of older text, changes nothing.
+    QTRY_VERIFY(!model->isParsingInBackground());
+    QTest::qWait(MarkdownModel::reparseDelay() + 50);
+    QCOMPARE(model->parseGeneration(), generation + 1);
+    QVERIFY(matchesFreshParse(*model));
+    QCOMPARE(QString::fromUtf8(model->blocks()[0].html.data(), model->blocks()[0].html.size()),
+             QStringLiteral("<h1><a name=\"more-top\"></a>More Top</h1>"));
+}
+
+void TestVisualView::modelDeletedDuringBackgroundParse()
+{
+    // Closing a document while a worker parses it: the worker holds copies
+    // only, and its result goes nowhere.
+    for (int round = 0; round < 3; ++round) {
+        auto *doc = new QTextDocument;
+        doc->setDocumentLayout(new DocumentLayout(doc));
+        doc->setPlainText(largeDocument());
+        auto *model = new MarkdownModel(doc);
+        model->blocks();
+        QTextCursor(doc).insertText(QStringLiteral("x"));
+        model->flushInBackground();
+        QVERIFY(model->isParsingInBackground());
+        if (round == 1)
+            QTest::qWait(1); // Let the worker get going.
+        delete doc;
+    }
+    QThreadPool::globalInstance()->waitForDone();
+    QTest::qWait(20);
+}
+
+void TestVisualView::modeSwitchDuringBackgroundParse()
+{
+    m_view->hide();
+    QTemporaryDir dir;
+    QFile file(dir.filePath(QStringLiteral("large.md")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(largeDocument().toUtf8());
+    file.close();
+    DocumentTab tab;
+    QVERIFY(tab.load(file.fileName()));
+    tab.setViewMode(DocumentTab::ViewMode::SourceVisual);
+    tab.resize(1200, 500);
+    tab.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&tab));
+    MarkdownModel *model = tab.file()->markdownModel();
+    QTextDocument *doc = tab.sourceView()->document();
+    model->blocks();
+    QTextCursor c(doc->findBlockByNumber(2));
+    c.insertText(QStringLiteral("Split "));
+    QTRY_VERIFY(model->isParsingInBackground() || !model->hasPendingEdits());
+    // To Source while it runs, and an edit there: the result is stale.
+    tab.setViewMode(DocumentTab::ViewMode::Source);
+    c.insertText(QStringLiteral("Source "));
+    QTRY_VERIFY(!model->isParsingInBackground());
+    QTest::qWait(MarkdownModel::reparseDelay() + 50);
+    // Source mode doesn't parse; showing the visual view does, at once.
+    QVERIFY(model->hasPendingEdits());
+    tab.setViewMode(DocumentTab::ViewMode::Visual);
+    QVERIFY(!model->hasPendingEdits());
+    QVERIFY(matchesFreshParse(*model));
+    QVERIFY(QString::fromUtf8(model->blocks()[1].html.data(), model->blocks()[1].html.size())
+                .startsWith(QStringLiteral("<p>Split Source A paragraph")));
 }
 
 void TestVisualView::wideImagesShrinkToColumn()

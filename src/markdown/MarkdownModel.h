@@ -8,9 +8,11 @@
 #include <QString>
 #include <QTimer>
 
+#include <memory>
 #include <vector>
 
 class QTextDocument;
+template<typename T> class QFutureWatcher;
 
 namespace vn {
 
@@ -56,9 +58,21 @@ public:
     // Bumped by every parse.
     int parseGeneration() const { return m_parseGeneration; }
     bool hasPendingEdits() const { return m_pending || m_dirty; }
-    // Reparses now if edits are pending; emits reparsed if it did.
+    // Reparses now if edits are pending; emits reparsed if it did. Always
+    // synchronous: when it returns, blocks() and spans() match the document.
     void flush();
+    // As flush(), except that a large document (see backgroundParseChars) is
+    // parsed on a worker thread: reparsed is emitted later, once the result
+    // is applied. A result for text that has been edited since is dropped
+    // (the edits keep their spans), and the parse runs again if asked for
+    // meanwhile.
+    void flushInBackground();
+    // A worker thread is parsing the document.
+    bool isParsingInBackground() const { return m_job.running; }
     static int reparseDelay() { return 120; }
+    // Parsing costs about 18 ms per MB; past this many characters edit
+    // pauses parse off the GUI thread.
+    static constexpr qsizetype backgroundParseChars = 256 * 1024;
 
     // Bumped whenever rendering options change, so views drop cached renders.
     int optionsRevision() const { return m_optionsRevision; }
@@ -73,8 +87,12 @@ Q_SIGNALS:
     void reparsed();
 
 private:
+    struct ParseResult;
+
     void reparse();
+    void apply(rust::Vec<core::Block> &&blocks);
     void documentChanged(int from, int removed, int added);
+    void backgroundParseDone();
 
     QTextDocument *m_doc;
     rust::Vec<core::Block> m_blocks;
@@ -86,6 +104,15 @@ private:
     int m_revision = 0;
     int m_parseGeneration = 0;
     int m_optionsRevision = 0;
+    // Bumped by every edit and every change of a parse setting: a parse of
+    // the text taken at one value is current while it stays the same.
+    quint64 m_inputSerial = 0;
+    struct
+    {
+        QFutureWatcher<std::shared_ptr<ParseResult>> *watcher = nullptr;
+        bool running = false;
+        bool again = false; // Asked for while a parse of older text ran.
+    } m_job;
 };
 
 } // namespace vn
