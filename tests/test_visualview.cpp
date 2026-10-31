@@ -16,6 +16,7 @@
 #include <KSyntaxHighlighting/Theme>
 
 #include <QApplication>
+#include <QFile>
 #include <QPainter>
 #include <QRegularExpression>
 #include <QSlider>
@@ -169,6 +170,9 @@ private Q_SLOTS:
     void onlyParseSettingsReparse();
     void wideImagesShrinkToColumn();
     void clickEnlargesPicture();
+    void networkPaths();
+    void networkPathsAreNotOpened_data();
+    void networkPathsAreNotOpened();
 
 private:
     // Source and preview of longDocument(), side by side; the source has
@@ -897,6 +901,118 @@ void TestVisualView::clickEnlargesPicture()
     m_view->setReadOnly(false);
     QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(m_view->viewport()->width() / 2, y));
     QVERIFY(m_view->window()->findChildren<ImageViewer *>().isEmpty());
+}
+
+void TestVisualView::networkPaths()
+{
+    for (const char *path : {"//host/share/x.png", "\\\\host\\share\\x.png", "/\\host\\share", "\\/host/share",
+                             "\\\\?\\UNC\\host\\share\\x.png", "  //host/x.png"})
+        QVERIFY2(md::isNetworkPath(QString::fromUtf8(path)), path);
+    for (const char *path : {"x.png", "img/x.png", "../x.png", "/home/user/x.png", "C:/Users/x.png", "C:\\Users\\x.png",
+                             "/", ""})
+        QVERIFY2(!md::isNetworkPath(QString::fromUtf8(path)), path);
+}
+
+void TestVisualView::networkPathsAreNotOpened_data()
+{
+    // %1 is the picture folder without its leading slash: on Linux "//%1"
+    // names the same local folder as "/%1", so a path that slipped through
+    // would paint red. On Windows it would be an SMB connection to a host.
+    QTest::addColumn<QString>("source");
+    QTest::addColumn<bool>("markdown");
+    QTest::addColumn<bool>("loads");
+    // {img} is an <img> of the given source, 40 by 40.
+    const auto row = [](const char *name, const char *source, bool markdown, bool loads) {
+        QString s = QString::fromUtf8(source);
+        if (s.startsWith(u'='))
+            s = QStringLiteral(R"(<img src="%1" width="40" height="40">)").arg(s.mid(1));
+        QTest::newRow(name) << s << markdown << loads;
+    };
+    row("relative", "=red.png", false, true);
+    row("absolute", "=/{dir}/red.png", false, true);
+    row("file url", "=file:///{dir}/red.png", false, true);
+    row("markdown relative", "![](red.png)", true, true);
+    row("svg with local picture", "=local.svg", false, true);
+    row("host", "=//{dir}/red.png", false, false);
+    row("file host", "=file://{dir}/red.png", false, false);
+    row("file empty host", "=file:////{dir}/red.png", false, false);
+    row("percent encoded", "=%2F%2F{encoded}%2Fred.png", false, false);
+    row("markdown host", "![](//{dir}/red.png)", true, false);
+    row("markdown file host", "![](file://{dir}/red.png)", true, false);
+    row("markdown file empty host", "![](file:////{dir}/red.png)", true, false);
+    row("table background", R"(<table background="//{dir}/red.png" width="40"><tr><td>x</td></tr></table>)", false,
+        false);
+    row("cell background", R"(<table><tr><td background="//{dir}/red.png" width="40">x</td></tr></table>)", false,
+        false);
+    row("link style sheet", R"(<link rel="stylesheet" type="text/css" href="//{dir}/red.css"><p>xxxxxxxx</p>)", false,
+        false);
+    row("link local style sheet", R"(<link rel="stylesheet" type="text/css" href="/{dir}/red.css"><p>xxxxxxxx</p>)",
+        false, false);
+    row("style import", R"(<style>@import url("//{dir}/red.css");</style><p>xxxxxxxx</p>)", false, false);
+    row("svg with network picture", "=network.svg", false, false);
+}
+
+void TestVisualView::networkPathsAreNotOpened()
+{
+    QFETCH(QString, source);
+    QFETCH(bool, markdown);
+    QFETCH(bool, loads);
+    QTemporaryDir dir;
+    QImage red(40, 40, QImage::Format_RGB32);
+    red.fill(Qt::red);
+    QVERIFY(red.save(dir.filePath(QStringLiteral("red.png"))));
+    QFile css(dir.filePath(QStringLiteral("red.css")));
+    QVERIFY(css.open(QIODevice::WriteOnly));
+    css.write("p { background-color: #ff0000; }");
+    css.close();
+    const QString folder = dir.path().mid(1);
+    const auto writeSvg = [&](const QString &name, const QString &href) {
+        QFile svg(dir.filePath(name));
+        QVERIFY(svg.open(QIODevice::WriteOnly));
+        svg.write(QStringLiteral(R"(<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" )"
+                                 R"(width="40" height="40"><image x="0" y="0" width="40" height="40" xlink:href="%1"/></svg>)")
+                      .arg(href)
+                      .toUtf8());
+    };
+    writeSvg(QStringLiteral("local.svg"), QStringLiteral("red.png"));
+    writeSvg(QStringLiteral("network.svg"), u"//" + folder + QStringLiteral("/red.png"));
+    source.replace(QStringLiteral("{dir}"), folder);
+    source.replace(QStringLiteral("{encoded}"), QString(folder).replace(u'/', QStringLiteral("%2F")));
+
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.width = 400;
+    ctx.baseDirectory = dir.path();
+    QTextDocument text;
+    MarkdownModel model(&text);
+    core::Block block;
+    if (markdown) {
+        text.setPlainText(source);
+        QCOMPARE(model.blocks().size(), size_t(1));
+        block = model.blocks()[0];
+    } else {
+        block.kind = core::BlockKind::Html;
+        const QByteArray html = source.toUtf8();
+        block.html = rust::String(html.constData(), html.size());
+    }
+    const auto rendered = RenderedBlock::create(block, source, ctx);
+    QImage image(int(ctx.width), qMax(1, int(rendered->height())), QImage::Format_RGB32);
+    image.fill(Qt::white);
+    {
+        QPainter painter(&image);
+        rendered->paint(painter, QPointF(0, 0), ctx.width);
+    }
+    QCOMPARE(countColor(image, Qt::red) > 0, loads);
+    if (source.contains(QLatin1String(".svg"))) {
+        // The SVG itself is local; its zoomed view must not reach out either.
+        const auto picture = rendered->pictureAt(QPointF(20, 20));
+        QVERIFY(picture);
+        QCOMPARE(rendered->pictureImage(*picture).isNull(), !loads);
+    } else if (source.contains(QLatin1String("img")) || markdown) {
+        // A click on a picture that did not load must not open it either.
+        QCOMPARE(bool(rendered->pictureAt(QPointF(20, 20))), loads);
+    }
 }
 
 // Keep tests away from the user's settings file.

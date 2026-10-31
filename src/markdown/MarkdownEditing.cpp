@@ -238,4 +238,12 @@ QString linkForFile(const QString &filePath, const QString &documentDir)
     return QStringLiteral("[%1](%2)").arg(info.fileName(), dest);
 }
 
+bool isNetworkPath(const QString &path)
+{
+    // Windows takes either slash; two at the start name a host.
+    const auto slash = [](QChar c) { return c == u'/' || c == u'\\'; };
+    const QString p = path.trimmed();
+    return p.size() >= 2 && slash(p[0]) && slash(p[1]);
+}
+
 } // namespace vn::md
