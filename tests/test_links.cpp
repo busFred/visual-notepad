@@ -529,7 +529,8 @@ void TestLinks::promptsShowAddressesAsText()
     link.replace(QStringLiteral("{dir}"), folder);
     shown.replace(QStringLiteral("{dir}"), folder);
     shown.replace(QStringLiteral("{missing}"),
-                  QStringLiteral("The file %1 does not exist.").arg(QDir::toNativeSeparators(m_dir.filePath(link))));
+                  QStringLiteral("The file %1 does not exist.")
+                      .arg(QDir::toNativeSeparators(vn::md::resolvedLocalPath(m_dir.filePath(link)))));
     MainWindow window;
     DocumentTab *tab = openDocument(window);
     QVERIFY(tab);
@@ -572,6 +573,8 @@ void TestLinks::longAddressesAreElided()
     QVERIFY(informative.endsWith(QLatin1String("aaa/end")));
     QVERIFY(informative.contains(QChar(0x2026)));
     QVERIFY(m_opened.isEmpty());
+}
+
 void TestLinks::invisibleCharactersAreSpelledOut_data()
 {
     QTest::addColumn<QString>("text");
