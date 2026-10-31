@@ -114,6 +114,13 @@ no bevels. Values live in `src/Theme.h`.
   and the proxy's with a local one (DNS rebinding) reaches whatever the proxy
   can reach; and only one checked address is tried, so a host whose first
   address (IPv4 preferred) is unreachable fails rather than trying the next.
+- Links that would run a program warn first (Open Anyway / Don't Open,
+  default Don't Open, full path shown, never remembered): local files the OS
+  would launch (`md::isLaunchable`: a deny-list of program, script,
+  installer and shortcut suffixes, judged as Windows reads names, plus
+  execute-bit files that are not plain documents) and every scheme other
+  than http, https, mailto and file. Text files (scripts too) open in the
+  app; network paths (UNC, `file://host`) are refused outright.
 
 ## Preferences
 

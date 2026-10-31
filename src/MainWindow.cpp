@@ -1188,6 +1188,59 @@ void MainWindow::setSaveConflictHandler(std::function<SaveConflictChoice(Documen
     saveConflictHandler() = std::move(handler);
 }
 
+namespace {
+
+std::function<bool(const QString &)> &launchConfirmer()
+{
+    static std::function<bool(const QString &)> confirmer;
+    return confirmer;
+}
+
+std::function<void(const QUrl &)> &urlOpener()
+{
+    static std::function<void(const QUrl &)> opener;
+    return opener;
+}
+
+} // namespace
+
+void MainWindow::setLaunchConfirmer(std::function<bool(const QString &)> confirmer)
+{
+    launchConfirmer() = std::move(confirmer);
+}
+
+void MainWindow::setUrlOpener(std::function<void(const QUrl &)> opener)
+{
+    urlOpener() = std::move(opener);
+}
+
+void MainWindow::openUrl(const QUrl &url)
+{
+    if (const auto &opener = urlOpener())
+        opener(url);
+    else
+        QDesktopServices::openUrl(url);
+}
+
+bool MainWindow::confirmLaunch(const QString &target)
+{
+    if (const auto &confirmer = launchConfirmer())
+        return confirmer(target);
+    // Plain text (the target comes from the document), all in the main label:
+    // the informative one guesses the format.
+    QMessageBox box(QMessageBox::Warning, productName(),
+                    tr("This link would run a program:\n\n%1\n\nOnly continue if you trust this document and the file.")
+                        .arg(target),
+                    QMessageBox::NoButton, this);
+    box.setTextFormat(Qt::PlainText);
+    QPushButton *open = box.addButton(tr("Open Anyway"), QMessageBox::AcceptRole);
+    QPushButton *cancel = box.addButton(tr("Don't Open"), QMessageBox::RejectRole);
+    box.setDefaultButton(cancel);
+    box.setEscapeButton(cancel);
+    box.exec();
+    return box.clickedButton() == open;
+}
+
 MainWindow::SaveConflictChoice MainWindow::askSaveConflict(DocumentTab *tab)
 {
     if (const auto &handler = saveConflictHandler())
@@ -2170,8 +2223,7 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
 
     const QUrl target(url);
     const QString scheme = target.scheme().toLower();
-    if (scheme == QLatin1String("http") || scheme == QLatin1String("https") || scheme == QLatin1String("mailto")
-        || scheme == QLatin1String("ftp")) {
+    if (scheme == QLatin1String("http") || scheme == QLatin1String("https") || scheme == QLatin1String("mailto")) {
         // Always ask before leaving the app, like VS Code's trusted-domain prompt.
         QMessageBox box(QMessageBox::Information, productName(),
                         tr("Do you want %1 to open the external website?").arg(productName()), QMessageBox::NoButton,
@@ -2183,9 +2235,17 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
         box.setDefaultButton(open);
         box.exec();
         if (box.clickedButton() == open)
-            QDesktopServices::openUrl(target);
+            openUrl(target);
         else if (box.clickedButton() == copy)
             QGuiApplication::clipboard()->setText(url);
+        return;
+    }
+    // Any other scheme hands the link to whatever program registered it
+    // (ms-msdt:, search-ms:, shell:, vscode:, ...). One letter is a Windows
+    // drive ("C:/x"): a local path.
+    if (scheme.size() > 1 && scheme != QLatin1String("file")) {
+        if (confirmLaunch(url))
+            openUrl(target);
         return;
     }
 
@@ -2203,7 +2263,11 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
     }
     const QMimeType mime = QMimeDatabase().mimeTypeForFile(path);
     if (!mime.inherits(QStringLiteral("text/plain"))) {
-        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+        // Text (scripts included) opens here; the rest goes to the OS, which
+        // runs programs, installers and shortcuts.
+        if (md::isLaunchable(path) && !confirmLaunch(QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath())))
+            return;
+        openUrl(QUrl::fromLocalFile(path));
         return;
     }
     openFile(path, [this, fragment](DocumentTab *opened) {

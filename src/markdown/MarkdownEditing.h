@@ -59,5 +59,12 @@ QString encodeDestination(const QString &path);
 // over SMB, which hands it the user's password hash. Never open these for a
 // document.
 bool isNetworkPath(const QString &path);
+// True if handing local `path` to the OS (QDesktopServices) could run a
+// program rather than show a document: a launchable suffix (see
+// launchableSuffixes in the .cpp; case-insensitive, ignoring what Windows
+// ignores: trailing dots and spaces, "::$DATA", alternate stream names), on
+// the path or, for a symlink, on its target; or an existing non-directory
+// file with an execute bit, unless its suffix is a plain document type.
+bool isLaunchable(const QString &path);
 
 } // namespace vn::md
