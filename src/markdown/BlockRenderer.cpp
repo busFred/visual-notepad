@@ -23,6 +23,7 @@
 #include <QUrl>
 
 #include <algorithm>
+#include <atomic>
 
 namespace vn {
 
@@ -103,6 +104,9 @@ QCache<QString, Diagram> &diagramCache()
     return cache;
 }
 
+// Renders started, for tests.
+std::atomic<int> diagramRenders{0};
+
 // True with the diagram if it is rendered; otherwise starts rendering it
 // (once) on the thread pool and returns false.
 bool mermaidDiagram(const QString &code, const RenderContext &context, Diagram *result)
@@ -123,6 +127,7 @@ bool mermaidDiagram(const QString &code, const RenderContext &context, Diagram *
                                           themeName = context.mermaidTheme.toUtf8()] {
         // mermaid_image is plain Rust (no Qt), and the QImage is built off the GUI thread.
         Diagram diagram;
+        ++diagramRenders;
         try {
             const core::RgbaImage raw = core::mermaid_image(rust::Str(utf8.constData(), utf8.size()),
                                                             rust::Str(themeName.constData(), themeName.size()),
@@ -130,12 +135,21 @@ bool mermaidDiagram(const QString &code, const RenderContext &context, Diagram *
             // tiny-skia pixmaps are premultiplied RGBA8888; copy so the image owns its pixels.
             diagram.image = QImage(raw.pixels.data(), int(raw.width), int(raw.height), int(raw.width) * 4,
                                    QImage::Format_RGBA8888_Premultiplied).copy();
-            diagram.image.setDevicePixelRatio(dpr);
+            // A diagram too big for the requested ratio comes back drawn at a lower one.
+            diagram.image.setDevicePixelRatio(raw.scale);
         } catch (const std::exception &e) { // rust::Error
             diagram.error = QString::fromUtf8(e.what());
         }
-        QMetaObject::invokeMethod(notifier, [key, diagram] {
-            diagramCache().insert(key, new Diagram(diagram), imageCost(diagram.image));
+        QMetaObject::invokeMethod(notifier, [key, diagram]() mutable {
+            // Every finished render must be found again, or the view would start
+            // it over and over: what the cache cannot hold becomes an error.
+            qsizetype cost = imageCost(diagram.image);
+            if (cost > diagramCache().maxCost()) {
+                diagram.image = QImage();
+                diagram.error = QObject::tr("diagram too large");
+                cost = 1;
+            }
+            diagramCache().insert(key, new Diagram(diagram), cost);
             pending.remove(key);
             Q_EMIT DiagramNotifier::instance().ready();
         }, Qt::QueuedConnection);
@@ -300,6 +314,16 @@ std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString
 }
 
 } // namespace
+
+int DiagramNotifier::renderCount()
+{
+    return diagramRenders;
+}
+
+void DiagramNotifier::setCacheLimitKiB(int kib)
+{
+    diagramCache().setMaxCost(kib);
+}
 
 DiagramNotifier &DiagramNotifier::instance()
 {
