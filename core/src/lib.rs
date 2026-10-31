@@ -38,7 +38,7 @@ mod ffi {
     }
 
     /// One top-level block with its 0-based source line range.
-    #[derive(Debug)]
+    #[derive(Clone, Debug, PartialEq)]
     struct Block {
         kind: BlockKind,
         first_line: usize,
@@ -84,6 +84,18 @@ mod ffi {
     extern "Rust" {
         fn outline(markdown: &str) -> Vec<Heading>;
         fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block>;
+        /// A document's blocks together with what it takes to parse the
+        /// next version of its text incrementally.
+        type Document;
+        /// The same blocks as `blocks`.
+        fn parse(markdown: &str, options: &RenderOptions) -> Box<Document>;
+        /// The blocks of `markdown`, a new version of `previous`'s text:
+        /// exactly those of `parse(markdown, options)`, made by parsing only
+        /// the blocks around the edits when that is safe.
+        fn reparse(previous: &Document, markdown: &str, options: &RenderOptions) -> Box<Document>;
+        fn blocks(self: &Document) -> &Vec<Block>;
+        /// Whether `reparse` parsed only the blocks around the edits.
+        fn spliced(self: &Document) -> bool;
         /// Premultiplied RGBA pixels of a Mermaid diagram; throws with the parse error.
         fn mermaid_image(code: &str, theme: &str, scale: f32) -> Result<RgbaImage>;
         /// GitHub-style anchor for a heading's text.
@@ -101,6 +113,16 @@ mod ffi {
 
 fn blocks(markdown: &str, options: &ffi::RenderOptions) -> Vec<ffi::Block> {
     render::blocks(markdown, options)
+}
+
+use render::Document;
+
+fn parse(markdown: &str, options: &ffi::RenderOptions) -> Box<Document> {
+    Box::new(Document::parse(markdown, options))
+}
+
+fn reparse(previous: &Document, markdown: &str, options: &ffi::RenderOptions) -> Box<Document> {
+    Box::new(render::reparse(previous, markdown, options))
 }
 
 fn mermaid_image(code: &str, theme: &str, scale: f32) -> Result<ffi::RgbaImage, String> {
