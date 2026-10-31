@@ -10,6 +10,7 @@
 #include <QCache>
 #include <QSet>
 
+#include <deque>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -38,6 +39,8 @@ public:
     void setHighlightActiveBlock(bool on);
     // Blocks currently shown as source because a caret or selection touches them.
     int expandedBlockCount() const { return int(m_expandedBlocks.size()); }
+    // For tests: renders kept in hand besides the cache.
+    int memoizedRenderCount() const { return m_spanRenderCount; }
 
 Q_SIGNALS:
     // A link was clicked in rendered text (not a task checkbox).
@@ -74,6 +77,7 @@ private:
         QString source;
         QString key;
         std::shared_ptr<RenderedBlock> block;
+        int cost = 0; // KiB, of the block.
     };
 
     void rebuildRows();
@@ -87,6 +91,8 @@ private:
     RenderedSelection selectionForRow(const Row &row, const RenderedBlock *block, const QString &source) const;
     void clearRenderCache();
     void diagramsReady();
+    void resetSpanRenders(size_t spans);
+    void dropSpanRender(int span);
 
     MarkdownModel *m_model;
     QString m_baseDirectory;
@@ -104,8 +110,13 @@ private:
     QCache<QString, Render> m_cache;
     QSet<QString> m_pendingKeys; // Diagrams still rendering.
     // The render of each span, for the model revision, width and pixel
-    // ratio below, so painting doesn't rebuild sources and keys.
+    // ratio below, so painting doesn't rebuild sources and keys. Only the
+    // latest few (see rendered()) are kept: the rest are in m_cache, within
+    // its budget, or gone.
     std::vector<Render> m_spanRenders;
+    std::deque<int> m_spanRenderOrder; // Spans in the order they were set.
+    int m_spanRenderCount = 0;
+    qint64 m_spanRenderKiB = 0;
     int m_spanRendersRevision = -1;
     qreal m_spanRendersWidth = -1;
     qreal m_spanRendersDpr = -1;

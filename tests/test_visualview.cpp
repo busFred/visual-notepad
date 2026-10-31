@@ -18,6 +18,7 @@
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
 #include <QPainterPath>
+#include <QScrollBar>
 #include <QSet>
 #include <QElapsedTimer>
 #include <QFile>
@@ -186,6 +187,7 @@ private Q_SLOTS:
     void hugeBlocksFallBackToTheirSource();
     void ordinaryBlocksIgnoreTheLayoutLimits();
     void longRunsWrapTheSameWithTheLimits();
+    void scrollingKeepsOnlyRecentRenders();
 
 private:
     // Source and preview of longDocument(), side by side; the source has
@@ -1404,6 +1406,31 @@ void TestVisualView::longRunsWrapTheSameWithTheLimits()
     QCOMPARE(guarded->height(), unguarded->height());
     QVERIFY(paintBlock(*guarded) == paintBlock(*unguarded));
     QVERIFY(guarded->lineAnchors() == unguarded->lineAnchors());
+}
+
+// The view remembers the render of each block it paints so that painting does
+// not rebuild keys; scrolling through a long document must not keep them all.
+void TestVisualView::scrollingKeepsOnlyRecentRenders()
+{
+    QStringList paragraphs;
+    for (int i = 0; i < 3000; ++i)
+        paragraphs << QStringLiteral("Paragraph %1 of a long document, with some **words** in it.").arg(i);
+    m_doc->setPlainText(paragraphs.join(QStringLiteral("\n\n")));
+    m_model->flush();
+    QScrollBar *bar = m_view->verticalScrollBar();
+    bar->setValue(0);
+    const QImage top = m_view->grab().toImage();
+    int most = 0;
+    for (int value = 0; value <= bar->maximum(); value += 15) {
+        bar->setValue(value);
+        QVERIFY(!m_view->grab().isNull());
+        most = qMax(most, m_view->memoizedRenderCount());
+    }
+    QVERIFY2(most > 10 && most <= 512, qPrintable(QString::number(most)));
+    QVERIFY(bar->maximum() > 3000);
+    // Blocks come back the way they were.
+    bar->setValue(0);
+    QCOMPARE(m_view->grab().toImage(), top);
 }
 
 // Keep tests away from the user's settings file.
