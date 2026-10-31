@@ -280,6 +280,9 @@ public:
         }
     }
 
+    // Bytes of the pictures (math, files) the document has resolved so far.
+    qsizetype pictureBytes() const { return m_pictureBytes; }
+
     // The file a picture's source names, or empty (math, remote pictures).
     QString pathOf(const QString &source) const
     {
@@ -318,6 +321,7 @@ private:
     // loads; without this every paint would load the picture again.
     QVariant keep(int type, const QUrl &url, const QImage &image)
     {
+        m_pictureBytes += image.sizeInBytes();
         addResource(type, url, image);
         return image;
     }
@@ -338,6 +342,7 @@ private:
 
     RenderContext m_context;
     QStringList m_math;
+    qsizetype m_pictureBytes = 0;
 };
 
 QString hex(theme::Role role)
@@ -549,6 +554,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         doc->fitImages(context.width);
         doc->setTextWidth(context.width);
         r.m_height = doc->size().height() + blockGap;
+        r.m_pictureBytes = doc->pictureBytes(); // Resolved by the layout.
         r.m_doc = std::move(doc);
         r.collectLineAnchors(0);
         return result;
@@ -719,12 +725,20 @@ QString RenderedBlock::renderedText() const
 
 int RenderedBlock::cost() const
 {
-    // Laid-out text takes very roughly 128 bytes a character.
+    // Laid-out text measured on the heap: rich text takes some 40 KiB of
+    // document structures plus about 64 bytes a character, a highlighted
+    // code block 20 KiB plus about 100 bytes a character. Pictures in the
+    // text are whole images (often shared with the picture caches, which
+    // still keeps them alive when this block is dropped, so it is a bit
+    // generous).
     int kib = 1;
     if (!m_image.isNull())
         kib += int(m_image.sizeInBytes() / 1024);
-    if (m_doc)
-        kib += m_doc->characterCount() / 8;
+    kib += int(m_pictureBytes / 1024);
+    if (m_doc) {
+        const int characters = m_doc->characterCount();
+        kib += m_kind == Kind::Code ? 20 + characters / 10 : 40 + characters / 16;
+    }
     return kib;
 }
 

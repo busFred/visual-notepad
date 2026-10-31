@@ -176,6 +176,7 @@ private Q_SLOTS:
     void decodedPicturesServeEveryWidth();
     void codeBlocksArePaintedAsTheStockHighlighterDoes_data();
     void codeBlocksArePaintedAsTheStockHighlighterDoes();
+    void renderCostCountsPicturesAndText();
     void clickEnlargesPicture();
     void networkPaths();
     void networkPathsAreNotOpened_data();
@@ -1068,6 +1069,46 @@ void TestVisualView::codeBlocksArePaintedAsTheStockHighlighterDoes()
             colors.insert(actual.pixel(x, y));
     if (language == QLatin1String("python") || language == QLatin1String("cpp"))
         QVERIFY(colors.size() > 20);
+}
+
+void TestVisualView::renderCostCountsPicturesAndText()
+{
+    QTemporaryDir dir;
+    QImage picture(1000, 500, QImage::Format_RGB32); // 2000 KiB.
+    picture.fill(Qt::blue);
+    QVERIFY(picture.save(dir.filePath(QStringLiteral("p.png"))));
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.width = 1200; // Wide enough to keep the picture at full size.
+    ctx.baseDirectory = dir.path();
+    const auto cost = [&](const QString &html) {
+        core::Block block;
+        block.kind = core::BlockKind::Html;
+        const QByteArray utf8 = html.toUtf8();
+        block.html = rust::String(utf8.constData(), utf8.size());
+        return RenderedBlock::create(block, html, ctx)->cost();
+    };
+    const int text = cost(QStringLiteral("<p>some words</p>"));
+    // A paragraph takes tens of KiB, not bytes.
+    QVERIFY2(text >= 30, qPrintable(QString::number(text)));
+    const int one = cost(QStringLiteral("<p>some words <img src=\"p.png\"></p>"));
+    QVERIFY2(one - text >= 1900 && one - text < 2200, qPrintable(QString::number(one - text)));
+    // A narrower column shrinks the picture, and its cost.
+    ctx.width = 250;
+    const int narrow = cost(QStringLiteral("<p>some words <img src=\"p.png\"></p>"));
+    QVERIFY2(narrow - text < 500, qPrintable(QString::number(narrow - text)));
+    QVERIFY(narrow < one);
+    // Text counts by its length, in code and prose.
+    QVERIFY(cost(QStringLiteral("<p>%1</p>").arg(QString(16000, u'x'))) - text > 800);
+    // A highlighted code block is no smaller than its text.
+    core::Block code;
+    code.kind = core::BlockKind::Code;
+    const QString body(QString(4000, u'y'));
+    const QString fenced = QStringLiteral("```\n%1\n```").arg(body);
+    const QByteArray utf8 = body.toUtf8();
+    code.text = rust::String(utf8.constData(), utf8.size());
+    QVERIFY(RenderedBlock::create(code, fenced, ctx)->cost() > 400);
 }
 
 void TestVisualView::clickEnlargesPicture()
