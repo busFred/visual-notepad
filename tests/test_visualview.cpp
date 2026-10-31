@@ -266,6 +266,7 @@ private Q_SLOTS:
     void networkPaths();
     void networkPathsAreNotOpened_data();
     void networkPathsAreNotOpened();
+    void svgBombsAreRefused();
     void hugeBlocksFallBackToTheirSource_data();
     void hugeBlocksFallBackToTheirSource();
     void ordinaryBlocksIgnoreTheLayoutLimits();
@@ -1651,6 +1652,136 @@ void TestVisualView::networkPathsAreNotOpened()
         // A click on a picture that did not load must not open it either.
         QCOMPARE(bool(rendered->pictureAt(QPointF(20, 20))), loads);
     }
+}
+
+namespace {
+
+// An SVG whose group at each level holds `fanOut` <use>s of the level
+// below, `depth` levels over a red square: fanOut^depth squares drawn.
+QByteArray useBomb(int depth, int fanOut = 10)
+{
+    QByteArray svg = R"(<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" )"
+                     R"(width="40" height="40"><defs><rect id="l0" width="40" height="40" fill="#ff0000"/>)";
+    for (int level = 1; level <= depth; ++level) {
+        svg += "<g id=\"l" + QByteArray::number(level) + "\">";
+        for (int i = 0; i < fanOut; ++i)
+            svg += "<use xlink:href=\"#l" + QByteArray::number(level - 1) + "\"/>";
+        svg += "</g>";
+    }
+    return svg + "</defs><use xlink:href=\"#l" + QByteArray::number(depth) + "\"/></svg>";
+}
+
+// The same with patterns filled by style sheet classes: each level's
+// pattern holds `fanOut` squares filled with the pattern below.
+QByteArray patternBomb(int depth, int fanOut = 10)
+{
+    QByteArray style = "<style>";
+    QByteArray defs = R"(<pattern id="p0" width="4" height="4" patternUnits="userSpaceOnUse">)"
+                      R"(<rect width="4" height="4" fill="#ff0000"/></pattern>)";
+    for (int level = 1; level <= depth; ++level) {
+        const QByteArray below = QByteArray::number(level - 1);
+        style += ".c" + below + "{fill:url(#p" + below + ")}";
+        defs += "<pattern id=\"p" + QByteArray::number(level)
+                + R"(" width="40" height="40" patternUnits="userSpaceOnUse">)";
+        for (int i = 0; i < fanOut; ++i)
+            defs += "<rect class=\"c" + below + "\" width=\"4\" height=\"4\"/>";
+        defs += "</pattern>";
+    }
+    return R"(<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">)" + style + "</style><defs>" + defs
+           + "</defs><rect width=\"40\" height=\"40\" fill=\"url(#p" + QByteArray::number(depth) + ")\"/></svg>";
+}
+
+} // namespace
+
+void TestVisualView::svgBombsAreRefused()
+{
+    // Small enough to draw: loads, as a download and as a file.
+    QVERIFY(!decodePicture(useBomb(3)).isNull());
+    QVERIFY(!decodePicture(useBomb(1, 1000)).isNull());
+
+    QElapsedTimer timer;
+    timer.start();
+    QVERIFY(decodePicture(useBomb(12)).isNull());
+    QVERIFY(decodePicture(gzipped(useBomb(12))).isNull());
+    QVERIFY(decodePicture(patternBomb(12)).isNull());
+    // Inside an SVG picture in an SVG.
+    const QByteArray nested = R"(<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">)"
+                              R"(<image width="40" height="40" href="data:image/svg+xml;base64,)"
+                              + useBomb(12).toBase64() + R"("/></svg>)";
+    QVERIFY(decodePicture(nested).isNull());
+    // A marker drawn at every one of 100000 vertices.
+    QByteArray markers = R"(<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><defs>)"
+                         R"(<marker id="m"><rect width="1" height="1" fill="#ff0000"/></marker></defs>)"
+                         R"x(<path marker-mid="url(#m)" d="M0 0)x";
+    for (int i = 0; i < 100000; ++i)
+        markers += " L1 1";
+    QVERIFY(decodePicture(markers + R"("/></svg>)").isNull());
+    // Cycles end, and are refused as QtSvg refuses them.
+    QVERIFY(decodePicture(R"(<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" )"
+                          R"(width="40" height="40"><g id="a"><use xlink:href="#b"/></g><g id="b">)"
+                          R"(<use xlink:href="#a"/></g><use xlink:href="#a"/></svg>)")
+                .isNull());
+    QVERIFY(decodePicture(R"(<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><g id="a">)"
+                          R"(<use href="#a"/><rect width="40" height="40" fill="#ff0000"/></g></svg>)")
+                .isNull());
+    QVERIFY2(timer.elapsed() < 1000, QByteArray::number(timer.elapsed()).constData());
+    // Nested too deep, and too many elements.
+    const QByteArray svg = R"(<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">)";
+    const QByteArray square = R"(<rect width="40" height="40" fill="#ff0000"/>)";
+    QVERIFY(!decodePicture(svg + QByteArray("<g>").repeated(60) + square + QByteArray("</g>").repeated(60) + "</svg>")
+                 .isNull());
+    QVERIFY(decodePicture(svg + QByteArray("<g>").repeated(80) + square + QByteArray("</g>").repeated(80) + "</svg>")
+                .isNull());
+    QVERIFY(decodePicture(svg + QByteArray("<g/>").repeated(600000) + "</svg>").isNull());
+    // A small SVG inside one is drawn.
+    QVERIFY(!decodePicture(svg + R"(<image width="40" height="40" href="data:image/svg+xml;base64,)"
+                           + useBomb(1).toBase64() + R"("/></svg>)")
+                 .isNull());
+
+    // Picture files: the bomb is not drawn, the small one is.
+    QTemporaryDir dir;
+    const auto write = [&](const char *name, const QByteArray &bytes) {
+        QFile file(dir.filePath(QString::fromLatin1(name)));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write(bytes), bytes.size());
+    };
+    write("small.svg", useBomb(3));
+    write("bomb.svg", useBomb(12));
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.width = 400;
+    ctx.baseDirectory = dir.path();
+    for (const auto &[name, loads] : {std::pair{"small.svg", true}, std::pair{"bomb.svg", false}}) {
+        core::Block block;
+        block.kind = core::BlockKind::Html;
+        const QByteArray html = QByteArray(R"(<img src=")") + name + R"(" width="40" height="40">)";
+        block.html = rust::String(html.constData(), html.size());
+        timer.restart();
+        const auto rendered = RenderedBlock::create(block, QString::fromUtf8(html), ctx);
+        QImage image(int(ctx.width), qMax(1, int(rendered->height())), QImage::Format_RGB32);
+        image.fill(Qt::white);
+        {
+            QPainter painter(&image);
+            rendered->paint(painter, QPointF(0, 0), ctx.width);
+        }
+        QVERIFY2(timer.elapsed() < 1000, name);
+        QCOMPARE(countColor(image, Qt::red) > 0, loads);
+    }
+
+    // The SVGs that come with the app still load.
+    QDir resources(QStringLiteral(VN_SOURCE_DIR "/resources"));
+    int checked = 0;
+    for (const QString &sub : {QStringLiteral("app"), QStringLiteral("icons")}) {
+        QDir folder(resources.filePath(sub));
+        for (const QFileInfo &info : folder.entryInfoList({QStringLiteral("*.svg")}, QDir::Files)) {
+            QFile file(info.filePath());
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            QVERIFY2(!decodePicture(file.readAll()).isNull(), qPrintable(info.fileName()));
+            ++checked;
+        }
+    }
+    QVERIFY(checked > 10);
 }
 
 namespace {

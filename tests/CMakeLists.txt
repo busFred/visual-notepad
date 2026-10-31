@@ -33,6 +33,7 @@ set_tests_properties(preferences PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TE
 
 qt_add_executable(test_visualview test_visualview.cpp)
 target_link_libraries(test_visualview PRIVATE vn_app Qt6::Test)
+target_compile_definitions(test_visualview PRIVATE VN_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 add_test(NAME visualview COMMAND test_visualview)
 set_tests_properties(visualview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
 

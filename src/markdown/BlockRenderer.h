@@ -146,8 +146,8 @@ private:
 };
 
 // The picture in downloaded bytes, or null: also for an SVG that names a
-// file on another machine, which the SVG plugin would open by itself (the
-// rule for local SVG files). Any thread.
+// file on another machine, which the SVG plugin would open by itself, or that
+// would take too long to draw (the rules for local SVG files). Any thread.
 QImage decodePicture(const QByteArray &data);
 
 } // namespace vn
