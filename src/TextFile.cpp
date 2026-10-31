@@ -5,12 +5,12 @@
 #include "Settings.h"
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
+#include "editor/Highlighter.h"
 #include "markdown/MarkdownEditing.h"
 #include "markdown/MarkdownModel.h"
 
 #include <KSyntaxHighlighting/Definition>
 #include <KSyntaxHighlighting/Repository>
-#include <KSyntaxHighlighting/SyntaxHighlighter>
 #include <KSyntaxHighlighting/Theme>
 
 #include <QCryptographicHash>
@@ -23,7 +23,6 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
-#include <QSignalBlocker>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QThread>
@@ -46,11 +45,11 @@ constexpr int diskCheckDelayMs = 100;
 // finds a change reads, hashes and reloads the whole file.
 constexpr int diskRecheckIntervalMs = 500;
 
-// Above either limit a file is not syntax highlighted. QSyntaxHighlighter
-// highlights the whole document synchronously when the text is set, which
-// blocks the window for seconds on files this large. The language (and so
-// Markdown editing and the visual view) is unaffected; the source view just
-// shows plain text. Decided on each load, not while typing.
+// Above either limit a file is not syntax highlighted: colouring it takes
+// seconds, even in slices (see Highlighter), and keeps a format list and a
+// line state per line. The language (and so Markdown editing and the visual
+// view) is unaffected; the source view just shows plain text. Decided on
+// each load, not while typing.
 constexpr qsizetype largeFileChars = 5 * 1024 * 1024;
 constexpr qsizetype largeFileLines = 100'000;
 
@@ -161,6 +160,11 @@ void run(Job &job)
         ~GiveBack() { job.doc->moveToThread(job.home); }
     } giveBack{job};
 
+    // What the disk said before the read: a change while it runs then shows
+    // as one to the check that follows the load.
+    const QFileInfo before(job.path);
+    const QDateTime modified = before.lastModified();
+    const qint64 size = before.size();
     QFile file(job.path);
     if (!file.open(QIODevice::ReadOnly)) {
         job.error = file.errorString();
@@ -183,6 +187,8 @@ void run(Job &job)
     // document goes on while it finishes.
     auto hash = std::async(std::launch::async, [bytes] { return hashOf(bytes); });
     job.decoded = decodeBytes(job.path, bytes, encoding::detect(bytes, job.detect), false);
+    job.decoded.disk.modified = modified;
+    job.decoded.disk.size = size;
     bytes = QByteArray();
 
     // What QTextDocument::setPlainText() does, in pieces ending at a line end.
@@ -464,8 +470,19 @@ TextFile::TextFile()
         }
     });
 
-    m_highlighter = new KSyntaxHighlighting::SyntaxHighlighter(m_doc);
+    m_highlighter = new Highlighter(this);
     m_highlighter->setTheme(theme::syntaxTheme());
+    m_highlighter->attach(m_doc);
+    m_highlighter->setVisibleLines([this] {
+        QList<std::pair<int, int>> lines;
+        for (const DocumentTab *view : std::as_const(m_views)) {
+            const auto shown = view->visibleSourceLines();
+            if (shown.first >= 0)
+                lines.append(shown);
+        }
+        return lines;
+    });
+    connect(m_highlighter, &Highlighter::highlighted, this, &TextFile::highlighted);
     updateDefinition();
 
     // Text edits only: highlighter format changes do not emit contentsChange.
@@ -579,9 +596,9 @@ void TextFile::loadAsync(const QString &path)
     job->detect = encoding::detectOptions();
     job->doc = m_doc;
     job->home = thread();
-    // The document leaves this thread, with its layout and highlighter (its
-    // children). Nothing may hear of its changes meanwhile.
-    m_highlighter->setDocument(nullptr);
+    // The document leaves this thread, with its layout (its child). Nothing
+    // may hear of its changes meanwhile.
+    m_highlighter->detach();
     m_linkTimer->stop();
     m_doc->setParent(nullptr);
     m_doc->blockSignals(true);
@@ -638,6 +655,8 @@ void TextFile::finishLoad()
     }
     ++m_changeSerial;
     applyDecoded(job->path, job->decoded, true);
+    // Nothing watched the file while it loaded.
+    scheduleDiskCheck();
     Q_EMIT loadFinished(true);
 }
 
@@ -671,8 +690,10 @@ void TextFile::updateHighlighting(bool highlightable)
     // Attached or detached before the text is set, so a highlighter that is
     // not wanted never sees it.
     const bool wanted = wantsHighlighting();
-    if (wanted != isHighlighting())
-        m_highlighter->setDocument(wanted ? m_doc : nullptr);
+    if (wanted)
+        m_highlighter->attach(m_doc);
+    else
+        m_highlighter->detach();
 }
 
 bool TextFile::isHighlighting() const
@@ -696,17 +717,17 @@ void TextFile::syncHighlighting()
     // text again each time, and edits keep an attached highlighter current.
     if (isHighlighting() || !wantsHighlighting())
         return;
-    {
-        // rehighlight() tells the layout about every block it recolours,
-        // and each view then splices its line cache: 28,000 times for 1 MB,
-        // 1.4 s instead of 0.17 s. The views are told once, below.
-        const QSignalBlocker layoutBlocker(m_doc->documentLayout());
-        m_highlighter->setDocument(m_doc);
-        // Now rather than from the event loop, which the call above queues.
-        m_highlighter->rehighlight();
-    }
-    for (DocumentTab *view : std::as_const(m_views))
-        view->editor()->formatsChanged();
+    m_highlighter->attach(m_doc);
+}
+
+bool TextFile::isHighlightPending() const
+{
+    return m_highlighter->isPending();
+}
+
+void TextFile::setHighlightInSlices(bool on)
+{
+    Highlighter::setSliced(on);
 }
 
 void TextFile::rememberDisk(const QByteArray &bytes)

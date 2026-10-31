@@ -167,6 +167,9 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
         Q_EMIT titleChanged();
     });
     connect(f, &TextFile::diskStateChanged, this, &DocumentTab::titleChanged);
+    connect(f, &TextFile::highlighted, this, [this](int first, int last) {
+        forEachView([&](TextView *view) { view->formatsChanged(first, last); });
+    });
     onDefinitionChanged();
     applyDiagnostics();
 }
@@ -419,6 +422,13 @@ void DocumentTab::onDefinitionChanged()
 bool DocumentTab::showsSource() const
 {
     return !isMarkdown() || m_viewMode != ViewMode::Visual;
+}
+
+std::pair<int, int> DocumentTab::visibleSourceLines() const
+{
+    if (!m_editor->isVisible())
+        return {-1, -1};
+    return {m_editor->topLine(), m_editor->bottomLine()};
 }
 
 void DocumentTab::setViewMode(ViewMode mode)

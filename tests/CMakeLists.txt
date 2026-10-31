@@ -52,6 +52,11 @@ target_link_libraries(test_files PRIVATE vn_app Qt6::Test)
 add_test(NAME files COMMAND test_files)
 set_tests_properties(files PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
 
+qt_add_executable(test_highlighting test_highlighting.cpp)
+target_link_libraries(test_highlighting PRIVATE vn_app Qt6::Test)
+add_test(NAME highlighting COMMAND test_highlighting)
+set_tests_properties(highlighting PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
+
 qt_add_executable(test_open test_open.cpp)
 target_link_libraries(test_open PRIVATE vn_app Qt6::Test)
 add_test(NAME open COMMAND test_open)

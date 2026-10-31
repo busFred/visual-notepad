@@ -485,9 +485,26 @@ void TextView::relayout()
     viewport()->update();
 }
 
-void TextView::formatsChanged()
+void TextView::formatsChanged(int firstLine, int lastLine)
 {
-    relayout();
+    // Highlighting in slices reports every few milliseconds: only the lines
+    // it coloured lose their layouts, and only lines laid out (painted or
+    // measured) need a repaint. Bold text may wrap sooner, so the scroll
+    // range is measured again; which rows there are does not change.
+    firstLine = qMax(0, firstLine);
+    lastLine = qMin(lastLine, int(m_lines.size()) - 1);
+    bool laidOut = false;
+    for (int i = firstLine; i <= lastLine; ++i) {
+        if (m_lines[i].layout) {
+            m_lines[i].layout.reset();
+            --m_liveLayouts;
+            laidOut = true;
+        }
+    }
+    if (!laidOut)
+        return;
+    updateScrollBars();
+    viewport()->update();
 }
 
 QTextOption TextView::textOption() const
@@ -521,6 +538,11 @@ void TextView::setTextMargins(qreal left, qreal right, qreal top)
 int TextView::topLine() const
 {
     return row(m_topRow).firstLine;
+}
+
+int TextView::bottomLine() const
+{
+    return qMin(m_doc->blockCount() - 1, topLine() + viewport()->height() / qMax(1, m_lineHeight) + 1);
 }
 
 void TextView::scrollToLine(int line)

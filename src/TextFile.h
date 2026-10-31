@@ -30,13 +30,10 @@
 class QTextDocument;
 class QTimer;
 
-namespace KSyntaxHighlighting {
-class SyntaxHighlighter;
-} // namespace KSyntaxHighlighting
-
 namespace vn {
 
 class DocumentTab;
+class Highlighter;
 class MarkdownModel;
 // Private to TextFile.cpp: a decoded file, and the worker of loadAsync().
 namespace load {
@@ -173,8 +170,15 @@ public:
     bool isHighlighting() const;
     // Starts the highlighter, if the file may be highlighted and a view shows
     // its source now, with a view that just came to. Highlights the whole
-    // document at once, without a text change.
+    // document at once (or in slices, see setHighlightInSlices), without a
+    // text change.
     void syncHighlighting();
+    // Whether highlighting in slices has more to do.
+    bool isHighlightPending() const;
+    // Big texts are highlighted a few milliseconds at a time from the event
+    // loop, the lines on screen first, instead of at once (see Highlighter).
+    // Process-wide; main() turns it on.
+    static void setHighlightInSlices(bool on);
 
 Q_SIGNALS:
     // loadAsync() ended; `ok` as load() returns it.
@@ -193,6 +197,8 @@ Q_SIGNALS:
     void diagnosticsChanged();
     // Orphaned or changed-on-disk state changed.
     void diskStateChanged();
+    // Lines (block numbers) [first, last] have new syntax colours.
+    void highlighted(int first, int last);
 
 private:
     TextFile();
@@ -222,7 +228,7 @@ private:
     friend class TextFileRegistry;
 
     QTextDocument *m_doc;
-    KSyntaxHighlighting::SyntaxHighlighter *m_highlighter;
+    Highlighter *m_highlighter;
     MarkdownModel *m_model = nullptr;
     QTimer *m_linkTimer;
     QList<TextView::Diagnostic> m_diagnostics;

@@ -114,6 +114,33 @@ bool hotExit()
     return Settings::instance().flag(key::restoreUnsaved);
 }
 
+// The per-file settings a session entry overrides: language, indentation.
+void applyFileSettings(DocumentTab *tab, const QJsonObject &entry)
+{
+    if (entry.contains(QStringLiteral("language")))
+        tab->setLanguage(entry.value(QStringLiteral("language")).toString());
+    if (entry.contains(QStringLiteral("tabSize")) && entry.contains(QStringLiteral("insertSpaces")))
+        tab->setIndentation({qBound(1, entry.value(QStringLiteral("tabSize")).toInt(), 16),
+                             entry.value(QStringLiteral("insertSpaces")).toBool()});
+}
+
+// Caret and scroll position, once the tab has its text.
+void restoreView(DocumentTab *tab, const QJsonObject &entry)
+{
+    QTextCursor cursor(tab->document());
+    cursor.setPosition(qBound(0, entry.value(QStringLiteral("caret")).toInt(), qMax(0, tab->document()->characterCount() - 1)));
+    tab->sourceView()->setTextCursor(cursor);
+    if (tab->visualView())
+        tab->visualView()->setTextCursor(cursor);
+    const int topLine = entry.value(QStringLiteral("topLine")).toInt();
+    tab->sourceView()->scrollToLine(topLine);
+    // The view has no size yet; scroll again once it is laid out.
+    QTimer::singleShot(0, tab, [view = QPointer<TextView>(tab->sourceView()), topLine] {
+        if (view)
+            view->scrollToLine(topLine);
+    });
+}
+
 #ifdef Q_OS_UNIX
 int signalPipe[2] = {-1, -1};
 
@@ -308,7 +335,8 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
         int current = 0;
         // Each stored tab's index in `tabs`, for the grid.
         QHash<DocumentTab *, int> ids;
-        for (DocumentTab *tab : window->tabs()) {
+        const QList<DocumentTab *> windowTabs = window->tabs();
+        for (DocumentTab *tab : windowTabs) {
             const bool untitled = tab->path().isEmpty();
             const bool unsaved = tab->isModified() || (untitled && !tab->document()->isEmpty());
             QString backup;
@@ -348,10 +376,17 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
             }
             entry[QStringLiteral("caret")] = tab->editor()->textCursor().position();
             entry[QStringLiteral("topLine")] = tab->sourceView()->topLine();
-            if (tab == window->tabs().value(window->currentTabIndex()))
+            if (tab == windowTabs.value(window->currentTabIndex()))
                 current = int(tabs.size());
             ids.insert(tab, int(tabs.size()));
             tabs.append(entry);
+        }
+        // Tabs a restore still loads keep what was restored, in their places:
+        // they have no text yet, and nothing of theirs can have changed.
+        QHash<const void *, int> pendingIds;
+        for (const MainWindow::PendingSessionTab &pending : window->pendingSessionTabs()) {
+            pendingIds.insert(pending.key, int(tabs.size()));
+            tabs.append(pending.entry);
         }
         if (tabs.isEmpty())
             continue;
@@ -360,7 +395,7 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
         object[QStringLiteral("maximized")] = window->isMaximized();
         object[QStringLiteral("current")] = current;
         object[QStringLiteral("tabs")] = tabs;
-        object[QStringLiteral("grid")] = window->saveGrid(ids);
+        object[QStringLiteral("grid")] = window->saveGrid(ids, pendingIds);
         windows.append(object);
     }
     for (const QJsonValue &carried : std::as_const(m_carried))
@@ -467,6 +502,8 @@ bool SessionManager::restore()
     int created = 0;
     // Entries for one document (several tabs on it) restore into one.
     QHash<QString, std::shared_ptr<TextFile>> restoredBackups;
+    // Files loading off the GUI thread, by path, likewise.
+    QHash<QString, std::shared_ptr<TextFile>> loading;
     for (const QJsonValue &windowValue : windows) {
         const QJsonObject windowObject = windowValue.toObject();
         auto *window = new MainWindow;
@@ -490,6 +527,26 @@ bool SessionManager::restore()
             std::shared_ptr<TextFile> shared = !backupName.isEmpty() ? restoredBackups.value(backupName) : nullptr;
             if (!shared && !path.isEmpty() && (!backupName.isEmpty() || wholeSession))
                 shared = TextFile::find(path);
+            if (!shared && backupName.isEmpty() && wholeSession && !path.isEmpty()) {
+                // A big file would hold up the window (and every other file
+                // of the session) while it is read and set up: it loads off
+                // the GUI thread, as opening it does, and its tab follows.
+                const bool second = loading.contains(path);
+                if (second || QFileInfo(path).size() >= TextFile::largeLoadBytes) {
+                    std::shared_ptr<TextFile> &file = loading[path];
+                    if (!file) {
+                        file = TextFile::create();
+                        file->loadAsync(path);
+                    }
+                    window->restoreLater(id, file, path, entry, [entry, second](DocumentTab *tab) {
+                        if (!second)
+                            applyFileSettings(tab, entry);
+                        tab->setViewMode(modeFromString(entry.value(QStringLiteral("mode")).toString()));
+                        restoreView(tab, entry);
+                    });
+                    continue;
+                }
+            }
             DocumentTab *tab = nullptr;
             if (shared) {
                 tab = new DocumentTab(shared);
@@ -523,11 +580,7 @@ bool SessionManager::restore()
                     delete tab;
                     continue;
                 }
-                if (entry.contains(QStringLiteral("language")))
-                    tab->setLanguage(entry.value(QStringLiteral("language")).toString());
-                if (entry.contains(QStringLiteral("tabSize")) && entry.contains(QStringLiteral("insertSpaces")))
-                    tab->setIndentation({qBound(1, entry.value(QStringLiteral("tabSize")).toInt(), 16),
-                                         entry.value(QStringLiteral("insertSpaces")).toBool()});
+                applyFileSettings(tab, entry);
             }
             tab->setViewMode(modeFromString(entry.value(QStringLiteral("mode")).toString()));
             restored.insert(id, tab);
@@ -537,28 +590,18 @@ bool SessionManager::restore()
         const QJsonObject grid = windowObject.value(QStringLiteral("grid")).toObject();
         window->restoreGrid(grid, restored);
 
-        for (DocumentTab *tab : std::as_const(restored)) {
-            const QJsonObject entry = entries.value(tab);
-            QTextCursor cursor(tab->document());
-            cursor.setPosition(qBound(0, entry.value(QStringLiteral("caret")).toInt(), qMax(0, tab->document()->characterCount() - 1)));
-            tab->sourceView()->setTextCursor(cursor);
-            if (tab->visualView())
-                tab->visualView()->setTextCursor(cursor);
-            const int topLine = entry.value(QStringLiteral("topLine")).toInt();
-            tab->sourceView()->scrollToLine(topLine);
-            // The view has no size yet; scroll again once it is laid out.
-            QTimer::singleShot(0, tab, [view = QPointer<TextView>(tab->sourceView()), topLine] {
-                if (view)
-                    view->scrollToLine(topLine);
-            });
-        }
+        for (DocumentTab *tab : std::as_const(restored))
+            restoreView(tab, entries.value(tab));
 
-        if (window->tabCount() == 0) {
+        if (window->tabCount() == 0 && !window->isOpening()) {
             delete window;
             continue;
         }
-        if (grid.isEmpty())
-            window->setCurrentTabIndex(windowObject.value(QStringLiteral("current")).toInt());
+        if (grid.isEmpty()) {
+            // "current" is an id; tabs before it may be missing or loading.
+            if (DocumentTab *current = restored.value(windowObject.value(QStringLiteral("current")).toInt()))
+                window->setCurrentTabIndex(int(window->tabs().indexOf(current)));
+        }
         const QByteArray geometry = QByteArray::fromBase64(windowObject.value(QStringLiteral("geometry")).toString().toLatin1());
         if (!geometry.isEmpty())
             window->restoreGeometry(geometry);

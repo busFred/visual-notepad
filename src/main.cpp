@@ -1,6 +1,7 @@
 #include "DesktopSettings.h"
 #include "MainWindow.h"
 #include "Session.h"
+#include "TextFile.h"
 #include "Theme.h"
 
 #include <QApplication>
@@ -75,6 +76,7 @@ int main(int argc, char *argv[])
     parser.process(app);
 
     vn::theme::apply(app);
+    vn::TextFile::setHighlightInSlices(true);
 
     auto &session = vn::SessionManager::instance();
     session.start();

@@ -4,6 +4,7 @@
 #include "DragGeometry.h"
 
 #include <QHash>
+#include <QJsonObject>
 #include <QMainWindow>
 #include <QMap>
 #include <QPoint>
@@ -18,7 +19,6 @@ class QActionGroup;
 class QDockWidget;
 class QLabel;
 class QMenu;
-class QJsonObject;
 class QSplitter;
 class QTimer;
 class QToolButton;
@@ -67,6 +67,22 @@ public:
     bool isOpening() const { return !m_pendingOpens.isEmpty(); }
     // Takes ownership of a tab from another window.
     void adoptTab(DocumentTab *tab);
+    // A session restore's big file, which `file` loads (TextFile::loadAsync)
+    // without blocking the window, as openFile() does. Its tab comes once it
+    // has: set up by prepare(), then put where tab `id` of the grid given to
+    // restoreGrid() goes (and shown if it was the current one there), or in
+    // the active group. Until then the session stores `entry` for it, in that
+    // place. Nothing comes if the load fails, as for a missing file.
+    void restoreLater(int id, const std::shared_ptr<TextFile> &file, const QString &path, const QJsonObject &entry,
+                      std::function<void(DocumentTab *)> prepare);
+    // The session entries of tabs restoreLater() has not placed yet; `key`
+    // stands for one in saveGrid().
+    struct PendingSessionTab
+    {
+        const void *key;
+        QJsonObject entry;
+    };
+    QList<PendingSessionTab> pendingSessionTabs() const;
 
     // Editor groups, in a grid of nested splitters like VS Code's editor
     // part. groups() lists them in reading order (GroupsOrder.GRID_APPEARANCE);
@@ -108,8 +124,9 @@ public:
 
     // The grid for the session: splitters with their orientation and sizes,
     // groups with their tabs (as ids from `ids`; others are left out) and
-    // current tab, and which group is active.
-    QJsonObject saveGrid(const QHash<DocumentTab *, int> &ids) const;
+    // current tab, and which group is active. Tabs still to be restored are
+    // in their places as ids from `pending` (keys of pendingSessionTabs()).
+    QJsonObject saveGrid(const QHash<DocumentTab *, int> &ids, const QHash<const void *, int> &pending = {}) const;
     // Rebuilds the grid saveGrid() wrote and places `tabs` (by id) in it; tabs
     // it does not mention, and all of them for an empty `grid` (sessions from
     // before the grid), go to the active group in id order.
@@ -172,10 +189,14 @@ private:
     void collapse(EvenSplitter *splitter);
     // A new group beside `group` with other views of those of `tabs` it shows.
     EditorGroup *splitTabs(EditorGroup *group, const QList<DocumentTab *> &tabs, SplitDirection direction);
-    QJsonObject saveNode(QWidget *node, const QHash<DocumentTab *, int> &ids) const;
+    QJsonObject saveNode(QWidget *node, const QHash<DocumentTab *, int> &ids,
+                         const QHash<const void *, int> &pending) const;
     // Builds `node` as the last pane of `parent` and fills its groups.
     void restoreNode(const QJsonObject &node, EvenSplitter *parent, const QMap<int, DocumentTab *> &tabs,
                      QSet<DocumentTab *> &placed);
+    // Puts tab `id` of a restored grid in `group`, or notes that a tab still
+    // loading for it (restoreLater()) goes there.
+    void placeRestored(int id, EditorGroup *group, const QMap<int, DocumentTab *> &tabs, QSet<DocumentTab *> &placed);
     void wireGroup(EditorGroup *group);
     void addTab(DocumentTab *tab, EditorGroup *group = nullptr, int index = -1);
     // Stops this window tracking the tab and removes it from its group; the
@@ -270,17 +291,32 @@ private:
     // Cached key::autoSave, read on every keystroke otherwise.
     QString m_autoSaveMode;
 
-    // Files loading on worker threads (openFile()), in the order asked.
+    // Files loading on worker threads (openFile(), restoreLater()), in the
+    // order asked.
     struct PendingOpen
     {
         std::shared_ptr<TextFile> file;
         QString path;
+        // After the tab is added (openFile()), or before (restoreLater()).
         std::function<void(DocumentTab *)> opened;
         bool finished = false;
         bool ok = false;
+        // A restored tab's id in the grid (-1 for openFile()), what the
+        // session stores for it meanwhile, and where it goes: before the
+        // first of `before` (restored after it) still in `group`. `order`
+        // is its place among all restored tabs.
+        int restoreId = -1;
+        QJsonObject sessionEntry;
+        QPointer<EditorGroup> group;
+        QList<QPointer<DocumentTab>> before;
+        int order = -1;
+        bool current = false;
     };
+    void watchLoad(const std::shared_ptr<PendingOpen> &pending);
     void finishPendingOpens();
+    void addRestoredTab(const PendingOpen &entry);
     QList<std::shared_ptr<PendingOpen>> m_pendingOpens;
+    int m_restoreOrder = 0;
 
     QHash<EditorGroup *, QToolButton *> m_modeButtons;
     QActionGroup *m_modeGroup;
