@@ -8,12 +8,15 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QPromise>
 #include <QStyle>
 #include <QTextDocument>
+#include <QThreadPool>
 #include <QToolButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <atomic>
 
 namespace vn {
 
@@ -29,7 +32,40 @@ QStringList &history(bool replace)
 
 constexpr int historyLimit = 50;
 
+// Documents up to this many characters are searched on the GUI thread (a few
+// milliseconds); bigger ones on a worker.
+constexpr int asyncThreshold = 256 * 1024;
+
+// A search that has not finished after this long shows "..." in the counter.
+constexpr int busyDelayMs = 120;
+
+QThreadPool &searchPool()
+{
+    // Never destroyed: a catastrophic regex cannot be interrupted, and quitting
+    // must not wait for it. Two threads, so one such search does not starve
+    // every later one.
+    static QThreadPool *pool = [] {
+        auto *created = new QThreadPool;
+        created->setMaxThreadCount(2);
+        return created;
+    }();
+    return *pool;
+}
+
 } // namespace
+
+// A search of a snapshot of the document, run on a worker.
+struct FindBar::Job
+{
+    std::atomic<bool> cancel{false};
+    std::atomic<bool> done{false};
+    quint64 revision = 0;
+    search::Options options;
+    QString text;
+    int scopeStart = -1;
+    int scopeEnd = -1;
+    QList<search::Range> matches;
+};
 
 FindBar::FindBar(TextView *view, QWidget *parent)
     : QFrame(parent)
@@ -140,13 +176,32 @@ FindBar::FindBar(TextView *view, QWidget *parent)
     m_researchTimer.setSingleShot(true);
     m_researchTimer.setInterval(100);
     connect(&m_researchTimer, &QTimer::timeout, this, &FindBar::research);
+    m_busyTimer.setSingleShot(true);
+    m_busyTimer.setInterval(busyDelayMs);
+    connect(&m_busyTimer, &QTimer::timeout, this, [this] {
+        if (m_job)
+            m_count->setText(QStringLiteral("\u2026"));
+    });
+    connect(&m_jobWatcher, &QFutureWatcher<void>::finished, this, &FindBar::finishSearch);
     connect(m_view->document(), &QTextDocument::contentsChanged, this, [this] {
-        if (isVisible())
+        ++m_revision;
+        m_snapshot.clear();
+        m_snapshotValid = false;
+        // A search of the old text is of no use any more. Search again once
+        // the edits pause, if anyone is looking at or waiting for the result.
+        const bool wanted = isVisible() || m_job || !m_waiting.isEmpty();
+        cancelSearch();
+        if (wanted)
             m_researchTimer.start();
     });
 
     setReplaceVisible(false);
     hide();
+}
+
+FindBar::~FindBar()
+{
+    cancelSearch();
 }
 
 void FindBar::setView(TextView *view)
@@ -155,6 +210,8 @@ void FindBar::setView(TextView *view)
         return;
     m_view->setSearchHighlights({}, -1);
     m_view = view;
+    m_snapshot.clear();
+    m_snapshotValid = false;
     if (isVisible())
         research();
 }
@@ -247,17 +304,15 @@ void FindBar::close()
     remember(m_find);
     hide();
     m_researchTimer.stop();
+    cancelSearch();
+    m_waiting.clear();
+    m_snapshot.clear();
+    m_snapshotValid = false;
     m_selectAfterResearch = false;
     m_matches.clear();
     m_view->setSearchHighlights({}, -1);
     m_view->setFocus();
     Q_EMIT closed();
-}
-
-void FindBar::flushResearch()
-{
-    if (m_researchTimer.isActive())
-        research();
 }
 
 QTextCursor FindBar::cursorFor(search::Range range) const
@@ -268,9 +323,18 @@ QTextCursor FindBar::cursorFor(search::Range range) const
     return cursor;
 }
 
+void FindBar::cancelSearch()
+{
+    if (m_job)
+        m_job->cancel = true;
+    m_job.reset();
+    m_busyTimer.stop();
+}
+
 void FindBar::research()
 {
     m_researchTimer.stop();
+    cancelSearch();
     const search::Compiled query(options());
     const bool valid = query.isValid();
     // Re-polishing restyles the whole bar, so only do it when the state flips.
@@ -282,7 +346,59 @@ void FindBar::research()
 
     const int scopeStart = m_scope.isNull() ? -1 : m_scope.selectionStart();
     const int scopeEnd = m_scope.isNull() ? -1 : m_scope.selectionEnd();
-    m_matches = search::findAll(m_view->document(), query, scopeStart, scopeEnd);
+    QTextDocument *document = m_view->document();
+    if (!valid || query.options().pattern.isEmpty() || document->characterCount() <= asyncThreshold) {
+        applyMatches(search::findAll(document, query, scopeStart, scopeEnd));
+        return;
+    }
+
+    // Search a snapshot on a worker. The raw text is one copy of the
+    // document's text, shared copy-on-write with the worker.
+    auto job = std::make_shared<Job>();
+    job->revision = m_revision;
+    job->options = query.options();
+    if (!m_snapshotValid) {
+        m_snapshot = document->toRawText();
+        m_snapshotValid = true;
+    }
+    job->text = m_snapshot;
+    job->scopeStart = scopeStart;
+    job->scopeEnd = scopeEnd;
+    auto promise = std::make_shared<QPromise<void>>();
+    promise->start();
+    m_jobWatcher.setFuture(promise->future());
+    m_job = job;
+    m_busyTimer.start();
+    searchPool().start([job, promise] {
+        // Compile here: a QRegularExpression is cheap to build and this keeps
+        // every use of it on one thread.
+        const search::Compiled compiled(job->options);
+        job->matches = search::findAllInText(std::move(job->text), compiled, job->scopeStart, job->scopeEnd,
+                                             &job->cancel);
+        job->done.store(true, std::memory_order_release);
+        promise->finish();
+    });
+}
+
+void FindBar::finishSearch()
+{
+    // Also called for searches that were cancelled meanwhile: only the
+    // current one counts.
+    if (!m_job || !m_job->done.load(std::memory_order_acquire))
+        return;
+    const std::shared_ptr<Job> job = std::move(m_job);
+    m_job.reset();
+    m_busyTimer.stop();
+    if (job->revision != m_revision) {
+        research();
+        return;
+    }
+    applyMatches(job->matches);
+}
+
+void FindBar::applyMatches(QList<search::Range> matches)
+{
+    m_matches = std::move(matches);
 
     // The current match is the first one at or after the search start.
     m_current = m_matches.isEmpty() ? -1 : 0;
@@ -300,6 +416,32 @@ void FindBar::research()
         if (!m_matches.isEmpty())
             selectMatch(m_current);
     }
+    runPending();
+}
+
+void FindBar::runWhenReady(std::function<void()> action)
+{
+    // A keystroke or edit that has not yet triggered its search.
+    if (m_researchTimer.isActive())
+        research();
+    if (m_job || m_runningWaiting) {
+        m_waiting.append(std::move(action));
+        return;
+    }
+    action();
+}
+
+void FindBar::runPending()
+{
+    if (m_runningWaiting)
+        return;
+    m_runningWaiting = true;
+    // An action may start another search, which the rest wait for.
+    while (!m_waiting.isEmpty() && !m_job && !m_researchTimer.isActive()) {
+        const std::function<void()> action = m_waiting.takeFirst();
+        action();
+    }
+    m_runningWaiting = false;
 }
 
 void FindBar::updateCount()
@@ -349,7 +491,11 @@ void FindBar::findPrevious()
 
 void FindBar::step(bool forward)
 {
-    flushResearch();
+    runWhenReady([this, forward] { stepNow(forward); });
+}
+
+void FindBar::stepNow(bool forward)
+{
     remember(m_find);
     if (m_matches.isEmpty())
         return;
@@ -387,14 +533,20 @@ void FindBar::findSelection(bool forward)
     }
     const bool shown = isVisible();
     research();
-    step(forward);
-    if (!shown)
-        m_view->setSearchHighlights({}, -1);
+    runWhenReady([this, forward, shown] {
+        stepNow(forward);
+        if (!shown)
+            m_view->setSearchHighlights({}, -1);
+    });
 }
 
 void FindBar::selectAllMatches()
 {
-    flushResearch();
+    runWhenReady([this] { selectAllMatchesNow(); });
+}
+
+void FindBar::selectAllMatchesNow()
+{
     if (m_matches.isEmpty())
         return;
     remember(m_find);
@@ -408,7 +560,11 @@ void FindBar::selectAllMatches()
 
 void FindBar::replaceOne()
 {
-    flushResearch();
+    runWhenReady([this] { replaceOneNow(); });
+}
+
+void FindBar::replaceOneNow()
+{
     if (m_view->isReadOnly() || m_matches.isEmpty())
         return;
     remember(m_replace);
@@ -429,7 +585,11 @@ void FindBar::replaceOne()
 
 void FindBar::replaceAll()
 {
-    flushResearch();
+    runWhenReady([this] { replaceAllNow(); });
+}
+
+void FindBar::replaceAllNow()
+{
     if (m_view->isReadOnly() || m_matches.isEmpty())
         return;
     remember(m_replace);

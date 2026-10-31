@@ -4,8 +4,12 @@
 #include "Search.h"
 
 #include <QFrame>
+#include <QFutureWatcher>
 #include <QTextCursor>
 #include <QTimer>
+
+#include <functional>
+#include <memory>
 
 class QLabel;
 class QLineEdit;
@@ -22,6 +26,7 @@ class FindBar : public QFrame
 
 public:
     FindBar(TextView *view, QWidget *parent);
+    ~FindBar() override;
     // Searches another view of the same document from now on.
     void setView(TextView *view);
 
@@ -44,6 +49,9 @@ public:
     QLineEdit *replaceField() const { return m_replace; }
     int matchCount() const { return int(m_matches.size()); }
     int currentMatch() const { return m_current; }
+    // True while a search of a big document runs on a worker thread; the
+    // matches and the counter still show the previous search.
+    bool isSearching() const { return m_job != nullptr; }
 
 Q_SIGNALS:
     void closed();
@@ -58,8 +66,19 @@ private:
     search::Options options() const;
     void setReplaceVisible(bool on);
     void research();
-    // Runs a search a pending keystroke or edit has not yet triggered.
-    void flushResearch();
+    // Shows the matches of the latest search and carries on with whatever
+    // waited for it.
+    void applyMatches(QList<search::Range> matches);
+    void cancelSearch();
+    void finishSearch();
+    // Runs `action` once the matches are up to date with the query and the
+    // text: at once normally, after a search in flight when there is one.
+    void runWhenReady(std::function<void()> action);
+    void runPending();
+    void stepNow(bool forward);
+    void replaceOneNow();
+    void replaceAllNow();
+    void selectAllMatchesNow();
     QTextCursor cursorFor(search::Range range) const;
     void selectMatch(int index);
     void step(bool forward);
@@ -86,6 +105,18 @@ private:
     QTextCursor m_scope; // Find-in-selection range.
     int m_searchStart = 0;
     QTimer m_researchTimer;
+
+    struct Job;
+    std::shared_ptr<Job> m_job; // The search in flight on a worker, if any.
+    QFutureWatcher<void> m_jobWatcher;
+    QTimer m_busyTimer; // Shows "..." when a search takes noticeably long.
+    quint64 m_revision = 0; // Counts edits of the document.
+    // The document's text for the worker, kept while the document is unedited
+    // so that typing a query does not copy it again for every search.
+    QString m_snapshot;
+    bool m_snapshotValid = false;
+    QList<std::function<void()>> m_waiting;
+    bool m_runningWaiting = false;
     int m_historyIndex = -1;
 };
 
