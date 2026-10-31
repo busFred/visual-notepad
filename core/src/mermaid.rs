@@ -498,7 +498,10 @@ mod tests {
             assert!(result.is_ok() || result.as_ref().err().map(String::as_str) == Some("diagram too large"), "{name}: {:?}", result.err());
             // About 1.5 s on the machine it was measured on; the margin is
             // for slow or busy CI machines. Unbounded layouts take minutes.
-            assert!(took.as_secs_f64() < 6.0, "{name} with {n} edges took {took:?}");
+            // Debug builds (`cargo test`) also run the library's own layout
+            // checks and leave this crate unoptimised: 7 s on Windows CI.
+            let limit = if cfg!(debug_assertions) { 20.0 } else { 6.0 };
+            assert!(took.as_secs_f64() < limit, "{name} with {n} edges took {took:?}");
         }
     }
 
