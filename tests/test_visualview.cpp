@@ -15,7 +15,10 @@
 #include <KSyntaxHighlighting/SyntaxHighlighter>
 #include <KSyntaxHighlighting/Theme>
 
+#include <QAbstractTextDocumentLayout>
 #include <QApplication>
+#include <QPainterPath>
+#include <QSet>
 #include <QFile>
 #include <QPainter>
 #include <QRegularExpression>
@@ -171,6 +174,8 @@ private Q_SLOTS:
     void onlyParseSettingsReparse();
     void wideImagesShrinkToColumn();
     void decodedPicturesServeEveryWidth();
+    void codeBlocksArePaintedAsTheStockHighlighterDoes_data();
+    void codeBlocksArePaintedAsTheStockHighlighterDoes();
     void clickEnlargesPicture();
     void networkPaths();
     void networkPathsAreNotOpened_data();
@@ -981,6 +986,88 @@ void TestVisualView::decodedPicturesServeEveryWidth()
     QVERIFY(countColor(small, Qt::white) < small.width() * small.height());
     QVERIFY(small != large);
     QVERIFY(large.height() > small.height());
+}
+
+void TestVisualView::codeBlocksArePaintedAsTheStockHighlighterDoes_data()
+{
+    QTest::addColumn<QString>("language");
+    QTest::addColumn<QString>("code");
+    QTest::newRow("python") << "python"
+                            << "def f(x):\n    # a comment\n    return [x * k for k in range(10) if k % 2 == 0]\n";
+    QTest::newRow("cpp") << "cpp"
+                         << "#include <vector>\nint main() {\n  std::vector<int> v{1, 2}; // two\n  return v[0] > 1 ? 0 : 1;\n}\n";
+    QTest::newRow("json") << "json" << "{\"a\": [1, 2.5, true, null], \"b\": {\"c\": \"text\"}}\n";
+    QTest::newRow("rust") << "rust" << "fn main() {\n    let s = \"hi\"; /* c */\n    println!(\"{}\", s);\n}\n";
+    QTest::newRow("bash") << "bash" << "for f in *.md; do echo \"$f\" | sed 's/a/b/'; done\n";
+    QTest::newRow("markdown") << "markdown" << "# Title\n\n*emphasis* **strong** `code` [link](http://x.y)\n- item\n";
+    QTest::newRow("wrapping") << "text" << QString(300, u'w') + QStringLiteral(" and some more words to wrap\n");
+    QTest::newRow("unknown language") << "no-such-language" << "plain text\n";
+    QTest::newRow("none") << "" << "no language at all\n";
+}
+
+void TestVisualView::codeBlocksArePaintedAsTheStockHighlighterDoes()
+{
+    QFETCH(QString, language);
+    QFETCH(QString, code);
+    const QString source = QStringLiteral("```%1\n%2```").arg(language, code);
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.width = 360;
+    core::Block block;
+    block.kind = core::BlockKind::Code;
+    const QByteArray lang = language.toUtf8();
+    const QByteArray text = code.toUtf8();
+    block.lang = rust::String(lang.constData(), lang.size());
+    block.text = rust::String(text.constData(), text.size());
+    const auto rendered = RenderedBlock::create(block, source, ctx);
+    QCOMPARE(rendered->kind(), RenderedBlock::Kind::Code);
+
+    // The same document the way the stock KSyntaxHighlighting highlighter
+    // does it, drawn the way RenderedBlock::paint does.
+    QTextDocument reference;
+    reference.setDocumentMargin(0);
+    reference.setDefaultFont(ctx.codeFont);
+    QTextOption option;
+    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    reference.setDefaultTextOption(option);
+    reference.setPlainText(source);
+    reference.setTextWidth(ctx.width - 20);
+    KSyntaxHighlighting::SyntaxHighlighter highlighter(&reference);
+    highlighter.setTheme(theme::syntaxTheme());
+    highlighter.setDefinition(theme::syntaxRepository().definitionForName(QStringLiteral("Markdown")));
+    highlighter.rehighlight();
+
+    const QSize size(int(ctx.width), int(rendered->height()));
+    QImage actual(size, QImage::Format_RGB32);
+    QImage expected(size, QImage::Format_RGB32);
+    actual.fill(Qt::white);
+    expected.fill(Qt::white);
+    {
+        QPainter painter(&actual);
+        rendered->paint(painter, QPointF(0, 0), ctx.width);
+    }
+    {
+        QPainter painter(&expected);
+        QPainterPath box;
+        box.addRoundedRect(QRectF(QPointF(0, 0), QSizeF(ctx.width, rendered->height() - 4)), 3, 3);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.fillPath(box, theme::color(theme::Role::codeBlock));
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.translate(10, 5);
+        QAbstractTextDocumentLayout::PaintContext paint;
+        paint.palette.setColor(QPalette::Text, theme::color(theme::Role::text));
+        reference.documentLayout()->draw(&painter, paint);
+    }
+    QCOMPARE(reference.size().height() + 10 + 4, rendered->height());
+    QVERIFY(actual == expected);
+    // Highlighted, not plain: more than the text colour and the box.
+    QSet<QRgb> colors;
+    for (int y = 0; y < actual.height(); ++y)
+        for (int x = 0; x < actual.width(); ++x)
+            colors.insert(actual.pixel(x, y));
+    if (language == QLatin1String("python") || language == QLatin1String("cpp"))
+        QVERIFY(colors.size() > 20);
 }
 
 void TestVisualView::clickEnlargesPicture()

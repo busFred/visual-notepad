@@ -5,6 +5,7 @@
 #include "MathRenderer.h"
 
 #include <KSyntaxHighlighting/Definition>
+#include <KSyntaxHighlighting/Format>
 #include <KSyntaxHighlighting/Repository>
 #include <KSyntaxHighlighting/SyntaxHighlighter>
 #include <KSyntaxHighlighting/Theme>
@@ -14,6 +15,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QHash>
 #include <QImageReader>
 #include <QPainter>
 #include <QPainterPath>
@@ -386,6 +388,52 @@ div.footnote { font-size: %12px; color: #444444; }
     return lastSheet;
 }
 
+// The Qt format of a syntax format. The stock SyntaxHighlighter works these
+// out for every format of its definition and of each definition that one
+// includes, in every highlighter: for Markdown (which includes the fenced
+// languages) thousands of them, 0.2 ms and 280 KiB for each code block. The
+// theme is the same for all blocks and a block uses a few formats, so they
+// are made on demand and shared. Built as KSyntaxHighlighting does.
+QTextCharFormat sharedTextFormat(const KSyntaxHighlighting::Format &format, const KSyntaxHighlighting::Theme &theme)
+{
+    static QHash<int, QTextCharFormat> formats; // By format id, which is unique in the repository.
+    static QString formatsTheme;
+    if (formatsTheme != theme.name()) {
+        formats.clear();
+        formatsTheme = theme.name();
+    }
+    if (const auto it = formats.constFind(format.id()); it != formats.constEnd())
+        return *it;
+    QTextCharFormat tf;
+    // Always set the foreground color to avoid palette issues.
+    tf.setForeground(format.textColor(theme));
+    if (format.hasBackgroundColor(theme))
+        tf.setBackground(format.backgroundColor(theme));
+    if (format.isBold(theme))
+        tf.setFontWeight(QFont::Bold);
+    if (format.isItalic(theme))
+        tf.setFontItalic(true);
+    if (format.isUnderline(theme))
+        tf.setFontUnderline(true);
+    if (format.isStrikeThrough(theme))
+        tf.setFontStrikeOut(true);
+    formats.insert(format.id(), tf);
+    return tf;
+}
+
+class CodeHighlighter : public KSyntaxHighlighting::SyntaxHighlighter
+{
+public:
+    using KSyntaxHighlighting::SyntaxHighlighter::SyntaxHighlighter;
+
+protected:
+    void applyFormat(int offset, int length, const KSyntaxHighlighting::Format &format) override
+    {
+        if (length > 0)
+            setFormat(offset, length, sharedTextFormat(format, theme()));
+    }
+};
+
 std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString &definition,
                                             const RenderContext &context, qreal width)
 {
@@ -397,10 +445,10 @@ std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString
     doc->setDefaultTextOption(option);
     doc->setPlainText(source);
     doc->setTextWidth(width);
-    auto *highlighter = new KSyntaxHighlighting::SyntaxHighlighter(doc.get());
+    auto *highlighter = new CodeHighlighter(doc.get());
     highlighter->setTheme(theme::syntaxTheme());
+    // Highlights the whole text by itself when the definition changes.
     highlighter->setDefinition(theme::syntaxRepository().definitionForName(definition));
-    highlighter->rehighlight();
     return doc;
 }
 
