@@ -18,7 +18,9 @@
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
 #include <QPainterPath>
+#include <QScrollBar>
 #include <QSet>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QPainter>
 #include <QRegularExpression>
@@ -181,6 +183,12 @@ private Q_SLOTS:
     void networkPaths();
     void networkPathsAreNotOpened_data();
     void networkPathsAreNotOpened();
+    void hugeBlocksFallBackToTheirSource_data();
+    void hugeBlocksFallBackToTheirSource();
+    void ordinaryBlocksIgnoreTheLayoutLimits();
+    void longRunsWrapTheSameWithTheLimits();
+    void scrollingKeepsOnlyRecentRenders();
+    void decodedPictureCacheSurvivesRoundsOfMorePictures();
 
 private:
     // Source and preview of longDocument(), side by side; the source has
@@ -1270,6 +1278,208 @@ void TestVisualView::networkPathsAreNotOpened()
         // A click on a picture that did not load must not open it either.
         QCOMPARE(bool(rendered->pictureAt(QPointF(20, 20))), loads);
     }
+}
+
+namespace {
+
+// A document's first block, rendered at a width.
+std::unique_ptr<RenderedBlock> renderFirstBlock(const QString &markdown, qreal width = 548)
+{
+    const QByteArray utf8 = markdown.toUtf8();
+    const rust::Vec<core::Block> blocks = core::blocks(rust::Str(utf8.constData(), utf8.size()),
+                                                       core::RenderOptions{false, true, true, true, 1});
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.width = width;
+    return RenderedBlock::create(blocks.at(0), markdown, ctx);
+}
+
+QImage paintBlock(const RenderedBlock &block, qreal width = 548)
+{
+    QImage image(QSize(int(width), qMax(1, qMin(4000, int(block.height()) + 1))), QImage::Format_RGB32);
+    image.fill(Qt::white);
+    QPainter painter(&image);
+    block.paint(painter, QPointF(0, 0), width);
+    return image;
+}
+
+// Turns the layout limits off for a scope.
+struct LayoutLimitsOff
+{
+    LayoutLimitsOff() { RenderedBlock::setLayoutGuardEnabled(false); }
+    ~LayoutLimitsOff() { RenderedBlock::setLayoutGuardEnabled(true); }
+};
+
+// The unit with %1 replaced by 0 .. times - 1, joined.
+QString repeated(const QString &unit, int times, const QString &separator = {})
+{
+    QStringList list;
+    list.reserve(times);
+    for (int i = 0; i < times; ++i)
+        list << unit.arg(i);
+    return list.join(separator);
+}
+
+const QString newline = QStringLiteral("\n");
+
+} // namespace
+
+// Shapes Qt's rich text lays out in time far from linear (a 260 KB word in
+// quotes squeezed to nothing took minutes, a list of 20 000 items 14 s)
+// become their source in a code box, which is quick.
+void TestVisualView::hugeBlocksFallBackToTheirSource_data()
+{
+    QTest::addColumn<QString>("markdown");
+    QTest::newRow("word in nested quotes") << QString(QStringLiteral("> ")).repeated(50) + QString(260000, u'x');
+    QTest::newRow("word in a quote") << QStringLiteral("> ") + QString(260000, u'x');
+    QTest::newRow("list of 20000") << repeated(QStringLiteral("- item %1 of the list"), 20000, newline);
+    QTest::newRow("table of 5000 rows")
+        << QStringLiteral("| a | b | c |\n|---|---|---|\n") + repeated(QStringLiteral("| r%1 | x | y |"), 5000, newline);
+    QTest::newRow("html nested 3000 deep") << QString(QStringLiteral("<blockquote>")).repeated(3000) + QStringLiteral("text")
+                                                  + QString(QStringLiteral("</blockquote>")).repeated(3000);
+    QTest::newRow("html table of 5000 cells")
+        << QStringLiteral("<table>") + repeated(QStringLiteral("<tr><td>%1</td></tr>"), 5000) + QStringLiteral("</table>");
+    QTest::newRow("code line of a million") << QStringLiteral("```\n") + QString(1000000, u'z') + QStringLiteral("\n```");
+}
+
+void TestVisualView::hugeBlocksFallBackToTheirSource()
+{
+    QFETCH(QString, markdown);
+    const int before = RenderedBlock::guardedBlockCount();
+    QElapsedTimer timer;
+    timer.start();
+    const auto block = renderFirstBlock(markdown);
+    const QImage image = paintBlock(*block);
+    const qint64 ms = timer.elapsed();
+    QVERIFY2(ms < 3000, qPrintable(QStringLiteral("%1 ms").arg(ms)));
+    QCOMPARE(block->kind(), RenderedBlock::Kind::Code);
+    QVERIFY(block->height() > 20);
+    QVERIFY(!image.isNull());
+    // The source is what is shown, word for word.
+    QCOMPARE(block->renderedText(), markdown);
+    // (A code block is a code block either way.)
+    if (!markdown.startsWith(QLatin1String("```")))
+        QCOMPARE(RenderedBlock::guardedBlockCount(), before + 1);
+}
+
+// Everything an ordinary page holds, and then some, renders as before.
+void TestVisualView::ordinaryBlocksIgnoreTheLayoutLimits()
+{
+    const QStringList documents = {
+        QString::fromUtf8(sample),
+        repeated(QStringLiteral("- item %1 of the list"), 2000, newline),
+        repeated(QStringLiteral("%1. item of the list"), 500, newline),
+        QStringLiteral("| a | b | c | d |\n|---|---|---|---|\n") + repeated(QStringLiteral("| r%1 | x | y | z |"), 900, newline),
+        QString(QStringLiteral("> ")).repeated(8) + QString(5000, u'w'),
+        QString(QStringLiteral("> ")).repeated(8) + repeated(QStringLiteral("word%1"), 20000, QStringLiteral(" ")),
+        QString(QStringLiteral("<blockquote>")).repeated(60) + QStringLiteral("text")
+            + QString(QStringLiteral("</blockquote>")).repeated(60),
+        QString(20000, QChar(0x4E2D)), // CJK: a break after every character.
+        QStringLiteral("```cpp\n") + repeated(QStringLiteral("int x%1 = f(%1, \"abc\");"), 3000, newline) + QStringLiteral("\n```"),
+        QStringLiteral("```\n") + QString(30000, u'q') + QStringLiteral("\n```"),
+    };
+    const int before = RenderedBlock::guardedBlockCount();
+    for (const QString &markdown : documents) {
+        const auto guarded = renderFirstBlock(markdown);
+        const auto unguarded = [&] {
+            LayoutLimitsOff off;
+            return renderFirstBlock(markdown);
+        }();
+        QVERIFY2(guarded->kind() == unguarded->kind(), qPrintable(markdown.left(40)));
+        QCOMPARE(guarded->height(), unguarded->height());
+        QVERIFY2(paintBlock(*guarded) == paintBlock(*unguarded), qPrintable(markdown.left(40)));
+        QVERIFY(guarded->lineAnchors() == unguarded->lineAnchors());
+    }
+    QCOMPARE(RenderedBlock::guardedBlockCount(), before);
+}
+
+// A code box wraps a very long run of text anywhere, which Qt lays out in
+// linear time; for a run it would wrap in the same places anyway.
+void TestVisualView::longRunsWrapTheSameWithTheLimits()
+{
+    const QString markdown = QStringLiteral("```\nshort line\n") + QString(70000, u'z') + QStringLiteral("\n```");
+    const auto guarded = renderFirstBlock(markdown);
+    const auto unguarded = [&] {
+        LayoutLimitsOff off;
+        return renderFirstBlock(markdown);
+    }();
+    QCOMPARE(guarded->height(), unguarded->height());
+    QVERIFY(paintBlock(*guarded) == paintBlock(*unguarded));
+    QVERIFY(guarded->lineAnchors() == unguarded->lineAnchors());
+}
+
+// The view remembers the render of each block it paints so that painting does
+// not rebuild keys; scrolling through a long document must not keep them all.
+void TestVisualView::scrollingKeepsOnlyRecentRenders()
+{
+    QStringList paragraphs;
+    for (int i = 0; i < 3000; ++i)
+        paragraphs << QStringLiteral("Paragraph %1 of a long document, with some **words** in it.").arg(i);
+    m_doc->setPlainText(paragraphs.join(QStringLiteral("\n\n")));
+    m_model->flush();
+    QScrollBar *bar = m_view->verticalScrollBar();
+    bar->setValue(0);
+    const QImage top = m_view->grab().toImage();
+    int most = 0;
+    for (int value = 0; value <= bar->maximum(); value += 15) {
+        bar->setValue(value);
+        QVERIFY(!m_view->grab().isNull());
+        most = qMax(most, m_view->memoizedRenderCount());
+    }
+    QVERIFY2(most > 10 && most <= 512, qPrintable(QString::number(most)));
+    QVERIFY(bar->maximum() > 3000);
+    // Blocks come back the way they were.
+    bar->setValue(0);
+    QCOMPARE(m_view->grab().toImage(), top);
+}
+
+// More pictures than the decoded-picture cache holds, shown one after the
+// other at every new window width: the ones that fit keep serving, instead
+// of all being pushed out just before they are needed again.
+void TestVisualView::decodedPictureCacheSurvivesRoundsOfMorePictures()
+{
+    QTemporaryDir dir;
+    QStringList blocks;
+    for (int n = 0; n < 6; ++n) {
+        QImage picture(300, 200, QImage::Format_RGB32);
+        for (int y = 0; y < picture.height(); ++y)
+            for (int x = 0; x < picture.width(); ++x)
+                picture.setPixel(x, y, qRgb((x * 7 + n * 40) % 256, (y * 5 + x / 3) % 256, (x * y + n) % 256));
+        QVERIFY(picture.save(dir.filePath(QStringLiteral("p%1.png").arg(n))));
+        blocks << QStringLiteral("<p><img src=\"p%1.png\"></p>").arg(n);
+    }
+    // Four of the six fit (held as 24 bit: 176 KiB each).
+    RenderedBlock::setDecodedPictureLimitKiB(4 * 176 + 8);
+    const auto round = [&](int width) {
+        const int start = RenderedBlock::pictureFileReads();
+        QList<QImage> images;
+        for (const QString &html : std::as_const(blocks))
+            images << paintHtml(html, dir.path(), width);
+        return std::pair(RenderedBlock::pictureFileReads() - start, images);
+    };
+    QCOMPARE(round(290).first, 6);
+    for (int width = 280; width >= 250; width -= 10) {
+        const auto [reads, images] = round(width);
+        QCOMPARE(reads, 2);
+        // The same pixels whether the picture was kept or read again.
+        for (int n = 0; n < 6; ++n) {
+            const QImage expected = QImage(dir.filePath(QStringLiteral("p%1.png").arg(n))).scaledToWidth(width, Qt::SmoothTransformation);
+            QCOMPARE(images[n].copy(0, 0, expected.width(), expected.height()).convertToFormat(QImage::Format_RGB32),
+                     expected.convertToFormat(QImage::Format_RGB32));
+        }
+    }
+    // A few pictures looked at again and again are kept after all.
+    blocks = blocks.mid(4);
+    int last = -1;
+    for (int width = 240; width >= 200 && last != 0; width -= 10) {
+        const int start = RenderedBlock::pictureFileReads();
+        for (const QString &html : std::as_const(blocks))
+            paintHtml(html, dir.path(), width);
+        last = RenderedBlock::pictureFileReads() - start;
+    }
+    QCOMPARE(last, 0);
+    RenderedBlock::setDecodedPictureLimitKiB(128 * 1024);
 }
 
 // Keep tests away from the user's settings file.

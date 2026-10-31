@@ -25,6 +25,10 @@ constexpr qreal gapRowFactor = 0.6;
 constexpr qreal activeBarInset = 10;
 // Render cache budget per view, in KiB (see RenderedBlock::cost).
 constexpr int renderCacheKiB = 48 * 1024;
+// Renders the view keeps in hand besides the cache (see rendered()): a screen
+// shows a few dozen blocks, at most a few hundred.
+constexpr int spanRenderMax = 512;
+constexpr int spanRenderKiB = 16 * 1024;
 
 bool sameChar(QChar a, QChar b)
 {
@@ -99,7 +103,25 @@ void VisualView::clearRenderCache()
 {
     m_cache.clear();
     m_pendingKeys.clear();
-    m_spanRenders.clear();
+    resetSpanRenders(0);
+}
+
+void VisualView::resetSpanRenders(size_t spans)
+{
+    m_spanRenders.assign(spans, {});
+    m_spanRenderOrder.clear();
+    m_spanRenderCount = 0;
+    m_spanRenderKiB = 0;
+}
+
+void VisualView::dropSpanRender(int span)
+{
+    Render &render = m_spanRenders[span];
+    if (!render.block)
+        return;
+    --m_spanRenderCount;
+    m_spanRenderKiB -= render.cost;
+    render = {};
 }
 
 void VisualView::diagramsReady()
@@ -111,9 +133,9 @@ void VisualView::diagramsReady()
     for (const QString &key : std::as_const(m_pendingKeys))
         m_cache.remove(key);
     m_pendingKeys.clear();
-    for (Render &render : m_spanRenders) {
-        if (render.block && render.block->isPending())
-            render = {};
+    for (size_t i = 0; i < m_spanRenders.size(); ++i) {
+        if (m_spanRenders[i].block && m_spanRenders[i].block->isPending())
+            dropSpanRender(int(i));
     }
     relayout();
 }
@@ -291,7 +313,7 @@ const RenderedBlock *VisualView::rendered(int index)
     const RenderContext ctx = context();
     if (m_spanRendersRevision != m_model->revision() || m_spanRendersWidth != ctx.width
         || m_spanRendersDpr != ctx.devicePixelRatio || m_spanRenders.size() != spans.size()) {
-        m_spanRenders.assign(spans.size(), {});
+        resetSpanRenders(spans.size());
         m_spanRendersRevision = m_model->revision();
         m_spanRendersWidth = ctx.width;
         m_spanRendersDpr = ctx.devicePixelRatio;
@@ -321,10 +343,23 @@ const RenderedBlock *VisualView::rendered(int index)
     if (hit && hit->source == source) {
         memo = *hit;
     } else {
-        memo = {source, key, std::shared_ptr<RenderedBlock>(RenderedBlock::create(block, source, ctx))};
-        if (memo.block->isPending())
+        const std::shared_ptr<RenderedBlock> created(RenderedBlock::create(block, source, ctx));
+        const int cost = created->cost() + int(source.size() / 512);
+        memo = {source, key, created, cost};
+        if (created->isPending())
             m_pendingKeys.insert(key);
-        m_cache.insert(key, new Render(memo), memo.block->cost() + int(source.size() / 512));
+        m_cache.insert(key, new Render(memo), cost);
+    }
+    // Keep the memos of the latest renders only: the cache holds the rest
+    // within its budget, while memos on every block seen would keep them all
+    // alive, however far the view has scrolled on.
+    m_spanRenderOrder.push_back(index);
+    ++m_spanRenderCount;
+    m_spanRenderKiB += memo.cost;
+    while (m_spanRenderOrder.size() > 1 && m_spanRenderOrder.front() != index
+           && (m_spanRenderCount > spanRenderMax || m_spanRenderKiB > spanRenderKiB)) {
+        dropSpanRender(m_spanRenderOrder.front());
+        m_spanRenderOrder.pop_front();
     }
     return memo.block.get();
 }
