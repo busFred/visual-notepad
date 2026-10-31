@@ -91,6 +91,9 @@ switches. Buttons: Help and Close; changes apply immediately. No search box.
   and Reset All.
 - Markdown > Math macros: a Command / Expands to table (`\RR` to
   `\mathbb{R}`), as the old `markdown.math.macros` setting.
+- Markdown > Images: the size of the decoded-picture cache
+  (`performance/pictureCacheMiB`, 16-2048 MiB, default 128), applied live to
+  all windows; pictures are only kept while their document is open.
 
 ## Shortcuts
 

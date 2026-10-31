@@ -3,6 +3,7 @@
 #include <QHash>
 #include <QSettings>
 
+#include <algorithm>
 #include <utility>
 
 namespace vn {
@@ -40,6 +41,7 @@ const QHash<QString, QVariant> &defaults()
         {key::pasteImageFolder, QString()},
         {key::updateLinksOnPaste, true},
         {key::validateLinks, false},
+        {key::pictureCacheMiB, pictureCacheDefaultMiB},
         {key::restoreUnsaved, true},
         {key::restoreSession, false},
         {key::rememberRecent, true},
@@ -118,6 +120,8 @@ QVariant Settings::value(const char *key) const
     // INI files store everything as strings; convert back to the default's type.
     if (fallback.isValid() && stored.metaType() != fallback.metaType() && stored.canConvert(fallback.metaType()))
         stored.convert(fallback.metaType());
+    if (qstrcmp(key, key::pictureCacheMiB) == 0)
+        return std::clamp(stored.toInt(), pictureCacheMinMiB, pictureCacheMaxMiB);
     return stored;
 }
 

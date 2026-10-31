@@ -8,6 +8,7 @@
 #include "Theme.h"
 #include "editor/FindBar.h"
 #include "editor/TextView.h"
+#include "markdown/BlockRenderer.h"
 #include "vn_core_bridge/lib.h"
 
 #include <QAction>
@@ -423,6 +424,21 @@ void MainWindow::createActions()
     });
 
     connect(&Settings::instance(), &Settings::changed, this, &MainWindow::onSettingChanged);
+
+    // The picture cache is shared by all windows: set it up once, before the
+    // first render, and follow the setting from then on.
+    static const bool pictureCacheBound = [] {
+        const auto apply = [] {
+            RenderedBlock::setDecodedPictureLimitKiB(Settings::instance().number(key::pictureCacheMiB) * 1024);
+        };
+        apply();
+        QObject::connect(&Settings::instance(), &Settings::changed, qApp, [apply](const QString &changedKey) {
+            if (changedKey == QLatin1String(key::pictureCacheMiB))
+                apply();
+        });
+        return true;
+    }();
+    Q_UNUSED(pictureCacheBound)
 }
 
 void MainWindow::createMenus()
