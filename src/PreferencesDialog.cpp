@@ -26,6 +26,7 @@
 #include <QScrollArea>
 #include <QSet>
 #include <QSignalBlocker>
+#include <QSpinBox>
 #include <QStackedWidget>
 #include <QStyle>
 #include <QTextDocument>
@@ -692,6 +693,8 @@ void PreferencesDialog::buildMarkdownPage()
              {{tr("Hide"), QStringLiteral("hide")},
               {tr("Code block"), QStringLiteral("code")},
               {tr("Table"), QStringLiteral("table")}});
+    addHeading(tr("Images"));
+    addPictureCacheRow();
     addHeading(tr("Math"));
     addSwitch(tr("Render math"), key::renderMath);
     addMacroTable();
@@ -711,6 +714,37 @@ void PreferencesDialog::buildMarkdownPage()
     addSwitch(tr("Update links when pasting Markdown"), key::updateLinksOnPaste);
     addSwitch(tr("Check links for errors"), key::validateLinks);
     endPage(tr("Markdown"), QStringLiteral("markdown"));
+}
+
+void PreferencesDialog::addPictureCacheRow()
+{
+    const QString hint = tr("Memory used to keep decoded pictures so scrolling and resizing stay fast. Larger is "
+                            "faster on pages with many big images; pictures are only kept while the document is "
+                            "open. Default %1 MiB.")
+                             .arg(pictureCacheDefaultMiB);
+    auto *spin = new QSpinBox;
+    spin->setObjectName(QString::fromLatin1(key::pictureCacheMiB));
+    spin->setRange(pictureCacheMinMiB, pictureCacheMaxMiB);
+    spin->setSuffix(tr(" MiB"));
+    spin->setSingleStep(16);
+    spin->setKeyboardTracking(false); // one change when typing is done, not one per digit
+    spin->setFixedHeight(26);
+    spin->setMinimumWidth(110);
+    spin->setToolTip(hint);
+    QWidget *row = addRow(tr("Picture cache size"), spin);
+    row->setToolTip(hint);
+    connect(spin, &QSpinBox::valueChanged, this,
+            [](int mib) { Settings::instance().setValue(key::pictureCacheMiB, mib); });
+    track(key::pictureCacheMiB, [spin] {
+        const QSignalBlocker blocker(spin);
+        spin->setValue(Settings::instance().number(key::pictureCacheMiB));
+    });
+
+    auto *note = new QLabel(hint);
+    note->setObjectName(QStringLiteral("PrefMuted"));
+    note->setWordWrap(true);
+    note->setContentsMargins(rowIndent, 0, 0, 4);
+    m_page->addWidget(note);
 }
 
 void PreferencesDialog::addMacroTable()

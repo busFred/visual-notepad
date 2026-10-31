@@ -37,6 +37,7 @@ private Q_SLOTS:
     void standardMatchesOriginalColors();
     void classicUsesWindowsClassicColors();
     void legacySettingsMigrateToStandard();
+    void pictureCacheSizeSettingIsClamped();
     void dialogCancelWritesNothing();
     void mnemonicsShowWhileAltOrMenuKeyboard();
     void dialogApplyWritesOverride();
@@ -78,6 +79,43 @@ void TestTheme::switchingThemeIsLive()
     Settings::instance().setValue(key::theme, QStringLiteral("modern"));
     QCOMPARE(QApplication::palette().color(QPalette::Window), QColor(0xF9F9F9));
     QVERIFY(!qApp->styleSheet().contains(QStringLiteral("#d4d0c8")));
+}
+
+void TestTheme::pictureCacheSizeSettingIsClamped()
+{
+    Settings &settings = Settings::instance();
+    QCOMPARE(settings.number(key::pictureCacheMiB), 128); // Missing key.
+    QCOMPARE(settings.defaultValue(key::pictureCacheMiB).toInt(), 128);
+    QSignalSpy changed(&settings, &Settings::changed);
+    settings.setValue(key::pictureCacheMiB, 512);
+    QCOMPARE(changed.size(), 1);
+    QCOMPARE(changed.first().first().toString(), QString::fromLatin1(key::pictureCacheMiB));
+    QCOMPARE(settings.number(key::pictureCacheMiB), 512);
+
+    // Stored by hand (an INI file holds text), also outside the range.
+    const QString path = m_dir.filePath(QStringLiteral("hand.ini"));
+    {
+        QSettings ini(path, QSettings::IniFormat);
+        ini.setValue(QString::fromLatin1(key::pictureCacheMiB), QStringLiteral("5"));
+    }
+    settings.useFile(path);
+    QCOMPARE(settings.number(key::pictureCacheMiB), 16);
+    settings.setValue(key::pictureCacheMiB, 100000);
+    QCOMPARE(settings.number(key::pictureCacheMiB), 2048);
+    settings.setValue(key::pictureCacheMiB, -3);
+    QCOMPARE(settings.number(key::pictureCacheMiB), 16);
+    settings.setValue(key::pictureCacheMiB, 16);
+    QCOMPARE(settings.number(key::pictureCacheMiB), 16);
+    settings.setValue(key::pictureCacheMiB, 2048);
+    QCOMPARE(settings.number(key::pictureCacheMiB), 2048);
+    {
+        QSettings ini(path, QSettings::IniFormat);
+        ini.setValue(QString::fromLatin1(key::pictureCacheMiB), QStringLiteral("notanumber"));
+    }
+    settings.useFile(path);
+    QCOMPARE(settings.number(key::pictureCacheMiB), 16); // Unreadable text still ends up in range.
+    settings.reset(key::pictureCacheMiB);
+    QCOMPARE(settings.number(key::pictureCacheMiB), 128);
 }
 
 void TestTheme::overrideSurvivesThemeSwitch()

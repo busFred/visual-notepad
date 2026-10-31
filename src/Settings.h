@@ -11,6 +11,12 @@ class QSettings;
 
 namespace vn {
 
+// Valid range of key::pictureCacheMiB (values outside it are clamped on read)
+// and its default.
+inline constexpr int pictureCacheMinMiB = 16;
+inline constexpr int pictureCacheMaxMiB = 2048;
+inline constexpr int pictureCacheDefaultMiB = 128;
+
 namespace key {
 // Editor
 inline constexpr char fontFamily[] = "editor/fontFamily"; // "" = built-in monospace
@@ -43,6 +49,8 @@ inline constexpr char remoteImages[] = "markdown/remoteImages"; // "ask" | "neve
 inline constexpr char pasteImageFolder[] = "markdown/pasteImageFolder";
 inline constexpr char updateLinksOnPaste[] = "markdown/updateLinksOnPaste";
 inline constexpr char validateLinks[] = "markdown/validateLinks";
+// Performance
+inline constexpr char pictureCacheMiB[] = "performance/pictureCacheMiB"; // see pictureCacheMinMiB/MaxMiB
 // Files
 inline constexpr char restoreUnsaved[] = "files/restoreUnsaved";
 inline constexpr char restoreSession[] = "files/restoreSession";

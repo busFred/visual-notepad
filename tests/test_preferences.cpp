@@ -22,6 +22,8 @@
 #include <QStackedWidget>
 #include <QScrollBar>
 #include <QScrollArea>
+#include <QSignalSpy>
+#include <QSpinBox>
 #include <QToolButton>
 
 using namespace vn;
@@ -62,6 +64,7 @@ private Q_SLOTS:
     void comboWritesValue();
     void externalChangeUpdatesCombo();
     void tabWidthSpin();
+    void pictureCacheSpin();
     void macros();
     void captureShortcut();
     void chordWithCtrlK();
@@ -95,7 +98,7 @@ void TestPreferences::init()
     Settings::instance().resetAllShortcuts();
     for (const char *k : {key::lineNumbers, key::tabWidth, key::autoSave, key::mathMacros, key::zoom, key::fontFamily,
                           key::fontSize, key::textFontFamily, key::textFontSize, key::textLineHeight,
-                          key::guessEncoding, key::legacyEncoding, key::encoding, key::autoClose, key::autoSurround})
+                          key::guessEncoding, key::legacyEncoding, key::encoding, key::autoClose, key::autoSurround, key::pictureCacheMiB})
         Settings::instance().reset(k);
     PreferencesDialog::showPage(nullptr, QStringLiteral("editor"));
     QVERIFY(prefsWindow());
@@ -195,6 +198,38 @@ void TestPreferences::tabWidthSpin()
     for (int i = 0; i < 30; ++i)
         spin->findChild<QToolButton *>(QStringLiteral("plus"))->click();
     QCOMPARE(Settings::instance().number(key::tabWidth), 16);
+}
+
+void TestPreferences::pictureCacheSpin()
+{
+    PreferencesDialog::showPage(nullptr, QStringLiteral("markdown"));
+    auto *spin = find<QSpinBox>(key::pictureCacheMiB);
+    QVERIFY(spin);
+    QCOMPARE(spin->minimum(), 16);
+    QCOMPARE(spin->maximum(), 2048);
+    QCOMPARE(spin->suffix(), QStringLiteral(" MiB"));
+    QVERIFY(spin->toolTip().contains(QStringLiteral("decoded pictures")));
+    QCOMPARE(spin->value(), 128); // The default.
+
+    // Shows what is stored, also when it changes elsewhere.
+    Settings::instance().setValue(key::pictureCacheMiB, 300);
+    QCOMPARE(spin->value(), 300);
+
+    // Typing and pressing Enter stores it, once.
+    QSignalSpy changed(&Settings::instance(), &Settings::changed);
+    spin->setFocus();
+    spin->selectAll();
+    QTest::keyClicks(spin, QStringLiteral("512"));
+    QTest::keyClick(spin, Qt::Key_Return);
+    QCOMPARE(Settings::instance().number(key::pictureCacheMiB), 512);
+    QCOMPARE(changed.size(), 1);
+
+    spin->setValue(256);
+    QCOMPARE(Settings::instance().number(key::pictureCacheMiB), 256);
+    spin->setValue(100000); // Clamped by the box.
+    QCOMPARE(Settings::instance().number(key::pictureCacheMiB), 2048);
+    Settings::instance().reset(key::pictureCacheMiB);
+    QCOMPARE(spin->value(), 128);
 }
 
 void TestPreferences::macros()

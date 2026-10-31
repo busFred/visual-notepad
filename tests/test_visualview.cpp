@@ -1,6 +1,7 @@
 // The hybrid visual Markdown view, run offscreen. Set VN_SCREENSHOT_DIR to
 // save renderings.
 #include "DocumentTab.h"
+#include "MainWindow.h"
 #include "Settings.h"
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
@@ -257,6 +258,7 @@ private Q_SLOTS:
     void modeSwitchDuringBackgroundParse();
     void wideImagesShrinkToColumn();
     void decodedPicturesServeEveryWidth();
+    void pictureCacheSettingResizesTheCache();
     void codeBlocksArePaintedAsTheStockHighlighterDoes_data();
     void codeBlocksArePaintedAsTheStockHighlighterDoes();
     void renderCostCountsPicturesAndText();
@@ -1212,6 +1214,41 @@ static QImage paintHtml(const QString &html, const QString &folder, qreal width,
     QPainter painter(&image);
     rendered->paint(painter, QPointF(0, 0), width);
     return image;
+}
+
+void TestVisualView::pictureCacheSettingResizesTheCache()
+{
+    Settings &settings = Settings::instance();
+    settings.reset(key::pictureCacheMiB);
+    MainWindow window; // Binds the setting to the cache.
+    // 26 MB decoded, about 20 MiB kept: fits 128 MiB, not 16 MiB.
+    QTemporaryDir dir;
+    QImage picture(3000, 2200, QImage::Format_RGB32);
+    for (int y = 0; y < picture.height(); ++y) {
+        auto *line = reinterpret_cast<QRgb *>(picture.scanLine(y));
+        for (int x = 0; x < picture.width(); ++x)
+            line[x] = qRgb(x % 256, y % 256, (x ^ y) % 256);
+    }
+    QVERIFY(picture.save(dir.filePath(QStringLiteral("big.png"))));
+    const QString html = QStringLiteral("<p><img src=\"big.png\"></p>");
+
+    int start = RenderedBlock::pictureFileReads();
+    paintHtml(html, dir.path(), 400);
+    paintHtml(html, dir.path(), 500);
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 1); // Kept at the default size.
+
+    settings.setValue(key::pictureCacheMiB, 16); // Shrinking forgets it, and it no longer fits.
+    start = RenderedBlock::pictureFileReads();
+    paintHtml(html, dir.path(), 600);
+    paintHtml(html, dir.path(), 700);
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 2);
+
+    settings.setValue(key::pictureCacheMiB, 64); // Growing makes room again.
+    start = RenderedBlock::pictureFileReads();
+    paintHtml(html, dir.path(), 800);
+    paintHtml(html, dir.path(), 900);
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 1);
+    settings.reset(key::pictureCacheMiB);
 }
 
 void TestVisualView::decodedPicturesServeEveryWidth()
