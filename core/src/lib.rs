@@ -115,47 +115,91 @@ mod ffi {
     }
 }
 
+// A panic must not reach the bridge: cxx aborts the process there, and the
+// session restore would reopen the same document and abort again. Every
+// bridged function runs its body through `guarded` and gives a neutral
+// result instead (the document shown as plain text, nothing found, the text
+// unchanged, an error). Document::blocks and Document::spliced, the other
+// two, only read a field.
+
+/// `f()`, or `fallback()` if `f` panics.
+fn guarded<T>(f: impl FnOnce() -> T, fallback: impl FnOnce() -> T) -> T {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| fallback())
+}
+
+/// The whole text as one plain code block: the document is still shown
+/// (and editable) when parsing it panicked.
+fn unparsed_blocks(markdown: &str) -> Vec<ffi::Block> {
+    if markdown.is_empty() {
+        return Vec::new();
+    }
+    vec![ffi::Block {
+        kind: ffi::BlockKind::Code,
+        first_line: 0,
+        last_line: markdown.lines().count().saturating_sub(1),
+        html: String::new(),
+        lang: String::new(),
+        text: markdown.to_owned(),
+        inline_math: Vec::new(),
+    }]
+}
+
 fn gunzip_bounded(data: &[u8], limit: usize) -> Vec<u8> {
-    gzip::gunzip_bounded(data, limit)
+    guarded(|| gzip::gunzip_bounded(data, limit), Vec::new)
 }
 
 fn blocks(markdown: &str, options: &ffi::RenderOptions) -> Vec<ffi::Block> {
-    render::blocks(markdown, options)
+    guarded(|| render::blocks(markdown, options), || unparsed_blocks(markdown))
 }
 
 use render::Document;
 
 fn parse(markdown: &str, options: &ffi::RenderOptions) -> Box<Document> {
-    Box::new(Document::parse(markdown, options))
+    guarded(
+        || Box::new(Document::parse(markdown, options)),
+        || Box::new(Document::unparsed(markdown, unparsed_blocks(markdown))),
+    )
 }
 
 fn reparse(previous: &Document, markdown: &str, options: &ffi::RenderOptions) -> Box<Document> {
-    Box::new(render::reparse(previous, markdown, options))
+    guarded(
+        || Box::new(render::reparse(previous, markdown, options)),
+        || parse(markdown, options),
+    )
 }
 
 fn mermaid_image(code: &str, theme: &str, scale: f32) -> Result<ffi::RgbaImage, String> {
-    let (width, height, pixels, scale) = mermaid::raster(code, theme, scale)?;
-    Ok(ffi::RgbaImage { width, height, pixels, scale })
+    guarded(
+        || {
+            let (width, height, pixels, scale) = mermaid::raster(code, theme, scale)?;
+            Ok(ffi::RgbaImage { width, height, pixels, scale })
+        },
+        || Err("The diagram renderer failed.".to_owned()),
+    )
 }
 
 fn heading_slug(text: &str) -> String {
-    render::slug(text)
+    guarded(|| render::slug(text), String::new)
 }
 
 fn format_markdown(markdown: &str) -> String {
-    format::format(markdown)
+    guarded(|| format::format(markdown), || markdown.to_owned())
 }
 
 fn rebase_links(text: &str, from_dir: &str, to_dir: &str) -> String {
-    links::rebase(text, from_dir, to_dir)
+    guarded(|| links::rebase(text, from_dir, to_dir), || text.to_owned())
 }
 
 fn link_targets(markdown: &str) -> Vec<ffi::LinkTarget> {
-    links::targets(markdown)
+    guarded(|| links::targets(markdown), Vec::new)
+}
+
+fn outline(markdown: &str) -> Vec<ffi::Heading> {
+    guarded(|| headings(markdown), Vec::new)
 }
 
 /// Headings in document order.
-pub fn outline(markdown: &str) -> Vec<ffi::Heading> {
+pub fn headings(markdown: &str) -> Vec<ffi::Heading> {
     let arena = Arena::new();
     let root = parse_document(&arena, markdown, &md::options(true, false));
     root.descendants().filter_map(heading).collect()
@@ -199,5 +243,39 @@ mod tests {
     #[test]
     fn outline_of_plain_text_is_empty() {
         assert!(outline("just text\n").is_empty());
+    }
+
+    #[test]
+    fn panics_give_the_fallback() {
+        assert_eq!(guarded(|| -> Vec<u8> { panic!("deliberate") }, Vec::new), Vec::<u8>::new());
+        assert_eq!(guarded(|| 1, || 2), 1);
+        let text = "# One\n\ntext";
+        assert_eq!(
+            guarded(|| -> String { panic!("deliberate") }, || text.to_owned()),
+            text
+        );
+        // What parse and reparse are left with.
+        let blocks = unparsed_blocks(text);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, ffi::BlockKind::Code);
+        assert_eq!((blocks[0].first_line, blocks[0].last_line), (0, 2));
+        assert_eq!(blocks[0].text, text);
+        assert!(unparsed_blocks("").is_empty());
+        let options = ffi::RenderOptions {
+            breaks: false,
+            linkify: false,
+            typographer: false,
+            math: true,
+            front_matter: 0,
+        };
+        let doc = guarded(
+            || -> Box<Document> { panic!("deliberate") },
+            || Box::new(Document::unparsed(text, unparsed_blocks(text))),
+        );
+        assert_eq!(doc.blocks(), &blocks);
+        // The next version is parsed from scratch, as if new.
+        let next = reparse(&doc, text, &options);
+        assert!(!next.spliced());
+        assert_eq!(next.blocks(), &render::blocks(text, &options));
     }
 }
