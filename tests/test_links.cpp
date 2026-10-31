@@ -63,6 +63,10 @@ private:
     static void answerNextBox(const QString &button);
     // Calls `inspect` with the next message box, then closes it unanswered.
     static void inspectNextBox(std::function<void(QMessageBox *)> inspect);
+    // Closes every message box while `owner` lives, adding its text to
+    // `texts`: one that should not come up fails the test instead of
+    // waiting for an answer until the test times out.
+    static void closeBoxes(QObject *owner, QStringList *texts);
 
     QTemporaryDir m_dir;
     QStringList m_asked;
@@ -150,6 +154,19 @@ void TestLinks::inspectNextBox(std::function<void(QMessageBox *)> inspect)
         timer->stop();
         inspect(box);
         box->reject();
+    });
+    timer->start();
+}
+
+void TestLinks::closeBoxes(QObject *owner, QStringList *texts)
+{
+    auto *timer = new QTimer(owner);
+    timer->setInterval(10);
+    QObject::connect(timer, &QTimer::timeout, timer, [texts] {
+        if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            texts->append(box->text());
+            box->reject();
+        }
     });
     timer->start();
 }
@@ -385,10 +402,13 @@ void TestLinks::declinedLaunchOpensNothing()
         m_asked.append(target);
         return false;
     });
+    QStringList boxes;
     MainWindow window;
+    closeBoxes(&window, &boxes);
     DocumentTab *tab = openDocument(window);
     QVERIFY(tab);
     Q_EMIT tab->linkActivated(link);
+    QVERIFY2(boxes.isEmpty(), qPrintable(boxes.join(u'|')));
     QCOMPARE(m_asked, QStringList{shown});
     QVERIFY(m_opened.isEmpty());
     QCOMPARE(window.tabCount(), 1);
@@ -416,10 +436,13 @@ void TestLinks::acceptedLaunchOpensOnce()
         m_asked.append(target);
         return true;
     });
+    QStringList boxes;
     MainWindow window;
+    closeBoxes(&window, &boxes);
     DocumentTab *tab = openDocument(window);
     QVERIFY(tab);
     Q_EMIT tab->linkActivated(link);
+    QVERIFY2(boxes.isEmpty(), qPrintable(boxes.join(u'|')));
     QCOMPARE(m_asked.size(), 1);
     QCOMPARE(m_opened, QList<QUrl>{opened});
 }
@@ -430,13 +453,16 @@ void TestLinks::ordinaryLinksDoNotAsk()
         m_asked.append(target);
         return false;
     });
+    QStringList boxes;
     MainWindow window;
+    closeBoxes(&window, &boxes);
     DocumentTab *tab = openDocument(window);
     QVERIFY(tab);
 
     Q_EMIT tab->linkActivated(QStringLiteral("#heading"));
     Q_EMIT tab->linkActivated(QStringLiteral("pic.png"));
     Q_EMIT tab->linkActivated(QStringLiteral("doc.pdf"));
+    QVERIFY2(boxes.isEmpty(), qPrintable(boxes.join(u'|')));
     QCOMPARE(m_opened, (QList<QUrl>{QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("pic.png"))),
                                     QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("doc.pdf")))}));
     QCOMPARE(window.tabCount(), 1);
@@ -444,6 +470,7 @@ void TestLinks::ordinaryLinksDoNotAsk()
     // Text opens in the app.
     Q_EMIT tab->linkActivated(QStringLiteral("other.md"));
     Q_EMIT tab->linkActivated(QStringLiteral("notes.txt"));
+    QVERIFY2(boxes.isEmpty(), qPrintable(boxes.join(u'|')));
     QCOMPARE(window.tabCount(), 3);
     QCOMPARE(m_opened.size(), 2);
     QVERIFY(m_asked.isEmpty());
@@ -493,10 +520,13 @@ void TestLinks::networkTargetsAreRefused()
         m_asked.append(target);
         return true;
     });
+    QStringList boxes;
     MainWindow window;
+    closeBoxes(&window, &boxes);
     DocumentTab *tab = openDocument(window);
     QVERIFY(tab);
     Q_EMIT tab->linkActivated(link);
+    QVERIFY2(boxes.isEmpty(), qPrintable(boxes.join(u'|')));
     QVERIFY(m_asked.isEmpty());
     QVERIFY(m_opened.isEmpty());
     QCOMPARE(window.tabCount(), 1);

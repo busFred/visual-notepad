@@ -2439,7 +2439,10 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
     // Checked and opened by the name of the file the OS opens: "evil.exe/."
     // and "evil.exe/x/.." are evil.exe.
     path = md::resolvedLocalPath(path);
-    if (!QFileInfo::exists(path)) {
+    // On Windows QFileInfo looks through a shortcut (.lnk): one whose target
+    // is missing, or that cannot be read, "does not exist". The shortcut
+    // does; it goes to the OS (after the prompt), which reports it broken.
+    if (const QFileInfo info(path); !info.exists() && !info.isShortcut()) {
         plainWarning(this, productName(), tr("The file %1 does not exist.").arg(QDir::toNativeSeparators(path)));
         return;
     }
