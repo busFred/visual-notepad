@@ -14,6 +14,7 @@
 
 #include <deque>
 #include <memory>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -45,7 +46,9 @@ public:
     // Blocks currently shown as source because a caret or selection touches them.
     int expandedBlockCount() const { return int(m_expandedBlocks.size()); }
     // For tests: renders kept in hand besides the cache.
-    int memoizedRenderCount() const { return m_spanRenderCount; }
+    int memoizedRenderCount() const { return int(m_renders.size()); }
+    // For tests: blocks (and parts of blocks) rendered so far.
+    int renderCount() const { return m_renderCount; }
 
 Q_SIGNALS:
     // A link was clicked in rendered text (not a task checkbox).
@@ -70,6 +73,7 @@ protected:
     void showEvent(QShowEvent *event) override;
     void focusOutEvent(QFocusEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    void paintEvent(QPaintEvent *event) override;
 
 private:
     struct RowInfo
@@ -83,14 +87,26 @@ private:
         QString source;
         QString key;
         std::shared_ptr<RenderedBlock> block;
-        int cost = 0; // KiB, of the block.
+        int cost = 0;     // KiB, of the block.
+        quint64 used = 0; // The last frame (see m_frame) that asked for it.
+    };
+    // What the view knows of a block it may show in parts (see
+    // RenderedBlock::createPart), for one parse.
+    struct LongBox
+    {
+        int parts = -1; // RenderedBlock::isLongCodeBox, -1 until asked.
+        int wrap = -1;  // RenderedBlock::wrapsAnywhere, -1 until asked.
     };
 
     void rebuildRows();
     RenderContext context() const;
-    const RenderedBlock *rendered(int span);
+    // The render of a rendered row (a block, or a part of one), or null.
+    const Render *rendered(const Row &row);
     const RenderedBlock *renderedForRow(const Row &row);
     int spanForRow(const Row &row) const;
+    LongBox &longBox(int blockIndex);
+    // Whether a span shows as a code box in parts.
+    bool madeInParts(int span);
     void toggleTask(int line);
     bool zoomClick(const QMouseEvent *event) const;
     bool openPicture(const RenderedBlock *block, const QPointF &point, const QMouseEvent *event);
@@ -103,8 +119,7 @@ private:
     // while that is undecided and the document has any.
     void updateRemoteBanner();
     void layoutBanner();
-    void resetSpanRenders(size_t spans);
-    void dropSpanRender(int span);
+    void resetRenders();
 
     MarkdownModel *m_model;
     QString m_baseDirectory;
@@ -112,6 +127,7 @@ private:
     std::vector<RowInfo> m_rows;
     std::vector<int> m_lineToRow;
     QSet<int> m_expandedBlocks; // Span indices.
+    QSet<int> m_partSpans;      // Spans shown in parts (see RenderedBlock::createPart).
     bool m_rowsStale = true;
     // What m_rows were built from, so caret moves that open or close
     // nothing don't rebuild them.
@@ -121,17 +137,22 @@ private:
     // Renders by size, fonts and source; bounded by cost (KiB).
     QCache<QString, Render> m_cache;
     QSet<QString> m_pendingKeys; // Diagrams still rendering.
-    // The render of each span, for the model revision, width and pixel
-    // ratio below, so painting doesn't rebuild sources and keys. Only the
-    // latest few (see rendered()) are kept: the rest are in m_cache, within
-    // its budget, or gone.
-    std::vector<Render> m_spanRenders;
-    std::deque<int> m_spanRenderOrder; // Spans in the order they were set.
-    int m_spanRenderCount = 0;
-    qint64 m_spanRenderKiB = 0;
-    int m_spanRendersRevision = -1;
-    qreal m_spanRendersWidth = -1;
-    qreal m_spanRendersDpr = -1;
+    // The render of rendered rows by first line, for the model revision,
+    // width and pixel ratio below, so painting doesn't rebuild sources and
+    // keys. Only the latest few (see rendered()) are kept: the rest are in
+    // m_cache, within its budget, or gone.
+    std::unordered_map<int, Render> m_renders;
+    std::deque<int> m_renderOrder; // First lines in the order they were set.
+    qint64 m_renderKiB = 0;
+    int m_rendersRevision = -1;
+    qreal m_rendersWidth = -1;
+    qreal m_rendersDpr = -1;
+    // Bumped by every paint: what a paint shows is kept until the next one.
+    quint64 m_frame = 0;
+    int m_renderCount = 0;
+    // Blocks made in parts, by block index of m_longBoxesGeneration's parse.
+    std::unordered_map<int, LongBox> m_longBoxes;
+    int m_longBoxesGeneration = -1;
 
     // The bar above the text asking about remote pictures (see
     // updateRemoteBanner); the remote addresses are scanned once per parse.
