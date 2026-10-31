@@ -1242,15 +1242,20 @@ void MainWindow::openUrl(const QUrl &url)
         QDesktopServices::openUrl(url);
 }
 
-bool MainWindow::confirmLaunch(const QString &target)
+bool MainWindow::confirmLaunch(const QString &target, const QString &fileName)
 {
     if (const auto &confirmer = launchConfirmer())
         return confirmer(target);
     // Plain text (the target comes from the document), all in the main label:
-    // the informative one guesses the format.
+    // the informative one guesses the format. Direction overrides and other
+    // invisible characters are spelled out: "\u{202E}exe.txt" is not
+    // "txt.exe" in disguise.
+    QString shown = md::withVisibleControls(target);
+    if (!fileName.isEmpty())
+        shown += u"\n\n" + tr("File name: %1").arg(md::withVisibleControls(fileName));
     QMessageBox box(QMessageBox::Warning, productName(),
                     tr("This link would run a program:\n\n%1\n\nOnly continue if you trust this document and the file.")
-                        .arg(target),
+                        .arg(shown),
                     QMessageBox::NoButton, this);
     box.setTextFormat(Qt::PlainText);
     QPushButton *open = box.addButton(tr("Open Anyway"), QMessageBox::AcceptRole);
@@ -2300,7 +2305,8 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
     if (!mime.inherits(QStringLiteral("text/plain"))) {
         // Text (scripts included) opens here; the rest goes to the OS, which
         // runs programs, installers and shortcuts.
-        if (md::isLaunchable(path) && !confirmLaunch(QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath())))
+        if (md::isLaunchable(path)
+            && !confirmLaunch(QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath()), QFileInfo(path).fileName()))
             return;
         openUrl(QUrl::fromLocalFile(path));
         return;

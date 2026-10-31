@@ -399,6 +399,33 @@ QString resolvedLocalPath(const QString &path)
 #endif
 }
 
+QString withVisibleControls(const QString &text)
+{
+    QString out;
+    out.reserve(text.size());
+    for (qsizetype i = 0; i < text.size(); ++i) {
+        char32_t c = text[i].unicode();
+        qsizetype length = 1;
+        if (QChar::isHighSurrogate(c) && i + 1 < text.size() && text[i + 1].isLowSurrogate()) {
+            c = QChar::surrogateToUcs4(text[i], text[i + 1]);
+            length = 2;
+        }
+        const QChar::Category category = QChar::category(c);
+        // The bidi controls are format characters; listed for clarity.
+        const bool bidi = (c >= 0x202A && c <= 0x202E) || (c >= 0x2066 && c <= 0x2069) || c == 0x200E || c == 0x200F
+                          || c == 0x061C;
+        if (bidi || category == QChar::Other_Format || category == QChar::Other_Control
+            || category == QChar::Other_Surrogate || category == QChar::Separator_Line
+            || category == QChar::Separator_Paragraph) {
+            out += QStringLiteral("\\u{%1}").arg(QString::number(uint(c), 16).toUpper().rightJustified(4, u'0'));
+        } else {
+            out += QStringView(text).mid(i, length);
+        }
+        i += length - 1;
+    }
+    return out;
+}
+
 bool isLaunchable(const QString &rawPath)
 {
     // "evil.exe/." and "evil.exe/x/.." name evil.exe.

@@ -77,5 +77,10 @@ QString resolvedLocalPath(const QString &path);
 // symlink, on its target; or an existing non-directory file with an execute
 // bit, unless its suffix is a plain document type.
 bool isLaunchable(const QString &path);
+// `text` with characters that change how the rest reads but show nothing of
+// their own spelled out as "\u{202E}": bidi controls, other format characters
+// (zero width, soft hyphen, tags), control characters, lone surrogates and
+// line separators.
+QString withVisibleControls(const QString &text);
 
 } // namespace vn::md
