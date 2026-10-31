@@ -67,6 +67,8 @@ mod ffi {
         width: u32,
         height: u32,
         pixels: Vec<u8>,
+        /// Device pixel ratio the pixels were drawn at (may be below the one asked for).
+        scale: f32,
     }
 
     /// A link, image or definition destination in the source text.
@@ -102,8 +104,8 @@ fn blocks(markdown: &str, options: &ffi::RenderOptions) -> Vec<ffi::Block> {
 }
 
 fn mermaid_image(code: &str, theme: &str, scale: f32) -> Result<ffi::RgbaImage, String> {
-    let (width, height, pixels) = mermaid::raster(code, theme, scale)?;
-    Ok(ffi::RgbaImage { width, height, pixels })
+    let (width, height, pixels, scale) = mermaid::raster(code, theme, scale)?;
+    Ok(ffi::RgbaImage { width, height, pixels, scale })
 }
 
 fn heading_slug(text: &str) -> String {

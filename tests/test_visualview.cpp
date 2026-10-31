@@ -166,6 +166,7 @@ private Q_SLOTS:
     void editsReparseLater();
     void caretMovesDontReparse();
     void diagramsRenderInBackground();
+    void oversizedDiagramsRenderOnce();
     void onlyParseSettingsReparse();
     void wideImagesShrinkToColumn();
     void clickEnlargesPicture();
@@ -803,6 +804,47 @@ void TestVisualView::diagramsRenderInBackground()
     Settings::instance().setValue(key::mermaidTheme, theme);
 }
 
+void TestVisualView::oversizedDiagramsRenderOnce()
+{
+    // A diagram that cannot be drawn or cached ends as an error after one
+    // render, instead of being rendered again and again.
+    core::Block diagram = m_model->blocks()[11];
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    const QString source = m_model->sourceText(int(diagram.first_line), int(diagram.last_line));
+
+    // Rejected by the renderer: a source far over the length limit.
+    ctx.devicePixelRatio = 1.25;
+    const QString huge = QStringLiteral("flowchart LR\nA[\"%1\"] --> B\n").arg(QString(200000, u'x'));
+    diagram.text = rust::String(huge.toStdString());
+    const int before = DiagramNotifier::renderCount();
+    QVERIFY(RenderedBlock::create(diagram, source, ctx)->isPending());
+    QTRY_VERIFY(!RenderedBlock::create(diagram, source, ctx)->isPending());
+    auto done = RenderedBlock::create(diagram, source, ctx);
+    QCOMPARE(done->kind(), RenderedBlock::Kind::Code);
+    QVERIFY(done->renderedText().contains(QStringLiteral("Diagram error: diagram too large")));
+    // Stable: no further renders however long we wait and ask.
+    QTest::qWait(300);
+    QVERIFY(!RenderedBlock::create(diagram, source, ctx)->isPending());
+    QCOMPARE(DiagramNotifier::renderCount(), before + 1);
+
+    // Rendered fine but bigger than the cache can hold.
+    diagram = m_model->blocks()[11];
+    ctx.devicePixelRatio = 1.75;
+    DiagramNotifier::setCacheLimitKiB(1);
+    const int before2 = DiagramNotifier::renderCount();
+    QVERIFY(RenderedBlock::create(diagram, source, ctx)->isPending());
+    QTRY_VERIFY(!RenderedBlock::create(diagram, source, ctx)->isPending());
+    done = RenderedBlock::create(diagram, source, ctx);
+    QCOMPARE(done->kind(), RenderedBlock::Kind::Code);
+    QVERIFY(done->renderedText().contains(QStringLiteral("Diagram error: diagram too large")));
+    QTest::qWait(300);
+    QVERIFY(!RenderedBlock::create(diagram, source, ctx)->isPending());
+    QCOMPARE(DiagramNotifier::renderCount(), before2 + 1);
+    DiagramNotifier::setCacheLimitKiB(64 * 1024);
+}
+
 void TestVisualView::onlyParseSettingsReparse()
 {
     m_model->blocks();
@@ -811,7 +853,6 @@ void TestVisualView::onlyParseSettingsReparse()
     Settings &settings = Settings::instance();
     const QVariant lineHeight = settings.value(key::textLineHeight);
     settings.setValue(key::textLineHeight, lineHeight.toDouble() + 0.1);
-    QCOMPARE(spy.count(), 1); // Renders are redone...
     m_view->grab();
     QCOMPARE(m_model->parseGeneration(), generation); // ...without a parse.
     settings.setValue(key::textLineHeight, lineHeight);

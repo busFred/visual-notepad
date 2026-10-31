@@ -52,6 +52,10 @@ class DiagramNotifier : public QObject
 public:
     static DiagramNotifier &instance();
 
+    // For tests: diagrams rendered so far, and the size of the cache holding them.
+    static int renderCount();
+    static void setCacheLimitKiB(int kib);
+
 Q_SIGNALS:
     void ready();
 };
