@@ -130,7 +130,7 @@ public:
     void setLimitKiB(qsizetype kib)
     {
         m_limit = kib;
-        evictFor(0);
+        clear();
     }
 
     QImage find(const QString &version)

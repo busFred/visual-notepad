@@ -94,7 +94,8 @@ public:
 
     // For tests: picture files read (and decoded) from disk so far.
     static int pictureFileReads();
-    // For tests: how many KiB of decoded picture files are kept for later widths.
+    // For tests: how many KiB of decoded picture files are kept for later
+    // widths (and forgets the ones kept).
     static void setDecodedPictureLimitKiB(int kib);
     // For tests: blocks shown as their source because rich text would take
     // too long to lay them out, and a switch for those limits (and the
