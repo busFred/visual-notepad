@@ -34,7 +34,7 @@
 //! checkboxes carry their absolute line, which is moved with the block.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use comrak::nodes::NodeValue;
 use comrak::{Arena, parse_document};
@@ -47,6 +47,11 @@ use crate::md;
 /// when they are under half the document (else a full parse costs about the
 /// same).
 const SMALL_WINDOW: usize = 64 * 1024;
+
+/// Texts over twice this size are parsed in windows of about this many bytes,
+/// one after the other (see `parse_windowed`): comrak keeps the tree of all
+/// it parses until it is done, some 18 times the text (180 MB for 10 MB).
+const PARSE_WINDOW: usize = 512 * 1024;
 
 /// A parsed document, kept so that the next version of its text can be
 /// parsed incrementally.
@@ -73,11 +78,22 @@ impl Document {
             starts: md::line_starts(text),
             options: options_key(options),
             blocks: parsed.blocks,
-            meta: parsed.meta.into_iter().map(Arc::new).collect(),
+            meta: parsed.meta.into_iter().map(shared_meta).collect(),
             front_matter_end: parsed.front_matter_end,
             local: is_local(text),
             spliced: false,
         }
+    }
+
+    /// The same as `parse`, but a large text is parsed in windows (see
+    /// `parse_windowed`), which needs far less memory on the way.
+    pub fn parse_large(text: &str, options: &RenderOptions) -> Document {
+        if text.len() > 2 * PARSE_WINDOW {
+            if let Some(document) = parse_windowed(text, options, PARSE_WINDOW) {
+                return document;
+            }
+        }
+        Document::parse(text, options)
     }
 
     pub fn blocks(&self) -> &Vec<Block> {
@@ -92,7 +108,23 @@ impl Document {
 
 /// The blocks of `text`, a new version of `previous`'s text.
 pub fn reparse(previous: &Document, text: &str, options: &RenderOptions) -> Document {
-    splice(previous, text, options).unwrap_or_else(|| Document::parse(text, options))
+    splice(previous, text, options).unwrap_or_else(|| Document::parse_large(text, options))
+}
+
+/// The meta in an `Arc`, one shared by all for the many blocks without
+/// headings or task boxes (each would take some 80 bytes).
+fn shared_meta(meta: Meta) -> Arc<Meta> {
+    static NONE: LazyLock<Arc<Meta>> = LazyLock::new(|| {
+        Arc::new(Meta {
+            slugs: Vec::new(),
+            tasks: Some(Vec::new()),
+        })
+    });
+    if meta == **NONE {
+        Arc::clone(&NONE)
+    } else {
+        Arc::new(meta)
+    }
 }
 
 fn options_key(o: &RenderOptions) -> [u8; 5] {
@@ -262,6 +294,175 @@ fn shifted(block: &Block, meta: &Arc<Meta>, delta: isize) -> Option<(Block, Arc<
         }
     }
     Some((b, m))
+}
+
+/// Where comrak's front matter ends in a text without `\r` (see
+/// `split_off_front_matter` in comrak): at the first `---` line after the
+/// opening one, and a blank line after it, however far down; or the whole
+/// text when its last line is the first `---`.
+fn front_matter_extent(text: &str) -> Option<usize> {
+    let bom = text.len() - text.strip_prefix('\u{feff}').unwrap_or(text).len();
+    let s = &text[bom..];
+    let rest = s.strip_prefix("---\n")?;
+    if let Some(n) = rest.find("\n---\n") {
+        let end = 4 + n + 5;
+        return Some(bom + end + s[end..].starts_with('\n') as usize);
+    }
+    rest.find("\n---")
+        .filter(|&n| 4 + n + 4 == s.len())
+        .map(|_| text.len())
+}
+
+/// Why a window could not be parsed.
+enum WindowError {
+    /// Its end does not bound it (a block runs on past it): try a later one.
+    End,
+    /// The text has something that reaches across windows: parse it whole.
+    Whole,
+}
+
+/// The top-level nodes of the window of `text` from line `a` up to line `b`
+/// (or the end), with their parsed line ranges and the offset that makes
+/// those document lines; checked as `splice` checks its window: a block
+/// starts at `a` and at `b`, and none runs from before `b` into it.
+fn parse_window<'a>(
+    arena: &'a Arena<'a>,
+    text: &str,
+    starts: &[usize],
+    a: usize,
+    b: Option<usize>,
+    options: &comrak::Options,
+) -> Result<(Vec<(&'a comrak::nodes::AstNode<'a>, usize, usize)>, usize, Option<usize>), WindowError> {
+    let tail = b.map_or(text.len(), |b| starts.get(b + 1).copied().unwrap_or(text.len()));
+    // After a blank line unless the window starts the text, as in splice().
+    let (root, offset) = if a == 0 {
+        (parse_document(arena, &text[..tail], options), 0)
+    } else {
+        let source = format!("\n{}", &text[starts[a]..tail]);
+        (parse_document(arena, &source, options), a - 1)
+    };
+    let b_parsed = b.map(|b| b - offset);
+    let mut nodes = Vec::new();
+    let mut front_matter_end = None;
+    let mut found_b = b_parsed.is_none();
+    for node in root.children() {
+        match &node.data().value {
+            NodeValue::FootnoteDefinition(_) => return Err(WindowError::Whole),
+            NodeValue::FrontMatter(raw) => {
+                if a > 0 {
+                    return Err(WindowError::Whole);
+                }
+                // As parse(): comrak skips one BOM before looking for it.
+                let bom = text.len() - text.strip_prefix('\u{feff}').unwrap_or(text).len();
+                front_matter_end = Some(bom + raw.len());
+            }
+            _ => {}
+        }
+        let (f, l) = md::line_range(node);
+        if nodes.is_empty() && a > 0 && f != 1 {
+            return Err(WindowError::Whole);
+        }
+        if let Some(b) = b_parsed {
+            if f >= b {
+                found_b = f == b;
+                break;
+            }
+            if l + 1 >= b {
+                return Err(WindowError::End);
+            }
+        }
+        nodes.push((node, f, l));
+    }
+    if !found_b {
+        return Err(WindowError::End);
+    }
+    Ok((nodes, offset, front_matter_end))
+}
+
+/// The blocks of `text` parsed window after window, each of about `window`
+/// bytes or more, so that comrak never holds the tree of the whole text. Each
+/// window ends where the next can start: before a line that bounds a window
+/// as `splice` requires (a blank line before it, which no block covers, and a
+/// clean start), checked by parsing the window together with that line. The
+/// heading anchors carry on from window to window. Exactly `parse`'s result;
+/// `None` for a text with definitions, footnotes or `\r` (see `is_local`),
+/// which reach across the whole text.
+fn parse_windowed(text: &str, options: &RenderOptions, window: usize) -> Option<Document> {
+    if !is_local(text) {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let starts = md::line_starts(text);
+    let comrak_options = md::options(options.math, options.linkify);
+    let no_footnotes = HashMap::new();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut blocks = Vec::new();
+    let mut meta: Vec<Arc<Meta>> = Vec::new();
+    let mut front_matter_end = None;
+    // The line that bounds a window: the first after byte `from` that can.
+    let boundary_after = |from: usize, a: usize| {
+        if from >= text.len() {
+            return None;
+        }
+        (line_of(&starts, from).max(a + 1)..starts.len())
+            .find(|&line| is_blank(bytes, &starts, line - 1) && starts_cleanly(bytes, &starts, line))
+    };
+    // The first window takes in all of the front matter (it may reach far).
+    let front_matter = if may_have_front_matter(text) {
+        front_matter_extent(text)
+    } else {
+        None
+    };
+    let mut a = 0;
+    loop {
+        let mut span = window;
+        let least = if a == 0 { front_matter.unwrap_or(0) } else { 0 };
+        let mut b = boundary_after((starts[a] + span).max(least), a);
+        let arena = Arena::new();
+        let (nodes, offset, front) = loop {
+            match parse_window(&arena, text, &starts, a, b, &comrak_options) {
+                Ok(parsed) => break parsed,
+                Err(WindowError::Whole) => return None,
+                // A block runs on past b (a fence, a comment, an HTML block
+                // that blank lines don't end): twice as far, so that a long
+                // one costs a few parses, not one a boundary.
+                Err(WindowError::End) => {
+                    span *= 2;
+                    b = boundary_after((starts[a] + span).max(least), a);
+                }
+            }
+        };
+        if a == 0 {
+            // (Found by comrak in the window as in the whole text.)
+            if front != front_matter {
+                return None;
+            }
+            front_matter_end = front;
+        }
+        let mut renderer = Html::new(options, &no_footnotes, offset, std::mem::take(&mut counts));
+        for &(node, f, l) in &nodes {
+            let (block, block_meta) = renderer.block(node, f, l);
+            blocks.push(block);
+            meta.push(shared_meta(block_meta));
+        }
+        counts = std::mem::take(&mut renderer.slugs);
+        match b {
+            Some(next) => a = next,
+            None => break,
+        }
+    }
+    blocks.shrink_to_fit();
+    meta.shrink_to_fit();
+    Some(Document {
+        text: text.to_owned(),
+        starts,
+        options: options_key(options),
+        blocks,
+        meta,
+        front_matter_end,
+        local: true,
+        spliced: false,
+    })
 }
 
 fn splice(prev: &Document, text: &str, options: &RenderOptions) -> Option<Document> {
@@ -434,7 +635,7 @@ fn splice(prev: &Document, text: &str, options: &RenderOptions) -> Option<Docume
     new_meta.extend_from_slice(&prev.meta[..first]);
     for (block, meta) in window {
         new_blocks.push(block);
-        new_meta.push(Arc::new(meta));
+        new_meta.push(shared_meta(meta));
     }
     for (block, meta) in blocks[end..].iter().zip(&prev.meta[end..]) {
         let (block, meta) = shifted(block, meta, delta)?;

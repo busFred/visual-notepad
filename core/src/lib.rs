@@ -126,7 +126,7 @@ fn blocks(markdown: &str, options: &ffi::RenderOptions) -> Vec<ffi::Block> {
 use render::Document;
 
 fn parse(markdown: &str, options: &ffi::RenderOptions) -> Box<Document> {
-    Box::new(Document::parse(markdown, options))
+    Box::new(Document::parse_large(markdown, options))
 }
 
 fn reparse(previous: &Document, markdown: &str, options: &ffi::RenderOptions) -> Box<Document> {

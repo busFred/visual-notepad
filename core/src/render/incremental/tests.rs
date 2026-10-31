@@ -660,6 +660,159 @@ fn edges_of_the_text() {
     }
 }
 
+/// Parses `text` in windows of `window` bytes and checks it against a whole
+/// parse; returns whether it was parsed in windows at all.
+fn check_windowed(text: &str, options: &RenderOptions, window: usize, context: &str) -> bool {
+    let Some(windowed) = parse_windowed(text, options, window) else {
+        return false;
+    };
+    let full = Document::parse(text, options);
+    if windowed.blocks != full.blocks || windowed.meta != full.meta {
+        let i = (0..windowed.blocks.len().max(full.blocks.len()))
+            .find(|&i| {
+                windowed.blocks.get(i) != full.blocks.get(i)
+                    || windowed.meta.get(i) != full.meta.get(i)
+            })
+            .unwrap();
+        let line = full
+            .blocks
+            .get(i)
+            .or(windowed.blocks.get(i))
+            .map_or(0, |b| b.first_line);
+        let dir = std::env::temp_dir().join("vn-windowed-failure");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("text.md"), text);
+        panic!(
+            "{context}: block {i} differs in windows of {window} (text in {})\nwindowed: {:#?} {:?}\nwhole: {:#?} {:?}\nnear line {line}:\n{}",
+            dir.display(),
+            windowed.blocks.get(i),
+            windowed.meta.get(i),
+            full.blocks.get(i),
+            full.meta.get(i),
+            describe(text, line)
+        );
+    }
+    assert_eq!(windowed.starts, full.starts, "{context}: line starts");
+    assert_eq!(
+        windowed.front_matter_end, full.front_matter_end,
+        "{context}: front matter"
+    );
+    assert_eq!(windowed.local, full.local, "{context}: local");
+    assert!(!windowed.spliced);
+    true
+}
+
+/// Parsing in windows gives exactly the whole parse's blocks, for windows of
+/// every size down to a line (a boundary tried at every line that may be
+/// one), on the corpus and on the texts of random edits to it.
+#[test]
+fn windowed_parse_matches_whole_parse() {
+    let mut corpus: Vec<(String, String)> = vec![
+        (
+            "README.md".into(),
+            include_str!("../../../../README.md").into(),
+        ),
+        (
+            "design.md".into(),
+            include_str!("../../../../docs/design.md").into(),
+        ),
+        ("generated".into(), generated(120, 3)),
+    ];
+    for (i, nasty) in NASTY.iter().enumerate() {
+        corpus.push((
+            format!("nasty {i}"),
+            format!(
+                "{}{}{}",
+                generated(4, i as u64 + 11),
+                nasty,
+                generated(4, i as u64 + 29)
+            ),
+        ));
+        corpus.push((format!("nasty {i} alone"), nasty.to_string()));
+    }
+    let edits = edits_per_document() / 4;
+    let mut windowed = 0;
+    let mut checks = 0;
+    for (i, (name, start)) in corpus.iter().enumerate() {
+        let mut rng = Rng(0x5851_F42D_4C95_7F2D ^ (i as u64 + 1));
+        let mut text = start.clone();
+        for step in 0..edits {
+            for window in [1, 80, 700, 5000] {
+                checks += 1;
+                windowed +=
+                    check_windowed(&text, &opts(), window, &format!("{name} step {step}")) as usize;
+            }
+            if !is_local(&text) && rng.chance(20) {
+                // As in run(): definitions and `\r` make every parse a whole one.
+                text = text.replace("]:", "] :").replace('\r', "");
+            } else {
+                edit(&mut rng, &mut text);
+            }
+            if text.len() > 3 * start.len() + 4096 || text.len() < start.len() / 3 {
+                text = start.clone();
+            }
+        }
+    }
+    println!("windowed parses: {windowed} of {checks}");
+    // Most texts have no definitions or footnotes.
+    assert!(windowed * 2 > checks, "{windowed} of {checks}");
+}
+
+/// The same with the other options, which change what blocks are.
+#[test]
+fn windowed_parse_matches_whole_parse_with_other_options() {
+    let variants = [
+        RenderOptions {
+            breaks: true,
+            linkify: false,
+            typographer: true,
+            math: false,
+            front_matter: 0,
+        },
+        RenderOptions {
+            breaks: false,
+            linkify: true,
+            typographer: false,
+            math: true,
+            front_matter: 1,
+        },
+    ];
+    for (v, options) in variants.iter().enumerate() {
+        for (i, nasty) in NASTY.iter().enumerate() {
+            let text = format!(
+                "{}{}{}",
+                generated(6, i as u64 + 41),
+                nasty,
+                generated(6, i as u64 + 43)
+            );
+            for window in [1, 120, 900] {
+                check_windowed(&text, options, window, &format!("variant {v} nasty {i}"));
+            }
+        }
+    }
+}
+
+/// Large texts go through windows of the real size and give the same.
+#[test]
+fn large_texts_parse_in_windows() {
+    let text = generated(14_000, 21);
+    assert!(text.len() > 2 * PARSE_WINDOW);
+    assert!(check_windowed(&text, &opts(), PARSE_WINDOW, "generated"));
+    let large = Document::parse_large(&text, &opts());
+    let full = Document::parse(&text, &opts());
+    assert!(large.blocks == full.blocks && large.meta == full.meta);
+    // A fence that runs over many windows' worth of boundaries.
+    let mut fenced = generated(200, 22);
+    fenced.push_str("```\n");
+    for i in 0..60_000 {
+        fenced.push_str(&format!("line {i}\n\nword {i}\n"));
+    }
+    fenced.push_str("```\n\n");
+    fenced.push_str(&generated(200, 23));
+    assert!(check_windowed(&fenced, &opts(), PARSE_WINDOW, "fenced"));
+    assert!(check_windowed(&fenced, &opts(), 4096, "fenced, small windows"));
+}
+
 /// `cargo test --release perf_reparse -- --ignored --nocapture`
 #[test]
 #[ignore]
