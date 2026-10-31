@@ -292,6 +292,7 @@ private Q_SLOTS:
     void editsWhileShowingTheSourceAreParsed();
     void flushWhileShowingTheSource();
     void switchingToVisualShowsTheSourceFirst();
+    void switchingToVisualRendersAtTheFinalWidthOnly();
 
 private:
     // Source and preview of longDocument(), side by side; the source has
@@ -2198,6 +2199,39 @@ void TestVisualView::switchingToVisualShowsTheSourceFirst()
     QVERIFY(!visual->grab().isNull());
     QVERIFY(visual->topLine() <= line);
     QVERIFY(line - visual->topLine() < 100);
+}
+
+// A mode switch shows the visual view in half the tab first (the splitter
+// still holds the source view), at a width it keeps only until the layout
+// catches up: blocks are rendered once, at the width that is painted, and
+// the caret carried over from the source stays in view.
+void TestVisualView::switchingToVisualRendersAtTheFinalWidthOnly()
+{
+    m_view->hide();
+    QTemporaryDir dir;
+    QFile file(dir.filePath(QStringLiteral("doc.md")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(largeDocument(60000).toUtf8());
+    file.close();
+    DocumentTab tab;
+    QVERIFY(tab.load(file.fileName()));
+    tab.setViewMode(DocumentTab::ViewMode::Source);
+    tab.resize(900, 600);
+    tab.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&tab));
+    QTextDocument *doc = tab.document();
+    const int line = doc->blockCount() / 2 + 2;
+    tab.editor()->setTextCursor(QTextCursor(doc->findBlockByNumber(line)));
+    tab.setViewMode(DocumentTab::ViewMode::Visual);
+    // As the event loop goes on: the layout first, then the paint.
+    QCoreApplication::sendPostedEvents();
+    VisualView *visual = tab.visualView();
+    QVERIFY(!visual->grab().isNull());
+    QVERIFY(visual->renderCount() > 3);
+    QCOMPARE(visual->renderCount(), visual->memoizedRenderCount());
+    QCOMPARE(visual->textCursor().blockNumber(), line);
+    QVERIFY(visual->topLine() <= line);
+    QVERIFY(line - visual->topLine() < 40);
 }
 
 // Keep tests away from the user's settings file.

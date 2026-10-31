@@ -99,11 +99,22 @@ private:
         int wrap = -1;  // RenderedBlock::wrapsAnywhere, -1 until asked.
     };
 
+    // Where the view is in the source: the line position at the top, and
+    // whether the caret shows.
+    struct Place
+    {
+        qreal top = 0;
+        bool caretShown = false;
+    };
+    Place place();
+    void restorePlace(const Place &place);
     void rebuildRows();
     RenderContext context() const;
     // The render of a rendered row (a block, or a part of one), or null.
     const Render *rendered(const Row &row);
     const RenderedBlock *renderedForRow(const Row &row);
+    // The render kept for a row at the current width, or null; makes none.
+    const Render *memoized(const Row &row) const;
     int spanForRow(const Row &row) const;
     LongBox &longBox(int blockIndex);
     // Whether a span shows as a code box in parts.
@@ -135,6 +146,9 @@ private:
     bool m_standIn = false;
     // Rows were built from a parse since the view was last shown.
     bool m_showsParse = false;
+    // Not painted since shown; rough heights were handed out meanwhile.
+    bool m_unpainted = true;
+    bool m_estimated = false;
     // What m_rows were built from, so caret moves that open or close
     // nothing don't rebuild them.
     int m_rowsRevision = -1;

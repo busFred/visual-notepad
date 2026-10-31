@@ -19,6 +19,7 @@
 #include <QToolTip>
 
 #include <algorithm>
+#include <optional>
 
 namespace vn {
 
@@ -194,6 +195,7 @@ void VisualView::hideEvent(QHideEvent *event)
 {
     TextView::hideEvent(event);
     m_showsParse = false;
+    m_unpainted = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -341,17 +343,11 @@ void VisualView::rebuildRows()
         m_standIn = true;
         return;
     }
-    // The rendered rows that replace the stand-in keep its place: the same
-    // source line at the top, and the caret in view if it was.
-    qreal standInTop = -1;
-    bool caretShown = false;
+    // The rendered rows that replace the stand-in keep its place.
+    std::optional<Place> standInPlace;
     if (m_standIn) {
+        standInPlace = place();
         m_standIn = false;
-        standInTop = topLinePosition();
-        qreal top = 0;
-        const int bottom = rowAt(viewport()->height() - 1, &top);
-        const int caret = textCursor().blockNumber();
-        caretShown = caret >= topLine() && (bottom < 0 || caret <= row(bottom).lastLine);
     }
     m_showsParse = true;
     const auto &spans = m_model->spans();
@@ -447,11 +443,23 @@ void VisualView::rebuildRows()
     m_rowsStale = false;
     m_rowsRevision = m_model->revision();
     m_rowsExpanded = std::move(expanded);
-    if (standInTop >= 0) {
-        scrollToLinePosition(standInTop);
-        if (caretShown)
-            ensureCursorVisible();
-    }
+    if (standInPlace)
+        restorePlace(*standInPlace);
+}
+
+VisualView::Place VisualView::place()
+{
+    qreal top = 0;
+    const int bottom = rowAt(viewport()->height() - 1, &top);
+    const int caret = textCursor().blockNumber();
+    return {topLinePosition(), caret >= topLine() && (bottom < 0 || caret <= row(bottom).lastLine)};
+}
+
+void VisualView::restorePlace(const Place &place)
+{
+    scrollToLinePosition(place.top);
+    if (place.caretShown)
+        ensureCursorVisible();
 }
 
 int VisualView::rowCount() const
@@ -636,10 +644,29 @@ const RenderedBlock *VisualView::renderedForRow(const Row &r)
     return render ? render->block.get() : nullptr;
 }
 
+const VisualView::Render *VisualView::memoized(const Row &r) const
+{
+    if (m_rendersRevision != m_model->revision() || m_rendersWidth != textWidth()
+        || m_rendersDpr != devicePixelRatioF())
+        return nullptr;
+    const auto it = m_renders.find(r.firstLine);
+    return it != m_renders.end() ? &it->second : nullptr;
+}
+
 qreal VisualView::renderedRowHeight(const Row &r, qreal)
 {
     if (spanForRow(r) < 0)
         return lineHeight() * gapRowFactor;
+    // Before the first paint the width may change yet (a splitter lays out
+    // a view it shows after showing it, and a mode switch shows it in a
+    // half first): blocks not rendered at this width are measured roughly,
+    // and rendered at the width the paint finds (see paintEvent).
+    if (m_unpainted) {
+        if (const Render *render = memoized(r))
+            return render->block->height();
+        m_estimated = true;
+        return lineHeight() * (r.lastLine - r.firstLine + 1);
+    }
     const RenderedBlock *block = renderedForRow(r);
     return block ? block->height() : lineHeight();
 }
@@ -654,6 +681,19 @@ void VisualView::paintRenderedRow(QPainter &painter, const Row &r, const QRectF 
 
 void VisualView::paintEvent(QPaintEvent *event)
 {
+    if (m_unpainted) {
+        // The rough heights give way to the real ones, at the same place:
+        // the same source line at the top, and the caret in view if it was.
+        std::optional<Place> estimatedPlace;
+        if (m_estimated)
+            estimatedPlace = place();
+        m_unpainted = false;
+        m_estimated = false;
+        if (estimatedPlace) {
+            relayout();
+            restorePlace(*estimatedPlace);
+        }
+    }
     ++m_frame;
     TextView::paintEvent(event);
 }
@@ -847,6 +887,9 @@ std::vector<TextView::LineAnchor> VisualView::rowLineAnchors(const Row &r, qreal
     // their table rows, list items and code lines are.
     std::vector<LineAnchor> anchors;
     if (!r.rendered || r.lastLine == r.firstLine)
+        return anchors;
+    // (Rough heights spread the lines evenly; see renderedRowHeight.)
+    if (m_unpainted && !memoized(r))
         return anchors;
     if (const RenderedBlock *block = renderedForRow(r)) {
         for (const auto &[offset, y] : block->lineAnchors())
