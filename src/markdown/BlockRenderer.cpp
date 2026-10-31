@@ -2,6 +2,7 @@
 
 #include "../Theme.h"
 #include "MathRenderer.h"
+#include "RemoteImages.h"
 
 #include <KSyntaxHighlighting/Definition>
 #include <KSyntaxHighlighting/Repository>
@@ -55,6 +56,16 @@ QImage cachedMath(const QString &tex, const math::Style &style)
     return image;
 }
 
+// One image pixel per logical pixel, shrunk to fit the column.
+QImage fitToColumn(QImage image, qreal width, qreal dpr)
+{
+    if (image.width() > width) {
+        image = image.scaledToWidth(int(width * dpr), Qt::SmoothTransformation);
+        image.setDevicePixelRatio(dpr);
+    }
+    return image;
+}
+
 // Local pictures, read and scaled to the column, by file version and size.
 QImage cachedLocalImage(const QString &path, qreal width, qreal dpr)
 {
@@ -73,12 +84,23 @@ QImage cachedLocalImage(const QString &path, qreal width, qreal dpr)
     QImage image = reader.read();
     if (image.isNull())
         return image; // Not cached: the file may appear later.
-    // One image pixel per logical pixel, shrunk to fit the column.
-    if (image.width() > width) {
-        image = image.scaledToWidth(int(width * dpr), Qt::SmoothTransformation);
-        image.setDevicePixelRatio(dpr);
-    }
+    image = fitToColumn(image, width, dpr);
     cache.insert(key, new QImage(image), imageCost(image));
+    return image;
+}
+
+// Downloaded pictures scaled to the column, by address (null until downloaded).
+QImage cachedRemoteImage(const QUrl &url, qreal width, qreal dpr)
+{
+    static QCache<QString, QImage> cache(32 * 1024); // KiB
+    RemoteImages &remote = RemoteImages::instance();
+    const QString key = QStringLiteral("%1|%2|%3|").arg(remote.generation()).arg(width).arg(dpr)
+                        + url.toString(QUrl::FullyEncoded);
+    if (const QImage *hit = cache.object(key))
+        return *hit;
+    const QImage image = fitToColumn(remote.fullImage(url), width, dpr);
+    if (!image.isNull())
+        cache.insert(key, new QImage(image), imageCost(image));
     return image;
 }
 
@@ -143,7 +165,8 @@ bool mermaidDiagram(const QString &code, const RenderContext &context, Diagram *
     return false;
 }
 
-// Rich text with images resolved locally: math placeholders and files.
+// Rich text with images resolved here: math placeholders, files, and
+// downloads when the user agreed to them.
 class ResourceDocument : public QTextDocument
 {
 public:
@@ -177,10 +200,22 @@ public:
         }
     }
 
+    // Some picture is still downloading.
+    bool hasPendingDownload() const { return m_pending; }
+
     // The file a picture's source names, or empty (math, remote pictures).
     QString pathOf(const QString &source) const
     {
         return source.startsWith(QLatin1String("vn-math")) ? QString() : localPath(QUrl(source));
+    }
+
+    // The address of a picture that was downloaded for this block, or empty.
+    QUrl downloadedUrlOf(const QString &source) const
+    {
+        const QUrl url(source);
+        const bool loaded = m_context.allowRemoteImages && RemoteImages::isWebUrl(url)
+                            && RemoteImages::instance().state(url) == RemoteImages::State::Loaded;
+        return loaded ? url : QUrl();
     }
 
 protected:
@@ -199,6 +234,8 @@ protected:
             style.display = display;
             return keep(type, url, cachedMath(math::withMacros(m_math.value(index)), style));
         }
+        if (RemoteImages::isWebUrl(url))
+            return remoteImage(type, url);
         const QString path = localPath(url);
         if (path.isEmpty())
             return QVariant();
@@ -217,6 +254,27 @@ private:
         return image;
     }
 
+    // Without the user's agreement nothing is requested and the picture
+    // stays missing; with it, the download starts now and this block is
+    // pending until it ends.
+    QVariant remoteImage(int type, const QUrl &url)
+    {
+        if (!m_context.allowRemoteImages)
+            return QVariant();
+        RemoteImages &remote = RemoteImages::instance();
+        switch (remote.request(url)) {
+        case RemoteImages::State::Loading:
+            m_pending = true;
+            return QVariant();
+        case RemoteImages::State::Loaded: {
+            const QImage image = cachedRemoteImage(url, m_context.width, m_context.devicePixelRatio);
+            return image.isNull() ? QVariant() : keep(type, url, image);
+        }
+        default:
+            return QVariant();
+        }
+    }
+
     QString localPath(const QUrl &url) const
     {
         if (url.scheme() == QLatin1String("file"))
@@ -231,6 +289,7 @@ private:
 
     RenderContext m_context;
     QStringList m_math;
+    bool m_pending = false;
 };
 
 QString hex(theme::Role role)
@@ -380,6 +439,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         doc->fitImages(context.width);
         doc->setTextWidth(context.width);
         r.m_height = doc->size().height() + blockGap;
+        r.m_pending = doc->hasPendingDownload();
         r.m_doc = std::move(doc);
         r.collectLineAnchors(0);
         return result;
@@ -514,16 +574,24 @@ std::optional<RenderedBlock::Picture> RenderedBlock::pictureAt(const QPointF &po
     if (m_kind != Kind::Rich)
         return std::nullopt;
     const QString source = m_doc->documentLayout()->imageAt(point);
-    const QString path = source.isEmpty() ? QString() : static_cast<const ResourceDocument *>(m_doc.get())->pathOf(source);
-    if (path.isEmpty())
+    if (source.isEmpty())
         return std::nullopt;
-    return Picture{QFileInfo(path).fileName(), path};
+    const auto *doc = static_cast<const ResourceDocument *>(m_doc.get());
+    if (const QString path = doc->pathOf(source); !path.isEmpty())
+        return Picture{QFileInfo(path).fileName(), path, {}};
+    const QUrl url = doc->downloadedUrlOf(source);
+    if (url.isEmpty())
+        return std::nullopt;
+    const QString name = QFileInfo(url.path()).fileName();
+    return Picture{name.isEmpty() ? url.host() : name, {}, url.toString(QUrl::FullyEncoded)};
 }
 
 QImage RenderedBlock::pictureImage(const Picture &picture) const
 {
     if (!picture.path.isEmpty())
         return fullSizeImage(picture.path);
+    if (!picture.url.isEmpty())
+        return RemoteImages::instance().fullImage(QUrl(picture.url)); // Not downloaded again.
     if (!m_diagramCode.isNull()) {
         // The diagram is vector: render it larger rather than magnify pixels.
         try {

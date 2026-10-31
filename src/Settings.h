@@ -39,6 +39,7 @@ inline constexpr char textLineHeight[] = "markdown/textLineHeight"; // multiple 
 inline constexpr char renderMath[] = "markdown/renderMath";
 inline constexpr char mathMacros[] = "markdown/mathMacros"; // QVariantMap command -> expansion
 inline constexpr char mermaidTheme[] = "markdown/mermaidTheme"; // "auto" | "base" | "default" | ...
+inline constexpr char remoteImages[] = "markdown/remoteImages"; // "ask" | "never"
 inline constexpr char pasteImageFolder[] = "markdown/pasteImageFolder";
 inline constexpr char updateLinksOnPaste[] = "markdown/updateLinksOnPaste";
 inline constexpr char validateLinks[] = "markdown/validateLinks";

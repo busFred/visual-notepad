@@ -1,0 +1,562 @@
+// Remote pictures in the Markdown preview, against a stub HTTP server on
+// this machine: nothing is requested before the user agrees, and the
+// download limits hold. Runs offscreen without a network.
+#include "Settings.h"
+#include "Theme.h"
+#include "editor/DocumentLayout.h"
+#include "markdown/BlockRenderer.h"
+#include "markdown/MarkdownModel.h"
+#include "markdown/RemoteImages.h"
+#include "markdown/VisualView.h"
+
+#include <QBuffer>
+#include <QFrame>
+#include <QLabel>
+#include <QPushButton>
+#include <QSignalSpy>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <QTemporaryDir>
+#include <QTest>
+#include <QTextDocument>
+
+using namespace vn;
+
+namespace {
+
+QByteArray encoded(int width, int height, const char *format)
+{
+    QImage image(width, height, QImage::Format_RGB32);
+    image.fill(Qt::red);
+    QByteArray bytes;
+    QBuffer buffer(&bytes);
+    buffer.open(QIODevice::WriteOnly);
+    image.save(&buffer, format);
+    return bytes;
+}
+
+// Answers GET requests on 127.0.0.1 and remembers them.
+class HttpStub : public QObject
+{
+public:
+    HttpStub()
+        : m_small(encoded(40, 20, "PNG"))
+        , m_wide(encoded(2000, 500, "PNG"))
+        , m_huge(encoded(4500, 4500, "BMP")) // 61 MB: a valid picture far over the limit.
+    {
+        listen();
+        connect(&m_server, &QTcpServer::newConnection, this, [this] {
+            while (QTcpSocket *socket = m_server.nextPendingConnection())
+                accept(socket);
+        });
+    }
+
+    void listen() { QVERIFY(m_server.listen(QHostAddress::LocalHost, 0)); }
+    QUrl url(const QString &path) const
+    {
+        return QUrl(QStringLiteral("http://127.0.0.1:%1%2").arg(m_server.serverPort()).arg(path));
+    }
+    QString host() const { return QStringLiteral("127.0.0.1:%1").arg(m_server.serverPort()); }
+
+    QStringList requests; // "/path", in arrival order.
+    QList<QByteArray> headers; // The raw header block of each.
+    int hung = 0;         // Connections held open without an answer.
+    qint64 sent = 0;      // Bytes handed to the network by the last response.
+    qint64 hugeSize() const { return m_huge.size(); }
+
+private:
+    void accept(QTcpSocket *socket)
+    {
+        socket->setParent(&m_server);
+        auto buffer = std::make_shared<QByteArray>();
+        connect(socket, &QTcpSocket::readyRead, socket, [this, socket, buffer] {
+            buffer->append(socket->readAll());
+            const qsizetype end = buffer->indexOf("\r\n\r\n");
+            if (end < 0)
+                return;
+            const QList<QByteArray> line = buffer->left(buffer->indexOf("\r\n")).split(' ');
+            const QString path = line.value(1);
+            // Other programs on this machine probe new listening ports; only
+            // requests of the app count.
+            if (buffer->left(end).contains("VisualNotepad/")) {
+                requests.append(path);
+                headers.append(buffer->left(end));
+            }
+            buffer->clear();
+            respond(socket, path);
+        });
+        connect(socket, &QTcpSocket::bytesWritten, socket, [this](qint64 bytes) { sent += bytes; });
+        connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+    }
+
+    static void send(QTcpSocket *socket, const QByteArray &status, const QByteArray &type, const QByteArray &body,
+                     const QByteArray &extra = {}, qint64 declared = -1)
+    {
+        QByteArray head = "HTTP/1.1 " + status + "\r\nConnection: close\r\n" + extra;
+        if (!type.isEmpty())
+            head += "Content-Type: " + type + "\r\n";
+        if (declared != 0)
+            head += "Content-Length: " + QByteArray::number(declared < 0 ? body.size() : declared) + "\r\n";
+        socket->write(head + "\r\n" + body);
+        socket->disconnectFromHost();
+    }
+
+    static void redirect(QTcpSocket *socket, const QString &to)
+    {
+        send(socket, "302 Found", {}, {}, "Location: " + to.toUtf8() + "\r\n", 0);
+    }
+
+    void respond(QTcpSocket *socket, const QString &path)
+    {
+        if (path.startsWith(QLatin1String("/ok")))
+            send(socket, "200 OK", "image/png", m_small, "Set-Cookie: session=1\r\n");
+        else if (path == QLatin1String("/wide.png"))
+            send(socket, "200 OK", "image/png", m_wide);
+        else if (path == QLatin1String("/text"))
+            send(socket, "200 OK", "text/plain", "this is not a picture");
+        else if (path == QLatin1String("/missing"))
+            send(socket, "404 Not Found", "text/plain", "gone");
+        else if (path == QLatin1String("/big")) // Announces the size.
+            send(socket, "200 OK", "image/bmp", m_huge);
+        else if (path == QLatin1String("/stream")) // No size announced, all of it.
+            send(socket, "200 OK", "image/bmp", m_huge, {}, 0);
+        else if (path == QLatin1String("/bmp")) // Large but within the limit.
+            send(socket, "200 OK", "image/bmp", encoded(1000, 1000, "BMP"));
+        else if (path == QLatin1String("/redirect"))
+            redirect(socket, QStringLiteral("/ok.png"));
+        else if (path == QLatin1String("/redirect-file"))
+            redirect(socket, QStringLiteral("file:///etc/hostname"));
+        else if (path == QLatin1String("/redirect-ftp"))
+            redirect(socket, QStringLiteral("ftp://127.0.0.1/ok.png"));
+        else if (path == QLatin1String("/redirect-login"))
+            redirect(socket, QStringLiteral("http://user:secret@127.0.0.1/ok.png"));
+        else if (path.startsWith(QLatin1String("/hops/"))) { // Redirects N times, then a picture.
+            const int left = path.mid(6).toInt();
+            if (left > 0)
+                redirect(socket, QStringLiteral("/hops/%1").arg(left - 1));
+            else
+                send(socket, "200 OK", "image/png", m_small);
+        } else if (path.startsWith(QLatin1String("/hang"))) {
+            ++hung; // Never answers.
+        } else {
+            send(socket, "400 Bad Request", "text/plain", "?");
+        }
+    }
+
+    QTcpServer m_server;
+    QByteArray m_small;
+    QByteArray m_wide;
+    QByteArray m_huge;
+};
+
+RenderContext context(bool allow, qreal width = 400)
+{
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.width = width;
+    ctx.allowRemoteImages = allow;
+    return ctx;
+}
+
+std::unique_ptr<RenderedBlock> renderHtml(const QString &html, const RenderContext &ctx)
+{
+    core::Block block;
+    block.kind = core::BlockKind::Html;
+    const QByteArray utf8 = html.toUtf8();
+    block.html = rust::String(utf8.constData(), utf8.size());
+    return RenderedBlock::create(block, html, ctx);
+}
+
+QString imageTag(const QUrl &url, const QString &attributes = {})
+{
+    return QStringLiteral("<p><img src=\"%1\" %2></p>").arg(url.toString(), attributes);
+}
+
+} // namespace
+
+class TestRemoteImages : public QObject
+{
+    Q_OBJECT
+
+private Q_SLOTS:
+    void initTestCase();
+    void init();
+    void cleanup();
+
+    void findsImageAddresses();
+    void redirectRules();
+    void nothingIsRequestedWithoutConsent();
+    void downloadsAfterConsent();
+    void wideDownloadsShrinkAndZoom();
+    void downloadLimits_data();
+    void downloadLimits();
+    void failuresAreNotRetried();
+    void sendsNoCookiesAndNoCredentials();
+    void limitsConcurrentDownloads();
+    void stalledDownloadTimesOut();
+    void viewAsksBeforeLoading();
+    void dontLoadNeverContacts();
+    void neverPreferenceDoesNotAsk();
+    void consentIsSharedByViews();
+    void localImagesStillLoad();
+
+private:
+    std::unique_ptr<HttpStub> m_stub;
+    std::unique_ptr<QTextDocument> m_doc;
+    MarkdownModel *m_model = nullptr;
+    // A visible view of a document with two pictures from the stub.
+    std::unique_ptr<VisualView> openView(const QString &markdown);
+    static QPushButton *button(QWidget *parent, const QString &text);
+};
+
+void TestRemoteImages::initTestCase()
+{
+    theme::apply(*qApp);
+}
+
+void TestRemoteImages::init()
+{
+    m_stub = std::make_unique<HttpStub>();
+    RemoteImages::instance().clear();
+    RemoteImages::instance().setTimeout(10000);
+    Settings::instance().reset(key::remoteImages);
+}
+
+void TestRemoteImages::cleanup()
+{
+    RemoteImages::instance().clear();
+    m_doc.reset();
+    m_model = nullptr;
+    m_stub.reset();
+}
+
+std::unique_ptr<VisualView> TestRemoteImages::openView(const QString &markdown)
+{
+    m_doc = std::make_unique<QTextDocument>();
+    m_doc->setDocumentLayout(new DocumentLayout(m_doc.get()));
+    m_doc->setPlainText(markdown);
+    m_model = new MarkdownModel(m_doc.get());
+    auto view = std::make_unique<VisualView>(m_model);
+    view->resize(760, 600);
+    view->show();
+    return view;
+}
+
+QPushButton *TestRemoteImages::button(QWidget *parent, const QString &text)
+{
+    for (QPushButton *b : parent->findChildren<QPushButton *>()) {
+        if (b->text() == text)
+            return b;
+    }
+    return nullptr;
+}
+
+void TestRemoteImages::findsImageAddresses()
+{
+    const QString html = QStringLiteral(
+        "<p><img src=\"https://img.shields.io/badge/a-b-green.svg?x=1&amp;y=2\" alt=\"badge\">"
+        "<IMG SRC='http://example.com/a.png'> <img src=\"http://example.com/a.png\">"
+        "<img src=http://bare.example/c.gif>"
+        "<img src=\"local/pic.png\"><img src=\"ftp://example.com/f.png\"><img src=\"file:///etc/passwd\">"
+        "<img data-src=\"http://lazy.example/l.png\">"
+        "<a href=\"http://example.com/page\">link</a></p>"
+        "<table background=\"http://bg.example/t.png\"><tr><td style=\"background-image: url('https://css.example/b.png')\">"
+        "x</td></tr></table>");
+    QCOMPARE(RemoteImages::imageUrls(html),
+             (QStringList{QStringLiteral("https://img.shields.io/badge/a-b-green.svg?x=1&y=2"),
+                          QStringLiteral("http://example.com/a.png"), QStringLiteral("http://bare.example/c.gif"),
+                          QStringLiteral("http://bg.example/t.png"), QStringLiteral("https://css.example/b.png")}));
+    QVERIFY(RemoteImages::imageUrls(QStringLiteral("<p>no pictures, see http://example.com</p>")).isEmpty());
+}
+
+void TestRemoteImages::redirectRules()
+{
+    const auto allowed = [](const char *from, const char *to) {
+        return RemoteImages::redirectAllowed(QUrl(QString::fromLatin1(from)), QUrl(QString::fromLatin1(to)));
+    };
+    QVERIFY(allowed("http://a.example/x", "http://b.example/y"));
+    QVERIFY(allowed("http://a.example/x", "https://b.example/y"));
+    QVERIFY(allowed("https://a.example/x", "https://b.example/y"));
+    QVERIFY(!allowed("https://a.example/x", "http://b.example/y")); // Never to less safe.
+    QVERIFY(!allowed("https://a.example/x", "http://a.example/x"));
+    QVERIFY(!allowed("http://a.example/x", "file:///etc/passwd"));
+    QVERIFY(!allowed("http://a.example/x", "ftp://a.example/x.png"));
+    QVERIFY(!allowed("http://a.example/x", "data:image/png;base64,AAAA"));
+    QVERIFY(!allowed("http://a.example/x", "http://user:pw@b.example/y"));
+    QVERIFY(!allowed("http://a.example/x", "http:///nohost"));
+    // Only web addresses are ever fetched.
+    for (const char *url : {"file:///etc/passwd", "ftp://a.example/x.png", "data:image/png;base64,AAAA", "pic.png", "http:///x"})
+        QCOMPARE(RemoteImages::instance().request(QUrl(QString::fromLatin1(url))), RemoteImages::State::Failed);
+    QVERIFY(m_stub->requests.isEmpty());
+}
+
+void TestRemoteImages::nothingIsRequestedWithoutConsent()
+{
+    const QUrl url = m_stub->url(QStringLiteral("/ok.png"));
+    const auto block = renderHtml(imageTag(url), context(false));
+    QVERIFY(!block->isPending());
+    QTest::qWait(300);
+    QVERIFY(m_stub->requests.isEmpty());
+    QCOMPARE(RemoteImages::instance().state(url), RemoteImages::State::Missing);
+    // Not even a picture another document already downloaded shows.
+    QVERIFY(RemoteImages::instance().request(url) != RemoteImages::State::Missing);
+    QTRY_COMPARE(RemoteImages::instance().state(url), RemoteImages::State::Loaded);
+    const auto refused = renderHtml(imageTag(url), context(false));
+    QVERIFY(!refused->pictureAt(QPointF(5, 5)));
+    QCOMPARE(m_stub->requests.size(), 1);
+}
+
+void TestRemoteImages::downloadsAfterConsent()
+{
+    const QUrl url = m_stub->url(QStringLiteral("/ok.png"));
+    const auto placeholder = renderHtml(imageTag(url), context(false));
+    QSignalSpy ready(&RemoteImages::instance(), &RemoteImages::ready);
+    const auto first = renderHtml(imageTag(url), context(true));
+    QVERIFY(first->isPending());
+    QTRY_VERIFY(ready.count() > 0);
+    QCOMPARE(RemoteImages::instance().state(url), RemoteImages::State::Loaded);
+    const auto done = renderHtml(imageTag(url), context(true));
+    QVERIFY(!done->isPending());
+    QVERIFY(done->height() != placeholder->height());
+    QCOMPARE(m_stub->requests, QStringList{QStringLiteral("/ok.png")});
+    // The picture is 40x20 and can be enlarged without downloading again.
+    const auto picture = done->pictureAt(QPointF(10, 5));
+    QVERIFY(picture);
+    QCOMPARE(picture->title, QStringLiteral("ok.png"));
+    QCOMPARE(done->pictureImage(*picture).size(), QSize(40, 20));
+    QCOMPARE(m_stub->requests.size(), 1);
+}
+
+void TestRemoteImages::wideDownloadsShrinkAndZoom()
+{
+    const QUrl url = m_stub->url(QStringLiteral("/wide.png"));
+    renderHtml(imageTag(url), context(true));
+    QTRY_COMPARE(RemoteImages::instance().state(url), RemoteImages::State::Loaded);
+    // 2000x500 in a 400 wide column keeps its shape: about 100 high.
+    const auto rendered = renderHtml(imageTag(url), context(true));
+    QVERIFY2(rendered->height() < 200, qPrintable(QString::number(rendered->height())));
+    QVERIFY(rendered->height() > 100);
+    const auto picture = rendered->pictureAt(QPointF(200, 50));
+    QVERIFY(picture);
+    QCOMPARE(rendered->pictureImage(*picture).size(), QSize(2000, 500));
+}
+
+void TestRemoteImages::downloadLimits_data()
+{
+    QTest::addColumn<QString>("path");
+    QTest::addColumn<bool>("loads");
+    QTest::newRow("picture") << QStringLiteral("/ok.png") << true;
+    QTest::newRow("large but allowed") << QStringLiteral("/bmp") << true;
+    QTest::newRow("redirect") << QStringLiteral("/redirect") << true;
+    QTest::newRow("5 redirects") << QStringLiteral("/hops/5") << true;
+    QTest::newRow("6 redirects") << QStringLiteral("/hops/6") << false;
+    QTest::newRow("redirect to file") << QStringLiteral("/redirect-file") << false;
+    QTest::newRow("redirect to ftp") << QStringLiteral("/redirect-ftp") << false;
+    QTest::newRow("redirect with credentials") << QStringLiteral("/redirect-login") << false;
+    QTest::newRow("not a picture") << QStringLiteral("/text") << false;
+    QTest::newRow("404") << QStringLiteral("/missing") << false;
+    QTest::newRow("over 20 MiB, announced") << QStringLiteral("/big") << false;
+    QTest::newRow("over 20 MiB, unannounced") << QStringLiteral("/stream") << false;
+}
+
+void TestRemoteImages::downloadLimits()
+{
+    QFETCH(QString, path);
+    QFETCH(bool, loads);
+    const QUrl url = m_stub->url(path);
+    QCOMPARE(RemoteImages::instance().request(url), RemoteImages::State::Loading);
+    const auto expected = loads ? RemoteImages::State::Loaded : RemoteImages::State::Failed;
+    QTRY_COMPARE_WITH_TIMEOUT(RemoteImages::instance().state(url), expected, 15000);
+    QCOMPARE(RemoteImages::instance().fullImage(url).isNull(), !loads);
+    if (path == QLatin1String("/big") || path == QLatin1String("/stream")) {
+        // The client stopped reading soon after the limit (a third of the picture).
+        QTest::qWait(300);
+        QVERIFY2(m_stub->sent < m_stub->hugeSize() * 3 / 4, qPrintable(QString::number(m_stub->sent)));
+    }
+}
+
+void TestRemoteImages::failuresAreNotRetried()
+{
+    const QUrl url = m_stub->url(QStringLiteral("/text"));
+    RemoteImages::instance().request(url);
+    QTRY_COMPARE(RemoteImages::instance().state(url), RemoteImages::State::Failed);
+    QCOMPARE(m_stub->requests.size(), 1);
+    // Rendering again and again asks, but nothing goes out.
+    for (int i = 0; i < 5; ++i) {
+        const auto block = renderHtml(imageTag(url), context(true));
+        QVERIFY(!block->isPending());
+    }
+    QTest::qWait(200);
+    QCOMPARE(m_stub->requests.size(), 1);
+    // Only an explicit new attempt tries again.
+    RemoteImages::instance().clearFailures();
+    RemoteImages::instance().request(url);
+    QTRY_COMPARE(m_stub->requests.size(), 2);
+}
+
+void TestRemoteImages::sendsNoCookiesAndNoCredentials()
+{
+    RemoteImages::instance().request(m_stub->url(QStringLiteral("/ok1.png")));
+    QTRY_COMPARE(m_stub->requests.size(), 1);
+    QTRY_COMPARE(RemoteImages::instance().state(m_stub->url(QStringLiteral("/ok1.png"))), RemoteImages::State::Loaded);
+    RemoteImages::instance().request(m_stub->url(QStringLiteral("/ok2.png"))); // After a Set-Cookie.
+    QTRY_COMPARE(m_stub->requests.size(), 2);
+    for (const QByteArray &head : std::as_const(m_stub->headers)) {
+        const QByteArray lower = head.toLower();
+        QVERIFY(!lower.contains("cookie:"));
+        QVERIFY(!lower.contains("authorization:"));
+        QVERIFY(!lower.contains("referer:"));
+        QVERIFY(lower.contains("accept: image/*"));
+    }
+}
+
+void TestRemoteImages::limitsConcurrentDownloads()
+{
+    for (int i = 0; i < 10; ++i)
+        RemoteImages::instance().request(m_stub->url(QStringLiteral("/hang%1").arg(i)));
+    QTRY_COMPARE(m_stub->hung, RemoteImages::maxConcurrent);
+    QTest::qWait(300);
+    QCOMPARE(m_stub->hung, RemoteImages::maxConcurrent);
+}
+
+void TestRemoteImages::stalledDownloadTimesOut()
+{
+    RemoteImages::instance().setTimeout(300);
+    const QUrl url = m_stub->url(QStringLiteral("/hang"));
+    RemoteImages::instance().request(url);
+    QTRY_COMPARE_WITH_TIMEOUT(RemoteImages::instance().state(url), RemoteImages::State::Failed, 5000);
+}
+
+void TestRemoteImages::viewAsksBeforeLoading()
+{
+    const QUrl a = m_stub->url(QStringLiteral("/ok.png"));
+    const QUrl b = m_stub->url(QStringLiteral("/wide.png"));
+    const auto view = openView(QStringLiteral("# Title\n\n![one](%1)\n\nText.\n\n![two](%2)\n").arg(a.toString(), b.toString()));
+    auto *banner = view->findChild<QFrame *>(QStringLiteral("RemoteImageBanner"));
+    QVERIFY(banner);
+    QVERIFY(banner->isVisible());
+    // It lists the hosts and how many pictures come from each.
+    const QString text = banner->findChild<QLabel *>()->text();
+    QVERIFY2(text.contains(m_stub->host() + QLatin1String(" (2)")), qPrintable(text));
+    QVERIFY(text.contains(QLatin1String("2 remote image")));
+    QVERIFY(button(banner, QStringLiteral("Load images")));
+    QVERIFY(button(banner, QStringLiteral("Don't load")));
+    // Painting, scrolling and waiting send nothing.
+    view->grab();
+    QTest::qWait(400);
+    QVERIFY(m_stub->requests.isEmpty());
+    QCOMPARE(m_model->remoteConsent(), MarkdownModel::RemoteConsent::Undecided);
+
+    const QImage before = view->grab().toImage();
+    if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
+        before.save(dir + QStringLiteral("/remote-images-banner.png"));
+    QTest::mouseClick(button(banner, QStringLiteral("Load images")), Qt::LeftButton);
+    QCOMPARE(m_model->remoteConsent(), MarkdownModel::RemoteConsent::Allow);
+    QVERIFY(!banner->isVisible());
+    QTRY_COMPARE(m_stub->requests.size(), 2);
+    QTRY_COMPARE(RemoteImages::instance().state(a), RemoteImages::State::Loaded);
+    QTRY_COMPARE(RemoteImages::instance().state(b), RemoteImages::State::Loaded);
+    QTRY_VERIFY(view->grab().toImage() != before);
+    QTest::qWait(300);
+    if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
+        view->grab().save(dir + QStringLiteral("/remote-images-loaded.png"));
+    // Re-rendering after edits does not ask again or download again.
+    QTextCursor cursor(m_doc.get());
+    cursor.insertText(QStringLiteral("More. "));
+    QTest::qWait(400);
+    view->grab();
+    QVERIFY(!banner->isVisible());
+    QCOMPARE(m_stub->requests.size(), 2);
+}
+
+void TestRemoteImages::dontLoadNeverContacts()
+{
+    const QUrl a = m_stub->url(QStringLiteral("/ok.png"));
+    const auto view = openView(QStringLiteral("![one](%1)\n").arg(a.toString()));
+    auto *banner = view->findChild<QFrame *>(QStringLiteral("RemoteImageBanner"));
+    QVERIFY(banner && banner->isVisible());
+    QTest::mouseClick(button(banner, QStringLiteral("Don't load")), Qt::LeftButton);
+    QCOMPARE(m_model->remoteConsent(), MarkdownModel::RemoteConsent::Deny);
+    QVERIFY(!banner->isVisible());
+    // Edits, reparses, settings changes and hiding and showing again: no
+    // bar, no request.
+    QTextCursor cursor(m_doc.get());
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(QStringLiteral("\nMore text.\n"));
+    QTRY_VERIFY(!m_model->hasPendingEdits());
+    Settings::instance().setValue(key::textLineHeight, 1.8);
+    view->hide();
+    view->show();
+    view->grab();
+    QTest::qWait(400);
+    Settings::instance().reset(key::textLineHeight);
+    QVERIFY(!banner->isVisible());
+    QVERIFY(m_stub->requests.isEmpty());
+    QCOMPARE(RemoteImages::instance().state(a), RemoteImages::State::Missing);
+}
+
+void TestRemoteImages::neverPreferenceDoesNotAsk()
+{
+    Settings::instance().setValue(key::remoteImages, QStringLiteral("never"));
+    const auto view = openView(QStringLiteral("![one](%1)\n").arg(m_stub->url(QStringLiteral("/ok.png")).toString()));
+    view->grab();
+    QTest::qWait(300);
+    auto *banner = view->findChild<QFrame *>(QStringLiteral("RemoteImageBanner"));
+    QVERIFY(!banner || !banner->isVisible());
+    QVERIFY(m_stub->requests.isEmpty());
+    // Even a session decision to load does not override it.
+    m_model->setRemoteConsent(MarkdownModel::RemoteConsent::Allow);
+    view->grab();
+    QTest::qWait(300);
+    QVERIFY(m_stub->requests.isEmpty());
+    // Back to asking: the bar comes up when the document was undecided.
+    m_model->setRemoteConsent(MarkdownModel::RemoteConsent::Undecided);
+    Settings::instance().reset(key::remoteImages);
+    banner = view->findChild<QFrame *>(QStringLiteral("RemoteImageBanner"));
+    QVERIFY(banner && banner->isVisible());
+    QVERIFY(m_stub->requests.isEmpty());
+}
+
+void TestRemoteImages::consentIsSharedByViews()
+{
+    const auto view = openView(QStringLiteral("![one](%1)\n").arg(m_stub->url(QStringLiteral("/ok.png")).toString()));
+    VisualView second(m_model);
+    second.resize(600, 400);
+    second.show();
+    auto *first = view->findChild<QFrame *>(QStringLiteral("RemoteImageBanner"));
+    auto *other = second.findChild<QFrame *>(QStringLiteral("RemoteImageBanner"));
+    QVERIFY(first && first->isVisible() && other && other->isVisible());
+    QTest::mouseClick(button(other, QStringLiteral("Don't load")), Qt::LeftButton);
+    QVERIFY(!first->isVisible());
+    QVERIFY(!other->isVisible());
+    QTest::qWait(200);
+    QVERIFY(m_stub->requests.isEmpty());
+}
+
+void TestRemoteImages::localImagesStillLoad()
+{
+    QTemporaryDir dir;
+    QImage picture(60, 30, QImage::Format_RGB32);
+    picture.fill(Qt::blue);
+    QVERIFY(picture.save(dir.filePath(QStringLiteral("local.png"))));
+    RenderContext ctx = context(false);
+    ctx.baseDirectory = dir.path();
+    const auto block = renderHtml(QStringLiteral("<p><img src=\"local.png\"></p>"), ctx);
+    QVERIFY(!block->isPending());
+    const auto point = block->pictureAt(QPointF(10, 5));
+    QVERIFY(point);
+    QCOMPARE(point->path, dir.filePath(QStringLiteral("local.png")));
+    QVERIFY(point->url.isEmpty());
+}
+
+// Keep tests away from the user's settings file.
+static void useTestSettings()
+{
+    static QTemporaryDir dir;
+    vn::Settings::instance().useFile(dir.filePath(QStringLiteral("settings.ini")));
+}
+Q_COREAPP_STARTUP_FUNCTION(useTestSettings)
+
+QTEST_MAIN(TestRemoteImages)
+#include "test_remote_images.moc"

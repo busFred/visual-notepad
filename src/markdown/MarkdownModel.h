@@ -64,8 +64,16 @@ public:
     int optionsRevision() const { return m_optionsRevision; }
     core::RenderOptions options() const;
 
+    // Whether the user agreed to download the document's remote pictures,
+    // for this session. Nothing is fetched while Undecided; Deny is final
+    // (the views stop asking).
+    enum class RemoteConsent { Undecided, Allow, Deny };
+    RemoteConsent remoteConsent() const { return m_remoteConsent; }
+    void setRemoteConsent(RemoteConsent consent);
+
 Q_SIGNALS:
     void optionsChanged();
+    void remoteConsentChanged();
     // Edits have settled; a visible view calls flush() (hidden ones don't,
     // so Source mode never parses).
     void reparseDue();
@@ -86,6 +94,7 @@ private:
     int m_revision = 0;
     int m_parseGeneration = 0;
     int m_optionsRevision = 0;
+    RemoteConsent m_remoteConsent = RemoteConsent::Undecided;
 };
 
 } // namespace vn

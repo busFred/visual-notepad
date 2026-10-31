@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 6.10 REQUIRED COMPONENTS Widgets Gui)
+find_package(Qt6 6.10 REQUIRED COMPONENTS Widgets Gui Network)
 find_package(KF6SyntaxHighlighting 6.31 REQUIRED)
 
 include(FetchContent)
@@ -76,6 +76,8 @@ add_library(vn_app STATIC
     src/markdown/MarkdownModel.h
     src/markdown/MathRenderer.cpp
     src/markdown/MathRenderer.h
+    src/markdown/RemoteImages.cpp
+    src/markdown/RemoteImages.h
     src/markdown/VisualView.cpp
     src/markdown/VisualView.h
 )
@@ -93,6 +95,7 @@ target_compile_definitions(vn_app PUBLIC VN_VERSION="${PROJECT_VERSION}")
 target_compile_definitions(vn_app PRIVATE VN_MICROTEX_RES="${VN_MICROTEX_RES_BUILD}")
 target_link_libraries(vn_app PUBLIC
     Qt6::Widgets
+    Qt6::Network
     KF6::SyntaxHighlighting
     vn_core_bridge
     microtex

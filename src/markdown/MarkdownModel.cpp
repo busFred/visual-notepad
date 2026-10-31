@@ -56,6 +56,14 @@ MarkdownModel::MarkdownModel(QTextDocument *document)
     });
 }
 
+void MarkdownModel::setRemoteConsent(RemoteConsent consent)
+{
+    if (m_remoteConsent == consent)
+        return;
+    m_remoteConsent = consent;
+    Q_EMIT remoteConsentChanged();
+}
+
 core::RenderOptions MarkdownModel::options() const
 {
     Settings &s = Settings::instance();

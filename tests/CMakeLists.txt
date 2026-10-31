@@ -35,6 +35,11 @@ target_link_libraries(test_visualview PRIVATE vn_app Qt6::Test)
 add_test(NAME visualview COMMAND test_visualview)
 set_tests_properties(visualview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
 
+qt_add_executable(test_remote_images test_remote_images.cpp)
+target_link_libraries(test_remote_images PRIVATE vn_app Qt6::Test)
+add_test(NAME remote_images COMMAND test_remote_images)
+set_tests_properties(remote_images PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
+
 qt_add_executable(test_math test_math.cpp)
 target_link_libraries(test_math PRIVATE vn_app Qt6::Test)
 add_test(NAME math COMMAND test_math)

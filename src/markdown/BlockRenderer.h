@@ -31,6 +31,9 @@ struct RenderContext
     qreal width = 600;
     qreal devicePixelRatio = 1;
     QString mermaidTheme;
+    // The user agreed to download the pictures this block names with http(s)
+    // addresses; otherwise they show as missing and nothing is requested.
+    bool allowRemoteImages = false;
 };
 
 // What to highlight in a block: ranges of rendered-text characters (for code,
@@ -73,15 +76,17 @@ public:
     int hitTest(const QPointF &point) const;
     QString anchorAt(const QPointF &point) const;
     QString renderedText() const;
-    // A Mermaid diagram still rendering: shown as its source for now.
+    // Something still arriving: a Mermaid diagram rendering (shown as its
+    // source for now) or remote pictures downloading (shown as missing).
     bool isPending() const { return m_pending; }
 
-    // A picture the viewer can enlarge: a local file (path), or a generated
-    // one (math, diagram; empty path).
+    // A picture the viewer can enlarge: a local file (path), a downloaded
+    // one (url), or a generated one (math, diagram; both empty).
     struct Picture
     {
         QString title;
         QString path;
+        QString url;
     };
     // The picture at a point relative to the block's top-left; cheap.
     std::optional<Picture> pictureAt(const QPointF &point) const;

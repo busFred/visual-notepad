@@ -80,6 +80,12 @@ no bevels. Values live in `src/Theme.h`.
 - Status bar, Notepad-style right-aligned columns: position, selections,
   zoom, line ending, encoding, language (clickable), sizing grip.
 - Web links always prompt: Open, Copy, Cancel.
+- Remote images (http/https) never load unasked. A bar above the visual view
+  lists the hosts and the number of images and offers Load images / Don't
+  load, for the session and per document; Don't load is final until the file
+  is reopened. Preferences > Markdown > Remote images can be set to Never
+  load. Downloads are limited (20 MiB, 5 redirects, never https to http,
+  10 s stall timeout, 4 at a time, no cookies) and cached in memory only.
 
 ## Preferences
 
@@ -89,6 +95,7 @@ switches. Buttons: Help and Close; changes apply immediately. No search box.
 
 - Shortcuts: click a row and press keys; warns on conflicts; per-row reset
   and Reset All.
+- Markdown > Remote images: Ask before loading (default) or Never load.
 - Markdown > Math macros: a Command / Expands to table (`\RR` to
   `\mathbb{R}`), as the old `markdown.math.macros` setting.
 

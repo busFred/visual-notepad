@@ -703,6 +703,9 @@ void PreferencesDialog::buildMarkdownPage()
               {tr("Forest"), QStringLiteral("forest")},
               {tr("Neutral"), QStringLiteral("neutral")},
               {tr("Dark"), QStringLiteral("dark")}});
+    addHeading(tr("Images"));
+    addCombo(tr("Remote images"), key::remoteImages,
+             {{tr("Ask before loading"), QStringLiteral("ask")}, {tr("Never load"), QStringLiteral("never")}});
     addHeading(tr("Links and paste"));
     addTextInput(tr("Folder for pasted images"), key::pasteImageFolder, tr("e.g. images/"));
     addSwitch(tr("Update links when pasting Markdown"), key::updateLinksOnPaste);
