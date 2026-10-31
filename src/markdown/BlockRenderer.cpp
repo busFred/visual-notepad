@@ -383,11 +383,49 @@ bool namesOtherMachine(const QUrl &url)
 
 // Whether HTML can make Qt ask for a picture: an img tag, a background
 // attribute or a style. (Tag and attribute names are never entity-encoded.)
+// Qt matches names ignoring case, by Unicode rules: the long s and the Kelvin
+// sign count as "s" and "k".
 bool mayLoadPictures(const QString &html)
 {
     return html.contains(QLatin1String("<img"), Qt::CaseInsensitive)
            || html.contains(QLatin1String("background"), Qt::CaseInsensitive)
            || html.contains(QLatin1String("style"), Qt::CaseInsensitive);
+}
+
+// The same answer from the UTF-8 bytes, without making a QString (a scan
+// of every block's HTML for remote pictures does this for each block): the
+// names in ASCII letters of either case, and the text above for HTML with a
+// character that folds to an ASCII letter.
+bool mayLoadPictures(QByteArrayView html)
+{
+    const char *text = html.data();
+    const qsizetype size = html.size();
+    const auto at = [&](qsizetype i, QLatin1StringView word) {
+        return size - i >= word.size() && qstrnicmp(text + i, word.data(), size_t(word.size())) == 0;
+    };
+    for (qsizetype i = 0; i < size; ++i) {
+        switch (text[i] | 0x20) {
+        case '<':
+            if (at(i, "<img"_L1))
+                return true;
+            break;
+        case 'b':
+            if (at(i, "background"_L1))
+                return true;
+            break;
+        case 's':
+            if (at(i, "style"_L1))
+                return true;
+            break;
+        default:
+            // U+017F (long s) is C5 BF, U+212A (Kelvin sign) E2 84 AA.
+            if ((text[i] == '\xC5' || text[i] == '\xE2')
+                && (html.sliced(i).startsWith("\xC5\xBF") || html.sliced(i).startsWith("\xE2\x84\xAA")))
+                return mayLoadPictures(QString::fromUtf8(html));
+            break;
+        }
+    }
+    return false;
 }
 
 // Rich text with images resolved here: math placeholders, files, and
@@ -1071,7 +1109,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         doc->setTextWidth(context.width);
         r.m_height = doc->size().height() + blockGap;
         // Backgrounds are asked for when painted: start their downloads now.
-        if (context.allowRemoteImages && mayLoadPictures(html))
+        if (context.allowRemoteImages && mayLoadPictures(QByteArrayView(block.html.data(), qsizetype(block.html.size()))))
             doc->loadPaintedPictures();
         r.m_pending = doc->hasPendingDownload();
         r.m_pictureBytes = doc->pictureBytes(); // Resolved by the layout (and the dry paint).
@@ -1086,9 +1124,9 @@ QStringList RenderedBlock::remoteImages(const core::Block &block, const RenderCo
 {
     if (block.kind != core::BlockKind::Html)
         return {};
-    const QString html = QString::fromUtf8(block.html.data(), block.html.size());
-    if (!mayLoadPictures(html))
+    if (!mayLoadPictures(QByteArrayView(block.html.data(), qsizetype(block.html.size()))))
         return {};
+    const QString html = QString::fromUtf8(block.html.data(), block.html.size());
     // Shown as its source (see create()): it asks for no pictures, and laying
     // it out would take as long as create() avoids.
     if (layoutGuard && tooHeavyForRichText(block.html.data(), block.html.size()))
