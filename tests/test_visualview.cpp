@@ -2009,6 +2009,61 @@ std::unique_ptr<RenderedBlock> renderFirstBlock(const QString &markdown, qreal w
     return RenderedBlock::create(blocks.at(0), markdown, ctx);
 }
 
+// What differs between two pictures, for a failure message: their sizes, or
+// how many pixels differ, the rows and columns they span and the first one.
+QString imageDifference(const QImage &actual, const QImage &expected)
+{
+    if (actual.size() != expected.size())
+        return QStringLiteral("sizes %1x%2 and %3x%4")
+            .arg(actual.width())
+            .arg(actual.height())
+            .arg(expected.width())
+            .arg(expected.height());
+    QString text;
+    if (actual.format() != expected.format() || actual.devicePixelRatio() != expected.devicePixelRatio())
+        text = QStringLiteral("formats %1 and %2, pixel ratios %3 and %4; ")
+                   .arg(int(actual.format()))
+                   .arg(int(expected.format()))
+                   .arg(actual.devicePixelRatio())
+                   .arg(expected.devicePixelRatio());
+    const QImage a = actual.convertToFormat(QImage::Format_ARGB32);
+    const QImage b = expected.convertToFormat(QImage::Format_ARGB32);
+    qsizetype count = 0;
+    QRect bounds;
+    QPoint first(-1, -1);
+    for (int y = 0; y < a.height(); ++y) {
+        for (int x = 0; x < a.width(); ++x) {
+            if (a.pixel(x, y) != b.pixel(x, y)) {
+                ++count;
+                bounds |= QRect(x, y, 1, 1);
+                if (first.x() < 0)
+                    first = QPoint(x, y);
+            }
+        }
+    }
+    if (count == 0)
+        return text + QStringLiteral("the same pixels");
+    return text
+           + QStringLiteral("%1 pixels differ, rows %2-%3, columns %4-%5; first at (%6, %7): #%8 against #%9")
+                 .arg(count)
+                 .arg(bounds.top())
+                 .arg(bounds.bottom())
+                 .arg(bounds.left())
+                 .arg(bounds.right())
+                 .arg(first.x())
+                 .arg(first.y())
+                 .arg(a.pixel(first), 8, 16, QLatin1Char('0'))
+                 .arg(b.pixel(first), 8, 16, QLatin1Char('0'));
+}
+
+// `image` saved in the system's temporary folder (kept after the test) for a
+// look at a failure; its path.
+QString keptForInspection(const QImage &image, const QString &name)
+{
+    const QString path = QDir(QDir::tempPath()).filePath(QStringLiteral("vn-test-%1.png").arg(name));
+    return image.save(path) ? path : QStringLiteral("(%1 not saved)").arg(path);
+}
+
 QImage paintBlock(const RenderedBlock &block, qreal width = 548)
 {
     QImage image(QSize(int(width), qMax(1, qMin(4000, int(block.height()) + 1))), QImage::Format_RGB32);
@@ -2298,8 +2353,9 @@ void TestVisualView::longCodeBoxPartsLookLikeTheBox()
     }
     QVERIFY(parts.size() > 50);
     QVERIFY(qAbs(height - whole->height()) < 0.01);
-    const qreal offset = 0.37;
     const qreal width = 548;
+    // Fractions over and under a half: clips snap to the nearest pixel.
+    for (const qreal offset : {0.37, 0.75})
     for (const qreal top : {0.0, tops[1] - 150, tops[1] - 149.5, tops[30] - 123.25, height - 300}) {
         QImage expected(QSize(int(width), 300), QImage::Format_RGB32);
         expected.fill(Qt::white);
@@ -2317,7 +2373,7 @@ void TestVisualView::longCodeBoxPartsLookLikeTheBox()
                     parts[i]->paint(painter, QPointF(0, offset - top + tops[i]), width);
             }
         }
-        QVERIFY2(actual == expected, qPrintable(QStringLiteral("at %1").arg(top)));
+        QVERIFY2(actual == expected, qPrintable(QStringLiteral("at %1, offset %2: %3").arg(top).arg(offset).arg(imageDifference(actual, expected))));
     }
 }
 
@@ -2361,8 +2417,15 @@ void TestVisualView::longCodeBoxesShowInParts()
         reference.scrollToLinePosition(position);
         QCOMPARE(view.topLinePosition(), reference.topLinePosition());
         // (The scroll bars differ: one row a part gives the bar finer steps.)
-        QVERIFY2(view.viewport()->grab().toImage() == reference.viewport()->grab().toImage(),
-                 qPrintable(QString::number(position)));
+        const QImage parts = view.viewport()->grab().toImage();
+        const QImage whole = reference.viewport()->grab().toImage();
+        if (parts != whole) {
+            const QString name = QStringLiteral("long-code-at-%1").arg(position);
+            qInfo().noquote() << "at" << position << imageDifference(parts, whole) << "- saved as"
+                              << keptForInspection(parts, name + QStringLiteral("-parts")) << "and"
+                              << keptForInspection(whole, name + QStringLiteral("-whole"));
+        }
+        QVERIFY2(parts == whole, qPrintable(QString::number(position)));
         for (int y = 0; y < 500; y += 23)
             QCOMPARE(view.lineAt(y), reference.lineAt(y));
     }

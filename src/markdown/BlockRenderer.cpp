@@ -1554,8 +1554,14 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
         QPainterPath box;
         box.addRoundedRect(QRectF(topLeft.x(), top, width, bottom - top), radius, radius);
         painter.save();
-        if (!m_part.first || !m_part.last)
-            painter.setClipRect(QRectF(topLeft, QSizeF(width, m_height)), Qt::IntersectClip);
+        // Clipped at the shared edges only: the clip snaps to whole pixels,
+        // which would drop the antialiased row of an outer edge at a
+        // fractional position (one the whole box paints).
+        if (!m_part.first || !m_part.last) {
+            const qreal clipTop = m_part.first ? top - 1 : topLeft.y();
+            const qreal clipBottom = m_part.last ? bottom + 1 : topLeft.y() + m_height;
+            painter.setClipRect(QRectF(topLeft.x() - 1, clipTop, width + 2, clipBottom - clipTop), Qt::IntersectClip);
+        }
         painter.setRenderHint(QPainter::Antialiasing);
         painter.fillPath(box, theme::color(theme::Role::codeBlock));
         painter.restore();
