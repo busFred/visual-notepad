@@ -7,12 +7,18 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   KF6_VERSION: v6.31.0
+  # Commits the v6.31.0 tags peel to on invent.kde.org (git ls-remote ... refs/tags/v6.31.0^{}).
+  KF6_ECM_COMMIT: 2958379fb49c71129f119ec17f88df0b5ea21550
+  KF6_KSH_COMMIT: 6d8ab7945958e7354295db7f399cce06f7de7571
 
 jobs:
   linux:
@@ -32,7 +38,7 @@ jobs:
     env:
       KF6_PREFIX: ${{ github.workspace }}/kf6
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: System packages
         shell: bash
@@ -40,7 +46,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends fakeroot dpkg-dev fonts-dejavu-core libgl1 libegl1
 
-      - uses: mamba-org/setup-micromamba@v2
+      - uses: mamba-org/setup-micromamba@add3a49764cedee8ee24e82dfde87f5bc2914462 # v2.0.7
         with:
           environment-file: ci/environment-linux.yml
           environment-name: visnotepad
@@ -53,7 +59,7 @@ jobs:
 
       - name: Cache KDE frameworks
         id: kf6
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: kf6
           key: kf6-${{ env.KF6_VERSION }}-linux-${{ matrix.arch }}-${{ hashFiles('ci/environment-linux.yml') }}
@@ -65,6 +71,9 @@ jobs:
           for repo in extra-cmake-modules syntax-highlighting; do
             git clone --depth 1 -b "$KF6_VERSION" "https://invent.kde.org/frameworks/$repo.git" "$RUNNER_TEMP/$repo"
           done
+          # Fail if the tag no longer points at the audited commits.
+          test "$(git -C "$RUNNER_TEMP/extra-cmake-modules" rev-parse HEAD)" = "$KF6_ECM_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/syntax-highlighting" rev-parse HEAD)" = "$KF6_KSH_COMMIT"
           cmake -S "$RUNNER_TEMP/extra-cmake-modules" -B "$RUNNER_TEMP/build-ecm" -G Ninja \
             -DCMAKE_INSTALL_PREFIX="$KF6_PREFIX" -DBUILD_TESTING=OFF
           cmake --build "$RUNNER_TEMP/build-ecm"
@@ -78,7 +87,7 @@ jobs:
           cp -r "$RUNNER_TEMP/syntax-highlighting/LICENSES" "$KF6_PREFIX/ksh-src/"
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -121,7 +130,7 @@ jobs:
           test -f "$dir/opt/visnotepad/share/visnotepad/microtex/res/fonts/fonts.json" || ls "$dir/opt/visnotepad/share/visnotepad/microtex/res"
           exit $fail
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: deb-${{ matrix.arch }}
           path: dist/visnotepad_*_${{ matrix.arch }}.deb
@@ -133,9 +142,9 @@ jobs:
     env:
       KF6_PREFIX: ${{ github.workspace }}\kf6
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: mamba-org/setup-micromamba@v2
+      - uses: mamba-org/setup-micromamba@add3a49764cedee8ee24e82dfde87f5bc2914462 # v2.0.7
         with:
           environment-file: ci/environment-windows.yml
           environment-name: visnotepad
@@ -146,7 +155,7 @@ jobs:
           cache-downloads-key: pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/environment-*.yml') }}
           init-shell: none
 
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           arch: x64
 
@@ -176,7 +185,7 @@ jobs:
 
       - name: Cache KDE frameworks
         id: kf6
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: kf6
           key: kf6-${{ env.KF6_VERSION }}-windows-${{ hashFiles('ci/environment-windows.yml') }}
@@ -191,6 +200,9 @@ jobs:
           for repo in extra-cmake-modules syntax-highlighting; do
             git clone --depth 1 -b "$KF6_VERSION" "https://invent.kde.org/frameworks/$repo.git" "$T/$repo"
           done
+          # Fail if the tag no longer points at the audited commits.
+          test "$(git -C "$T/extra-cmake-modules" rev-parse HEAD)" = "$KF6_ECM_COMMIT"
+          test "$(git -C "$T/syntax-highlighting" rev-parse HEAD)" = "$KF6_KSH_COMMIT"
           common=(-G Ninja -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
             "-DCMAKE_IGNORE_PREFIX_PATH=C:/Strawberry/c;C:/Strawberry/perl"
             -DCMAKE_INSTALL_PREFIX="$KF6_PREFIX" -DBUILD_TESTING=OFF)
@@ -204,7 +216,7 @@ jobs:
           cp -r "$T/syntax-highlighting/LICENSES" "$KF6_PREFIX/ksh-src/"
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -259,7 +271,7 @@ jobs:
           if (-not $iscc) {
             $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
             if (-not (Test-Path $iscc)) {
-              choco install innosetup -y --no-progress
+              choco install innosetup --version 6.7.1 -y --no-progress
               $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
             }
           }
@@ -268,13 +280,13 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Get-ChildItem dist\out | Format-Table Name, Length
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-x64-portable
           path: dist/out/*.zip
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-x64-setup
           path: dist/out/*.exe
@@ -287,7 +299,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           merge-multiple: true
