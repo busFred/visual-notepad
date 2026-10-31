@@ -63,16 +63,18 @@ pub fn line_range<'a>(node: &'a AstNode<'a>) -> (usize, usize) {
     (first, last.max(first))
 }
 
-/// Plain text of inline content, markup stripped.
+/// Plain text of a node and its inline content, markup stripped. Iterative,
+/// so that deeply nested input cannot overflow the stack.
 pub fn plain_text<'a>(node: &'a AstNode<'a>, out: &mut String) {
-    for child in node.children() {
+    // Every node that adds text is a leaf, so a pre-order walk of the node
+    // and its descendants visits the text in order.
+    for child in node.descendants() {
         match &child.data().value {
             NodeValue::Text(t) => out.push_str(t),
             NodeValue::Code(c) => out.push_str(&c.literal),
             NodeValue::Math(m) => out.push_str(&m.literal),
             NodeValue::SoftBreak | NodeValue::LineBreak => out.push('\n'),
-            NodeValue::HtmlInline(_) | NodeValue::FootnoteReference(_) => {}
-            _ => plain_text(child, out),
+            _ => {}
         }
     }
 }
