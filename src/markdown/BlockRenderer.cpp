@@ -455,7 +455,8 @@ public:
 
     // Some picture is still downloading.
     bool hasPendingDownload() const { return m_pending; }
-    // Every http(s) address asked for so far, allowed or not.
+    // Every http(s) address asked for so far that may be fetched once
+    // allowed (not those of this machine or a local network, which never are).
     const QStringList &remoteUrls() const { return m_remote; }
     // Pictures behind backgrounds are only asked for when painting: paint
     // once, into nothing.
@@ -539,7 +540,8 @@ private:
     // pending until it ends.
     QVariant remoteImage(int type, const QUrl &url)
     {
-        if (const QString address = url.toString(); !m_remote.contains(address))
+        if (const QString address = url.toString();
+            !m_remote.contains(address) && RemoteImages::redirectAllowed(QUrl(), url))
             m_remote.append(address);
         if (m_listing)
             return standIn(type, url);

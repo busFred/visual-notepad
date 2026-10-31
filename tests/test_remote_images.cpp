@@ -1,6 +1,9 @@
 // Remote pictures in the Markdown preview, against a stub HTTP server on
-// this machine: nothing is requested before the user agrees, and the
-// download limits hold. Runs offscreen without a network.
+// this machine: nothing is requested before the user agrees, the download
+// limits hold, and hosts on this machine or a local network are never
+// contacted. Runs offscreen without a network (one test uses DNS if there is
+// one). The stub is on 127.0.0.1, so most tests let local hosts through with
+// RemoteImages::setAllowLocalHostsForTests; the ones about local hosts don't.
 #include "Settings.h"
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
@@ -10,8 +13,8 @@
 #include "markdown/VisualView.h"
 
 #include <QBuffer>
-#include <algorithm>
 #include <QFrame>
+#include <QHostInfo>
 #include <QLabel>
 #include <QPushButton>
 #include <QSignalSpy>
@@ -20,6 +23,9 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextDocument>
+
+#include <algorithm>
+#include <functional>
 
 using namespace vn;
 
@@ -60,6 +66,8 @@ public:
     QString host() const { return QStringLiteral("127.0.0.1:%1").arg(m_server.serverPort()); }
 
     QStringList requests; // "/path", in arrival order.
+    // Called for each request of the app, before it is answered.
+    std::function<void()> onRequest;
     QList<QByteArray> headers; // The raw header block of each.
     int hung = 0;         // Connections held open without an answer.
     qint64 sent = 0;      // Bytes handed to the network by the last response.
@@ -82,6 +90,8 @@ private:
             if (buffer->left(end).contains("VisualNotepad)")) {
                 requests.append(path);
                 headers.append(buffer->left(end));
+                if (onRequest)
+                    onRequest();
             }
             buffer->clear();
             respond(socket, path);
@@ -141,6 +151,8 @@ private:
             redirect(socket, QStringLiteral("ftp://127.0.0.1/ok.png"));
         else if (path == QLatin1String("/redirect-login"))
             redirect(socket, QStringLiteral("http://user:secret@127.0.0.1/ok.png"));
+        else if (path.startsWith(QLatin1String("/to/"))) // Redirects to the percent-encoded address that follows.
+            redirect(socket, QUrl::fromPercentEncoding(path.mid(4).toLatin1()));
         else if (path.startsWith(QLatin1String("/hops/"))) { // Redirects N times, then a picture.
             const int left = path.mid(6).toInt();
             if (left > 0)
@@ -213,6 +225,12 @@ private Q_SLOTS:
     void neverPreferenceDoesNotAsk();
     void consentIsSharedByViews();
     void localImagesStillLoad();
+    void addressesAreJudged_data();
+    void addressesAreJudged();
+    void lookedUpAddressesAreJudged();
+    void localHostsAreNeverContacted();
+    void namesResolvingToThisMachineAreRefused();
+    void namesKeepTheirHostHeader();
 
 private:
     std::unique_ptr<HttpStub> m_stub;
@@ -230,6 +248,7 @@ void TestRemoteImages::initTestCase()
 
 void TestRemoteImages::init()
 {
+    RemoteImages::setAllowLocalHostsForTests(true); // The stub is on 127.0.0.1.
     m_stub = std::make_unique<HttpStub>();
     RemoteImages::instance().clear();
     RemoteImages::instance().setTimeout(10000);
@@ -238,6 +257,7 @@ void TestRemoteImages::init()
 
 void TestRemoteImages::cleanup()
 {
+    RemoteImages::setAllowLocalHostsForTests(true);
     RemoteImages::instance().clear();
     m_doc.reset();
     m_model = nullptr;
@@ -645,6 +665,233 @@ void TestRemoteImages::localImagesStillLoad()
     QVERIFY(point);
     QCOMPARE(point->path, dir.filePath(QStringLiteral("local.png")));
     QVERIFY(point->url.isEmpty());
+}
+
+void TestRemoteImages::addressesAreJudged_data()
+{
+    QTest::addColumn<QString>("host");
+    QTest::addColumn<bool>("allowed");
+    const auto row = [](const char *host, bool allowed) {
+        QTest::newRow(*host ? host : "(empty)") << QString::fromLatin1(host) << allowed;
+    };
+    // Public.
+    row("93.184.216.34", true);
+    row("8.8.8.8", true);
+    row("2606:4700::1111", true);
+    row("2a00:1450:4001:80b::200e", true);
+    row("1572395042", true); // 93.184.216.34 in decimal.
+    row("example.com", true);
+    row("images.example.org.", true);
+    row("localhost.example.com", true); // Only the last labels count.
+    row("example.local.com", true);
+    row("mylan.com", true);
+    // Loopback, any spelling.
+    row("127.0.0.1", false);
+    row("127.255.255.254", false);
+    row("2130706433", false); // Decimal.
+    row("0x7f000001", false); // Hex.
+    row("0x7F.1", false);
+    row("0177.0.0.1", false); // Octal.
+    row("017700000001", false);
+    row("127.1", false); // Short.
+    row("127.0.1", false);
+    row("127.0.0.1.", false);
+    row("::1", false);
+    row("[::1]", false);
+    row("0:0:0:0:0:0:0:1", false);
+    // Private, link-local (cloud metadata), carrier-grade NAT.
+    row("10.0.0.1", false);
+    row("10.255.255.255", false);
+    row("172.15.255.255", true);
+    row("172.16.0.0", false);
+    row("172.31.255.255", false);
+    row("172.32.0.0", true);
+    row("192.167.255.255", true);
+    row("192.168.0.1", false);
+    row("192.169.0.0", true);
+    row("3232235777", false); // 192.168.1.1.
+    row("169.254.169.254", false);
+    row("2852039166", false); // 169.254.169.254.
+    row("169.253.255.255", true);
+    row("100.63.255.255", true);
+    row("100.64.0.0", false);
+    row("100.127.255.255", false);
+    row("100.128.0.0", true);
+    row("fc00::1", false);
+    row("fd12:3456:789a::1", false);
+    row("fe80::1", false);
+    row("febf::1", false);
+    row("fec0::1", false); // Old site-local.
+    // Unspecified, multicast, reserved, broadcast.
+    row("0.0.0.0", false);
+    row("0", false);
+    row("0.1.2.3", false);
+    row("::", false);
+    row("224.0.0.1", false);
+    row("239.255.255.250", false);
+    row("223.255.255.255", true);
+    row("ff02::1", false);
+    row("240.0.0.1", false);
+    row("255.255.255.255", false);
+    // IPv4 inside IPv6.
+    row("::ffff:127.0.0.1", false);
+    row("::ffff:7f00:1", false);
+    row("::ffff:10.0.0.1", false);
+    row("::ffff:169.254.169.254", false);
+    row("::ffff:192.168.1.1", false);
+    row("::ffff:93.184.216.34", true);
+    row("::127.0.0.1", false);
+    row("::ffff:0:127.0.0.1", false);
+    row("64:ff9b::7f00:1", false);
+    row("64:ff9b::a9fe:a9fe", false);
+    row("64:ff9b::5db8:d822", true); // 93.184.216.34.
+    row("64:ff9b:1::1", false);
+    row("2002:7f00:1::1", false); // 6to4 of 127.0.0.1.
+    row("2002:c0a8:101::1", false); // 6to4 of 192.168.1.1.
+    row("2002:5db8:d822::1", true); // 6to4 of 93.184.216.34.
+    row("2001:0:4136:e378::1", false); // Teredo.
+    row("2001:db8::1", false); // Documentation.
+    // Names of this machine and local networks.
+    row("localhost", false);
+    row("LOCALHOST.", false);
+    row("foo.localhost", false);
+    row("localhost.localdomain", false);
+    row("printer.local", false);
+    row("metadata.google.internal", false);
+    row("nas.lan", false);
+    row("router.home.arpa", false);
+    row("intranet", false); // Single label.
+    row("intranet.", false);
+    row("", false);
+}
+
+void TestRemoteImages::addressesAreJudged()
+{
+    QFETCH(QString, host);
+    QFETCH(bool, allowed);
+    RemoteImages::setAllowLocalHostsForTests(false);
+    QCOMPARE(RemoteImages::hostAllowed(host), allowed);
+    if (const QHostAddress address = RemoteImages::literalAddress(host); !address.isNull()) {
+        QCOMPARE(RemoteImages::isPublicAddress(address), allowed);
+        QVERIFY(!RemoteImages::hostIsLocalName(host)); // An address is no name.
+    } else if (!host.isEmpty()) {
+        QCOMPARE(RemoteImages::hostIsLocalName(host), !allowed);
+    }
+    if (allowed)
+        return; // Public hosts are not contacted from a test.
+    // Refused for a picture and as a redirect target, before any request.
+    const QString authority = host.contains(u':') && !host.startsWith(u'[') ? u'[' + host + u']' : host;
+    const QUrl url(QStringLiteral("http://%1/x.png").arg(authority));
+    QVERIFY(!RemoteImages::redirectAllowed(QUrl(QStringLiteral("http://example.com/")), url));
+    QCOMPARE(RemoteImages::instance().request(url), RemoteImages::State::Failed);
+}
+
+void TestRemoteImages::lookedUpAddressesAreJudged()
+{
+    RemoteImages::setAllowLocalHostsForTests(false);
+    const auto allowed = [](std::initializer_list<const char *> addresses) {
+        QList<QHostAddress> list;
+        for (const char *a : addresses)
+            list.append(QHostAddress(QString::fromLatin1(a)));
+        return RemoteImages::resolvedAddressesAllowed(list);
+    };
+    QVERIFY(allowed({"93.184.216.34"}));
+    QVERIFY(allowed({"93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"}));
+    QVERIFY(!allowed({}));
+    // Any local address among them refuses the name.
+    QVERIFY(!allowed({"93.184.216.34", "127.0.0.1"}));
+    QVERIFY(!allowed({"10.0.0.5", "93.184.216.34"}));
+    QVERIFY(!allowed({"93.184.216.34", "::ffff:169.254.169.254"}));
+    QVERIFY(!allowed({"2606:4700::1111", "fd00::1"}));
+}
+
+void TestRemoteImages::localHostsAreNeverContacted()
+{
+    HttpStub second; // Where the redirects below point.
+    const QString port = QString::number(second.url({}).port());
+
+    // The stub itself, in any spelling: refused before anything is sent,
+    // also when a document asks for it with consent given.
+    RemoteImages::setAllowLocalHostsForTests(false);
+    const QString stubPort = QString::number(m_stub->url({}).port());
+    for (const char *form : {"127.0.0.1", "localhost", "[::1]", "2130706433", "0x7f000001", "127.1", "0177.0.0.1",
+                             "[::ffff:127.0.0.1]"}) {
+        const QUrl url(QStringLiteral("http://%1:%2/ok.png").arg(QString::fromLatin1(form), stubPort));
+        QCOMPARE(RemoteImages::instance().request(url), RemoteImages::State::Failed);
+        const auto block = renderHtml(imageTag(url), context(true));
+        QVERIFY(!block->isPending());
+        QVERIFY(!block->pictureAt(QPointF(5, 5)));
+    }
+    // Not even listed by the bar: they would never load.
+    QVERIFY(RenderedBlock::remoteImages(htmlBlock(imageTag(m_stub->url(QStringLiteral("/ok.png")))), context(false)).isEmpty());
+
+    // Redirects from a host that may be contacted (the stub, let through
+    // for its first answer only) to local ones: refused at once, and nothing
+    // reaches the second server.
+    const QStringList targets = {
+        second.url(QStringLiteral("/ok.png")).toString(),
+        QStringLiteral("http://localhost:%1/ok.png").arg(port),
+        QStringLiteral("http://[::1]:%1/ok.png").arg(port),
+        QStringLiteral("http://[::ffff:127.0.0.1]:%1/ok.png").arg(port),
+        QStringLiteral("http://2130706433:%1/ok.png").arg(port),
+        QStringLiteral("http://10.0.0.1/ok.png"),
+        QStringLiteral("http://192.168.0.1/ok.png"),
+        QStringLiteral("http://169.254.169.254/latest/meta-data/"),
+        QStringLiteral("http://intranet/ok.png"),
+    };
+    m_stub->onRequest = [] { RemoteImages::setAllowLocalHostsForTests(false); };
+    for (const QString &target : targets) {
+        RemoteImages::setAllowLocalHostsForTests(true);
+        const QUrl url = m_stub->url(QStringLiteral("/to/") + QString::fromLatin1(QUrl::toPercentEncoding(target)));
+        QCOMPARE(RemoteImages::instance().request(url), RemoteImages::State::Loading);
+        // Well within the 10 s a connection attempt would be given.
+        QTRY_COMPARE_WITH_TIMEOUT(RemoteImages::instance().state(url), RemoteImages::State::Failed, 3000);
+    }
+    QTest::qWait(300);
+    QCOMPARE(m_stub->requests.size(), targets.size());
+    QVERIFY(second.requests.isEmpty());
+
+    // With local hosts let through, the same redirect is followed: the
+    // refusals above were the address check.
+    m_stub->onRequest = nullptr;
+    RemoteImages::setAllowLocalHostsForTests(true);
+    const QUrl followed = m_stub->url(QStringLiteral("/to/") + QString::fromLatin1(QUrl::toPercentEncoding(targets.first())));
+    RemoteImages::instance().clearFailures();
+    QCOMPARE(RemoteImages::instance().request(followed), RemoteImages::State::Loading);
+    QTRY_COMPARE(RemoteImages::instance().state(followed), RemoteImages::State::Loaded);
+    QCOMPARE(second.requests, QStringList{QStringLiteral("/ok.png")});
+}
+
+void TestRemoteImages::namesResolvingToThisMachineAreRefused()
+{
+    // A public name whose addresses are this machine's (localtest.me is kept
+    // that way for such tests): only the lookup can tell. Needs DNS.
+    const QHostInfo info = QHostInfo::fromName(QStringLiteral("localtest.me"));
+    const QList<QHostAddress> addresses = info.addresses();
+    if (addresses.isEmpty()
+        || !std::all_of(addresses.begin(), addresses.end(), [](const QHostAddress &a) { return a.isLoopback(); }))
+        QSKIP("localtest.me does not resolve to this machine here (no DNS?)");
+    RemoteImages::setAllowLocalHostsForTests(false);
+    QVERIFY(RemoteImages::hostAllowed(QStringLiteral("localtest.me"))); // Its name passes...
+    const QUrl url(QStringLiteral("http://localtest.me:%1/ok.png").arg(m_stub->url({}).port()));
+    QCOMPARE(RemoteImages::instance().request(url), RemoteImages::State::Loading);
+    // ...its addresses don't.
+    QTRY_COMPARE_WITH_TIMEOUT(RemoteImages::instance().state(url), RemoteImages::State::Failed, 5000);
+    QTest::qWait(300);
+    QVERIFY(m_stub->requests.isEmpty());
+}
+
+void TestRemoteImages::namesKeepTheirHostHeader()
+{
+    // A name is looked up and the request sent to the address found, still
+    // naming the host it is for (local hosts let through: offline, only
+    // "localhost" has an address).
+    const QUrl url(QStringLiteral("http://localhost:%1/ok.png").arg(m_stub->url({}).port()));
+    RemoteImages::instance().request(url);
+    QTRY_COMPARE(RemoteImages::instance().state(url), RemoteImages::State::Loaded);
+    QCOMPARE(m_stub->headers.size(), 1);
+    const QByteArray expected = QStringLiteral("\r\nhost: localhost:%1").arg(url.port()).toLatin1();
+    QVERIFY2(m_stub->headers.first().toLower().contains(expected), m_stub->headers.first().constData());
 }
 
 // Keep tests away from the user's settings file.

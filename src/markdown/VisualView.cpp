@@ -285,7 +285,8 @@ void VisualView::updateRemoteBanner()
         text += tr(" and %n more host(s)", "", shown.size() - maxShown);
     m_bannerText->setText(tr("%n remote image(s) from %1. Load them only if you trust the links in this file.", "",
                              int(urls.size())).arg(text));
-    m_bannerText->setToolTip(shown.join(u'\n'));
+    m_bannerText->setToolTip(shown.join(u'\n') + QLatin1String("\n\n")
+                             + tr("Pictures on this computer or the local network are never loaded."));
     m_banner->show();
     layoutBanner();
 }

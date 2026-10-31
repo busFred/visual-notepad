@@ -93,6 +93,28 @@ no bevels. Values live in `src/Theme.h`.
   (64 MiB as downloaded, 32 MiB decoded). Like local pictures they shrink to
   the column, open in the zoom viewer and count toward the render cache; an
   SVG that names a file on another machine is refused, as a local one is.
+- Remote images never come from this machine or a local network: loopback
+  (127/8, ::1), private (10/8, 172.16/12, 192.168/16, fc00::/7), link-local
+  (169.254/16, which holds cloud metadata services, fe80::/10), carrier-grade
+  NAT (100.64/10), unspecified and 0/8, multicast, reserved and broadcast,
+  documentation and benchmarking ranges, IPv6 site-local and anything outside
+  2000::/3; IPv4 inside IPv6 (mapped, compatible, NAT64, 6to4) is judged by
+  its IPv4 address, Teredo is refused. Odd IPv4 spellings (`2130706433`,
+  `0x7f000001`, `0177.0.0.1`, `127.1`) are read the way resolvers read
+  them. Names `localhost`, `*.localhost`, `*.localdomain`, `*.local`,
+  `*.internal`, `*.lan`, `*.home.arpa` and single-label names are refused
+  without a lookup. Every other host, the first and each redirect's, is
+  looked up before the request and refused if any of its addresses is not
+  public; the request then goes to the address that was checked, with the
+  name kept in the Host header and for TLS (SNI and the certificate check),
+  over HTTP/1.1. Such pictures look like failed ones and the bar leaves them
+  out; its tooltip says local-network pictures are never loaded.
+  Remaining gaps: with a system proxy in use the proxy connects by name and
+  looks it up itself, so a name that answers our lookup with a public address
+  and the proxy's with a local one (DNS rebinding) reaches whatever the proxy
+  can reach; and only one checked address is tried, so a host whose first
+  address (IPv4 preferred) is unreachable fails rather than trying the next.
+
 ## Preferences
 
 xed-style dialog under Edit > Preferences (Ctrl+,). Left category list:
