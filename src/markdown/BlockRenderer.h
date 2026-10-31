@@ -96,6 +96,9 @@ public:
     // when it is laid out and painted (entities and styles decoded by Qt
     // itself), whether or not downloads are allowed. Nothing is requested.
     static QStringList remoteImages(const core::Block &block, const RenderContext &context);
+    // False if remoteImages() is sure to be empty without laying the block
+    // out (it has no picture, background or style at all). Quick.
+    static bool mayAskForPictures(const core::Block &block);
 
     Kind kind() const { return m_kind; }
     qreal height() const { return m_height; }

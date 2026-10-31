@@ -220,7 +220,8 @@ void VisualView::updateRemoteBanner()
             const RenderContext ctx = context();
             for (int i = 0, n = m_model->parsedBlockCount(); i < n; ++i) {
                 const core::Block &block = m_model->parsedBlock(i);
-                if (block.kind != core::BlockKind::Html)
+                // (Most blocks can't ask for any: no need to keep their scans.)
+                if (!RenderedBlock::mayAskForPictures(block))
                     continue;
                 const size_t hash = qHash(QByteArrayView(block.html.data(), qsizetype(block.html.size())));
                 const auto known = m_remoteScans.constFind(hash);

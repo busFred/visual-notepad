@@ -1120,11 +1120,15 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
     }
 }
 
+bool RenderedBlock::mayAskForPictures(const core::Block &block)
+{
+    return block.kind == core::BlockKind::Html
+           && mayLoadPictures(QByteArrayView(block.html.data(), qsizetype(block.html.size())));
+}
+
 QStringList RenderedBlock::remoteImages(const core::Block &block, const RenderContext &context)
 {
-    if (block.kind != core::BlockKind::Html)
-        return {};
-    if (!mayLoadPictures(QByteArrayView(block.html.data(), qsizetype(block.html.size()))))
+    if (!mayAskForPictures(block))
         return {};
     const QString html = QString::fromUtf8(block.html.data(), block.html.size());
     // Shown as its source (see create()): it asks for no pictures, and laying

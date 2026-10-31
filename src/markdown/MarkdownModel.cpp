@@ -10,9 +10,24 @@
 
 #include <algorithm>
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 namespace vn {
 
 namespace {
+
+// Gives memory freed by a large parse back to the system. glibc keeps what
+// is freed in each thread's arena for later; the text copies, the trees and
+// the old blocks of a parse of a 10 MB document come to some 100 MB, which
+// would stay with the process. Takes a few milliseconds; worker threads only.
+void releaseFreedMemory()
+{
+#if defined(__GLIBC__)
+    malloc_trim(0);
+#endif
+}
 
 // Edits over more lines than this (pastes, replace all, reloads) mark the
 // spans unusable instead: the next read reparses, as one big edit costs a
@@ -51,6 +66,9 @@ std::shared_ptr<const core::Document> parseText(QString text, const core::Render
 {
     text.replace(QChar::ParagraphSeparator, u'\n');
     const QByteArray utf8 = text.toUtf8();
+    // Twice the size of the UTF-8: gone before the parse (the core keeps a
+    // copy of the text too).
+    text = QString();
     const rust::Str markdown(utf8.constData(), utf8.size());
     return shared(previous ? core::reparse(*previous, markdown, options) : core::parse(markdown, options));
 }
@@ -193,8 +211,12 @@ void MarkdownModel::startJob()
     promise->start();
     m_job.watcher->setFuture(promise->future());
     QThreadPool::globalInstance()->start([promise, serial = m_inputSerial, text = m_doc->toRawText(),
-                                          options = options(), previous = previousParse()] {
-        promise->addResult(std::make_shared<ParseResult>(ParseResult{serial, parseText(text, options, previous)}));
+                                          options = options(), previous = previousParse()]() mutable {
+        // (Moved: a copy would be detached by parseText, one more of it.)
+        auto result = std::make_shared<ParseResult>(ParseResult{serial, parseText(std::move(text), options, previous)});
+        previous.reset();
+        releaseFreedMemory();
+        promise->addResult(std::move(result));
         promise->finish();
     });
 }
@@ -288,9 +310,13 @@ void MarkdownModel::reparse()
 void MarkdownModel::apply(std::shared_ptr<const core::Document> parsed)
 {
     // Freeing a large document's blocks takes milliseconds (about 3 ms at
-    // 10 MB): the thread pool does it.
-    if (m_parsed && m_parsed->blocks().size() > 4096)
-        QThreadPool::globalInstance()->start([old = std::move(m_parsed)] {});
+    // 10 MB): the thread pool does it, and gives the memory back.
+    if (m_parsed && m_parsed->blocks().size() > 4096) {
+        QThreadPool::globalInstance()->start([old = std::move(m_parsed)]() mutable {
+            old.reset();
+            releaseFreedMemory();
+        });
+    }
     m_parsed = std::move(parsed);
     m_draft.reset();
     m_awaiting = false;
