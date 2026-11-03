@@ -21,6 +21,7 @@
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QToolButton>
 #include <QTreeWidget>
 
 #include "TextFile.h"
@@ -109,6 +110,7 @@ private Q_SLOTS:
     void textFileHidesOutline();
     void outlineMatchesCore();
     void outlineIsKeptPerTab();
+    void outlineCloseButtonHides();
     void largeOutlineIsParsedOffThread();
     void crlfIsPreserved();
     void fileDropOnEmptyWindowOpensIt();
@@ -288,6 +290,25 @@ void TestMainWindow::outlineIsKeptPerTab()
     QVERIFY(window.closeTabs(window.currentTabIndex(), vn::MainWindow::CloseScope::This));
     QVERIFY(window.openFile(write(QStringLiteral("keep-c.md"), "# Gamma\n")));
     QCOMPARE(outline->topLevelItem(0)->text(0), QStringLiteral("Gamma"));
+}
+
+// The close button in the outline's title hides it, like View > Outline.
+void TestMainWindow::outlineCloseButtonHides()
+{
+    vn::Settings::instance().setValue(vn::key::outline, true);
+    vn::MainWindow window;
+    QVERIFY(window.openFile(write(QStringLiteral("close-button.md"), "# Title\n")));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *dock = window.findChild<QDockWidget *>();
+    QVERIFY(dock->isVisible());
+    auto *close = dock->titleBarWidget()->findChild<QToolButton *>();
+    QVERIFY(close);
+    QTest::mouseClick(close, Qt::LeftButton);
+    QVERIFY(dock->isHidden());
+    QVERIFY(!vn::Settings::instance().flag(vn::key::outline));
+    vn::Settings::instance().setValue(vn::key::outline, true);
+    QVERIFY(dock->isVisible());
 }
 
 // A big document is parsed off the GUI thread. The old outline stays while

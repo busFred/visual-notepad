@@ -614,7 +614,11 @@ void MainWindow::createOutline()
     close->setIconSize({14, 14});
     close->setFixedSize(18, 18);
     close->setToolTip(tr("Hide Outline (%1)").arg(m_outlineAction->shortcut().toString(QKeySequence::NativeText)));
-    connect(close, &QToolButton::clicked, this, [this] { m_outlineAction->setChecked(false); });
+    // trigger(), not setChecked(): only triggered() hides the dock and stores the choice.
+    connect(close, &QToolButton::clicked, this, [this] {
+        if (m_outlineAction->isChecked())
+            m_outlineAction->trigger();
+    });
     titleLayout->addWidget(label);
     titleLayout->addStretch(1);
     titleLayout->addWidget(close);
