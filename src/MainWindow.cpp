@@ -67,6 +67,9 @@ namespace {
 
 constexpr int outlineLineRole = Qt::UserRole;
 constexpr int outlineWidth = 200;
+// The window whose outline toggle is being written to the settings, so that
+// the other windows leave their own outline as it is.
+const MainWindow *outlineToggleOrigin = nullptr;
 // Parsing the headings costs about 12 ms per MB. Past this many characters
 // (a few ms) it runs off the GUI thread, so that a pause in typing does not
 // freeze the window.
@@ -359,7 +362,12 @@ void MainWindow::createActions()
                 [settingKey](bool on) { Settings::instance().setValue(settingKey, on); });
         return a;
     };
-    m_outlineAction = bindSetting(QStringLiteral("view.outline"), key::outline);
+    // The outline is shown or hidden per window; the setting only remembers
+    // the last choice for new windows (see setOutlineShown).
+    m_outlineAction = makeAction(QStringLiteral("view.outline"));
+    m_outlineAction->setCheckable(true);
+    m_outlineAction->setChecked(Settings::instance().flag(key::outline));
+    connect(m_outlineAction, &QAction::triggered, this, &MainWindow::setOutlineShown);
     m_wrapAction = bindSetting(QStringLiteral("view.wordWrap"), key::wordWrap);
     m_statusBarAction = bindSetting(QStringLiteral("view.statusBar"), key::statusBar);
 
@@ -614,7 +622,7 @@ void MainWindow::createOutline()
     close->setIconSize({14, 14});
     close->setFixedSize(18, 18);
     close->setToolTip(tr("Hide Outline (%1)").arg(m_outlineAction->shortcut().toString(QKeySequence::NativeText)));
-    connect(close, &QToolButton::clicked, this, [this] { m_outlineAction->setChecked(false); });
+    connect(close, &QToolButton::clicked, this, [this] { setOutlineShown(false); });
     titleLayout->addWidget(label);
     titleLayout->addStretch(1);
     titleLayout->addWidget(close);
@@ -2141,6 +2149,9 @@ void MainWindow::onSettingChanged(const QString &changedKey)
     }
     Settings &settings = Settings::instance();
     if (changedKey == QLatin1String(key::outline)) {
+        // Another window's toggle is remembered for new windows only.
+        if (outlineToggleOrigin && outlineToggleOrigin != this)
+            return;
         m_outlineAction->setChecked(settings.flag(key::outline));
         updateOutlineVisibility();
     } else if (changedKey == QLatin1String(key::wordWrap)) {
@@ -2349,6 +2360,14 @@ void MainWindow::finishOutlineJob()
         m_outlineJobSkipped = false;
         updateOutline();
     }
+}
+
+void MainWindow::setOutlineShown(bool on)
+{
+    m_outlineAction->setChecked(on);
+    updateOutlineVisibility();
+    const QScopedValueRollback<const MainWindow *> origin(outlineToggleOrigin, this);
+    Settings::instance().setValue(key::outline, on);
 }
 
 void MainWindow::updateOutlineVisibility()

@@ -21,6 +21,7 @@
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QToolButton>
 #include <QTreeWidget>
 
 #include "TextFile.h"
@@ -109,6 +110,8 @@ private Q_SLOTS:
     void textFileHidesOutline();
     void outlineMatchesCore();
     void outlineIsKeptPerTab();
+    void outlineCloseButtonHides();
+    void outlineToggleIsPerWindow();
     void largeOutlineIsParsedOffThread();
     void crlfIsPreserved();
     void fileDropOnEmptyWindowOpensIt();
@@ -288,6 +291,91 @@ void TestMainWindow::outlineIsKeptPerTab()
     QVERIFY(window.closeTabs(window.currentTabIndex(), vn::MainWindow::CloseScope::This));
     QVERIFY(window.openFile(write(QStringLiteral("keep-c.md"), "# Gamma\n")));
     QCOMPARE(outline->topLevelItem(0)->text(0), QStringLiteral("Gamma"));
+}
+
+// The close button in the outline's title hides it, like View > Outline.
+void TestMainWindow::outlineCloseButtonHides()
+{
+    vn::Settings::instance().setValue(vn::key::outline, true);
+    vn::MainWindow window;
+    QVERIFY(window.openFile(write(QStringLiteral("close-button.md"), "# Title\n")));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *dock = window.findChild<QDockWidget *>();
+    QVERIFY(dock->isVisible());
+    auto *close = dock->titleBarWidget()->findChild<QToolButton *>();
+    QVERIFY(close);
+    QTest::mouseClick(close, Qt::LeftButton);
+    QVERIFY(dock->isHidden());
+    QVERIFY(!vn::Settings::instance().flag(vn::key::outline));
+    vn::Settings::instance().setValue(vn::key::outline, true);
+    QVERIFY(dock->isVisible());
+}
+
+// The menu command, its shortcut and the close button act on their own window
+// only; the choice is kept for windows opened later. Preferences reach all.
+void TestMainWindow::outlineToggleIsPerWindow()
+{
+    vn::Settings::instance().setValue(vn::key::outline, true);
+    const QString path = write(QStringLiteral("per-window.md"), "# Title\n\n## Part\n");
+    vn::MainWindow one;
+    vn::MainWindow two;
+    for (vn::MainWindow *w : {&one, &two}) {
+        QVERIFY(w->openFile(path));
+        w->show();
+        QVERIFY(QTest::qWaitForWindowExposed(w));
+    }
+    auto *dockOne = one.findChild<QDockWidget *>();
+    auto *dockTwo = two.findChild<QDockWidget *>();
+    QVERIFY(dockOne->isVisible());
+    QVERIFY(dockTwo->isVisible());
+
+    // The command (menu item or Ctrl+Shift+B) in the first window.
+    const auto outlineAction = [](vn::MainWindow &w) -> QAction * {
+        for (QAction *a : w.actions()) {
+            if (a->text() == vn::command(QStringLiteral("view.outline"))->menuText)
+                return a;
+        }
+        return nullptr;
+    };
+    QAction *toggleOne = outlineAction(one);
+    QAction *toggleTwo = outlineAction(two);
+    QVERIFY(toggleOne && toggleTwo);
+    toggleOne->trigger();
+    QVERIFY(dockOne->isHidden());
+    QVERIFY(!toggleOne->isChecked());
+    QVERIFY(dockTwo->isVisible());
+    QVERIFY(toggleTwo->isChecked());
+    QVERIFY(!vn::Settings::instance().flag(vn::key::outline));
+    toggleOne->trigger();
+    QVERIFY(dockOne->isVisible());
+    QVERIFY(dockTwo->isVisible());
+
+    // The close button in the second window's outline title.
+    auto *close = dockTwo->titleBarWidget()->findChild<QToolButton *>();
+    QVERIFY(close);
+    QTest::mouseClick(close, Qt::LeftButton);
+    QVERIFY(dockTwo->isHidden());
+    QVERIFY(!toggleTwo->isChecked());
+    QVERIFY(dockOne->isVisible());
+    QVERIFY(toggleOne->isChecked());
+
+    // A new window follows the last choice.
+    {
+        vn::MainWindow three;
+        QVERIFY(three.openFile(path));
+        QVERIFY(!outlineAction(three)->isChecked());
+    }
+
+    // The preference applies to every window.
+    vn::Settings::instance().setValue(vn::key::outline, true);
+    QVERIFY(dockOne->isVisible());
+    QVERIFY(dockTwo->isVisible());
+    QVERIFY(toggleTwo->isChecked());
+    vn::Settings::instance().setValue(vn::key::outline, false);
+    QVERIFY(dockOne->isHidden());
+    QVERIFY(dockTwo->isHidden());
+    vn::Settings::instance().setValue(vn::key::outline, true);
 }
 
 // A big document is parsed off the GUI thread. The old outline stays while
