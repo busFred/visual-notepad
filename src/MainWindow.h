@@ -247,6 +247,8 @@ private:
     void updateStatus();
     void updateOutline();
     void updateOutlineVisibility();
+    // This window only; also remembered for windows opened later.
+    void setOutlineShown(bool on);
     void showOutline(TextFile *file, const OutlineSnapshot &snapshot);
     void startOutlineJob(DocumentTab *tab);
     void finishOutlineJob();
