@@ -347,9 +347,9 @@ void VisualView::rebuildRows()
         return;
     }
     // The rendered rows that replace the stand-in keep its place.
-    std::optional<Place> standInPlace;
+    std::optional<Place> keptPlace;
     if (m_standIn) {
-        standInPlace = place();
+        keptPlace = place();
         m_standIn = false;
     }
     m_showsParse = true;
@@ -389,6 +389,14 @@ void VisualView::rebuildRows()
     if (!m_rowsStale && m_rowsRevision == m_model->revision() && int(m_lineToRow.size()) == lines
         && expanded == m_rowsExpanded)
         return;
+
+    // Rows that matched the document and now open or close for editing
+    // (a caret moved into a table, a selection ended in it) change height and
+    // count: the top of the view stays at the same source line, or a click
+    // among the last rows of a long table would scroll to its first row.
+    if (!keptPlace && !m_rows.empty() && !m_rowsStale && m_rowsRevision == m_model->revision()
+        && int(m_lineToRow.size()) == lines)
+        keptPlace = place();
 
     m_rows.clear();
     m_rows.reserve(spans.size() * 2 + 16);
@@ -446,8 +454,8 @@ void VisualView::rebuildRows()
     m_rowsStale = false;
     m_rowsRevision = m_model->revision();
     m_rowsExpanded = std::move(expanded);
-    if (standInPlace)
-        restorePlace(*standInPlace);
+    if (keptPlace)
+        restorePlace(*keptPlace);
 }
 
 VisualView::Place VisualView::place()

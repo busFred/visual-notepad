@@ -263,6 +263,8 @@ private Q_SLOTS:
     void scrollSyncIsContinuous_data();
     void scrollSyncIsContinuous();
     void scrollSyncEnds();
+    void selectingInALongTableKeepsTheScroll_data();
+    void selectingInALongTableKeepsTheScroll();
     void editsReparseLater();
     void caretMovesDontReparse();
     void diagramsRenderInBackground();
@@ -853,6 +855,69 @@ void TestVisualView::scrollSyncEnds()
         QCOMPARE(follower->scrollPixels(), y);
         leader->scrollToLine(0);
     }
+}
+
+void TestVisualView::selectingInALongTableKeepsTheScroll_data()
+{
+    QTest::addColumn<bool>("locked");
+    QTest::newRow("locked preview") << true;
+    QTest::newRow("editable preview") << false;
+}
+
+void TestVisualView::selectingInALongTableKeepsTheScroll()
+{
+    QFETCH(bool, locked);
+    // A table far taller than the window, its top and bottom off screen.
+    QString text = QStringLiteral("Intro paragraph.\n\n| Row | Value |\n|-----|-------|\n");
+    for (int i = 1; i <= 300; ++i)
+        text += QStringLiteral("| r%1 | value %1 |\n").arg(i);
+    text += QStringLiteral("\nClosing paragraph.\n");
+    QTemporaryDir dir;
+    QFile file(dir.filePath(QStringLiteral("table.md")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(text.toUtf8());
+    file.close();
+    DocumentTab tab;
+    QVERIFY(tab.load(file.fileName()));
+    tab.setViewMode(DocumentTab::ViewMode::SourceVisual);
+    tab.resize(1200, 500);
+    tab.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&tab));
+    TextView *source = tab.sourceView();
+    VisualView *visual = tab.visualView();
+    QVERIFY(visual && source->isVisible() && visual->isVisible());
+    visual->setReadOnly(locked);
+    source->setReadOnly(true);
+    visual->setFocus();
+    QTRY_VERIFY(visual->hasFocus());
+
+    // Show the table's last rows, as a reader scrolled to them would.
+    visual->scrollToLinePosition(290);
+    source->followScroll(*visual);
+    const qreal before = visual->topLinePosition();
+    const qreal sourceBefore = source->topLinePosition();
+    QVERIFY2(before > 280, qPrintable(QString::number(before)));
+
+    QTest::mousePress(visual->viewport(), Qt::LeftButton, {}, QPoint(100, 100));
+    QTest::mouseMove(visual->viewport(), QPoint(300, 160));
+    QVERIFY(visual->textCursor().hasSelection());
+    QVERIFY(visual->textCursor().blockNumber() > 285);
+    QTest::mouseRelease(visual->viewport(), Qt::LeftButton, {}, QPoint(300, 160));
+    QVERIFY(visual->textCursor().hasSelection());
+    QVERIFY2(qAbs(visual->topLinePosition() - before) < 3, qPrintable(QString::number(visual->topLinePosition())));
+    QVERIFY2(qAbs(source->topLinePosition() - sourceBefore) < 3, qPrintable(QString::number(source->topLinePosition())));
+
+    // The same from the source side: its selection is mirrored into the
+    // preview, which must not go back to the table's top to show it.
+    source->setFocus();
+    QTRY_VERIFY(source->hasFocus());
+    QTextDocument *doc = source->document();
+    QTextCursor c(doc);
+    c.setPosition(doc->findBlockByNumber(293).position() + 2);
+    c.setPosition(doc->findBlockByNumber(296).position() + 4, QTextCursor::KeepAnchor);
+    source->setTextCursor(c);
+    QVERIFY(visual->textCursor().hasSelection());
+    QVERIFY2(qAbs(visual->topLinePosition() - before) < 12, qPrintable(QString::number(visual->topLinePosition())));
 }
 
 void TestVisualView::editsReparseLater()

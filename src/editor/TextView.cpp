@@ -592,24 +592,25 @@ qreal TextView::topLinePosition()
     return anchors.back().line;
 }
 
+qreal TextView::yOfLinePosition(const std::vector<LineAnchor> &anchors, qreal position)
+{
+    for (size_t i = 1; i < anchors.size(); ++i) {
+        const LineAnchor &a = anchors[i - 1];
+        const LineAnchor &b = anchors[i];
+        if (position < b.line)
+            return a.y + (b.y - a.y) * qMax<qreal>(0, position - a.line) / (b.line - a.line);
+    }
+    return anchors.back().y;
+}
+
 void TextView::scrollToLinePosition(qreal position)
 {
     const int lines = m_doc->blockCount();
     position = qBound<qreal>(0, position, lines);
     const int index = qBound(0, rowOfLine(qMin(int(position), lines - 1)), qMax(0, rowCount() - 1));
     const qreal height = rowHeight(index);
-    const std::vector<LineAnchor> anchors = lineAnchors(index, height);
-    qreal y = height;
-    for (size_t i = 1; i < anchors.size(); ++i) {
-        const LineAnchor &a = anchors[i - 1];
-        const LineAnchor &b = anchors[i];
-        if (position < b.line) {
-            y = a.y + (b.y - a.y) * qMax<qreal>(0, position - a.line) / (b.line - a.line);
-            break;
-        }
-    }
     m_topRow = index;
-    m_topOffset = y;
+    m_topOffset = yOfLinePosition(lineAnchors(index, height), position);
     normalizeScroll();
     updateScrollBars();
     viewport()->update();
@@ -942,25 +943,43 @@ void TextView::ensureCursorVisible()
     const Row r = row(rowIndex);
 
     qreal caretTop = 0;
+    qreal caretBottom = m_lineHeight;
     if (!r.rendered) {
         QTextLayout *layout = layoutForLine(line);
         const QTextLine textLine = layout->lineForTextPosition(cursor.positionInBlock());
         if (textLine.isValid())
             caretTop = textLine.y() - m_linePad;
+        caretBottom = caretTop + m_lineHeight;
+    } else {
+        // A rendered row (a table, a list, a code box) can be many screens
+        // tall: the caret is where its source line is drawn, not at the
+        // row's top, or selecting in the last rows of a long table would
+        // scroll back to the first.
+        const qreal rowH = rowHeight(rowIndex);
+        if (r.lastLine == r.firstLine) {
+            caretBottom = qMax<qreal>(m_lineHeight, rowH);
+        } else {
+            const std::vector<LineAnchor> anchors = lineAnchors(rowIndex, rowH);
+            caretTop = yOfLinePosition(anchors, line);
+            caretBottom = qMax(caretTop + m_lineHeight, yOfLinePosition(anchors, line + 1));
+        }
     }
-    const qreal caretBottom = caretTop + m_lineHeight;
     const qreal height = viewport()->height();
+    // More than a screenful of the row is the caret's: showing any of it will do.
+    const bool tall = caretBottom - caretTop > height;
 
     qreal top = 0;
-    const bool visible = rowTop(rowIndex, &top) && top + caretTop >= 0 && top + caretBottom <= height;
+    const bool visible = rowTop(rowIndex, &top)
+        && (tall ? top + caretBottom > 0 && top + caretTop < height : top + caretTop >= 0 && top + caretBottom <= height);
     if (!visible) {
         if (rowIndex < m_topRow || (rowIndex == m_topRow && caretTop < m_topOffset)) {
             m_topRow = rowIndex;
             m_topOffset = caretTop;
         } else {
-            // Scroll so the caret's bottom sits at the viewport's bottom.
+            // Scroll so the caret's bottom sits at the viewport's bottom
+            // (its top at the viewport's top when it is taller).
             int topRow = rowIndex;
-            qreal offset = caretBottom - height;
+            qreal offset = tall ? caretTop : caretBottom - height;
             while (offset < 0 && topRow > 0) {
                 --topRow;
                 offset += rowHeight(topRow);
