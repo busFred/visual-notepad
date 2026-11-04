@@ -307,6 +307,9 @@ private:
     qreal maxLastRowOffset();
     // rowLineAnchors() with both ends added and anything out of order dropped.
     std::vector<LineAnchor> lineAnchors(int row, qreal height);
+    // Where, from the row's top, a source line position is drawn: anchors
+    // from lineAnchors().
+    static qreal yOfLinePosition(const std::vector<LineAnchor> &anchors, qreal position);
     void updateScrollBars();
 
     // Geometry. Returns false if the position is not in a visible row.
