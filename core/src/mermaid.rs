@@ -531,7 +531,10 @@ mod tests {
         let (w, h, pixels, _) = raster(&code, "auto", 1.0).expect("render");
         eprintln!("300 nodes: {w}x{h} in {:?}", start.elapsed());
         assert_eq!(pixels.len(), (w * h * 4) as usize);
-        assert!(start.elapsed().as_secs_f64() < 6.0, "took {:?}", start.elapsed());
+        // About 3 s here, but twice that on GitHub's Intel Macs: the bound
+        // catches a layout that blows up, not a slow machine (diagrams that
+        // would blow up are refused first; see the test above).
+        assert!(start.elapsed().as_secs_f64() < 10.0, "took {:?}", start.elapsed());
     }
 
     #[test]
