@@ -348,6 +348,7 @@ void TextView::normalizeCarets()
 void TextView::caretsChanged()
 {
     normalizeCarets();
+    realignLeftTable();
     recordCursorHistory();
     rowsMayHaveChanged();
     restartBlink();
@@ -394,11 +395,15 @@ void TextView::onDocumentChanged(int from, int charsRemoved, int charsAdded)
     if (oldAffected < 0 || first + oldAffected > oldCount) {
         m_lines.clear();
         m_lines.resize(newCount);
+        m_fenceMarksValid = false;
+        m_tableRun = {};
     } else {
         m_lines.erase(m_lines.begin() + first, m_lines.begin() + first + oldAffected);
         std::vector<LineCache> fresh(newAffected);
         m_lines.insert(m_lines.begin() + first, std::make_move_iterator(fresh.begin()),
                        std::make_move_iterator(fresh.end()));
+        spliceFenceMarks(first, oldAffected, newAffected);
+        spliceTableRun(first, oldAffected, newAffected);
     }
     m_topRow = qBound(0, m_topRow, qMax(0, rowCount() - 1));
     rowsMayHaveChanged();
@@ -871,6 +876,17 @@ bool TextView::rowTop(int index, qreal *top)
     if (y > height)
         return false;
     *top = y;
+    return true;
+}
+
+bool TextView::lineBounds(int line, qreal *top, qreal *bottom)
+{
+    const int index = rowOfLine(line);
+    qreal y = 0;
+    if (!rowTop(index, &y))
+        return false;
+    *top = y;
+    *bottom = y + rowHeight(index);
     return true;
 }
 
@@ -1379,19 +1395,21 @@ void TextView::keyPressEvent(QKeyEvent *event)
                 insertLineAbove();
             else
                 insertLineBelow();
-        } else {
+        } else if (shift || !tableEnter()) {
             insertNewline();
         }
         return;
     case Qt::Key_Tab:
         if (!ctrl && !alt) {
-            insertTab();
+            if (!tableTab(true))
+                insertTab();
             return;
         }
         break;
     case Qt::Key_Backtab:
         if (!ctrl && !alt) {
-            outdent();
+            if (!tableTab(false))
+                outdent();
             return;
         }
         break;
@@ -1857,6 +1875,10 @@ void TextView::contextMenuEvent(QContextMenuEvent *event)
     menu.addAction(tr("Paste"), this, &TextView::paste)->setEnabled(canEdit());
     menu.addSeparator();
     menu.addAction(tr("Select All"), this, &TextView::selectAll);
+    if (tableAtCaret().found) {
+        menu.addSeparator();
+        addTableMenu(&menu);
+    }
     menu.exec(event->globalPos());
 }
 

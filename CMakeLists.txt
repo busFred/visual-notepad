@@ -69,6 +69,7 @@ add_library(vn_app STATIC
     src/editor/Search.h
     src/editor/TextView.cpp
     src/editor/TextViewFormat.cpp
+    src/editor/TextViewTable.cpp
     src/editor/TextView.h
     src/markdown/BlockRenderer.cpp
     src/markdown/BlockRenderer.h
@@ -82,6 +83,10 @@ add_library(vn_app STATIC
     src/markdown/MathRenderer.h
     src/markdown/RemoteImages.cpp
     src/markdown/RemoteImages.h
+    src/markdown/TableCellEditor.cpp
+    src/markdown/TableCellEditor.h
+    src/markdown/TableToolbar.cpp
+    src/markdown/TableToolbar.h
     src/markdown/VisualView.cpp
     src/markdown/VisualView.h
 )

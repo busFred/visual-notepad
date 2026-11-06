@@ -258,6 +258,9 @@ private:
     const OutlineSnapshot *cachedOutline(const TextFile *file) const;
     const OutlineSnapshot &cacheOutline(TextFile *file, const OutlineSnapshot &snapshot);
     void updateModeControls();
+    // Enables the Table menu items that apply to the caret (while it is open).
+    void updateTableActions();
+    void insertTable();
 
     QPointer<DocumentTab> m_previousTab;
     // The grid's root; a group or a splitter of the other orientation in

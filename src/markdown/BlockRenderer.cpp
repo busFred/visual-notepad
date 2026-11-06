@@ -26,6 +26,7 @@
 #include <QSet>
 #include <QTextBlock>
 #include <QTextLayout>
+#include <QTextTable>
 #include <QThreadPool>
 #include <QUrl>
 #include <QXmlStreamReader>
@@ -1601,6 +1602,90 @@ int RenderedBlock::hitTest(const QPointF &point) const
     if (!m_doc)
         return -1;
     return m_doc->documentLayout()->hitTest(point - contentOffset(), Qt::FuzzyHit);
+}
+
+QTextTable *RenderedBlock::theTable() const
+{
+    if (m_kind != Kind::Rich || !m_doc)
+        return nullptr;
+    // The root frame holds the table directly and nothing else but the empty
+    // paragraphs around it.
+    QTextTable *table = nullptr;
+    for (QTextFrame *frame : m_doc->rootFrame()->childFrames()) {
+        if (auto *t = qobject_cast<QTextTable *>(frame)) {
+            if (table)
+                return nullptr;
+            table = t;
+        } else {
+            return nullptr;
+        }
+    }
+    if (!table)
+        return nullptr;
+    for (QTextBlock b = m_doc->begin(); b.isValid() && b.position() < table->firstPosition(); b = b.next()) {
+        if (!b.text().isEmpty())
+            return nullptr;
+    }
+    for (QTextBlock b = m_doc->findBlock(table->lastPosition() + 1); b.isValid(); b = b.next()) {
+        if (!b.text().isEmpty())
+            return nullptr;
+    }
+    return table;
+}
+
+QSize RenderedBlock::tableCells() const
+{
+    const QTextTable *table = theTable();
+    return table ? QSize(table->columns(), table->rows()) : QSize();
+}
+
+std::optional<QRectF> RenderedBlock::tableCellRect(int row, int col) const
+{
+    const QTextTable *table = theTable();
+    if (!table || row < 0 || col < 0 || row >= table->rows() || col >= table->columns())
+        return std::nullopt;
+    QAbstractTextDocumentLayout *layout = m_doc->documentLayout();
+    // The text of a cell. The cells themselves are not laid out anywhere one
+    // can ask, so their rectangles are made from the text: they tile the table.
+    const auto content = [&](int r, int c) {
+        QRectF rect;
+        const QTextTableCell cell = table->cellAt(r, c);
+        if (!cell.isValid())
+            return rect;
+        for (QTextBlock b = cell.firstCursorPosition().block(); b.isValid() && b.position() <= cell.lastPosition(); b = b.next())
+            rect = rect.united(layout->blockBoundingRect(b));
+        return rect;
+    };
+    const QRectF own = content(row, col);
+    if (own.isNull())
+        return std::nullopt;
+    // A cell starts a padding and a border before its text, and goes on up
+    // to where the next one starts; the last cells are as far on as the
+    // one before, or as far as their text and padding.
+    const qreal edge = table->format().cellPadding() + 1.5;
+    const qreal top = own.top() - edge;
+    const qreal left = own.left() - edge;
+    const qreal bottom = row + 1 < table->rows() ? content(row + 1, col).top() - edge
+                         : row > 0              ? top + (own.top() - content(row - 1, col).top())
+                                                : own.bottom() + edge;
+    const qreal right = col + 1 < table->columns() ? content(row, col + 1).left() - edge : own.right() + edge;
+    return QRectF(QPointF(left, top), QPointF(right, bottom)).translated(contentOffset());
+}
+
+std::optional<RenderedBlock::TableCellHit> RenderedBlock::tableCellAt(const QPointF &point) const
+{
+    const QTextTable *table = theTable();
+    if (!table)
+        return std::nullopt;
+    // The cells tile the table (see tableCellRect): the one holding the point.
+    for (int row = 0; row < table->rows(); ++row) {
+        for (int col = 0; col < table->columns(); ++col) {
+            const auto rect = tableCellRect(row, col);
+            if (rect && rect->contains(point))
+                return TableCellHit{row, col, *rect};
+        }
+    }
+    return std::nullopt;
 }
 
 QString RenderedBlock::anchorAt(const QPointF &point) const

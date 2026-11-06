@@ -7,6 +7,7 @@ mod links;
 mod md;
 mod mermaid;
 mod render;
+mod table;
 
 use comrak::nodes::{AstNode, NodeValue};
 use comrak::{Arena, parse_document};
@@ -82,7 +83,87 @@ mod ffi {
         dest: String,
     }
 
+    /// What can be done to a table (see `table_edit`).
+    #[derive(Debug, PartialEq)]
+    enum TableOp {
+        RowAbove,
+        RowBelow,
+        ColumnLeft,
+        ColumnRight,
+        DeleteRow,
+        DeleteColumn,
+        DeleteTable,
+        RowUp,
+        RowDown,
+        ColumnBefore,
+        ColumnAfter,
+        AlignNone,
+        AlignLeft,
+        AlignCenter,
+        AlignRight,
+        SortAscending,
+        SortDescending,
+        Transpose,
+        Realign,
+        /// Replaces the text of one cell with the `arg` given.
+        SetCell,
+    }
+
+    /// The table around a position. Rows count from the header (0); the
+    /// delimiter line is part of the header.
+    struct TableInfo {
+        found: bool,
+        /// 0-based lines, the last one included.
+        first_line: usize,
+        last_line: usize,
+        /// Including the header.
+        rows: usize,
+        cols: usize,
+        /// The row and column of the position.
+        row: usize,
+        col: usize,
+        /// Of that column: 0 none, 1 left, 2 center, 3 right.
+        alignment: u8,
+        /// Whether the text is what `Realign` would make of it.
+        aligned: bool,
+    }
+
+    /// Lines to put in place of `first_line..=last_line`.
+    struct TableEdit {
+        ok: bool,
+        changed: bool,
+        /// The lines go and nothing replaces them (`replacement` is empty).
+        remove: bool,
+        first_line: usize,
+        last_line: usize,
+        replacement: String,
+        /// Where the caret goes, in the lines after the edit.
+        caret_line: usize,
+        caret_column: usize,
+        /// Lines at the start and at the end of the old lines that are the
+        /// same in `replacement`: only the ones between need replacing.
+        keep_before: usize,
+        keep_after: usize,
+    }
+
+    /// The text of one cell of a table, as a range of one line.
+    struct TableCell {
+        found: bool,
+        line: usize,
+        /// UTF-16 columns of the text in the line.
+        start: usize,
+        end: usize,
+        text: String,
+    }
+
     extern "Rust" {
+        /// The table that holds 0-based `line` of `text`, and which cell
+        /// `column` (UTF-16 units into the line) is in.
+        fn table_info(text: &str, line: usize, column: usize) -> TableInfo;
+        /// The table holding `line` after `op` on the cell at (`row`, `col`).
+        fn table_edit(text: &str, line: usize, op: TableOp, row: usize, col: usize, arg: &str) -> TableEdit;
+        /// Where cell (`row`, `col`) of the table holding `line` is.
+        fn table_cell(text: &str, line: usize, row: usize, col: usize) -> TableCell;
         fn outline(markdown: &str) -> Vec<Heading>;
         fn blocks(markdown: &str, options: &RenderOptions) -> Vec<Block>;
         /// A document's blocks together with what it takes to parse the
@@ -192,6 +273,48 @@ fn rebase_links(text: &str, from_dir: &str, to_dir: &str) -> String {
 
 fn link_targets(markdown: &str) -> Vec<ffi::LinkTarget> {
     guarded(|| links::targets(markdown), Vec::new)
+}
+
+fn table_info(text: &str, line: usize, column: usize) -> ffi::TableInfo {
+    guarded(
+        || table::info(text, line, column),
+        || ffi::TableInfo {
+            found: false,
+            first_line: 0,
+            last_line: 0,
+            rows: 0,
+            cols: 0,
+            row: 0,
+            col: 0,
+            alignment: 0,
+            aligned: true,
+        },
+    )
+}
+
+fn table_edit(text: &str, line: usize, op: ffi::TableOp, row: usize, col: usize, arg: &str) -> ffi::TableEdit {
+    guarded(
+        || table::edit(text, line, op, row, col, arg),
+        || ffi::TableEdit {
+            ok: false,
+            changed: false,
+            remove: false,
+            first_line: 0,
+            last_line: 0,
+            replacement: String::new(),
+            caret_line: 0,
+            caret_column: 0,
+            keep_before: 0,
+            keep_after: 0,
+        },
+    )
+}
+
+fn table_cell(text: &str, line: usize, row: usize, col: usize) -> ffi::TableCell {
+    guarded(
+        || table::cell(text, line, row, col),
+        || ffi::TableCell { found: false, line: 0, start: 0, end: 0, text: String::new() },
+    )
 }
 
 fn outline(markdown: &str) -> Vec<ffi::Heading> {

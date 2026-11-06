@@ -17,15 +17,18 @@
 #include <QTextLayout>
 
 #include <QString>
+#include <QStringList>
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 
 class QDragEnterEvent;
 class QDragMoveEvent;
 class QDropEvent;
 class QImage;
+class QMenu;
 class QTextDocument;
 
 namespace vn {
@@ -183,6 +186,32 @@ public:
     };
     void formatMarkdown(MarkdownFormat format);
 
+    // Pipe tables (TextViewTable.cpp), in Markdown views. They act on the
+    // table around the primary caret and do nothing outside one.
+    // The table being edited: the one holding the caret, or the cell a
+    // subclass names with setTableTarget (a cell editor over a rendered table).
+    md::TableInfo tableAtCaret();
+    // Applies the operation to the whole table as one undo step, realigned,
+    // and puts the caret where the operation says. False if it was refused.
+    bool editTable(md::TableOp op, const QString &arg = {});
+    // The same for the table holding `line`, naming the cell (row, col).
+    bool editTableAt(int line, md::TableOp op, int row, int col, const QString &arg = {}, bool moveCaret = true);
+    // A table edited with the caret in it is realigned once the caret has
+    // left it (typing in it leaves it as it is meanwhile). Off by default.
+    void setRealignTablesOnLeave(bool on);
+    // Selects the text of a cell of the table holding `line`.
+    bool moveToTableCell(int line, int row, int col);
+    // Inserts a table of `rows` (with the header) by `cols` below the caret's
+    // line, with its first header selected.
+    void insertTable(int rows, int cols);
+    // The keys in a table: to the next or previous cell (a new row after the
+    // last), and a new row below. False, with nothing done, outside one.
+    bool tableTab(bool forward);
+    bool tableEnter();
+    // Adds the table commands (for the caret's table, enabled as they apply)
+    // to a menu.
+    void populateTableMenu(QMenu *menu);
+
     // The colours of lines [firstLine, lastLine] changed (the highlighter
     // ran) without a text change.
     void formatsChanged(int firstLine, int lastLine);
@@ -237,6 +266,19 @@ protected:
     virtual QTextCursor lineUnitAt(int position) const;
     // True while the left button is down after a click or drag selection.
     bool isMouseSelecting() const { return m_dragging; }
+    // Makes the table commands act on cell (row, col) of the table holding
+    // `line`, not on the caret's table, until cleared (line < 0).
+    void setTableTarget(int line, int row = 0, int col = 0);
+    // Called before a table command acts on that target: save what is being
+    // edited there (and clear the target).
+    virtual void tableTargetEditing() {}
+    // The table's cell (row, col) in the document, as md::tableCell says.
+    md::TableCell tableCellOf(int line, int row, int col);
+    md::TableInfo tableInfoAt(int line, int column);
+    // Realigns the table the primary caret was in if it left it after
+    // editing (see setRealignTablesOnLeave); the caret moves are checked on
+    // their own, a mouse selection once it ends.
+    void realignLeftTable();
 
     // The row at viewport y and its top, or -1 past the end.
     int rowAt(qreal y, qreal *top);
@@ -245,6 +287,9 @@ protected:
     qreal textLeft() const;
     qreal textWidth() const;
     int lineHeight() const { return m_lineHeight; }
+    // The viewport y range of the row holding a source line; false if that
+    // row is not (even partly) in the viewport.
+    bool lineBounds(int line, qreal *top, qreal *bottom);
     // Forgets cached row heights and repaints.
     void relayout();
 
@@ -355,6 +400,34 @@ private:
     void toggleLinePrefix(MarkdownFormat kind);
     void insertLink();
     void wrapInCodeBlock();
+    // The document's text for the table functions; made once per revision.
+    // The lines that can hold the table around `line`: the run of pipe-ended
+    // lines it is in, joined by newlines, with the first one's number. The
+    // Rust table functions get this instead of the whole document (which
+    // costs a copy of it per call): a table never crosses a line that is not
+    // such a line, and the run holds no code fence. Empty (firstLine -1) if
+    // `line` is not such a line or the run is inside fenced code.
+    struct TableWindow
+    {
+        QString text;
+        int firstLine = -1;
+    };
+    TableWindow tableWindow(int line);
+    // The run tableWindow() last made, kept across edits inside it (see
+    // spliceTableRun): a keystroke in a long table does not read it again.
+    struct TableRun
+    {
+        QStringList lines;
+        QString text; // The lines joined.
+        int firstLine = -1;
+    };
+    TableRun m_tableRun;
+    void spliceTableRun(int first, int oldAffected, int newAffected);
+    // Whether fenced code is open where `line` starts (see m_fenceMarks).
+    bool inFencedCode(int line);
+    void rebuildFenceMarks();
+    void spliceFenceMarks(int first, int oldAffected, int newAffected);
+    void addTableMenu(QMenu *menu);
 
     // Caret helpers.
     void moveCarets(QTextCursor::MoveOperation op, bool select);
@@ -448,6 +521,35 @@ private:
     qreal m_rightMargin = 8;
     qreal m_topMargin = 0;
     Qt::KeyboardModifier m_multiCursorModifier = Qt::AltModifier;
+    // The lines that open or close fenced code (three or more backticks or
+    // tildes after any quote markers; see core/src/format.rs), in order,
+    // for the whole document. Made when first needed, then kept up to date
+    // by onDocumentChanged. Pairing them says whether a line is in a fence.
+    struct FenceMark
+    {
+        int line = 0;
+        QChar ch;
+        int run = 0;
+        bool closes = false; // Nothing else on the line: it can close one.
+    };
+    // The mark of a line, if it is one; as the core's scan reads it.
+    static std::optional<FenceMark> fenceMarkOf(int line, const QString &text);
+    std::vector<FenceMark> m_fenceMarks;
+    bool m_fenceMarksValid = false;
+    md::TableInfo m_tableInfo;
+    struct TableTarget
+    {
+        int line = -1;
+        int row = 0;
+        int col = 0;
+    } m_tableTarget;
+    md::TableInfo caretTableInfo();
+    int m_tableInfoRevision = -1;
+    int m_tableInfoPosition = -1;
+    bool m_realignTables = false;
+    QTextCursor m_tableCursor; // In the table the caret was last seen in.
+    bool m_tableTracked = false;
+    int m_tableEnterRevision = -1;
     bool m_markdown = false;
     bool m_codeEditing = false;
     // Closers inserted by auto-closing that may still be typed over or

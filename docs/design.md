@@ -122,6 +122,44 @@ no bevels. Values live in `src/Theme.h`.
   than http, https, mailto and file. Text files (scripts too) open in the
   app; network paths (UNC, `file://host`) are refused outright.
 
+## Table editing
+
+Pipe tables (GFM) can be edited without touching the pipes. The work is text
+to text, in `core/src/table.rs` (rows, columns, alignment, sorting,
+transposing, one cell; the result is always aligned like Format Document
+does), called through `vn::md::tableEdit`.
+
+- Format > Table has Insert Table (a Rows x Columns dialog, rows counting
+  the header) and the commands below; Table items are enabled while the
+  menu is open, from the caret's table. The context menu of an editor view
+  has the same commands inside a table. No default shortcuts.
+- In the Markdown views, Tab and Shift+Tab move between cells (selecting the
+  cell's text), Tab in the last cell adds a row, and Enter adds a row below.
+  Nothing is rewritten while moving or typing.
+- Visual editor: a table opened for editing shows a floating toolbar (rows,
+  columns, alignment, a More menu) above it, and is realigned once the caret
+  has left it after an edit (one undo step; the other views leave tables
+  alone until Realign).
+- Visual editor, editable: a click on a cell of a rendered table opens a
+  text box over that cell with its Markdown source instead of opening the
+  whole table as source. Enter, clicking elsewhere or leaving the view
+  writes the cell back (a `|` is escaped, line breaks become `<br>`) and
+  realigns the table; Esc drops the edit; Tab, Shift+Tab, Up and Down
+  continue in another cell (Tab after the last cell adds a row). The table
+  toolbar and the Table menu act on that cell. A table is edited this way
+  only if the block is exactly one pipe table; to edit its source, move the
+  caret into it with the keys. Read-only views do not open the box.
+- A table is found by the same rules as the formatter (header and delimiter
+  lines with as many cells, rows with a leading and closing pipe, quote and
+  list prefixes, not inside fenced code). Rows with fewer cells get empty
+  ones; extra cells are dropped, as GFM does. The lookup reads only the run
+  of pipe-ended lines around the caret (kept across edits in it) and a list
+  of the document's fence lines, so a keystroke in a long table or a long
+  document stays cheap; whether a table over 500 lines is aligned is not
+  checked (Realign stays enabled for it). An edit replaces only the lines
+  that differ from the table as it was (a realign after typing in one row
+  is a change of that row, unless the row became the widest of a column).
+
 ## Preferences
 
 xed-style dialog under Edit > Preferences (Ctrl+,). Left category list:

@@ -27,6 +27,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QPainter>
+#include <QPlainTextEdit>
 #include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSlider>
@@ -36,6 +37,7 @@
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QThreadPool>
+#include <QToolButton>
 #include <QToolTip>
 #include <QUrl>
 #include <QWheelEvent>
@@ -183,6 +185,10 @@ public:
     using VisualView::VisualView;
     using VisualView::rowCount;
 
+    // The viewport y range of the row holding a line, or false.
+    bool boundsOfLine(int line, qreal *top, qreal *bottom) { return lineBounds(line, top, bottom); }
+    qreal textStart() const { return textLeft(); }
+
     int lineAt(qreal y)
     {
         qreal top = 0;
@@ -254,6 +260,11 @@ private Q_SLOTS:
     void dragSelectsAcrossRenderedBlocks();
     void selectionIsPainted();
     void editableDragDefersExpansion();
+    void tableIsRealignedWhenTheCaretLeavesIt();
+    void tableToolbarFollowsTheCaret();
+    void clickingATableCellEditsIt();
+    void cellEditorKeysMoveBetweenCells();
+    void cellEditorOnlyInEditableViews();
     void doubleAndTripleClick();
     void selectionMirrorsInSplit();
     void screenshots();
@@ -359,7 +370,7 @@ void TestVisualView::init()
     m_highlighter->setDefinition(theme::syntaxRepository().definitionForName(QStringLiteral("Markdown")));
     m_doc->setPlainText(QString::fromUtf8(sample));
     m_model = new MarkdownModel(m_doc);
-    m_view = new VisualView(m_model);
+    m_view = new ProbeView(m_model);
     m_view->resize(760, 900);
     m_view->show();
     QVERIFY(QTest::qWaitForWindowExposed(m_view));
@@ -578,6 +589,177 @@ void TestVisualView::editableDragDefersExpansion()
     QTest::mouseRelease(m_view->viewport(), Qt::LeftButton, {}, QPoint(300, y2));
     QVERIFY(m_view->textCursor().hasSelection());
     QVERIFY(m_view->expandedBlockCount() > during);
+}
+
+void TestVisualView::tableIsRealignedWhenTheCaretLeavesIt()
+{
+    m_view->setReadOnly(false);
+    m_view->setMarkdownEditing(true); // (DocumentTab does this for Markdown.)
+    QTextCursor c(m_doc->findBlockByNumber(26));
+    c.setPosition(c.block().position() + 2);
+    m_view->setTextCursor(c);
+    QTest::keyClicks(m_view, QStringLiteral("A much longer name "));
+    // Typing leaves the table as it is.
+    QCOMPARE(m_doc->findBlockByNumber(24).text(), QStringLiteral("| Platform | Status |"));
+    QVERIFY(m_doc->findBlockByNumber(26).text().startsWith(QLatin1String("| A much longer name Linux")));
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(9)));
+    const QString header = m_doc->findBlockByNumber(24).text();
+    QVERIFY2(header.startsWith(QLatin1String("| Platform ")) && header.size() > 20, qPrintable(header));
+    // All rows have one width again.
+    QCOMPARE(m_doc->findBlockByNumber(26).text().size(), header.size());
+    QCOMPARE(m_doc->findBlockByNumber(27).text().size(), header.size());
+    // The caret stayed where it was put.
+    QCOMPARE(m_view->textCursor().blockNumber(), 9);
+    // Passing through a table without editing it changes nothing.
+    const QString before = m_doc->toPlainText();
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(26)));
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(9)));
+    QCOMPARE(m_doc->toPlainText(), before);
+}
+
+void TestVisualView::tableToolbarFollowsTheCaret()
+{
+    m_view->setReadOnly(false);
+    m_view->setMarkdownEditing(true);
+    const auto toolbar = [this]() -> QWidget * {
+        QTest::qWait(5); // The update runs once the event is done.
+        return m_view->viewport()->findChild<QWidget *>(QStringLiteral("TableToolbar"));
+    };
+    QVERIFY(!toolbar());
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(26)));
+    QWidget *bar = toolbar();
+    QVERIFY(bar && !bar->isHidden());
+    // Above the table's first line, inside the viewport.
+    QVERIFY(bar->y() >= 0 && bar->y() < m_view->viewport()->height());
+    if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
+        QVERIFY(m_view->grab().save(dir + QStringLiteral("/table-toolbar.png")));
+    // An operation button edits the table around the caret.
+    const int lines = m_doc->blockCount();
+    const auto buttons = bar->findChildren<QToolButton *>(QStringLiteral("TableToolButton"));
+    QToolButton *below = nullptr;
+    for (QToolButton *b : buttons) {
+        if (b->toolTip().contains(QLatin1String("row below")))
+            below = b;
+    }
+    QVERIFY(below && below->isEnabled());
+    QTest::mouseClick(below, Qt::LeftButton);
+    QCOMPARE(m_doc->blockCount(), lines + 1);
+    QVERIFY(m_view->hasFocus()); // The click did not take the focus.
+    // Not in a table: gone. Read-only: gone.
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(9)));
+    QVERIFY(toolbar()->isHidden());
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(26)));
+    QVERIFY(!toolbar()->isHidden());
+    m_view->setReadOnly(true);
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(27)));
+    QVERIFY(toolbar()->isHidden());
+}
+
+namespace {
+
+// The open cell editor (closed ones wait to be deleted, hidden).
+QPlainTextEdit *cellEditor(QWidget *viewport)
+{
+    for (auto *editor : viewport->findChildren<QPlainTextEdit *>(QStringLiteral("TableCellEditor"))) {
+        if (!editor->isHidden())
+            return editor;
+    }
+    return nullptr;
+}
+
+// Where cell (row, col) of the sample's table (line 24) is, in the viewport:
+// the rows are 38 pixels apart, the first column is the narrower one.
+QPoint cellPoint(VisualView *view, int row, int col)
+{
+    auto *probe = static_cast<ProbeView *>(view);
+    qreal top = 0;
+    qreal bottom = 0;
+    if (!probe->boundsOfLine(24, &top, &bottom))
+        return {};
+    return QPoint(int(probe->textStart()) + (col == 0 ? 30 : 100), int(top) + 18 + 38 * row);
+}
+
+// Clicks a cell and returns the editor that opens over it, if any.
+QPlainTextEdit *clickCell(VisualView *view, int row, int col)
+{
+    QTest::mouseClick(view->viewport(), Qt::LeftButton, {}, cellPoint(view, row, col));
+    return cellEditor(view->viewport());
+}
+
+} // namespace
+
+void TestVisualView::clickingATableCellEditsIt()
+{
+    m_view->setReadOnly(false);
+    m_view->setMarkdownEditing(true);
+    QPlainTextEdit *editor = clickCell(m_view, 1, 0);
+    QVERIFY(editor && editor->hasFocus());
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Linux"));
+    if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty()) {
+        QTest::qWait(10);
+        QVERIFY(m_view->grab().save(dir + QStringLiteral("/table-cell-editor.png")));
+    }
+    // The table stays rendered: no block was opened for editing, the caret did not move.
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QTest::keyClicks(editor, QStringLiteral(" Mint"));
+    QTest::keyClick(editor, Qt::Key_Return);
+    QVERIFY(!cellEditor(m_view->viewport()));
+    // The cell is written and the table realigned, as one undo step.
+    QCOMPARE(m_doc->findBlockByNumber(26).text(), QStringLiteral("| Linux Mint |   done |"));
+    QCOMPARE(m_doc->findBlockByNumber(24).text().size(), m_doc->findBlockByNumber(26).text().size());
+    m_doc->undo();
+    QCOMPARE(m_doc->findBlockByNumber(26).text(), QStringLiteral("| Linux    | done   |"));
+    // Escape drops the edit; a pipe in the text is escaped.
+    editor = clickCell(m_view, 1, 0);
+    QVERIFY(editor);
+    QTest::keyClicks(editor, QStringLiteral("x"));
+    QTest::keyClick(editor, Qt::Key_Escape);
+    QCOMPARE(m_doc->findBlockByNumber(26).text(), QStringLiteral("| Linux    | done   |"));
+    editor = clickCell(m_view, 1, 0);
+    QVERIFY(editor);
+    editor->selectAll();
+    QTest::keyClicks(editor, QStringLiteral("a|b"));
+    QTest::keyClick(editor, Qt::Key_Return);
+    QVERIFY(m_doc->findBlockByNumber(26).text().startsWith(QLatin1String("| a\\|b ")));
+}
+
+void TestVisualView::cellEditorKeysMoveBetweenCells()
+{
+    m_view->setReadOnly(false);
+    m_view->setMarkdownEditing(true);
+    QPlainTextEdit *editor = clickCell(m_view, 1, 0);
+    QVERIFY(editor);
+    QTest::keyClick(editor, Qt::Key_Tab);
+    editor = cellEditor(m_view->viewport());
+    QVERIFY(editor && !editor->isHidden());
+    QCOMPARE(editor->toPlainText(), QStringLiteral("done"));
+    QTest::keyClick(editor, Qt::Key_Down);
+    editor = cellEditor(m_view->viewport());
+    QCOMPARE(editor->toPlainText(), QStringLiteral("next"));
+    // Tab in the last cell adds a row and goes to its first cell.
+    const int lines = m_doc->blockCount();
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QCOMPARE(m_doc->blockCount(), lines + 1);
+    editor = cellEditor(m_view->viewport());
+    QVERIFY(editor && !editor->isHidden());
+    QCOMPARE(editor->toPlainText(), QString());
+    QTest::keyClicks(editor, QStringLiteral("BSD"));
+    QTest::keyClick(editor, Qt::Key_Backtab);
+    QVERIFY(m_doc->findBlockByNumber(28).text().startsWith(QLatin1String("| BSD ")));
+    editor = cellEditor(m_view->viewport());
+    QCOMPARE(editor->toPlainText(), QStringLiteral("next"));
+    QTest::keyClick(editor, Qt::Key_Escape);
+}
+
+void TestVisualView::cellEditorOnlyInEditableViews()
+{
+    m_view->setMarkdownEditing(true);
+    m_view->setReadOnly(true);
+    QVERIFY(!clickCell(m_view, 1, 0));
+    // A table that is not a pipe table (front matter) has no cell editor either.
+    m_view->setReadOnly(false);
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(40, 30));
+    QVERIFY(!cellEditor(m_view->viewport()));
 }
 
 void TestVisualView::doubleAndTripleClick()

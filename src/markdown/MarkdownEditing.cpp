@@ -9,6 +9,7 @@
 #include <QUrl>
 
 #include <algorithm>
+#include <cstring>
 #include <iterator>
 #include <string_view>
 
@@ -153,6 +154,136 @@ QString formatDocument(const QString &text)
 {
     const QByteArray utf8 = text.toUtf8();
     return toQString(core::format_markdown(str(utf8)));
+}
+
+namespace {
+
+core::TableOp coreOp(TableOp op)
+{
+    switch (op) {
+    case TableOp::RowAbove: return core::TableOp::RowAbove;
+    case TableOp::RowBelow: return core::TableOp::RowBelow;
+    case TableOp::ColumnLeft: return core::TableOp::ColumnLeft;
+    case TableOp::ColumnRight: return core::TableOp::ColumnRight;
+    case TableOp::DeleteRow: return core::TableOp::DeleteRow;
+    case TableOp::DeleteColumn: return core::TableOp::DeleteColumn;
+    case TableOp::DeleteTable: return core::TableOp::DeleteTable;
+    case TableOp::MoveRowUp: return core::TableOp::RowUp;
+    case TableOp::MoveRowDown: return core::TableOp::RowDown;
+    case TableOp::MoveColumnLeft: return core::TableOp::ColumnBefore;
+    case TableOp::MoveColumnRight: return core::TableOp::ColumnAfter;
+    case TableOp::AlignNone: return core::TableOp::AlignNone;
+    case TableOp::AlignLeft: return core::TableOp::AlignLeft;
+    case TableOp::AlignCenter: return core::TableOp::AlignCenter;
+    case TableOp::AlignRight: return core::TableOp::AlignRight;
+    case TableOp::SortAscending: return core::TableOp::SortAscending;
+    case TableOp::SortDescending: return core::TableOp::SortDescending;
+    case TableOp::Transpose: return core::TableOp::Transpose;
+    case TableOp::Realign: return core::TableOp::Realign;
+    case TableOp::SetCell: return core::TableOp::SetCell;
+    }
+    return core::TableOp::Realign;
+}
+
+} // namespace
+
+bool tableOpAvailable(const TableInfo &info, TableOp op)
+{
+    if (!info.found)
+        return false;
+    switch (op) {
+    case TableOp::RowAbove:
+    case TableOp::DeleteRow:
+        return info.row > 0;
+    case TableOp::DeleteColumn:
+        return info.cols > 1;
+    case TableOp::MoveRowUp:
+        return info.row > 1;
+    case TableOp::MoveRowDown:
+        return info.row > 0 && info.row + 1 < info.rows;
+    case TableOp::MoveColumnLeft:
+        return info.col > 0;
+    case TableOp::MoveColumnRight:
+        return info.col + 1 < info.cols;
+    case TableOp::SortAscending:
+    case TableOp::SortDescending:
+        return info.rows > 2;
+    case TableOp::Realign:
+        return !info.aligned;
+    default:
+        return true;
+    }
+}
+
+TableInfo tableInfo(const QString &text, int line, int column)
+{
+    const QByteArray utf8 = text.toUtf8();
+    const core::TableInfo r = core::table_info(str(utf8), size_t(qMax(line, 0)), size_t(qMax(column, 0)));
+    TableInfo info;
+    info.found = r.found;
+    if (!r.found)
+        return info;
+    info.firstLine = int(r.first_line);
+    info.lastLine = int(r.last_line);
+    info.rows = int(r.rows);
+    info.cols = int(r.cols);
+    info.row = int(r.row);
+    info.col = int(r.col);
+    info.alignment = TableAlignment(qMin(int(r.alignment), 3));
+    info.aligned = r.aligned;
+    return info;
+}
+
+TableEdit tableEdit(const QString &text, int line, TableOp op, int row, int col, const QString &arg)
+{
+    const QByteArray utf8 = text.toUtf8();
+    const QByteArray argUtf8 = arg.toUtf8();
+    const core::TableEdit r = core::table_edit(str(utf8), size_t(qMax(line, 0)), coreOp(op), size_t(qMax(row, 0)),
+                                               size_t(qMax(col, 0)), str(argUtf8));
+    TableEdit edit;
+    edit.ok = r.ok;
+    if (!r.ok)
+        return edit;
+    edit.changed = r.changed;
+    edit.remove = r.remove;
+    edit.firstLine = int(r.first_line);
+    edit.lastLine = int(r.last_line);
+    edit.caretLine = int(r.caret_line);
+    if (!r.changed || r.remove)
+        return edit; // (No text to take: nothing changed, or the lines go.)
+    // Only the lines that differ, which a realigned table mostly does not:
+    // replacing a whole long table would be the most of the work.
+    const char *data = r.replacement.data();
+    const size_t size = r.replacement.size();
+    size_t from = 0;
+    for (size_t n = 0; n < r.keep_before; ++n)
+        from = static_cast<const char *>(std::memchr(data + from, '\n', size - from)) - data + 1;
+    size_t to = size;
+    for (size_t n = 0; n < r.keep_after; ++n) {
+        while (data[to - 1] != '\n')
+            --to;
+        --to;
+    }
+    edit.firstLine += int(r.keep_before);
+    edit.lastLine -= int(r.keep_after);
+    edit.replacement = QString::fromUtf8(data + from, qsizetype(to - from));
+    edit.caretColumn = int(r.caret_column);
+    return edit;
+}
+
+TableCell tableCell(const QString &text, int line, int row, int col)
+{
+    const QByteArray utf8 = text.toUtf8();
+    const core::TableCell r = core::table_cell(str(utf8), size_t(qMax(line, 0)), size_t(qMax(row, 0)), size_t(qMax(col, 0)));
+    TableCell cell;
+    cell.found = r.found;
+    if (!r.found)
+        return cell;
+    cell.line = int(r.line);
+    cell.start = int(r.start);
+    cell.end = int(r.end);
+    cell.text = toQString(r.text);
+    return cell;
 }
 
 QString rebaseLinks(const QString &text, const QString &fromDir, const QString &toDir)

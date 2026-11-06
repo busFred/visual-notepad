@@ -6,6 +6,7 @@
 
 #include "../editor/TextView.h"
 #include "BlockRenderer.h"
+#include "TableCellEditor.h"
 
 #include <QCache>
 #include <QHash>
@@ -24,6 +25,8 @@ class QLabel;
 namespace vn {
 
 class MarkdownModel;
+class TableCellEditor;
+class TableToolbar;
 
 // Map between a Rich block's rendered text and its Markdown source by
 // matching characters in order (Markdown syntax that is not rendered is
@@ -132,6 +135,49 @@ private:
     void updateRemoteBanner();
     void layoutBanner();
     void resetRenders();
+    // The toolbar over the table being edited: shown while the caret is in a
+    // table of an editable view with the focus; the update is made once the
+    // event being handled is done.
+    void scheduleToolbarUpdate();
+    void updateTableToolbar();
+    void toolbarOperation(md::TableOp op);
+
+    // Cell editing in rendered tables: a click on a cell of a rendered
+    // table (editable view) opens a text box over it instead of the table's
+    // source; see TableCellEditor. The table commands act on that cell then.
+    bool tableCellPressed(const Row &row, const QPointF &point, QMouseEvent *event);
+    // `line` is the table's first line.
+    bool openCellEditor(int line, int row, int col);
+    void closeCellEditor(TableCellEditor::Exit how);
+    // Puts the box over its cell; false if the cell is gone or has changed.
+    bool placeCellEditor();
+    void tableTargetEditing() override;
+
+    struct CellTarget
+    {
+        int line = -1; // First line of the table.
+        int row = 0;
+        int col = 0;
+        QString original; // The cell's source when the box opened.
+    };
+    TableCellEditor *m_cellEditor = nullptr;
+    CellTarget m_cell;
+    // A press on a cell: a click (no drag) opens the box when the button
+    // comes up; a drag selects text as anywhere. The caret is where it was
+    // before the press moved it.
+    struct PendingCell
+    {
+        bool active = false;
+        int line = 0;
+        int row = 0;
+        int col = 0;
+        QPoint pos;
+        QTextCursor caret;
+    } m_pendingCell;
+
+    TableToolbar *m_tableToolbar = nullptr;
+    bool m_toolbarUpdatePending = false;
+    bool m_hasFocus = false; // Not counting the toolbar's menu taking it.
 
     MarkdownModel *m_model;
     QString m_baseDirectory;

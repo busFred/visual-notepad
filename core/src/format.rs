@@ -52,7 +52,7 @@ fn display_width(text: &str) -> usize {
 
 /// Splits `prefix| a | b |` into the prefix and trimmed cells. The prefix is
 /// whatever list or quote markers precede the first pipe.
-fn split_row(line: &str) -> Option<(&str, Vec<String>)> {
+pub(crate) fn split_row(line: &str) -> Option<(&str, Vec<String>)> {
     let (prefix, body) = row_parts(line)?;
     let mut cells = vec![String::new()];
     let mut escaped = false;
@@ -72,7 +72,7 @@ fn split_row(line: &str) -> Option<(&str, Vec<String>)> {
 
 /// The prefix and the text between the first and the closing pipe, if the
 /// line is a table row. Cheap: no allocation.
-fn row_parts(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn row_parts(line: &str) -> Option<(&str, &str)> {
     let bar = line.find('|')?;
     let prefix = &line[..bar];
     if !prefix
@@ -87,20 +87,10 @@ fn row_parts(line: &str) -> Option<(&str, &str)> {
 }
 
 /// Column alignment from a delimiter cell like `:---:`; None if it isn't one.
-fn delimiter_alignment(cell: &str) -> Option<(bool, bool)> {
+pub(crate) fn delimiter_alignment(cell: &str) -> Option<(bool, bool)> {
     let inner = cell.trim_start_matches(':').trim_end_matches(':');
     let valid = !inner.is_empty() && inner.chars().all(|c| c == '-');
     (valid && cell.len() - inner.len() <= 2).then(|| (cell.starts_with(':'), cell.ends_with(':')))
-}
-
-fn pad(text: &str, width: usize, left: bool, right: bool) -> String {
-    let gap = width.saturating_sub(display_width(text));
-    let (before, after) = match (left, right) {
-        (true, true) => (gap / 2, gap - gap / 2),
-        (false, true) => (gap, 0),
-        _ => (0, gap),
-    };
-    format!("{}{}{}", " ".repeat(before), text, " ".repeat(after))
 }
 
 /// comrak prints tables with minimal padding; pad every column to its widest
@@ -149,7 +139,7 @@ fn push_line(out: &mut String, not_first: bool, line: &str) {
 }
 
 /// End (exclusive) of the table starting at `start`, if one does.
-fn table_end(lines: &[&str], start: usize) -> Option<usize> {
+pub(crate) fn table_end(lines: &[&str], start: usize) -> Option<usize> {
     // Most lines are not rows; reject them without splitting.
     row_parts(lines[start])?;
     row_parts(lines.get(start + 1)?)?;
@@ -170,49 +160,83 @@ fn table_end(lines: &[&str], start: usize) -> Option<usize> {
     Some(end)
 }
 
-fn align_table(lines: &[&str]) -> Vec<String> {
+pub(crate) fn align_table(lines: &[&str]) -> Vec<String> {
     let rows: Vec<(&str, Vec<String>)> = lines.iter().filter_map(|l| split_row(l)).collect();
-    let columns = rows[0].1.len();
     let alignment: Vec<(bool, bool)> = rows[1]
         .1
         .iter()
         .map(|c| delimiter_alignment(c).unwrap_or((false, false)))
         .collect();
+    let body = std::iter::once(&rows[0])
+        .chain(&rows[2..])
+        .map(|(prefix, cells)| (*prefix, cells.as_slice()));
+    aligned_rows(body, rows.len() - 1, rows[1].0, &alignment[..rows[0].1.len()])
+}
+
+/// The aligned lines of a table: the first of `rows` (the header), a
+/// delimiter line after `delimiter_prefix` with `alignment` (which also
+/// gives the number of columns), then the other rows; `count` of them in
+/// all. Every column is as wide as its widest cell (at least 3). Missing
+/// cells are empty, extra ones are dropped.
+pub(crate) fn aligned_rows<'a, I>(rows: I, count: usize, delimiter_prefix: &str, alignment: &[(bool, bool)]) -> Vec<String>
+where
+    I: Iterator<Item = (&'a str, &'a [String])> + Clone,
+{
+    let columns = alignment.len();
     let mut widths = vec![3usize; columns];
-    for (n, (_, cells)) in rows.iter().enumerate() {
-        if n != 1 {
-            for (w, cell) in widths.iter_mut().zip(cells) {
-                *w = (*w).max(display_width(cell));
-            }
+    for (_, cells) in rows.clone() {
+        for (w, cell) in widths.iter_mut().zip(cells) {
+            *w = (*w).max(display_width(cell));
         }
     }
-    rows.iter()
-        .enumerate()
-        .map(|(n, (prefix, cells))| {
-            let mut line = prefix.to_string();
+    let row_width = widths.iter().sum::<usize>() + 3 * columns + 1;
+    let mut out = Vec::with_capacity(count + 1);
+    for (n, (prefix, cells)) in rows.enumerate() {
+        let mut line = String::with_capacity(prefix.len() + row_width + 8);
+        line.push_str(prefix);
+        line.push('|');
+        for (col, &(left, right)) in alignment.iter().enumerate() {
+            let cell = cells.get(col).map_or("", String::as_str);
+            let gap = widths[col].saturating_sub(display_width(cell));
+            let (before, after) = match (left, right) {
+                (true, true) => (gap / 2, gap - gap / 2),
+                (false, true) => (gap, 0),
+                _ => (0, gap),
+            };
+            line.push(' ');
+            push_spaces(&mut line, before);
+            line.push_str(cell);
+            push_spaces(&mut line, after);
+            line.push_str(" |");
+        }
+        out.push(line);
+        if n == 0 {
+            let mut line = String::with_capacity(delimiter_prefix.len() + row_width);
+            line.push_str(delimiter_prefix);
             line.push('|');
-            for col in 0..columns {
-                let (left, right) = alignment[col];
-                let cell = cells.get(col).map_or("", String::as_str);
-                let body = if n == 1 {
-                    let dashes = "-".repeat(widths[col] - usize::from(left) - usize::from(right));
-                    format!(
-                        "{}{dashes}{}",
-                        if left { ":" } else { "" },
-                        if right { ":" } else { "" }
-                    )
-                } else if left && right {
-                    pad(cell, widths[col], true, true)
-                } else {
-                    pad(cell, widths[col], false, right)
-                };
+            for (col, &(left, right)) in alignment.iter().enumerate() {
                 line.push(' ');
-                line.push_str(&body);
+                if left {
+                    line.push(':');
+                }
+                for _ in 0..widths[col] - usize::from(left) - usize::from(right) {
+                    line.push('-');
+                }
+                if right {
+                    line.push(':');
+                }
                 line.push_str(" |");
             }
-            line
-        })
-        .collect()
+            out.push(line);
+        }
+    }
+    out
+}
+
+fn push_spaces(line: &mut String, n: usize) {
+    for _ in 0..n {
+        line.push(' ');
+    }
 }
 
 #[cfg(test)]

@@ -14,6 +14,8 @@
 #include <QTextBlock>
 #include <QTextDocument>
 
+#include <tuple>
+
 using vn::TextView;
 
 // Exposes the geometry the mouse tests need.
@@ -68,6 +70,14 @@ private Q_SLOTS:
     void middleClickPastesPrimarySelection();
     void pasteTextAtPlacesCaretAfter();
     void expandLineSelection();
+    void tableCommandsEditTheTableAsOneUndoStep();
+    void tableCommandsNeedMarkdownAndATable();
+    void tabMovesBetweenTableCells();
+    void enterAddsATableRow();
+    void insertingATable();
+    void tablesInFencedCodeAreLeftAlone();
+    void tableLinesAreFollowedAcrossEdits();
+    void tableEditsReplaceOnlyTheChangedLines();
     void cursorUndoAndRedo();
     void cursorHistoryDropsOnEditAndIsBounded();
     void moveLastSelectionToNextMatch();
@@ -894,6 +904,196 @@ void TestTextView::scrollBarOnlyWhenDocumentOverflows()
     QCOMPARE(m_view->verticalScrollBarPolicy(), Qt::ScrollBarAsNeeded);
     setText(QStringLiteral("short"));
     QCOMPARE(m_view->verticalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);
+}
+
+namespace {
+const QString smallTable = QStringLiteral("| a   | b   |\n| --- | --- |\n| 1   | 2   |");
+}
+
+void TestTextView::tableCommandsEditTheTableAsOneUndoStep()
+{
+    m_view->setMarkdownEditing(true);
+    setText(QStringLiteral("intro\n\n") + smallTable + QStringLiteral("\n\nend"));
+    place(4, 8); // In the second cell of the last row.
+    const vn::md::TableInfo info = m_view->tableAtCaret();
+    QVERIFY(info.found);
+    QCOMPARE(info.row, 1);
+    QCOMPARE(info.col, 1);
+    QVERIFY(m_view->editTable(vn::md::TableOp::ColumnRight));
+    QCOMPARE(text(), QStringLiteral("intro\n\n| a   | b   |     |\n| --- | --- | --- |\n| 1   | 2   |     |\n\nend"));
+    // The caret is in the new column of the same row.
+    QCOMPARE(m_view->textCursor().blockNumber(), 4);
+    QCOMPARE(m_view->textCursor().positionInBlock(), 14);
+    m_view->undo();
+    QCOMPARE(text(), QStringLiteral("intro\n\n") + smallTable + QStringLiteral("\n\nend"));
+    // Deleting the table takes its lines.
+    QVERIFY(m_view->editTable(vn::md::TableOp::DeleteTable));
+    QCOMPARE(text(), QStringLiteral("intro\n\n\nend"));
+}
+
+void TestTextView::tableCommandsNeedMarkdownAndATable()
+{
+    setText(smallTable);
+    place(0, 2);
+    QVERIFY(!m_view->tableAtCaret().found); // Not a Markdown view.
+    QVERIFY(!m_view->editTable(vn::md::TableOp::RowBelow));
+    m_view->setMarkdownEditing(true);
+    setText(QStringLiteral("plain | text |\n\n") + smallTable);
+    place(0, 3);
+    QVERIFY(!m_view->editTable(vn::md::TableOp::RowBelow));
+    place(4, 2);
+    m_view->setReadOnly(true);
+    QVERIFY(!m_view->editTable(vn::md::TableOp::RowBelow));
+}
+
+void TestTextView::tabMovesBetweenTableCells()
+{
+    m_view->setMarkdownEditing(true);
+    // Not aligned: Tab selects the next cell's text without rewriting.
+    const QString raw = QStringLiteral("|a|bb|\n|-|-|\n|1|2|");
+    setText(raw);
+    place(0, 2);
+    QTest::keyClick(m_view, Qt::Key_Tab);
+    QCOMPARE(m_view->textCursor().selectedText(), QStringLiteral("bb"));
+    QTest::keyClick(m_view, Qt::Key_Tab); // To the next row.
+    QCOMPARE(m_view->textCursor().selectedText(), QStringLiteral("1"));
+    QTest::keyClick(m_view, Qt::Key_Backtab);
+    QCOMPARE(m_view->textCursor().selectedText(), QStringLiteral("bb"));
+    QCOMPARE(text(), raw);
+    // After the last cell a row is added.
+    place(2, 1);
+    QTest::keyClick(m_view, Qt::Key_Tab);
+    QCOMPARE(m_view->textCursor().blockNumber(), 2);
+    QTest::keyClick(m_view, Qt::Key_Tab);
+    QCOMPARE(m_view->document()->blockCount(), 4);
+    QCOMPARE(m_view->textCursor().blockNumber(), 3);
+    // Outside a table Tab still indents.
+    setText(QStringLiteral("text"));
+    place(0, 0);
+    QTest::keyClick(m_view, Qt::Key_Tab);
+    QVERIFY(text() != QStringLiteral("text"));
+}
+
+void TestTextView::enterAddsATableRow()
+{
+    m_view->setMarkdownEditing(true);
+    setText(smallTable);
+    place(0, 3);
+    QTest::keyClick(m_view, Qt::Key_Return);
+    QCOMPARE(text(), QStringLiteral("| a   | b   |\n| --- | --- |\n|     |     |\n| 1   | 2   |"));
+    QCOMPARE(m_view->textCursor().blockNumber(), 2);
+    // Shift+Enter is an ordinary line break.
+    setText(smallTable);
+    place(2, 3);
+    QTest::keyClick(m_view, Qt::Key_Return, Qt::ShiftModifier);
+    QCOMPARE(m_view->document()->blockCount(), 4);
+}
+
+void TestTextView::insertingATable()
+{
+    m_view->setMarkdownEditing(true);
+    setText(QStringLiteral("para\nnext"));
+    place(0, 2);
+    m_view->insertTable(3, 2);
+    QCOMPARE(text(), QStringLiteral("para\n\n| Column 1 | Column 2 |\n| -------- | -------- |\n"
+                                    "|          |          |\n|          |          |\n\nnext"));
+    QCOMPARE(m_view->textCursor().selectedText(), QStringLiteral("Column 1"));
+    QVERIFY(m_view->tableAtCaret().found);
+    // On an empty line the table takes its place.
+    setText(QString());
+    m_view->insertTable(2, 1);
+    QCOMPARE(text(), QStringLiteral("| Column 1 |\n| -------- |\n|          |"));
+}
+
+void TestTextView::tablesInFencedCodeAreLeftAlone()
+{
+    m_view->setMarkdownEditing(true);
+    setText(QStringLiteral("```\n") + smallTable + QStringLiteral("\n```\n\n") + smallTable);
+    place(3, 3);
+    QVERIFY(!m_view->tableAtCaret().found);
+    QVERIFY(!m_view->editTable(vn::md::TableOp::RowBelow));
+    place(7, 3); // The table after the fence is one.
+    QVERIFY(m_view->tableAtCaret().found);
+    QCOMPARE(m_view->tableAtCaret().firstLine, 6);
+    // Taking the opening fence away frees the first table and encloses the
+    // second one (the fences are followed across edits).
+    QTextCursor c(m_doc->findBlockByNumber(0));
+    c.select(QTextCursor::BlockUnderCursor);
+    c.removeSelectedText();
+    place(2, 3);
+    QVERIFY(m_view->tableAtCaret().found);
+    QCOMPARE(m_view->tableAtCaret().firstLine, 1);
+    place(6, 3);
+    QVERIFY(!m_view->tableAtCaret().found);
+    // A tilde fence does not close a backtick one.
+    setText(QStringLiteral("```\n~~~\n") + smallTable);
+    place(3, 3);
+    QVERIFY(!m_view->tableAtCaret().found);
+}
+
+void TestTextView::tableLinesAreFollowedAcrossEdits()
+{
+    // The lines of the caret's table are kept from one ask to the next and
+    // patched by edits in them; edits around them take them back to the text.
+    m_view->setMarkdownEditing(true);
+    setText(QStringLiteral("text\n") + smallTable + QStringLiteral("\n| 3   | 4   |\nend"));
+    place(3, 3);
+    QCOMPARE(m_view->tableAtCaret().firstLine, 1);
+    QCOMPARE(m_view->tableAtCaret().rows, 3);
+    type(QStringLiteral("xx"));
+    QCOMPARE(m_view->tableAtCaret().rows, 3);
+    QVERIFY(!m_view->tableAtCaret().aligned);
+    QTest::keyClick(m_view, Qt::Key_Return); // A row inside: 4 rows.
+    QCOMPARE(m_view->tableAtCaret().rows, 4);
+    QCOMPARE(m_view->tableAtCaret().lastLine, 5);
+    // The line after the last row stops being one.
+    place(5, 13);
+    type(QStringLiteral("z"));
+    QVERIFY(!m_view->tableAtCaret().found);
+    place(4, 3);
+    QCOMPARE(m_view->tableAtCaret().rows, 3);
+    QCOMPARE(m_view->tableAtCaret().lastLine, 4);
+    // A line taken out above moves the table up; one put in moves it down.
+    QTextCursor c(m_doc->findBlockByNumber(0));
+    c.select(QTextCursor::BlockUnderCursor);
+    c.removeSelectedText();
+    c.deleteChar();
+    place(3, 3);
+    QCOMPARE(m_view->tableAtCaret().firstLine, 0);
+    c.insertText(QStringLiteral("| p | q |\n"));
+    place(4, 3);
+    QCOMPARE(m_view->tableAtCaret().firstLine, 1);
+    QCOMPARE(m_view->tableAtCaret().rows, 3);
+}
+
+void TestTextView::tableEditsReplaceOnlyTheChangedLines()
+{
+    // A realigned table is mostly as it was: only the lines that differ are
+    // replaced, so a long table's edit stays a small change of the document.
+    m_view->setMarkdownEditing(true);
+    setText(QStringLiteral("text\n\n") + smallTable + QStringLiteral("\n| 3 | 4 |\n\nend"));
+    QList<std::tuple<int, int, int>> changes;
+    connect(m_doc, &QTextDocument::contentsChange, this,
+            [&changes](int from, int removed, int added) { changes.append({from, removed, added}); });
+    place(5, 3);
+    QVERIFY(m_view->editTable(vn::md::TableOp::Realign));
+    QCOMPARE(m_doc->findBlockByNumber(5).text(), QStringLiteral("| 3   | 4   |"));
+    QCOMPARE(text(), QStringLiteral("text\n\n") + smallTable + QStringLiteral("\n| 3   | 4   |\n\nend"));
+    QCOMPARE(changes.size(), 1);
+    QCOMPARE(std::get<0>(changes.first()), m_doc->findBlockByNumber(5).position());
+    QCOMPARE(std::get<1>(changes.first()), 9);
+    QCOMPARE(std::get<2>(changes.first()), 13);
+    // A row added in the middle: the lines before it stay, as do the ones after.
+    changes.clear();
+    place(4, 3);
+    QVERIFY(m_view->editTable(vn::md::TableOp::RowAbove));
+    QCOMPARE(m_doc->blockCount(), 9);
+    QCOMPARE(changes.size(), 1);
+    QVERIFY(std::get<0>(changes.first()) >= m_doc->findBlockByNumber(4).position());
+    QVERIFY(std::get<2>(changes.first()) < 2 * 14);
+    // Undo puts the table back as it was, in one step.
+    m_view->undo();
+    QCOMPARE(text(), QStringLiteral("text\n\n") + smallTable + QStringLiteral("\n| 3   | 4   |\n\nend"));
 }
 
 QTEST_MAIN(TestTextView)

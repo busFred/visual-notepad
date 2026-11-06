@@ -358,6 +358,13 @@ QPushButton#BannerButton { background: @button; border: 1px solid @divider; bord
 QPushButton#BannerButton:hover { background: @buttonHover; }
 QPushButton#BannerButton:pressed { background: @panelTitle; }
 
+#TableToolbar { background: @surface; border: 1px solid @divider; border-radius: 3px; }
+QToolButton#TableToolButton { background: transparent; border: 1px solid transparent; border-radius: 2px; padding: 2px 6px; }
+QToolButton#TableToolButton:hover { background: @buttonHover; }
+QToolButton#TableToolButton:pressed, QToolButton#TableToolButton:checked { background: @panelTitle; }
+QToolButton#TableToolButton:disabled { color: @mutedText; }
+QToolButton#TableToolButton::menu-indicator { image: none; }
+
 #Welcome { background: @editor; }
 #Welcome QLabel#WelcomeTitle { color: @mutedText; }
 #Welcome QLabel#WelcomeHeading { color: @mutedText; font-weight: 600; padding-top: 4px; }

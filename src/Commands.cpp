@@ -49,6 +49,7 @@ QList<Command> build()
     const QString edit = tr("Edit");
     const QString selection = tr("Selection");
     const QString format = tr("Format");
+    const QString table = tr("Table");
     const QString view = tr("View");
     const QString help = tr("Help");
     // Titles carry the menu mnemonic; each letter is unique within its menu
@@ -127,6 +128,29 @@ QList<Command> build()
         {QStringLiteral("format.taskList"), format, tr("&Task List"), {k("Alt+C")}},
         {QStringLiteral("format.link"), format, tr("Lin&k"), {}},
         {QStringLiteral("format.codeBlock"), format, tr("Code Bl&ock"), {}},
+
+        // Pipe tables (Format > Table, and the table toolbar). No default
+        // shortcuts: Tab, Shift+Tab and Enter work inside a table anyway.
+        {QStringLiteral("table.insert"), table, tr("Insert &Table…"), {}},
+        {QStringLiteral("table.rowAbove"), table, tr("Insert Row &Above"), {}},
+        {QStringLiteral("table.rowBelow"), table, tr("Insert Row &Below"), {}},
+        {QStringLiteral("table.columnLeft"), table, tr("Insert Column &Left"), {}},
+        {QStringLiteral("table.columnRight"), table, tr("Insert Column &Right"), {}},
+        {QStringLiteral("table.deleteRow"), table, tr("Delete R&ow"), {}},
+        {QStringLiteral("table.deleteColumn"), table, tr("Delete &Column"), {}},
+        {QStringLiteral("table.deleteTable"), table, tr("&Delete Table"), {}},
+        {QStringLiteral("table.moveRowUp"), table, tr("Move Row &Up"), {}},
+        {QStringLiteral("table.moveRowDown"), table, tr("Move Row Dow&n"), {}},
+        {QStringLiteral("table.moveColumnLeft"), table, tr("Mo&ve Column Left"), {}},
+        {QStringLiteral("table.moveColumnRight"), table, tr("Move Column Ri&ght"), {}},
+        {QStringLiteral("table.alignNone"), table, tr("Align Column &Default"), {}},
+        {QStringLiteral("table.alignLeft"), table, tr("Align Column &Left"), {}},
+        {QStringLiteral("table.alignCenter"), table, tr("Align Column &Center"), {}},
+        {QStringLiteral("table.alignRight"), table, tr("Align Column &Right"), {}},
+        {QStringLiteral("table.sortAscending"), table, tr("&Sort Ascending"), {}},
+        {QStringLiteral("table.sortDescending"), table, tr("Sort Desc&ending"), {}},
+        {QStringLiteral("table.transpose"), table, tr("Trans&pose"), {}},
+        {QStringLiteral("table.realign"), table, tr("Real&ign"), {}},
 
         {QStringLiteral("view.outline"), view, tr("&Outline"), {k("Ctrl+Shift+B")}},
         {QStringLiteral("view.modeSource"), view, tr("&Source"), {}},

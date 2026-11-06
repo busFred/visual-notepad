@@ -23,7 +23,11 @@
 #include <QDir>
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDockWidget>
+#include <QFormLayout>
+#include <QSpinBox>
 #include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -428,6 +432,27 @@ void MainWindow::createActions()
                 tab->editor()->formatMarkdown(format);
         })->setEnabled(false);
     }
+    // Pipe tables. Always enabled for Markdown (their shortcuts must work);
+    // the Table menu greys out what does not apply while it is open.
+    using TableOp = md::TableOp;
+    static const QList<std::pair<const char *, TableOp>> tableOps{
+        {"table.rowAbove", TableOp::RowAbove}, {"table.rowBelow", TableOp::RowBelow},
+        {"table.columnLeft", TableOp::ColumnLeft}, {"table.columnRight", TableOp::ColumnRight},
+        {"table.deleteRow", TableOp::DeleteRow}, {"table.deleteColumn", TableOp::DeleteColumn},
+        {"table.deleteTable", TableOp::DeleteTable}, {"table.moveRowUp", TableOp::MoveRowUp},
+        {"table.moveRowDown", TableOp::MoveRowDown}, {"table.moveColumnLeft", TableOp::MoveColumnLeft},
+        {"table.moveColumnRight", TableOp::MoveColumnRight}, {"table.alignNone", TableOp::AlignNone},
+        {"table.alignLeft", TableOp::AlignLeft}, {"table.alignCenter", TableOp::AlignCenter},
+        {"table.alignRight", TableOp::AlignRight}, {"table.sortAscending", TableOp::SortAscending},
+        {"table.sortDescending", TableOp::SortDescending}, {"table.transpose", TableOp::Transpose},
+        {"table.realign", TableOp::Realign}};
+    for (const auto &[id, op] : tableOps) {
+        makeAction(QLatin1String(id), [this, op = op] {
+            if (auto *tab = currentTab(); tab && tab->isMarkdown())
+                tab->editor()->editTable(op);
+        })->setEnabled(false);
+    }
+    makeAction(QStringLiteral("table.insert"), [this] { insertTable(); })->setEnabled(false);
     makeAction(QStringLiteral("view.zoomIn"), [this] { zoom(1); });
     makeAction(QStringLiteral("view.zoomOut"), [this] { zoom(-1); });
     makeAction(QStringLiteral("view.zoomReset"), [this] { zoom(0); });
@@ -500,6 +525,24 @@ void MainWindow::createMenus()
                  "format.heading6", "format.headingUp", "format.headingDown", "-", "format.quote",
                  "format.orderedList", "format.bulletList", "format.taskList", "-", "format.link",
                  "format.codeBlock"});
+    format->addSeparator();
+    QMenu *table = format->addMenu(tr("T&able"));
+    add(table, {"table.insert", "-", "table.rowAbove", "table.rowBelow", "table.columnLeft", "table.columnRight", "-",
+                "table.deleteRow", "table.deleteColumn", "table.deleteTable", "-", "table.moveRowUp",
+                "table.moveRowDown", "table.moveColumnLeft", "table.moveColumnRight", "-"});
+    QMenu *align = table->addMenu(tr("A&lign Column"));
+    add(align, {"table.alignNone", "table.alignLeft", "table.alignCenter", "table.alignRight"});
+    add(table, {"table.sortAscending", "table.sortDescending", "table.transpose", "table.realign"});
+    connect(table, &QMenu::aboutToShow, this, &MainWindow::updateTableActions);
+    connect(table, &QMenu::aboutToHide, this, [this] {
+        // Shortcuts need the actions enabled again (while Markdown is shown).
+        const DocumentTab *tab = currentTab();
+        const bool markdown = tab && tab->isMarkdown();
+        for (auto it = m_actions.cbegin(); it != m_actions.cend(); ++it) {
+            if (it.key().startsWith(QLatin1String("table.")))
+                it.value()->setEnabled(markdown);
+        }
+    });
 
     QMenu *view = menuBar()->addMenu(menus.at(4));
     add(view, {"view.outline", "-", "view.modeSource", "view.modeSplit", "view.modeVisual", "-", "view.splitEditor",
@@ -2481,6 +2524,64 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
     });
 }
 
+void MainWindow::updateTableActions()
+{
+    DocumentTab *tab = currentTab();
+    TextView *editor = tab && tab->isMarkdown() ? tab->editor() : nullptr;
+    const md::TableInfo info = editor ? editor->tableAtCaret() : md::TableInfo();
+    const bool editable = editor && !editor->isReadOnly();
+    const bool in = editable && info.found;
+    const auto enable = [this](const char *id, bool on) { action(QLatin1String(id))->setEnabled(on); };
+    enable("table.insert", editable);
+    using Op = md::TableOp;
+    const std::pair<const char *, Op> ops[] = {
+        {"table.rowAbove", Op::RowAbove}, {"table.rowBelow", Op::RowBelow},
+        {"table.columnLeft", Op::ColumnLeft}, {"table.columnRight", Op::ColumnRight},
+        {"table.deleteRow", Op::DeleteRow}, {"table.deleteColumn", Op::DeleteColumn},
+        {"table.deleteTable", Op::DeleteTable}, {"table.moveRowUp", Op::MoveRowUp},
+        {"table.moveRowDown", Op::MoveRowDown}, {"table.moveColumnLeft", Op::MoveColumnLeft},
+        {"table.moveColumnRight", Op::MoveColumnRight}, {"table.sortAscending", Op::SortAscending},
+        {"table.sortDescending", Op::SortDescending}, {"table.transpose", Op::Transpose},
+        {"table.realign", Op::Realign}};
+    for (const auto &[id, op] : ops)
+        enable(id, editable && md::tableOpAvailable(info, op));
+    const std::pair<const char *, md::TableAlignment> alignments[] = {{"table.alignNone", md::TableAlignment::None},
+                                                                       {"table.alignLeft", md::TableAlignment::Left},
+                                                                       {"table.alignCenter", md::TableAlignment::Center},
+                                                                       {"table.alignRight", md::TableAlignment::Right}};
+    for (const auto &[id, alignment] : alignments) {
+        QAction *a = action(QLatin1String(id));
+        a->setEnabled(in);
+        a->setCheckable(true);
+        a->setChecked(in && info.alignment == alignment);
+    }
+}
+
+void MainWindow::insertTable()
+{
+    DocumentTab *tab = currentTab();
+    if (!tab || !tab->isMarkdown() || tab->editor()->isReadOnly())
+        return;
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Insert Table"));
+    auto *form = new QFormLayout(&dialog);
+    auto *rows = new QSpinBox(&dialog);
+    rows->setRange(2, 200);
+    rows->setValue(3);
+    rows->setToolTip(tr("Including the header row"));
+    auto *columns = new QSpinBox(&dialog);
+    columns->setRange(1, 50);
+    columns->setValue(3);
+    form->addRow(tr("&Rows:"), rows);
+    form->addRow(tr("&Columns:"), columns);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() == QDialog::Accepted)
+        tab->editor()->insertTable(rows->value(), columns->value());
+}
+
 void MainWindow::updateModeControls()
 {
     // Every group's button shows its own tab; the menu actions follow the
@@ -2499,6 +2600,10 @@ void MainWindow::updateModeControls()
     action(QStringLiteral("edit.format"))->setEnabled(markdown);
     for (auto it = m_actions.cbegin(); it != m_actions.cend(); ++it) {
         if (it.key().startsWith(QLatin1String("format.")))
+            it.value()->setEnabled(markdown);
+    }
+    for (auto it = m_actions.cbegin(); it != m_actions.cend(); ++it) {
+        if (it.key().startsWith(QLatin1String("table.")))
             it.value()->setEnabled(markdown);
     }
     for (QAction *action : m_modeGroup->actions())

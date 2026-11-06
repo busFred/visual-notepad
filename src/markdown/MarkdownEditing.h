@@ -41,6 +41,64 @@ struct LinkTarget
 };
 
 QList<LinkTarget> linkTargets(const QString &text);
+
+// Pipe tables, as text (the work is done by the Rust core, table.rs). Lines
+// are 0-based; columns are UTF-16 offsets into a line. Rows count from the
+// header (0), which includes the delimiter line; columns from 0.
+enum class TableOp {
+    RowAbove, RowBelow, ColumnLeft, ColumnRight,
+    DeleteRow, DeleteColumn, DeleteTable,
+    MoveRowUp, MoveRowDown, MoveColumnLeft, MoveColumnRight,
+    AlignNone, AlignLeft, AlignCenter, AlignRight,
+    SortAscending, SortDescending, Transpose, Realign,
+    SetCell
+};
+enum class TableAlignment { None, Left, Center, Right };
+
+struct TableInfo
+{
+    bool found = false;
+    int firstLine = 0;
+    int lastLine = 0; // Included.
+    int rows = 0;     // With the header.
+    int cols = 0;
+    int row = 0;      // Of the position asked about.
+    int col = 0;
+    TableAlignment alignment = TableAlignment::None; // Of that column.
+    bool aligned = true; // Realign would change nothing.
+};
+
+struct TableEdit
+{
+    bool ok = false;
+    bool changed = false;
+    bool remove = false; // The lines go, nothing replaces them.
+    int firstLine = 0;
+    int lastLine = 0; // Included; replaced by `replacement` (lines joined by \n).
+                      // Only the lines that change: a part of the table.
+    QString replacement;
+    int caretLine = 0; // In the text after the edit.
+    int caretColumn = 0;
+};
+
+struct TableCell
+{
+    bool found = false;
+    int line = 0;
+    int start = 0; // Columns of the cell's text in the line.
+    int end = 0;
+    QString text;
+};
+
+// Whether `op` applies to the cell `info` names (not the header row for
+// "above", not the only column for delete, ...).
+bool tableOpAvailable(const TableInfo &info, TableOp op);
+// `text` is the whole document with "\n" line breaks.
+TableInfo tableInfo(const QString &text, int line, int column);
+// `row` and `col` name the cell the operation is about; `arg` is the new
+// text of the cell for SetCell.
+TableEdit tableEdit(const QString &text, int line, TableOp op, int row, int col, const QString &arg = {});
+TableCell tableCell(const QString &text, int line, int row, int col);
 QString formatDocument(const QString &text);
 QString rebaseLinks(const QString &text, const QString &fromDir, const QString &toDir);
 // GitHub-style anchors of the headings in `text` (lower case), plus explicit

@@ -6,21 +6,25 @@
 #include "ImageViewer.h"
 #include "MarkdownModel.h"
 #include "RemoteImages.h"
+#include "TableToolbar.h"
 
 #include <QApplication>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QTimer>
 #include <QToolTip>
 
 #include <algorithm>
 #include <optional>
+#include <utility>
 
 namespace vn {
 
@@ -78,8 +82,11 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
     setLineNumbersVisible(false);
     // The edited block has its own shading instead.
     setHighlightCurrentLine(false);
+    // A table in source form is realigned when the caret leaves it.
+    setRealignTablesOnLeave(true);
     setTextMargins(sideMargin, sideMargin, topMargin);
     viewport()->setMouseTracking(true);
+    connect(this, &TextView::scrolled, this, &VisualView::scheduleToolbarUpdate);
     connect(model, &MarkdownModel::optionsChanged, this, [this] {
         clearRenderCache();
         relayout();
@@ -170,6 +177,7 @@ void VisualView::setHighlightActiveBlock(bool on)
 
 void VisualView::rowsMayHaveChanged()
 {
+    scheduleToolbarUpdate();
     // A hidden view (Source mode) waits until it is shown, so edits don't
     // re-parse the document for nothing.
     if (!isVisible()) {
@@ -182,6 +190,8 @@ void VisualView::rowsMayHaveChanged()
 void VisualView::showEvent(QShowEvent *event)
 {
     TextView::showEvent(event);
+    m_hasFocus = hasFocus();
+    scheduleToolbarUpdate();
     // Edits made while hidden are parsed once now rather than shown stale,
     // but a large document with nothing usable parsed is parsed on a worker
     // (its source shows meanwhile).
@@ -195,6 +205,7 @@ void VisualView::showEvent(QShowEvent *event)
 void VisualView::hideEvent(QHideEvent *event)
 {
     TextView::hideEvent(event);
+    scheduleToolbarUpdate();
     m_showsParse = false;
     m_unpainted = true;
 }
@@ -320,6 +331,271 @@ void VisualView::resizeEvent(QResizeEvent *event)
 {
     TextView::resizeEvent(event);
     layoutBanner();
+    scheduleToolbarUpdate();
+}
+
+// ---------------------------------------------------------------------------
+// Table toolbar
+
+void VisualView::scheduleToolbarUpdate()
+{
+    if (m_toolbarUpdatePending)
+        return;
+    m_toolbarUpdatePending = true;
+    QTimer::singleShot(0, this, [this] {
+        m_toolbarUpdatePending = false;
+        updateTableToolbar();
+    });
+}
+
+void VisualView::updateTableToolbar()
+{
+    const auto hideToolbar = [this] {
+        if (m_tableToolbar)
+            m_tableToolbar->hide();
+    };
+    // The box over a cell follows its cell (the view scrolled, was resized or
+    // re-rendered); one whose cell is gone ends there.
+    if (m_cellEditor && !placeCellEditor())
+        closeCellEditor(TableCellEditor::Exit::FocusLost);
+    if (!isVisible() || isReadOnly() || !(m_hasFocus || m_cellEditor) || cursorCount() != 1 || !markdownEditing())
+        return hideToolbar();
+    const md::TableInfo info = tableAtCaret();
+    if (!info.found)
+        return hideToolbar();
+    qreal firstTop = 0;
+    qreal firstBottom = 0;
+    qreal lastTop = 0;
+    qreal lastBottom = 0;
+    const bool firstShown = lineBounds(info.firstLine, &firstTop, &firstBottom);
+    const bool lastShown = lineBounds(info.lastLine, &lastTop, &lastBottom);
+    if (!firstShown && !lastShown && textCursor().blockNumber() > info.lastLine)
+        return hideToolbar();
+
+    if (!m_tableToolbar) {
+        m_tableToolbar = new TableToolbar(viewport());
+        connect(m_tableToolbar, &TableToolbar::operation, this, &VisualView::toolbarOperation);
+        connect(m_tableToolbar->moreMenu(), &QMenu::aboutToShow, this, [this] {
+            m_tableToolbar->moreMenu()->clear();
+            populateTableMenu(m_tableToolbar->moreMenu());
+        });
+    }
+    m_tableToolbar->setState(info);
+    m_tableToolbar->adjustSize();
+    const QSize size = m_tableToolbar->size();
+    constexpr int gap = 4;
+    // Above the table; else below it; else (it covers the viewport) at the top.
+    int y = 2;
+    if (firstShown && firstTop - size.height() - gap >= 0)
+        y = int(firstTop) - size.height() - gap;
+    else if (lastShown && lastBottom + size.height() + gap <= viewport()->height())
+        y = int(lastBottom) + gap;
+    const int x = qBound(0, int(textLeft() - activeBarInset), qMax(0, viewport()->width() - size.width()));
+    m_tableToolbar->move(x, y);
+    m_tableToolbar->show();
+    m_tableToolbar->raise();
+}
+
+void VisualView::toolbarOperation(md::TableOp op)
+{
+    // Choosing the alignment a column has goes back to the default.
+    const md::TableInfo info = tableAtCaret();
+    const struct
+    {
+        md::TableOp op;
+        md::TableAlignment alignment;
+    } same[] = {{md::TableOp::AlignLeft, md::TableAlignment::Left},
+                {md::TableOp::AlignCenter, md::TableAlignment::Center},
+                {md::TableOp::AlignRight, md::TableAlignment::Right}};
+    for (const auto &s : same) {
+        if (s.op == op && info.found && info.alignment == s.alignment)
+            op = md::TableOp::AlignNone;
+    }
+    editTable(op);
+    setFocus();
+}
+
+// ---------------------------------------------------------------------------
+// Cell editing
+
+bool VisualView::tableCellPressed(const Row &r, const QPointF &point, QMouseEvent *event)
+{
+    if (isReadOnly() || !markdownEditing() || (event->modifiers() & ~Qt::KeypadModifier))
+        return false;
+    const Render *render = rendered(r);
+    if (!render)
+        return false;
+    const auto hit = render->block->tableCellAt(point);
+    if (!hit)
+        return false;
+    // Not consumed: the press goes on to place the caret and start a drag;
+    // mouseReleaseEvent decides whether it was a click.
+    m_pendingCell = {true, r.firstLine, hit->row, hit->col, event->position().toPoint(), textCursor()};
+    return false;
+}
+
+bool VisualView::openCellEditor(int line, int row, int col)
+{
+    if (m_cellEditor)
+        closeCellEditor(TableCellEditor::Exit::Commit);
+    const int index = rowOfLine(line);
+    if (index < 0 || index >= rowCount())
+        return false;
+    const Row r = this->row(index);
+    if (!r.rendered || r.firstLine != line)
+        return false;
+    const Render *render = rendered(r);
+    if (!render)
+        return false;
+    // The block must be one pipe table (and not, say, front matter, shown as
+    // a table), the rendered one with the cells the source has.
+    const md::TableInfo info = md::tableInfo(render->source, 0, 0);
+    const QSize cells = render->block->tableCells();
+    if (!info.found || info.firstLine != 0 || info.lastLine != r.lastLine - r.firstLine || cells.height() != info.rows
+        || cells.width() != info.cols || row >= info.rows || col >= info.cols)
+        return false;
+    const md::TableCell cell = md::tableCell(render->source, 0, row, col);
+    if (!cell.found)
+        return false;
+
+    m_cell = {line, row, col, cell.text};
+    if (!m_cellEditor) {
+        m_cellEditor = new TableCellEditor(viewport());
+        connect(m_cellEditor, &TableCellEditor::finished, this, [this](TableCellEditor::Exit how) { closeCellEditor(how); });
+    }
+    m_cellEditor->setFont(context().font);
+    m_cellEditor->open(cell.text);
+    if (!placeCellEditor()) {
+        TableCellEditor *editor = m_cellEditor;
+        m_cellEditor = nullptr;
+        m_cell = {};
+        delete editor;
+        return false;
+    }
+    setTableTarget(line, row, col);
+    m_cellEditor->show();
+    m_cellEditor->raise();
+    m_cellEditor->setFocus(Qt::MouseFocusReason);
+    scheduleToolbarUpdate();
+    return true;
+}
+
+bool VisualView::placeCellEditor()
+{
+    if (!m_cellEditor || m_cell.line < 0)
+        return false;
+    const int index = rowOfLine(m_cell.line);
+    if (index < 0 || index >= rowCount())
+        return false;
+    const Row r = row(index);
+    if (!r.rendered || r.firstLine != m_cell.line)
+        return false;
+    const Render *render = rendered(r);
+    if (!render)
+        return false;
+    const md::TableCell cell = md::tableCell(render->source, 0, m_cell.row, m_cell.col);
+    const auto rect = render->block->tableCellRect(m_cell.row, m_cell.col);
+    if (!cell.found || !rect || cell.text != m_cell.original)
+        return false;
+    // The cell's line is where the view scrolls to when the cell is out of view.
+    const int sourceLine = m_cell.line + (m_cell.row == 0 ? 0 : m_cell.row + 1);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        qreal top = 0;
+        qreal bottom = 0;
+        if (lineBounds(m_cell.line, &top, &bottom)) {
+            const qreal y = top + rect->top();
+            if (y + rect->height() > 0 && y < viewport()->height()) {
+                const int width = qBound(60, int(rect->width()), qMax(60, viewport()->width() - int(textLeft() + rect->left())));
+                m_cellEditor->place(QPoint(int(textLeft() + rect->left()), int(y)), width, int(rect->height()));
+                return true;
+            }
+        }
+        if (attempt == 0)
+            scrollToLine(sourceLine);
+    }
+    return false;
+}
+
+void VisualView::tableTargetEditing()
+{
+    // A command of the table (the toolbar, a menu) is about to change it: the
+    // text typed so far goes in first.
+    closeCellEditor(TableCellEditor::Exit::Commit);
+}
+
+void VisualView::closeCellEditor(TableCellEditor::Exit how)
+{
+    using Exit = TableCellEditor::Exit;
+    if (!m_cellEditor)
+        return;
+    // Forget the box first: closing it moves the focus, which ends it again.
+    TableCellEditor *editor = m_cellEditor;
+    m_cellEditor = nullptr;
+    const CellTarget cell = m_cell;
+    m_cell = {};
+    setTableTarget(-1);
+    const QString text = editor->toPlainText();
+    editor->hide();
+    editor->deleteLater();
+    if (how != Exit::FocusLost)
+        setFocus(Qt::OtherFocusReason);
+
+    bool changed = false;
+    if (how != Exit::Cancel && text != cell.original)
+        changed = editTableAt(cell.line, md::TableOp::SetCell, cell.row, cell.col, text, false);
+    if (changed)
+        m_model->flush(); // Show the new text (and widths) now.
+    scheduleToolbarUpdate();
+
+    // Tab, Shift+Tab and the arrows go on to the next cell.
+    if (how == Exit::Commit || how == Exit::Cancel || how == Exit::FocusLost)
+        return;
+    const md::TableCell now = tableCellOf(cell.line, cell.row, cell.col);
+    if (!now.found)
+        return;
+    const md::TableInfo info = tableInfoAt(now.line, now.start);
+    int row = cell.row;
+    int col = cell.col;
+    switch (how) {
+    case Exit::Next:
+        if (col + 1 < info.cols) {
+            ++col;
+        } else if (row + 1 < info.rows) {
+            ++row;
+            col = 0;
+        } else {
+            // Past the last cell: a new row.
+            if (!editTableAt(cell.line, md::TableOp::RowBelow, row, 0, {}, false))
+                return;
+            m_model->flush();
+            ++row;
+            col = 0;
+        }
+        break;
+    case Exit::Previous:
+        if (col > 0) {
+            --col;
+        } else if (row > 0) {
+            --row;
+            col = info.cols - 1;
+        } else {
+            return;
+        }
+        break;
+    case Exit::Up:
+        if (row == 0)
+            return;
+        --row;
+        break;
+    case Exit::Down:
+        if (row + 1 >= info.rows)
+            return;
+        ++row;
+        break;
+    default:
+        return;
+    }
+    openCellEditor(cell.line, row, col);
 }
 
 void VisualView::rebuildRows()
@@ -788,7 +1064,19 @@ QTextCursor VisualView::lineUnitAt(int position) const
 void VisualView::mouseReleaseEvent(QMouseEvent *event)
 {
     const bool wasSelecting = isMouseSelecting();
+    const PendingCell pending = std::exchange(m_pendingCell, PendingCell());
     TextView::mouseReleaseEvent(event);
+    if (pending.active && event->button() == Qt::LeftButton && !hasSelection() && !isReadOnly()
+        && (event->position().toPoint() - pending.pos).manhattanLength() <= QApplication::startDragDistance()) {
+        // A click on a cell of a rendered table: its box, not the table's
+        // source. The caret goes back to where it was.
+        const QTextCursor clicked = textCursor();
+        setTextCursor(pending.caret);
+        if (openCellEditor(pending.line, pending.row, pending.col))
+            return;
+        setTextCursor(clicked);
+    }
+    realignLeftTable();
     // Editable: the blocks the selection touches open for editing now.
     if (wasSelecting && !isReadOnly())
         relayout();
@@ -858,7 +1146,7 @@ bool VisualView::renderedRowPressed(const Row &r, const QPointF &point, QMouseEv
         return false;
     const QString anchor = block->anchorAt(point);
     if (anchor.isEmpty())
-        return openPicture(block, point, event);
+        return openPicture(block, point, event) || tableCellPressed(r, point, event);
     if (anchor.startsWith(QLatin1String("vn-task:"))) {
         toggleTask(anchor.section(u':', 1).toInt());
         return true;
@@ -954,6 +1242,8 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
 void VisualView::focusInEvent(QFocusEvent *event)
 {
     TextView::focusInEvent(event);
+    m_hasFocus = true;
+    scheduleToolbarUpdate();
     rebuildRows();
     viewport()->update();
 }
@@ -965,6 +1255,8 @@ void VisualView::focusOutEvent(QFocusEvent *event)
     // for those, close it when focus really moves elsewhere.
     if (event->reason() == Qt::PopupFocusReason)
         return;
+    m_hasFocus = false;
+    scheduleToolbarUpdate();
     rebuildRows();
     viewport()->update();
 }

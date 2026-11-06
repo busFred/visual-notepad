@@ -10,6 +10,8 @@
 #include <QObject>
 #include <QPair>
 #include <QPointF>
+#include <QRectF>
+#include <QSize>
 #include <QString>
 #include <QStringList>
 #include <QTextDocument>
@@ -20,6 +22,7 @@
 #include <vector>
 
 class QPainter;
+class QTextTable;
 
 namespace vn {
 
@@ -113,6 +116,23 @@ public:
     // source for now) or remote pictures downloading (shown as missing).
     bool isPending() const { return m_pending; }
 
+    // A cell of the one pipe table a block of rich text is (see
+    // tableCells): its row (0 is the header) and column, and its rectangle
+    // relative to the block's top-left.
+    struct TableCellHit
+    {
+        int row = -1;
+        int col = -1;
+        QRectF rect;
+    };
+    // The table's size, or (0, 0) if the block is not exactly one table (text
+    // around it, two tables, a table in a table).
+    QSize tableCells() const;
+    // The cell at a point relative to the block's top-left, if it is in the table.
+    std::optional<TableCellHit> tableCellAt(const QPointF &point) const;
+    // The rectangle of a cell, relative to the block's top-left.
+    std::optional<QRectF> tableCellRect(int row, int col) const;
+
     // A picture the viewer can enlarge: a local file (path), a downloaded
     // one (url), or a generated one (math, diagram; both empty).
     struct Picture
@@ -152,6 +172,7 @@ private:
     static std::unique_ptr<RenderedBlock> codeBox(std::unique_ptr<RenderedBlock> result, const QString &source,
                                                   const RenderContext &context);
     QPointF contentOffset() const;
+    QTextTable *theTable() const;
     void collectLineAnchors(int sourceLines);
 
     Kind m_kind = Kind::Empty;
