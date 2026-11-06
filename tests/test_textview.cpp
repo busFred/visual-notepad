@@ -2,6 +2,7 @@
 #include "Theme.h"
 #include "Settings.h"
 #include "editor/DocumentLayout.h"
+#include "editor/TableSizePicker.h"
 #include "editor/TextView.h"
 
 #include <QApplication>
@@ -10,6 +11,8 @@
 #include <QClipboard>
 #include <QTemporaryDir>
 #include <QScrollBar>
+#include <QMenu>
+#include <QMouseEvent>
 #include <QTest>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -78,6 +81,9 @@ private Q_SLOTS:
     void tablesInFencedCodeAreLeftAlone();
     void tableLinesAreFollowedAcrossEdits();
     void tableEditsReplaceOnlyTheChangedLines();
+    void htmlTablesAreEditedToo();
+    void tablesConvertBetweenPipesAndHtml();
+    void tableSizePickerPicksASize();
     void cursorUndoAndRedo();
     void cursorHistoryDropsOnEditAndIsBounded();
     void moveLastSelectionToNextMatch();
@@ -1107,6 +1113,128 @@ void TestTextView::tableEditsReplaceOnlyTheChangedLines()
     // Undo puts the table back as it was, in one step.
     m_view->undo();
     QCOMPARE(text(), QStringLiteral("text\n\n") + smallTable + QStringLiteral("\n| 3   | 4   |\n\nend"));
+}
+
+namespace {
+
+namespace md = vn::md;
+
+const QString htmlTable = QStringLiteral("<table>\n"
+                                         "  <tr>\n"
+                                         "    <th>Name</th>\n"
+                                         "    <th>Qty</th>\n"
+                                         "  </tr>\n"
+                                         "  <tr>\n"
+                                         "    <td>pear</td>\n"
+                                         "    <td>3</td>\n"
+                                         "  </tr>\n"
+                                         "</table>");
+
+} // namespace
+
+void TestTextView::htmlTablesAreEditedToo()
+{
+    m_view->setMarkdownEditing(true);
+    setText(QStringLiteral("text\n\n") + htmlTable + QStringLiteral("\n\nend"));
+    // The caret in "pear" (line 8): row 1, column 0 of an HTML table.
+    place(8, 9);
+    md::TableInfo info = m_view->tableAtCaret();
+    QVERIFY(info.found && info.html);
+    QCOMPARE(info.rows, 2);
+    QCOMPARE(info.cols, 2);
+    QCOMPARE(info.row, 1);
+    QCOMPARE(info.col, 0);
+    QCOMPARE(info.firstLine, 2);
+    QCOMPARE(info.lastLine, 11);
+    QVERIFY(!md::tableOpAvailable(info, md::TableOp::Realign));
+    QVERIFY(!md::tableOpAvailable(info, md::TableOp::ToHtml));
+    // Not on a line of the table, or in plain text: no table.
+    place(0, 1);
+    QVERIFY(!m_view->tableAtCaret().found);
+    // A row below: the same layout, empty cells, one undo step.
+    place(8, 9);
+    QVERIFY(m_view->editTable(md::TableOp::RowBelow));
+    QCOMPARE(text(), QStringLiteral("text\n\n<table>\n  <tr>\n    <th>Name</th>\n    <th>Qty</th>\n  </tr>\n"
+                                    "  <tr>\n    <td>pear</td>\n    <td>3</td>\n  </tr>\n"
+                                    "  <tr>\n    <td></td>\n    <td></td>\n  </tr>\n</table>\n\nend"));
+    m_view->undo();
+    QCOMPARE(text(), QStringLiteral("text\n\n") + htmlTable + QStringLiteral("\n\nend"));
+    // Enter and Tab are the source's own in HTML: no row, no cell jump.
+    place(8, 9);
+    QTest::keyClick(m_view, Qt::Key_Return);
+    QCOMPARE(m_doc->blockCount(), 15);
+    m_view->undo();
+    // A cell is written as given; a line break is a <br>.
+    place(8, 9);
+    info = m_view->tableAtCaret();
+    QVERIFY(m_view->editTable(md::TableOp::SetCell, QStringLiteral("big\npear")));
+    QCOMPARE(m_doc->findBlockByNumber(8).text(), QStringLiteral("    <td>big<br>pear</td>"));
+    // Moving to a cell selects its text.
+    QVERIFY(m_view->moveToTableCell(2, 1, 1));
+    QCOMPARE(m_view->textCursor().selectedText(), QStringLiteral("3"));
+}
+
+void TestTextView::tablesConvertBetweenPipesAndHtml()
+{
+    m_view->setMarkdownEditing(true);
+    // A pipe table with a paragraph right under it: the HTML gets a blank
+    // line after it, or the paragraph would be part of the HTML block.
+    setText(QStringLiteral("| a | **b** |\n| --- | :-: |\n| 1 | 2 |\nafter"));
+    place(2, 3);
+    md::TableInfo info = m_view->tableAtCaret();
+    QVERIFY(info.found && !info.html);
+    QVERIFY(md::tableOpAvailable(info, md::TableOp::ToHtml));
+    QVERIFY(!md::tableOpAvailable(info, md::TableOp::ToPipe));
+    QVERIFY(m_view->editTable(md::TableOp::ToHtml));
+    const QString html = text();
+    QVERIFY2(html.startsWith(QLatin1String("<table>\n")), qPrintable(html));
+    QVERIFY2(html.contains(QLatin1String("<strong>b</strong>")), qPrintable(html));
+    QVERIFY2(html.contains(QLatin1String("align=\"center\"")), qPrintable(html));
+    QVERIFY2(html.endsWith(QLatin1String("</table>\n\nafter")), qPrintable(html));
+    // And back.
+    place(1, 3);
+    info = m_view->tableAtCaret();
+    QVERIFY(info.found && info.html);
+    QVERIFY(md::tableOpAvailable(info, md::TableOp::ToPipe));
+    QVERIFY(m_view->editTable(md::TableOp::ToPipe));
+    QVERIFY2(text().startsWith(QLatin1String("| a ")), qPrintable(text()));
+    QVERIFY2(text().contains(QLatin1String("<strong>b</strong>")), qPrintable(text()));
+    QVERIFY2(text().endsWith(QLatin1String("|\n\nafter")), qPrintable(text()));
+}
+
+void TestTextView::tableSizePickerPicksASize()
+{
+    QMenu menu;
+    QList<QPair<int, int>> inserted;
+    QMenu *sub = vn::addInsertTableMenu(&menu, [&inserted](int rows, int columns) { inserted.append({rows, columns}); });
+    QCOMPARE(sub->actions().size(), 3); // The grid, a separator, Custom Size...
+    QVERIFY(sub->actions().last()->text().contains(QLatin1String("Custom")));
+    auto *picker = sub->findChild<vn::TableSizePicker *>();
+    QVERIFY(picker);
+    picker->resize(picker->sizeHint());
+    // Pointing at the third square of the fourth row: 4 rows (with the
+    // header) by 3 columns. The grid never offers fewer than 2 rows.
+    const QPoint square(6 + 2 * 16 + 7, picker->sizeHint().height() - 6 - (vn::TableSizePicker::gridRows - 4) * 16 - 9);
+    // (The menu is not shown: the move is sent to the picker directly.)
+    QMouseEvent move(QEvent::MouseMove, square, picker->mapToGlobal(square), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(picker, &move);
+    QCOMPARE(picker->rows(), 4);
+    QCOMPARE(picker->columns(), 3);
+    if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
+        QVERIFY(picker->grab().save(dir + QStringLiteral("/table-size-picker.png")));
+    QTest::mouseClick(picker, Qt::LeftButton, {}, square);
+    QTRY_COMPARE(inserted.size(), 1); // Once the menu is closed.
+    QCOMPARE(inserted.first(), qMakePair(4, 3));
+    // The keys: from nothing, Right gives 2 x 1; Down and Right grow it.
+    picker->setSelection(0, 0);
+    QTest::keyClick(picker, Qt::Key_Right);
+    QTest::keyClick(picker, Qt::Key_Right);
+    QTest::keyClick(picker, Qt::Key_Down);
+    QCOMPARE(picker->rows(), 3);
+    QCOMPARE(picker->columns(), 2);
+    QTest::keyClick(picker, Qt::Key_Return);
+    QTRY_COMPARE(inserted.size(), 2);
+    QCOMPARE(inserted.last(), qMakePair(3, 2));
 }
 
 QTEST_MAIN(TestTextView)

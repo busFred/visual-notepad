@@ -203,7 +203,7 @@ public:
     bool moveToTableCell(int line, int row, int col);
     // Inserts a table of `rows` (with the header) by `cols` below the caret's
     // line, with its first header selected.
-    void insertTable(int rows, int cols);
+    virtual void insertTable(int rows, int cols);
     // The keys in a table: to the next or previous cell (a new row after the
     // last), and a new row below. False, with nothing done, outside one.
     bool tableTab(bool forward);
@@ -272,6 +272,11 @@ protected:
     // Called before a table command acts on that target: save what is being
     // edited there (and clear the target).
     virtual void tableTargetEditing() {}
+    // Puts in a pipe table of `rows` (with the header) x `cols` empty cells
+    // at the caret, apart from the text around it, as one undo step.
+    // `roomAfter`: a line after it to type on, apart from it, when nothing
+    // follows. Returns the table's first line (the caret is left as Qt put it).
+    int insertTableLines(int rows, int cols, bool roomAfter);
     // The table's cell (row, col) in the document, as md::tableCell says.
     md::TableCell tableCellOf(int line, int row, int col);
     md::TableInfo tableInfoAt(int line, int column);
@@ -423,6 +428,20 @@ private:
     };
     TableRun m_tableRun;
     void spliceTableRun(int first, int oldAffected, int newAffected);
+    // For a line that is not a pipe row: the run of non-blank lines around
+    // it (an HTML block ends at a blank line), if one of them starts with
+    // <table. Kept until the document changes; `found` false is kept too, so
+    // caret moves through a paragraph do not read it again.
+    struct HtmlRun
+    {
+        QString text;
+        int firstLine = -1;
+        int lineCount = 0;
+        int revision = -1;
+        bool found = false;
+    };
+    HtmlRun m_htmlRun;
+    TableWindow htmlTableWindow(int line);
     // Whether fenced code is open where `line` starts (see m_fenceMarks).
     bool inFencedCode(int line);
     void rebuildFenceMarks();

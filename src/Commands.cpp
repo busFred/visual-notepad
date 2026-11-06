@@ -131,7 +131,7 @@ QList<Command> build()
 
         // Pipe tables (Format > Table, and the table toolbar). No default
         // shortcuts: Tab, Shift+Tab and Enter work inside a table anyway.
-        {QStringLiteral("table.insert"), table, tr("Insert &Table…"), {}},
+        {QStringLiteral("table.insert"), table, tr("Insert Table of Custom &Size…"), {}},
         {QStringLiteral("table.rowAbove"), table, tr("Insert Row &Above"), {}},
         {QStringLiteral("table.rowBelow"), table, tr("Insert Row &Below"), {}},
         {QStringLiteral("table.columnLeft"), table, tr("Insert Column &Left"), {}},
@@ -151,6 +151,8 @@ QList<Command> build()
         {QStringLiteral("table.sortDescending"), table, tr("Sort Desc&ending"), {}},
         {QStringLiteral("table.transpose"), table, tr("Trans&pose"), {}},
         {QStringLiteral("table.realign"), table, tr("Real&ign"), {}},
+        {QStringLiteral("table.toHtml"), table, tr("Convert to &HTML Table"), {}},
+        {QStringLiteral("table.toPipe"), table, tr("Convert to Pipe &Table"), {}},
 
         {QStringLiteral("view.outline"), view, tr("&Outline"), {k("Ctrl+Shift+B")}},
         {QStringLiteral("view.modeSource"), view, tr("&Source"), {}},

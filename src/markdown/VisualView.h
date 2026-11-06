@@ -52,6 +52,9 @@ public:
     int memoizedRenderCount() const { return int(m_renders.size()); }
     // For tests: blocks (and parts of blocks) rendered so far.
     int renderCount() const { return m_renderCount; }
+    // A new table stays rendered, with its first header's box open (its
+    // text selected, to type over), as a word processor does.
+    void insertTable(int rows, int cols) override;
 
 Q_SIGNALS:
     // A link was clicked in rendered text (not a task checkbox).
@@ -155,7 +158,9 @@ private:
 
     struct CellTarget
     {
-        int line = -1; // First line of the table.
+        int line = -1; // First line of the table's block.
+        int at = 0;    // The table's first line, in the block (an HTML
+                       // table can be inside a <div>).
         int row = 0;
         int col = 0;
         QString original; // The cell's source when the box opened.

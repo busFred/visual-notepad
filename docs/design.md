@@ -130,10 +130,16 @@ to text, in `core/src/table.rs` (rows, columns, alignment, sorting,
 transposing, one cell; the result is always aligned like Format Document
 does), called through `vn::md::tableEdit`.
 
-- Format > Table has Insert Table (a Rows x Columns dialog, rows counting
-  the header) and the commands below; Table items are enabled while the
-  menu is open, from the caret's table. The context menu of an editor view
-  has the same commands inside a table. No default shortcuts.
+- Format > Table > Insert Table, and the same submenu in the context menu of
+  any editable Markdown view: a grid of 8 x 10 squares (pointing picks rows,
+  counting the header, by columns; the arrow keys and Enter work too), and
+  Insert Table of Custom Size... for a larger table (a Rows x Columns
+  dialog, up to 200 x 50). The table commands below are enabled while the
+  menu is open, from the caret's table; the context menu has them inside a
+  table. No default shortcuts.
+- In the visual editor a new table stays rendered and opens its first
+  header's cell box, its text selected to type over; when nothing follows
+  the table, a blank line and a line to type on are added after it.
 - In the Markdown views, Tab and Shift+Tab move between cells (selecting the
   cell's text), Tab in the last cell adds a row, and Enter adds a row below.
   Nothing is rewritten while moving or typing.
@@ -160,6 +166,27 @@ does), called through `vn::md::tableEdit`.
   checked (Realign stays enabled for it). An edit replaces only the lines
   that differ from the table as it was (a realign after typing in one row
   is a change of that row, unless the row became the widest of a column).
+- HTML tables (`core/src/html_table.rs`): a `<table>` that starts a line
+  (after at most three spaces) in an HTML block, outside fenced code, is
+  edited with the same commands, toolbar and cell box. An edit changes only
+  what it must in the source (attributes, comments, indentation and the
+  layout of the rows are kept; a new row or cell copies its neighbour's
+  layout, with empty cells); end tags HTML lets out (`</td>`, `</tr>`) are
+  understood. Row 0 is a header only if it is in `<thead>` or all `<th>`.
+  Alignment is an `align` attribute on each cell of the column (a
+  `text-align` in a `style` is taken out). A cell is written as typed (it is
+  HTML, Markdown is not read inside an HTML block); a line break becomes
+  `<br>`, as a blank line would end the block. Tables with merged cells
+  (`colspan`, `rowspan`) only have their cells' text edited; Transpose
+  writes the table anew. Realign does not apply. Tab and Enter keep their
+  usual meaning in HTML source. The cell box opens on a rendered HTML block
+  that shows nothing but the table (it may be inside a `<div>`).
+- Convert to HTML Table / Convert to Pipe Table: a pipe table becomes a
+  `<table>` with `<thead>`/`<tbody>` (each cell's Markdown rendered to HTML;
+  not for tables in lists or quotes; a blank line is added after it when
+  text follows), and an HTML table without merged cells or `<pre>` whose
+  block is only the table becomes a pipe table (white space collapsed, `|`
+  escaped, row 0 the header).
 
 ## Preferences
 

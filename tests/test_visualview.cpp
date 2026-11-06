@@ -262,6 +262,9 @@ private Q_SLOTS:
     void editableDragDefersExpansion();
     void tableIsRealignedWhenTheCaretLeavesIt();
     void tableToolbarFollowsTheCaret();
+    void toolbarWorksWithACellOpen();
+    void htmlTableCellsAreEditedInPlace();
+    void insertedTableOpensItsFirstCell();
     void clickingATableCellEditsIt();
     void cellEditorKeysMoveBetweenCells();
     void cellEditorOnlyInEditableViews();
@@ -642,7 +645,10 @@ void TestVisualView::tableToolbarFollowsTheCaret()
             below = b;
     }
     QVERIFY(below && below->isEnabled());
-    QTest::mouseClick(below, Qt::LeftButton);
+    // As a real click arrives: at the window, routed to whatever is under it.
+    QWidget *window = m_view->window();
+    QVERIFY(window->childAt(below->mapTo(window, below->rect().center())) == below);
+    QTest::mouseClick(window->windowHandle(), Qt::LeftButton, {}, below->mapTo(window, below->rect().center()));
     QCOMPARE(m_doc->blockCount(), lines + 1);
     QVERIFY(m_view->hasFocus()); // The click did not take the focus.
     // Not in a table: gone. Read-only: gone.
@@ -721,6 +727,116 @@ void TestVisualView::clickingATableCellEditsIt()
     QTest::keyClicks(editor, QStringLiteral("a|b"));
     QTest::keyClick(editor, Qt::Key_Return);
     QVERIFY(m_doc->findBlockByNumber(26).text().startsWith(QLatin1String("| a\\|b ")));
+}
+
+void TestVisualView::toolbarWorksWithACellOpen()
+{
+    m_view->setReadOnly(false);
+    m_view->setMarkdownEditing(true);
+    QPlainTextEdit *editor = clickCell(m_view, 1, 0);
+    QVERIFY(editor && editor->hasFocus());
+    QTest::qWait(5);
+    auto *bar = m_view->viewport()->findChild<QWidget *>(QStringLiteral("TableToolbar"));
+    QVERIFY(bar && !bar->isHidden());
+    QToolButton *below = nullptr;
+    for (QToolButton *b : bar->findChildren<QToolButton *>(QStringLiteral("TableToolButton"))) {
+        if (b->toolTip().contains(QLatin1String("row below")))
+            below = b;
+    }
+    QVERIFY(below && below->isEnabled());
+    QWidget *window = m_view->window();
+    const QPoint at = below->mapTo(window, below->rect().center());
+    QTest::keyClicks(editor, QStringLiteral(" Mint"));
+    const int lines = m_doc->blockCount();
+    // A real click: the press must not take the focus from the box (which
+    // would close it and hide the toolbar before the release).
+    QTest::mouseClick(window->windowHandle(), Qt::LeftButton, {}, at);
+    QTest::qWait(5);
+    // The text typed went in, then the row below the cell's was added.
+    QCOMPARE(m_doc->blockCount(), lines + 1);
+    QVERIFY(m_doc->findBlockByNumber(26).text().startsWith(QLatin1String("| Linux Mint |")));
+    QCOMPARE(m_doc->findBlockByNumber(27).text().count(u'|'), 3);
+    QVERIFY(m_doc->findBlockByNumber(27).text().remove(u'|').trimmed().isEmpty());
+}
+
+void TestVisualView::htmlTableCellsAreEditedInPlace()
+{
+    m_view->setReadOnly(false);
+    m_view->setMarkdownEditing(true);
+    m_doc->setPlainText(QStringLiteral("Intro\n\n<div align=\"center\">\n<table>\n"
+                                       "  <tr><th>Name</th><th>Qty</th></tr>\n"
+                                       "  <tr><td>pear</td><td>3</td></tr>\n"
+                                       "</table>\n</div>\n\nEnd"));
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(0)));
+    m_model->flush();
+    QTest::qWait(20);
+    qreal top = 0;
+    qreal bottom = 0;
+    auto *probe = static_cast<ProbeView *>(m_view);
+    QVERIFY(probe->boundsOfLine(2, &top, &bottom));
+    // Down the first column until a click opens a box: the header cell.
+    QPlainTextEdit *editor = nullptr;
+    // (The <div> centers the table.)
+    for (int y = int(top) + 2; y < int(bottom) && !editor; y += 4) {
+        for (int x = int(probe->textStart()) + 4; x < m_view->viewport()->width() && !editor; x += 8) {
+            QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(x, y));
+            editor = cellEditor(m_view->viewport());
+            if (!editor) {
+                // Not a cell: the click opened the block's source. Close it.
+                m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(0)));
+                m_model->flush();
+            }
+        }
+    }
+    QVERIFY(editor);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Name"));
+    // The block stays rendered, and the toolbar shows for it.
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QTest::qWait(5);
+    auto *bar = m_view->viewport()->findChild<QWidget *>(QStringLiteral("TableToolbar"));
+    QVERIFY(bar && !bar->isHidden());
+    // Down: the cell below, then a new text written back as it is.
+    QTest::keyClick(editor, Qt::Key_Down);
+    editor = cellEditor(m_view->viewport());
+    QVERIFY(editor);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("pear"));
+    editor->selectAll();
+    QTest::keyClicks(editor, QStringLiteral("<b>ripe</b> pear"));
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(m_doc->findBlockByNumber(5).text(), QStringLiteral("  <tr><td><b>ripe</b> pear</td><td>3</td></tr>"));
+    // The rest of the source is as it was.
+    QCOMPARE(m_doc->findBlockByNumber(2).text(), QStringLiteral("<div align=\"center\">"));
+    QCOMPARE(m_doc->findBlockByNumber(4).text(), QStringLiteral("  <tr><th>Name</th><th>Qty</th></tr>"));
+}
+
+void TestVisualView::insertedTableOpensItsFirstCell()
+{
+    m_view->setReadOnly(false);
+    m_view->setMarkdownEditing(true);
+    m_doc->setPlainText(QString());
+    m_model->flush();
+    m_view->insertTable(3, 2);
+    // A table, a blank line and a line to type on after it.
+    QCOMPARE(m_doc->blockCount(), 6);
+    QVERIFY(m_doc->findBlockByNumber(0).text().startsWith(QLatin1String("| Column 1 |")));
+    QCOMPARE(m_doc->findBlockByNumber(4).text(), QString());
+    QCOMPARE(m_view->textCursor().blockNumber(), 5);
+    // Shown as a table, with the first header's box open, its text selected.
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QPlainTextEdit *editor = cellEditor(m_view->viewport());
+    QVERIFY(editor && editor->hasFocus());
+    QCOMPARE(editor->textCursor().selectedText(), QStringLiteral("Column 1"));
+    QTest::keyClicks(editor, QStringLiteral("Fruit"));
+    QTest::keyClick(editor, Qt::Key_Tab);
+    editor = cellEditor(m_view->viewport());
+    QVERIFY(editor);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Column 2"));
+    QTest::keyClick(editor, Qt::Key_Escape);
+    QVERIFY(m_doc->findBlockByNumber(0).text().startsWith(QLatin1String("| Fruit ")));
+    // One undo takes the cell back, another the table.
+    m_doc->undo();
+    m_doc->undo();
+    QCOMPARE(m_doc->toPlainText(), QString());
 }
 
 void TestVisualView::cellEditorKeysMoveBetweenCells()

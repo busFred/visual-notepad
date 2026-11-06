@@ -380,6 +380,11 @@ void VisualView::updateTableToolbar()
             populateTableMenu(m_tableToolbar->moreMenu());
         });
     }
+    // A press on the toolbar gives the focus to the first widget up from the
+    // button that takes it on a click (QApplication), the view: that would end
+    // the cell box, and the toolbar with it, before the button is released.
+    // The search stops at a widget whose focus proxy has the focus already.
+    m_tableToolbar->setFocusProxy(m_cellEditor);
     m_tableToolbar->setState(info);
     m_tableToolbar->adjustSize();
     const QSize size = m_tableToolbar->size();
@@ -447,18 +452,29 @@ bool VisualView::openCellEditor(int line, int row, int col)
     const Render *render = rendered(r);
     if (!render)
         return false;
-    // The block must be one pipe table (and not, say, front matter, shown as
-    // a table), the rendered one with the cells the source has.
-    const md::TableInfo info = md::tableInfo(render->source, 0, 0);
+    // The block must be one table (and not, say, front matter, shown as a
+    // table), the rendered one with the cells the source has: a pipe table,
+    // or an HTML block that renders as nothing but its <table>.
+    int at = 0;
+    md::TableInfo info = md::tableInfo(render->source, 0, 0);
+    if (!info.found) {
+        static const QRegularExpression tag(QStringLiteral("^ {0,3}<table[\\s>/]"),
+                                            QRegularExpression::CaseInsensitiveOption | QRegularExpression::MultilineOption);
+        if (const QRegularExpressionMatch m = tag.match(render->source); m.hasMatch()) {
+            at = int(QStringView(render->source).first(m.capturedStart()).count(u'\n'));
+            info = md::tableInfo(render->source, at, 0);
+        }
+    }
+    const int lines = r.lastLine - r.firstLine;
     const QSize cells = render->block->tableCells();
-    if (!info.found || info.firstLine != 0 || info.lastLine != r.lastLine - r.firstLine || cells.height() != info.rows
-        || cells.width() != info.cols || row >= info.rows || col >= info.cols)
+    if (!info.found || info.firstLine != at || info.lastLine > lines || (!info.html && info.lastLine != lines)
+        || cells.height() != info.rows || cells.width() != info.cols || row >= info.rows || col >= info.cols)
         return false;
-    const md::TableCell cell = md::tableCell(render->source, 0, row, col);
+    const md::TableCell cell = md::tableCell(render->source, at, row, col);
     if (!cell.found)
         return false;
 
-    m_cell = {line, row, col, cell.text};
+    m_cell = {line, at, row, col, cell.text};
     if (!m_cellEditor) {
         m_cellEditor = new TableCellEditor(viewport());
         connect(m_cellEditor, &TableCellEditor::finished, this, [this](TableCellEditor::Exit how) { closeCellEditor(how); });
@@ -472,7 +488,7 @@ bool VisualView::openCellEditor(int line, int row, int col)
         delete editor;
         return false;
     }
-    setTableTarget(line, row, col);
+    setTableTarget(line + at, row, col);
     m_cellEditor->show();
     m_cellEditor->raise();
     m_cellEditor->setFocus(Qt::MouseFocusReason);
@@ -493,12 +509,12 @@ bool VisualView::placeCellEditor()
     const Render *render = rendered(r);
     if (!render)
         return false;
-    const md::TableCell cell = md::tableCell(render->source, 0, m_cell.row, m_cell.col);
+    const md::TableCell cell = md::tableCell(render->source, m_cell.at, m_cell.row, m_cell.col);
     const auto rect = render->block->tableCellRect(m_cell.row, m_cell.col);
     if (!cell.found || !rect || cell.text != m_cell.original)
         return false;
     // The cell's line is where the view scrolls to when the cell is out of view.
-    const int sourceLine = m_cell.line + (m_cell.row == 0 ? 0 : m_cell.row + 1);
+    const int sourceLine = m_cell.line + cell.line;
     for (int attempt = 0; attempt < 2; ++attempt) {
         qreal top = 0;
         qreal bottom = 0;
@@ -514,6 +530,28 @@ bool VisualView::placeCellEditor()
             scrollToLine(sourceLine);
     }
     return false;
+}
+
+void VisualView::insertTable(int rows, int cols)
+{
+    const int first = insertTableLines(rows, cols, true);
+    if (first < 0)
+        return;
+    const md::TableInfo info = tableInfoAt(first, 0);
+    if (info.found && !isReadOnly()) {
+        // The caret below the table (past the blank line after it), so the
+        // table is shown as a table, not as its source.
+        const int below = qMin(info.lastLine + 2, document()->blockCount() - 1);
+        if (below > info.lastLine) {
+            setTextCursor(QTextCursor(document()->findBlockByNumber(below)));
+            m_model->flush();
+            if (openCellEditor(first, 0, 0)) {
+                m_cellEditor->selectAll();
+                return;
+            }
+        }
+    }
+    moveToTableCell(first, 0, 0); // Its source, then: the header selected.
 }
 
 void VisualView::tableTargetEditing()
@@ -542,7 +580,7 @@ void VisualView::closeCellEditor(TableCellEditor::Exit how)
 
     bool changed = false;
     if (how != Exit::Cancel && text != cell.original)
-        changed = editTableAt(cell.line, md::TableOp::SetCell, cell.row, cell.col, text, false);
+        changed = editTableAt(cell.line + cell.at, md::TableOp::SetCell, cell.row, cell.col, text, false);
     if (changed)
         m_model->flush(); // Show the new text (and widths) now.
     scheduleToolbarUpdate();
@@ -550,7 +588,7 @@ void VisualView::closeCellEditor(TableCellEditor::Exit how)
     // Tab, Shift+Tab and the arrows go on to the next cell.
     if (how == Exit::Commit || how == Exit::Cancel || how == Exit::FocusLost)
         return;
-    const md::TableCell now = tableCellOf(cell.line, cell.row, cell.col);
+    const md::TableCell now = tableCellOf(cell.line + cell.at, cell.row, cell.col);
     if (!now.found)
         return;
     const md::TableInfo info = tableInfoAt(now.line, now.start);
@@ -565,7 +603,7 @@ void VisualView::closeCellEditor(TableCellEditor::Exit how)
             col = 0;
         } else {
             // Past the last cell: a new row.
-            if (!editTableAt(cell.line, md::TableOp::RowBelow, row, 0, {}, false))
+            if (!editTableAt(cell.line + cell.at, md::TableOp::RowBelow, row, 0, {}, false))
                 return;
             m_model->flush();
             ++row;

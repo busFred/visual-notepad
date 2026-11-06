@@ -4,6 +4,7 @@
 #include "../Settings.h"
 #include "../Theme.h"
 #include "DocumentLayout.h"
+#include "TableSizePicker.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -17,6 +18,7 @@
 #include <QImage>
 #include <QMessageBox>
 #include <QMenu>
+#include <QPointer>
 #include <QMimeData>
 #include <QPainter>
 #include <QPen>
@@ -397,6 +399,7 @@ void TextView::onDocumentChanged(int from, int charsRemoved, int charsAdded)
         m_lines.resize(newCount);
         m_fenceMarksValid = false;
         m_tableRun = {};
+        m_htmlRun = {};
     } else {
         m_lines.erase(m_lines.begin() + first, m_lines.begin() + first + oldAffected);
         std::vector<LineCache> fresh(newAffected);
@@ -1875,8 +1878,16 @@ void TextView::contextMenuEvent(QContextMenuEvent *event)
     menu.addAction(tr("Paste"), this, &TextView::paste)->setEnabled(canEdit());
     menu.addSeparator();
     menu.addAction(tr("Select All"), this, &TextView::selectAll);
-    if (tableAtCaret().found) {
+    if (m_markdown && canEdit()) {
         menu.addSeparator();
+        addInsertTableMenu(&menu, [view = QPointer<TextView>(this)](int rows, int columns) {
+            if (view)
+                view->insertTable(rows, columns);
+        });
+    }
+    if (tableAtCaret().found) {
+        if (!(m_markdown && canEdit()))
+            menu.addSeparator();
         addTableMenu(&menu);
     }
     menu.exec(event->globalPos());

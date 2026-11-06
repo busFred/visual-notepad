@@ -334,6 +334,7 @@ private:
     QAction *m_statusBarAction;
     QHash<QString, QAction *> m_actions;
     QMenu *m_recentMenu = nullptr;
+    QMenu *m_insertTableMenu = nullptr;
 
     QLabel *m_position;
     QLabel *m_indentation;

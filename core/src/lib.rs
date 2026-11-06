@@ -3,6 +3,7 @@
 
 mod format;
 mod gzip;
+mod html_table;
 mod links;
 mod md;
 mod mermaid;
@@ -107,6 +108,8 @@ mod ffi {
         Realign,
         /// Replaces the text of one cell with the `arg` given.
         SetCell,
+        ToHtml,
+        ToPipe,
     }
 
     /// The table around a position. Rows count from the header (0); the
@@ -126,6 +129,10 @@ mod ffi {
         alignment: u8,
         /// Whether the text is what `Realign` would make of it.
         aligned: bool,
+        /// Whether this is an HTML table.
+        html: bool,
+        /// Bit `1 << TableOp.repr` for accepted operations (except aligned Realign).
+        available: u32,
     }
 
     /// Lines to put in place of `first_line..=last_line`.
@@ -146,12 +153,13 @@ mod ffi {
         keep_after: usize,
     }
 
-    /// The text of one cell of a table, as a range of one line.
+    /// The text of one cell, possibly spanning multiple lines.
     struct TableCell {
         found: bool,
         line: usize,
-        /// UTF-16 columns of the text in the line.
+        /// UTF-16 columns on `line` and `end_line`.
         start: usize,
+        end_line: usize,
         end: usize,
         text: String,
     }
@@ -288,6 +296,8 @@ fn table_info(text: &str, line: usize, column: usize) -> ffi::TableInfo {
             col: 0,
             alignment: 0,
             aligned: true,
+            html: false,
+            available: 0,
         },
     )
 }
@@ -313,7 +323,7 @@ fn table_edit(text: &str, line: usize, op: ffi::TableOp, row: usize, col: usize,
 fn table_cell(text: &str, line: usize, row: usize, col: usize) -> ffi::TableCell {
     guarded(
         || table::cell(text, line, row, col),
-        || ffi::TableCell { found: false, line: 0, start: 0, end: 0, text: String::new() },
+        || ffi::TableCell { found: false, line: 0, start: 0, end_line: 0, end: 0, text: String::new() },
     )
 }
 

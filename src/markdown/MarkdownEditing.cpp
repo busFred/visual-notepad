@@ -181,6 +181,8 @@ core::TableOp coreOp(TableOp op)
     case TableOp::Transpose: return core::TableOp::Transpose;
     case TableOp::Realign: return core::TableOp::Realign;
     case TableOp::SetCell: return core::TableOp::SetCell;
+    case TableOp::ToHtml: return core::TableOp::ToHtml;
+    case TableOp::ToPipe: return core::TableOp::ToPipe;
     }
     return core::TableOp::Realign;
 }
@@ -189,30 +191,8 @@ core::TableOp coreOp(TableOp op)
 
 bool tableOpAvailable(const TableInfo &info, TableOp op)
 {
-    if (!info.found)
-        return false;
-    switch (op) {
-    case TableOp::RowAbove:
-    case TableOp::DeleteRow:
-        return info.row > 0;
-    case TableOp::DeleteColumn:
-        return info.cols > 1;
-    case TableOp::MoveRowUp:
-        return info.row > 1;
-    case TableOp::MoveRowDown:
-        return info.row > 0 && info.row + 1 < info.rows;
-    case TableOp::MoveColumnLeft:
-        return info.col > 0;
-    case TableOp::MoveColumnRight:
-        return info.col + 1 < info.cols;
-    case TableOp::SortAscending:
-    case TableOp::SortDescending:
-        return info.rows > 2;
-    case TableOp::Realign:
-        return !info.aligned;
-    default:
-        return true;
-    }
+    const auto bit = static_cast<unsigned>(coreOp(op));
+    return info.found && bit < 32 && (info.available & (quint32(1) << bit));
 }
 
 TableInfo tableInfo(const QString &text, int line, int column)
@@ -231,6 +211,8 @@ TableInfo tableInfo(const QString &text, int line, int column)
     info.col = int(r.col);
     info.alignment = TableAlignment(qMin(int(r.alignment), 3));
     info.aligned = r.aligned;
+    info.html = r.html;
+    info.available = r.available;
     return info;
 }
 
@@ -281,6 +263,7 @@ TableCell tableCell(const QString &text, int line, int row, int col)
         return cell;
     cell.line = int(r.line);
     cell.start = int(r.start);
+    cell.endLine = int(r.end_line);
     cell.end = int(r.end);
     cell.text = toQString(r.text);
     return cell;

@@ -51,7 +51,8 @@ enum class TableOp {
     MoveRowUp, MoveRowDown, MoveColumnLeft, MoveColumnRight,
     AlignNone, AlignLeft, AlignCenter, AlignRight,
     SortAscending, SortDescending, Transpose, Realign,
-    SetCell
+    SetCell,
+    ToHtml, ToPipe // Convert a pipe table to an HTML <table>, and back.
 };
 enum class TableAlignment { None, Left, Center, Right };
 
@@ -66,6 +67,8 @@ struct TableInfo
     int col = 0;
     TableAlignment alignment = TableAlignment::None; // Of that column.
     bool aligned = true; // Realign would change nothing.
+    bool html = false;   // An HTML <table>, not a pipe table.
+    quint32 available = 0; // Bit i: the core accepts core::TableOp i here.
 };
 
 struct TableEdit
@@ -85,13 +88,14 @@ struct TableCell
 {
     bool found = false;
     int line = 0;
-    int start = 0; // Columns of the cell's text in the line.
-    int end = 0;
+    int start = 0;   // Column of the cell's text in `line`.
+    int endLine = 0; // An HTML cell can take several lines.
+    int end = 0;     // Column in `endLine`.
     QString text;
 };
 
 // Whether `op` applies to the cell `info` names (not the header row for
-// "above", not the only column for delete, ...).
+// "above", not the only column for delete, ...): the core says.
 bool tableOpAvailable(const TableInfo &info, TableOp op);
 // `text` is the whole document with "\n" line breaks.
 TableInfo tableInfo(const QString &text, int line, int column);

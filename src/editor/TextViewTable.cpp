@@ -112,8 +112,10 @@ TextView::TableWindow TextView::tableWindow(int line)
     if (run.firstLine < 0 || line < run.firstLine || line >= run.firstLine + run.lines.size()) {
         run = {};
         const QTextBlock block = m_doc->findBlockByNumber(line);
-        if (!block.isValid() || !rowLike(block.text()))
+        if (!block.isValid())
             return {};
+        if (!rowLike(block.text()))
+            return htmlTableWindow(line);
         // (Each line's text is made once: that is most of the cost.)
         for (QTextBlock b = block.previous(); b.isValid(); b = b.previous()) {
             const QString text = b.text();
@@ -131,6 +133,78 @@ TextView::TableWindow TextView::tableWindow(int line)
         run.text = run.lines.join(u'\n');
     }
     if (inFencedCode(run.firstLine))
+        return {};
+    return {run.text, run.firstLine};
+}
+
+namespace {
+
+// A line that ends an HTML block: empty or only white space.
+bool blankLine(const QTextBlock &block, QString *text)
+{
+    *text = block.text();
+    for (const QChar c : std::as_const(*text)) {
+        if (!c.isSpace())
+            return false;
+    }
+    return true;
+}
+
+// Whether `text` starts with a <table tag after at most three spaces, as the
+// core wants (html_table.rs).
+bool tableTagLine(const QString &text)
+{
+    int i = 0;
+    while (i < 3 && i < text.size() && text.at(i) == u' ')
+        ++i;
+    if (!QStringView(text).sliced(i).startsWith(QLatin1String("<table"), Qt::CaseInsensitive))
+        return false;
+    const qsizetype after = i + 6;
+    return after >= text.size() || text.at(after).isSpace() || text.at(after) == u'>' || text.at(after) == u'/';
+}
+
+} // namespace
+
+TextView::TableWindow TextView::htmlTableWindow(int line)
+{
+    // Longer runs are not looked at: a table is a few hundred lines at most,
+    // and this runs after every keystroke in a long block.
+    constexpr int maxLines = 4000;
+    HtmlRun &run = m_htmlRun;
+    const int revision = m_doc->revision();
+    if (run.revision != revision || line < run.firstLine || line >= run.firstLine + run.lineCount) {
+        run = {};
+        run.revision = revision;
+        const QTextBlock block = m_doc->findBlockByNumber(line);
+        QString text;
+        if (!block.isValid() || blankLine(block, &text)) {
+            run.firstLine = line;
+            run.lineCount = 1;
+            return {};
+        }
+        QStringList lines{text};
+        bool table = tableTagLine(text);
+        int first = line;
+        for (QTextBlock b = block.previous(); b.isValid() && lines.size() < maxLines; b = b.previous()) {
+            if (blankLine(b, &text))
+                break;
+            table = table || tableTagLine(text);
+            lines.prepend(text);
+            --first;
+        }
+        for (QTextBlock b = block.next(); b.isValid() && lines.size() < maxLines; b = b.next()) {
+            if (blankLine(b, &text))
+                break;
+            table = table || tableTagLine(text);
+            lines.append(text);
+        }
+        run.firstLine = first;
+        run.lineCount = int(lines.size());
+        run.found = table && lines.size() < maxLines && !inFencedCode(first);
+        if (run.found)
+            run.text = lines.join(u'\n');
+    }
+    if (!run.found)
         return {};
     return {run.text, run.firstLine};
 }
@@ -184,8 +258,10 @@ md::TableCell TextView::tableCellOf(int line, int row, int col)
     if (window.firstLine < 0)
         return {};
     md::TableCell cell = md::tableCell(window.text, line - window.firstLine, row, col);
-    if (cell.found)
+    if (cell.found) {
         cell.line += window.firstLine;
+        cell.endLine += window.firstLine;
+    }
     return cell;
 }
 
@@ -216,9 +292,8 @@ md::TableInfo TextView::caretTableInfo()
     if (!m_markdown || m_carets.empty())
         return {};
     const QTextCursor c = textCursor();
-    if (!rowLike(c.block().text()))
-        return {};
-    // (Asked after every caret move, and the same several times.)
+    // (Asked after every caret move, and the same several times. A line that
+    // is no pipe row costs a look at its block once per document revision.)
     const int revision = m_doc->revision();
     if (m_tableInfoRevision != revision || m_tableInfoPosition != c.position()) {
         m_tableInfo = tableInfoAt(c.blockNumber(), c.positionInBlock());
@@ -270,6 +345,8 @@ bool TextView::editTableAt(int line, md::TableOp op, int row, int col, const QSt
         else if (first.previous().isValid())
             from = first.previous().position() + first.previous().length() - 1;
     }
+    if (op == md::TableOp::ToHtml && last.next().isValid() && !last.next().text().trimmed().isEmpty())
+        edit.replacement.append(u'\n'); // Else the next line would be part of the HTML.
     if (edit.changed) {
         beginEdit();
         replaceRange(from, to, edit.remove ? QString() : edit.replacement);
@@ -323,9 +400,10 @@ bool TextView::moveToTableCell(int line, int row, int col)
     QTextCursor cursor(m_doc);
     if (cell.found) {
         const QTextBlock block = m_doc->findBlockByNumber(cell.line);
+        const QTextBlock endBlock = m_doc->findBlockByNumber(cell.endLine);
         cursor.setPosition(block.position() + cell.start);
         // The text of a cell is selected, so typing replaces it.
-        cursor.setPosition(block.position() + cell.end, QTextCursor::KeepAnchor);
+        cursor.setPosition(endBlock.position() + cell.end, QTextCursor::KeepAnchor);
     } else {
         // A short row has no such cell: go to the end of its line.
         const md::TableInfo info = tableInfoAt(line, 0);
@@ -352,7 +430,7 @@ bool TextView::tableTab(bool forward)
     if (!m_markdown || !canEdit() || m_carets.size() != 1 || !onOneLine(textCursor()))
         return false;
     const md::TableInfo info = caretTableInfo();
-    if (!info.found)
+    if (!info.found || info.html)
         return false;
     const int line = textCursor().blockNumber();
     int row = info.row;
@@ -385,15 +463,32 @@ bool TextView::tableEnter()
     if (!m_markdown || !canEdit() || m_carets.size() != 1 || !onOneLine(textCursor()))
         return false;
     const md::TableInfo info = caretTableInfo();
-    if (!info.found)
+    if (!info.found || info.html)
         return false;
     return editTableAt(textCursor().blockNumber(), md::TableOp::RowBelow, info.row, info.col);
 }
 
 void TextView::insertTable(int rows, int cols)
 {
-    if (!m_markdown || !canEdit())
+    const int first = insertTableLines(rows, cols, false);
+    if (first < 0)
         return;
+    // The first header, selected for typing over.
+    const md::TableCell cell = tableCellOf(first, 0, 0);
+    if (cell.found) {
+        const QTextBlock block = m_doc->findBlockByNumber(cell.line);
+        QTextCursor selection(m_doc);
+        selection.setPosition(block.position() + cell.start);
+        selection.setPosition(block.position() + cell.end, QTextCursor::KeepAnchor);
+        setTextCursor(selection);
+    }
+    ensureCursorVisible();
+}
+
+int TextView::insertTableLines(int rows, int cols, bool roomAfter)
+{
+    if (!m_markdown || !canEdit())
+        return -1;
     rows = qBound(2, rows, 200);
     cols = qBound(1, cols, 50);
 
@@ -434,15 +529,11 @@ void TextView::insertTable(int rows, int cols)
     const QTextBlock next = block.next();
     if (next.isValid() && !next.text().trimmed().isEmpty())
         text.append(u'\n');
+    else if (!next.isValid() && roomAfter)
+        text.append(QStringLiteral("\n\n")); // A blank line, then one to type on.
     c.insertText(text);
     endEdit();
-
-    // The first header, selected for typing over.
-    QTextCursor selection(m_doc);
-    selection.setPosition(start + 2);
-    selection.setPosition(start + 2 + int(names.first().size()), QTextCursor::KeepAnchor);
-    setTextCursor(selection);
-    ensureCursorVisible();
+    return m_doc->findBlock(start).blockNumber();
 }
 
 void TextView::addTableMenu(QMenu *menu)
@@ -493,6 +584,9 @@ void TextView::populateTableMenu(QMenu *table)
     add(table, tr("Sort Descending"), Op::SortDescending);
     add(table, tr("Transpose"), Op::Transpose);
     add(table, tr("Realign"), Op::Realign);
+    table->addSeparator();
+    add(table, tr("Convert to HTML Table"), Op::ToHtml);
+    add(table, tr("Convert to Pipe Table"), Op::ToPipe);
 }
 
 } // namespace vn

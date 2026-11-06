@@ -191,7 +191,7 @@ fn line_of_row(row: usize) -> usize {
     if row == 0 { 0 } else { row + 1 }
 }
 
-fn unfound_info() -> TableInfo {
+pub(super) fn unfound_info() -> TableInfo {
     TableInfo {
         found: false,
         first_line: 0,
@@ -202,7 +202,34 @@ fn unfound_info() -> TableInfo {
         col: 0,
         alignment: 0,
         aligned: true,
+        html: false,
+        available: 0,
     }
+}
+
+/// Operations use the bridge discriminants as bit positions.
+pub(super) fn bit(op: TableOp) -> u32 { 1 << op.repr }
+
+fn pipe_available(rows: usize, cols: usize, row: usize, col: usize, aligned: bool, html: bool) -> u32 {
+    let mut bits = 0;
+    for repr in 0..=TableOp::ToPipe.repr {
+        let op = TableOp { repr };
+        let accepted = match op {
+            TableOp::RowAbove | TableOp::DeleteRow => row > 0,
+            TableOp::DeleteColumn => cols > 1,
+            TableOp::RowUp => row > 1,
+            TableOp::RowDown => row > 0 && row + 1 < rows,
+            TableOp::ColumnBefore => col > 0,
+            TableOp::ColumnAfter => col + 1 < cols,
+            TableOp::SortAscending | TableOp::SortDescending => rows > 2,
+            TableOp::Realign => !aligned,
+            TableOp::ToHtml => html,
+            TableOp::ToPipe => false,
+            _ => true,
+        };
+        if accepted { bits |= bit(op); }
+    }
+    bits
 }
 
 /// Tables with more lines than this are not checked for `aligned` (which
@@ -212,7 +239,7 @@ const ALIGNED_CHECK_MAX: usize = 500;
 pub fn info(text: &str, line: usize, column: usize) -> TableInfo {
     let lines: Vec<&str> = text.split('\n').collect();
     let Some((first, end)) = find_in(&lines, line) else {
-        return unfound_info();
+        return crate::html_table::info(text, line, column);
     };
     // Asked after every keystroke in a table: only the header and the
     // delimiter line are read (table_end checked the delimiter's cells).
@@ -241,14 +268,17 @@ pub fn info(text: &str, line: usize, column: usize) -> TableInfo {
         col,
         alignment: align_code(alignment),
         aligned,
+        html: false,
+        available: pipe_available(end - first - 1, cols, row, col, aligned,
+            lines[first..end].iter().all(|l| split_row(l).is_some_and(|(p, _)| p.trim().is_empty()))),
     }
 }
 
 pub fn cell(text: &str, line: usize, row: usize, col: usize) -> TableCell {
-    let none = TableCell { found: false, line: 0, start: 0, end: 0, text: String::new() };
+    let none = TableCell { found: false, line: 0, start: 0, end_line: 0, end: 0, text: String::new() };
     let lines: Vec<&str> = text.split('\n').collect();
     let Some((first, end)) = find_in(&lines, line) else {
-        return none;
+        return crate::html_table::cell(text, line, row, col);
     };
     let target = first + line_of_row(row);
     if target >= end {
@@ -261,6 +291,7 @@ pub fn cell(text: &str, line: usize, row: usize, col: usize) -> TableCell {
     TableCell {
         found: true,
         line: target,
+        end_line: target,
         start: char_to_utf16(source, start),
         end: char_to_utf16(source, stop),
         text: source.chars().skip(start).take(stop - start).collect(),
@@ -285,7 +316,7 @@ fn clean_cell(text: &str) -> String {
     out
 }
 
-fn number(cell: &str) -> Option<f64> {
+pub(super) fn number(cell: &str) -> Option<f64> {
     cell.trim().replace(',', "").parse().ok()
 }
 
@@ -309,7 +340,7 @@ fn sort_body(table: &mut Table, col: usize, descending: bool) {
     }
 }
 
-fn refused() -> TableEdit {
+pub(super) fn refused() -> TableEdit {
     TableEdit {
         ok: false,
         changed: false,
@@ -329,7 +360,7 @@ fn refused() -> TableEdit {
 pub fn edit(text: &str, line: usize, op: TableOp, row: usize, col: usize, arg: &str) -> TableEdit {
     let lines: Vec<&str> = text.split('\n').collect();
     let Some((first, end)) = find_in(&lines, line) else {
-        return refused();
+        return crate::html_table::edit(text, line, op, row, col, arg);
     };
     let Some(mut table) = Table::parse(&lines[first..end]) else {
         return refused();
@@ -451,6 +482,37 @@ pub fn edit(text: &str, line: usize, op: TableOp, row: usize, col: usize, arg: &
             at_row = 0;
             at_col = 0;
         }
+        TableOp::ToHtml => {
+            if !table.prefixes.iter().chain([&table.new_prefix]).all(|p| p.trim().is_empty()) {
+                return refused();
+            }
+            let mut out = vec!["<table>".to_string(), "  <thead>".to_string()];
+            for (r, cells) in table.cells.iter().enumerate() {
+                if r == 1 {
+                    out.push("  </thead>".into());
+                    out.push("  <tbody>".into());
+                }
+                out.push("    <tr>".into());
+                for (c, value) in cells.iter().enumerate() {
+                    let tag = if r == 0 { "th" } else { "td" };
+                    let align = match align_code(table.align[c]) {
+                        1 => " align=\"left\"", 2 => " align=\"center\"", 3 => " align=\"right\"", _ => "",
+                    };
+                    let rendered = comrak::markdown_to_html(&value.replace("\\|", "|"), &crate::md::options(false, false));
+                    let rendered = rendered.trim_end_matches('\n');
+                    let rendered = rendered.strip_prefix("<p>").and_then(|s| s.strip_suffix("</p>")).unwrap_or(rendered);
+                    out.push(format!("      <{tag}{align}>{rendered}</{tag}>"));
+                }
+                out.push("    </tr>".into());
+            }
+            out.push(if rows > 1 { "  </tbody>" } else { "  </thead>" }.into());
+            out.push("</table>".into());
+            let replacement = out.join("\n");
+            let target = crate::html_table::cell(&replacement, 0, 0, 0);
+            let (keep_before, keep_after) = unchanged_ends(&lines[first..end], &out);
+            return TableEdit { ok: true, changed: true, remove: false, first_line: first, last_line: end - 1,
+                replacement, caret_line: first + target.line, caret_column: target.start, keep_before, keep_after };
+        }
         TableOp::Realign => {}
         TableOp::SetCell => table.cells[row][col] = clean_cell(arg),
         _ => return refused(),
@@ -480,7 +542,7 @@ pub fn edit(text: &str, line: usize, op: TableOp, row: usize, col: usize, arg: &
 /// How many lines at the start and at the end the old and the new lines of
 /// a table have in common, leaving at least one of each between: only those
 /// need replacing, and a realigned table is mostly as it was.
-fn unchanged_ends(old: &[&str], new: &[String]) -> (usize, usize) {
+pub(super) fn unchanged_ends(old: &[&str], new: &[String]) -> (usize, usize) {
     let most = old.len().min(new.len()).saturating_sub(1);
     let before = old.iter().zip(new).take(most).take_while(|(a, b)| **a == b.as_str()).count();
     let after = old
@@ -504,6 +566,37 @@ mod tests {
 
     fn run(text: &str, line: usize, op: TableOp, row: usize, col: usize) -> TableEdit {
         edit(text, line, op, row, col, "")
+    }
+
+    #[test]
+    fn html_conversion_renders_inline_markdown_and_alignment() {
+        let doc = "| **b** | a \\| b |\n| :---: | --- |\n| x | y |";
+        let r = run(doc, 0, TableOp::ToHtml, 0, 0);
+        assert!(r.ok);
+        assert_eq!(r.replacement, "<table>\n  <thead>\n    <tr>\n      <th align=\"center\"><strong>b</strong></th>\n      <th>a | b</th>\n    </tr>\n  </thead>\n  <tbody>\n    <tr>\n      <td align=\"center\">x</td>\n      <td>y</td>\n    </tr>\n  </tbody>\n</table>");
+        assert_eq!((r.caret_line, r.caret_column), (3, 25));
+        assert_eq!(cell(doc, 0, 0, 0).end_line, 0);
+        assert!(!run("> | a |\n> |---|", 0, TableOp::ToHtml, 0, 0).ok);
+        let r = run("| a |\n|---|", 0, TableOp::ToHtml, 0, 0);
+        assert_eq!(r.replacement, "<table>\n  <thead>\n    <tr>\n      <th>a</th>\n    </tr>\n  </thead>\n</table>");
+    }
+
+    #[test]
+    fn available_matches_pipe_edit_rules() {
+        for doc in [T, "| a |\n|---|", "> | a | b |\n> |---|---|\n> | 1 | 2 |"] {
+            let t = info(doc, 0, 0);
+            for row in 0..t.rows {
+                for col in 0..t.cols {
+                    let c = cell(doc, 0, row, col);
+                    let i = info(doc, c.line, c.start);
+                    for repr in 0..=TableOp::ToPipe.repr {
+                        let op = TableOp { repr };
+                        let accepted = edit(doc, 0, op, row, col, "").ok;
+                        assert_eq!(i.available & bit(op) != 0, accepted && (op != TableOp::Realign || !i.aligned), "{op:?} {row} {col}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
