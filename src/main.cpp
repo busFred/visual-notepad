@@ -9,6 +9,10 @@
 #include <QIcon>
 #include <QCommandLineParser>
 
+#ifdef Q_OS_MACOS
+#include <QFileOpenEvent>
+#endif
+
 #ifdef Q_OS_WIN
 #include <cstdio>
 #include <cstring>
@@ -18,6 +22,49 @@
 #include <windows.h>
 #endif
 
+#ifdef Q_OS_MACOS
+namespace {
+
+// Finder hands files to an application (opening one, Open With, a drop on
+// the Dock icon) as FileOpen events, not as arguments: each opens in the
+// active window, or in a new one if there is none.
+class FileOpenHandler : public QObject
+{
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() != QEvent::FileOpen)
+            return QObject::eventFilter(watched, event);
+        const QString file = static_cast<QFileOpenEvent *>(event)->file();
+        if (file.isEmpty())
+            return false;
+        auto *window = qobject_cast<vn::MainWindow *>(QApplication::activeWindow());
+        if (!window) {
+            for (QWidget *widget : QApplication::topLevelWidgets()) {
+                auto *candidate = qobject_cast<vn::MainWindow *>(widget);
+                if (candidate && candidate->isVisible()) {
+                    window = candidate;
+                    break;
+                }
+            }
+        }
+        if (!window) {
+            window = new vn::MainWindow;
+            window->setAttribute(Qt::WA_DeleteOnClose);
+            window->show();
+        }
+        window->openFile(file);
+        window->raise();
+        window->activateWindow();
+        return true;
+    }
+};
+
+} // namespace
+#endif
 
 int main(int argc, char *argv[])
 {
@@ -77,6 +124,9 @@ int main(int argc, char *argv[])
 
     vn::theme::apply(app);
     vn::TextFile::setHighlightInSlices(true);
+#ifdef Q_OS_MACOS
+    app.installEventFilter(new FileOpenHandler(&app));
+#endif
 
     auto &session = vn::SessionManager::instance();
     session.start();

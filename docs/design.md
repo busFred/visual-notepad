@@ -6,7 +6,8 @@ VisualMarkdown, a trimmed VS Code/Electron fork, and must reach parity with
 that app's Markdown editing and preview features.
 
 Targets: Windows and Linux (Linux Mint 22.3 is the reference desktop), on
-x86-64 and ARM64. The app should look and behave the same on both systems.
+x86-64 and ARM64, and macOS 11 or later on Intel and Apple Silicon. The app
+should look and behave the same on every system.
 
 ## Scope
 

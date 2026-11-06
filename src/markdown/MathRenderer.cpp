@@ -83,6 +83,8 @@ QString findResources()
         app + QStringLiteral("/microtex/res"),
         app + QStringLiteral("/../microtex/res"),
         app + QStringLiteral("/../share/visnotepad/microtex/res"),
+        // A macOS bundle: the executable is in Contents/MacOS.
+        app + QStringLiteral("/../Resources/microtex/res"),
     };
 #ifdef VN_MICROTEX_RES
     candidates << QStringLiteral(VN_MICROTEX_RES);

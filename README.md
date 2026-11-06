@@ -1,7 +1,7 @@
 # Visual Notepad
 
 A native, lightweight Notepad replacement with Markdown editing and preview,
-for Windows and Linux. Built with Qt 6 and a small Rust core. See
+for Windows, Linux and macOS. Built with Qt 6 and a small Rust core. See
 [docs/design.md](docs/design.md).
 
 ## Building on Linux
@@ -45,6 +45,22 @@ installed system-wide.
 
 Set `VN_SCREENSHOT=/path/shot.png` when running the tests to save a
 rendering of the main window.
+
+## macOS
+
+Releases have a disk image for Apple Silicon (`macos-arm64`) and one for
+Intel Macs (`macos-x86_64`), for macOS 11 or later. The app is signed ad hoc,
+not notarized: the first time, open it, then allow it under System Settings >
+Privacy & Security > Open Anyway.
+
+To build one, use the conda environment in `ci/environment-macos.yml`, build
+ECM and KSyntaxHighlighting as above, then:
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+cmake --build build
+python3 scripts/package_macos.py --build-dir build --env "$CONDA_PREFIX" --kf6 <kf6 prefix>
+```
 
 ## License
 

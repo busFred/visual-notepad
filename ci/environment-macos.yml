@@ -1,0 +1,16 @@
+name: visnotepad-macos
+channels:
+  - conda-forge
+dependencies:
+  - qt6-main 6.12.0
+  - rust
+  - cmake
+  - ninja
+  - cxx-compiler
+  - c-compiler
+  - pkg-config
+  - git
+  - perl
+  - icu
+  # rsvg-convert, for the app icon.
+  - librsvg

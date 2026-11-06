@@ -124,13 +124,23 @@ if(WIN32)
     enable_language(RC)
     set(VN_WIN_RC packaging/windows/visnotepad.rc)
 endif()
-qt_add_executable(visnotepad WIN32 src/main.cpp ${VN_WIN_RC})
+qt_add_executable(visnotepad WIN32 MACOSX_BUNDLE src/main.cpp ${VN_WIN_RC})
 target_link_libraries(visnotepad PRIVATE vn_app)
+if(APPLE)
+    # A bundle (visnotepad.app); scripts/package_macos.py fills in Qt, the
+    # libraries and resources, and makes the disk image.
+    set_target_properties(visnotepad PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST ${PROJECT_SOURCE_DIR}/packaging/macos/Info.plist.in
+        MACOSX_BUNDLE_BUNDLE_NAME "Visual Notepad"
+        MACOSX_BUNDLE_GUI_IDENTIFIER io.github.busfred.visnotepad
+        MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
+        MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION})
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
 
-install(TARGETS visnotepad RUNTIME DESTINATION bin)
+install(TARGETS visnotepad RUNTIME DESTINATION bin BUNDLE DESTINATION .)
 install(DIRECTORY ${VN_MICROTEX_RES_BUILD}/ DESTINATION share/visnotepad/microtex/res)
