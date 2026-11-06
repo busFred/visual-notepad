@@ -92,6 +92,7 @@ private:
     void type(const QString &text);
     void place(int line, int column);
     QPoint pointAt(int line, qreal column) const;
+    QString describeCarets() const;
     void boxSelect(const QPoint &from, const QPoint &to, Qt::KeyboardModifiers mods);
 
     void selectRange(int from, int to);
@@ -149,6 +150,18 @@ void TestTextView::place(int line, int column)
     QTextCursor c(m_doc->findBlockByNumber(line));
     c.setPosition(c.position() + column);
     m_view->setTextCursor(c);
+}
+
+QString TestTextView::describeCarets() const
+{
+    QStringList parts;
+    for (const QTextCursor &c : m_view->cursors())
+        parts << QStringLiteral("%1:%2-%3:%4")
+                     .arg(m_doc->findBlock(c.anchor()).blockNumber())
+                     .arg(c.anchor() - m_doc->findBlock(c.anchor()).position())
+                     .arg(c.blockNumber())
+                     .arg(c.positionInBlock());
+    return QStringLiteral("%1 carets (anchor-position as line:column): %2").arg(m_view->cursorCount()).arg(parts.join(u' '));
 }
 
 QPoint TestTextView::pointAt(int line, qreal column) const
@@ -476,7 +489,7 @@ void TestTextView::columnSelectWithMouse()
 
     // Dragging a second box continues from the same start.
     boxSelect(pointAt(3, 3), pointAt(3, 3), Qt::ShiftModifier | Qt::AltModifier);
-    QCOMPARE(m_view->cursorCount(), 4);
+    QVERIFY2(m_view->cursorCount() == 4, qPrintable(describeCarets()));
     QCOMPARE(m_view->cursors()[3].selectedText(), QStringLiteral("xx"));
 
     // Dragging upwards keeps one selection per line, anchored at the start.

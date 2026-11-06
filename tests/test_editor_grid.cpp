@@ -243,7 +243,12 @@ void TestEditorGrid::overlayRects()
 
 void TestEditorGrid::modifiers()
 {
-#ifndef Q_OS_MACOS
+#ifdef Q_OS_MACOS
+    QVERIFY(dragGeometry::isCopyOperation(Qt::AltModifier));
+    QVERIFY(!dragGeometry::isCopyOperation(Qt::ControlModifier));
+    QVERIFY(dragGeometry::isToggleSplitOperation(Qt::ShiftModifier));
+    QVERIFY(!dragGeometry::isToggleSplitOperation(Qt::AltModifier));
+#else
     QVERIFY(dragGeometry::isCopyOperation(Qt::ControlModifier));
     QVERIFY(!dragGeometry::isCopyOperation(Qt::AltModifier));
     QVERIFY(dragGeometry::isToggleSplitOperation(Qt::AltModifier));
@@ -440,6 +445,30 @@ void TestEditorGrid::dropOnEdgeSplits()
     QCOMPARE(root(window)->orientation(), Qt::Vertical);
 }
 
+namespace {
+
+// What makes a drop copy, and what keeps it from splitting: Ctrl and Alt,
+// Option and Shift on macOS (see dragGeometry::isCopyOperation).
+Qt::KeyboardModifier copyModifier()
+{
+#ifdef Q_OS_MACOS
+    return Qt::AltModifier;
+#else
+    return Qt::ControlModifier;
+#endif
+}
+
+Qt::KeyboardModifier noSplitModifier()
+{
+#ifdef Q_OS_MACOS
+    return Qt::ShiftModifier;
+#else
+    return Qt::AltModifier;
+#endif
+}
+
+} // namespace
+
 void TestEditorGrid::altDropMerges()
 {
     MainWindow *window = makeWindow();
@@ -451,8 +480,8 @@ void TestEditorGrid::altDropMerges()
     DocumentTab *tab = right->tab(0);
     window->activateGroup(main);
     window->newFile();
-    QCOMPARE(main->dropZoneAt(bodyPoint(main, 0.02, 0.5), Qt::AltModifier), Split::None);
-    QVERIFY(drop(main, {tab}, bodyPoint(main, 0.02, 0.5), Qt::AltModifier));
+    QCOMPARE(main->dropZoneAt(bodyPoint(main, 0.02, 0.5), noSplitModifier()), Split::None);
+    QVERIFY(drop(main, {tab}, bodyPoint(main, 0.02, 0.5), noSplitModifier()));
     QCOMPARE(window->groups(), QList<EditorGroup *>{main});
     QCOMPARE(main->count(), 3);
     QCOMPARE(main->tab(2), tab);
@@ -469,7 +498,7 @@ void TestEditorGrid::ownOnlyTabCannotSplitItsGroup()
     QCOMPARE(window->groups(), QList<EditorGroup *>{main});
     QCOMPARE(main->tab(0), tab);
     // A copy may: the tab stays and its copy opens beside.
-    QVERIFY(drop(main, {tab}, bodyPoint(main, 0.98, 0.5), Qt::ControlModifier));
+    QVERIFY(drop(main, {tab}, bodyPoint(main, 0.98, 0.5), copyModifier()));
     QCOMPARE(window->groups().size(), 2);
     QCOMPARE(main->tab(0), tab);
     QCOMPARE(window->groups().value(1)->tab(0)->file(), tab->file());
@@ -484,7 +513,7 @@ void TestEditorGrid::ctrlDropCopies()
     target->newFile();
     EditorGroup *group = target->activeGroup();
 
-    QVERIFY(drop(group, {tab}, stripPoint(group, 0), Qt::ControlModifier));
+    QVERIFY(drop(group, {tab}, stripPoint(group, 0), copyModifier()));
     QCOMPARE(source->tabCount(), 1);
     QCOMPARE(source->currentTab(), tab);
     QCOMPARE(target->tabCount(), 2);
@@ -515,7 +544,7 @@ void TestEditorGrid::copyIntoGroupShowingFileActivates()
     QCOMPARE(right->count(), 2);
     QCOMPARE(right->currentTab() != copy, true);
 
-    QVERIFY(drop(right, {tab}, bodyPoint(right, 0.5, 0.5), Qt::ControlModifier));
+    QVERIFY(drop(right, {tab}, bodyPoint(right, 0.5, 0.5), copyModifier()));
     QCOMPARE(right->count(), 2);
     QCOMPARE(right->currentTab(), copy);
     QCOMPARE(window->tabCount(), 3);

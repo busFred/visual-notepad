@@ -620,7 +620,12 @@ QFont editorFont()
         font.setFamilies({QStringLiteral("Consolas"), font.family()});
     } else {
         font.setFamilies({QStringLiteral("Inconsolata"), font.family()});
+#ifndef Q_OS_MACOS
         font.setStretch(113); // fontconfig reads SemiExpanded as 113, not 112.
+#endif
+        // (Core Text reads the cut's width its own way, and Qt would stretch
+        // the glyphs to make up the difference; the SemiExpanded cut is the
+        // only Inconsolata registered, so no stretch finds it.)
     }
     font.setStyleHint(QFont::Monospace);
     if (const int size = Settings::instance().number(key::fontSize); size > 0)
