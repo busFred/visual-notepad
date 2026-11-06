@@ -100,6 +100,11 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
 
+      - name: Build the core's tests
+        # Apart from the Test step: compiling them is most of the core test's
+        # time, which ctest's timeout would count.
+        run: cargo test --no-run --manifest-path core/Cargo.toml --target-dir build/cargo-test
+
       - name: Test
         env:
           QT_QPA_PLATFORM: offscreen
@@ -232,6 +237,12 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cmake --build build
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Build the core's tests
+        shell: pwsh
+        # Apart from the Test step: compiling them is most of the core test's
+        # time, which ctest's timeout would count.
+        run: cargo test --no-run --manifest-path core/Cargo.toml --target-dir build/cargo-test
 
       - name: Test
         shell: pwsh
@@ -369,6 +380,11 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
           cmake --build build
           cmake --build build --target microtex_res
+
+      - name: Build the core's tests
+        # Apart from the Test step: compiling them is most of the core test's
+        # time, which ctest's timeout would count.
+        run: cargo test --no-run --manifest-path core/Cargo.toml --target-dir build/cargo-test
 
       - name: Test
         env:

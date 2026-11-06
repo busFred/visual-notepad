@@ -531,10 +531,12 @@ mod tests {
         let (w, h, pixels, _) = raster(&code, "auto", 1.0).expect("render");
         eprintln!("300 nodes: {w}x{h} in {:?}", start.elapsed());
         assert_eq!(pixels.len(), (w * h * 4) as usize);
-        // About 3 s here, but twice that on GitHub's Intel Macs: the bound
-        // catches a layout that blows up, not a slow machine (diagrams that
-        // would blow up are refused first; see the test above).
-        assert!(start.elapsed().as_secs_f64() < 10.0, "took {:?}", start.elapsed());
+        // About 3 s here, 6-7 s on GitHub's Intel Macs and more when one is
+        // slow that day: the bound catches a layout that blows up (that takes
+        // minutes; such diagrams are refused first, see the test above), not
+        // a slow machine. As above, unoptimised builds get more time.
+        let limit = if cfg!(debug_assertions) { 20.0 } else { 10.0 };
+        assert!(start.elapsed().as_secs_f64() < limit, "took {:?}", start.elapsed());
     }
 
     #[test]
