@@ -17,15 +17,31 @@
 #include <QTextCursor>
 #include <QTextDocument>
 
+#ifdef Q_OS_WIN
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <ctime>
+#endif
 
 namespace {
 
+// CPU time of the calling thread.
 double cpuMs()
 {
+#ifdef Q_OS_WIN
+    FILETIME created, exited, kernel, user;
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user))
+        return 0;
+    const auto ticks = [](const FILETIME &t) { return (quint64(t.dwHighDateTime) << 32) | t.dwLowDateTime; };
+    return (ticks(kernel) + ticks(user)) / 1e4; // 100 ns units.
+#else
     timespec ts;
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
     return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+#endif
 }
 
 // Wall and CPU milliseconds since the last lap.
