@@ -112,6 +112,12 @@ public:
     int hitTest(const QPointF &point) const;
     QString anchorAt(const QPointF &point) const;
     QString renderedText() const;
+    // Where a caret before character `position` of the rendered text (code:
+    // of the source) is drawn, relative to the block's top-left; none for
+    // pictures and empty blocks.
+    std::optional<QRectF> caretRect(int position) const;
+    // The [start, end) of the laid-out line holding `position`.
+    std::pair<int, int> lineAt(int position) const;
     // Something still arriving: a Mermaid diagram rendering (shown as its
     // source for now) or remote pictures downloading (shown as missing).
     bool isPending() const { return m_pending; }

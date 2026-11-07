@@ -6,10 +6,13 @@
 // its last cell) and caret moves between them; the first move away from an
 // edited table is shown apart, as the visual view realigns the table then.
 // VN_PROBE_KEY=backspace types Backspace instead of "a" (VN_PROBE_COUNT
-// times, 20 by default): a row that gets narrower, not wider.
+// times, 20 by default): a row that gets narrower, not wider. In the visual
+// editor the keystrokes go into rendered text; VN_PROBE_OPEN=1 opens the
+// line's block as source first. VN_PROBE_PAINT=1 paints after each one.
 #include "DocumentTab.h"
 #include "TextFile.h"
 #include "editor/TextView.h"
+#include "markdown/VisualView.h"
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QTest>
@@ -94,6 +97,7 @@ int main(int argc, char **argv)
                 lines.append(s.toInt());
             const bool backspace = qEnvironmentVariable("VN_PROBE_KEY") == QLatin1String("backspace");
             const int count = qEnvironmentVariableIsSet("VN_PROBE_COUNT") ? qEnvironmentVariableIntValue("VN_PROBE_COUNT") : 20;
+            const bool paint = qEnvironmentVariableIntValue("VN_PROBE_PAINT") != 0;
             const auto place = [&](int line) {
                 QTextCursor c(view->document()->findBlockByNumber(line));
                 c.movePosition(QTextCursor::EndOfBlock);
@@ -104,10 +108,20 @@ int main(int argc, char **argv)
             };
             for (int line : lines) {
                 place(line);
+                if (auto *visual = qobject_cast<vn::VisualView *>(view);
+                    visual && qEnvironmentVariableIntValue("VN_PROBE_OPEN") != 0)
+                    visual->openBlockAtCaret();
+                view->grab();
                 lap.restart();
-                for (int k = 0; k < count; ++k)
+                for (int k = 0; k < count; ++k) {
                     QTest::keyClick(view, backspace ? Qt::Key_Backspace : Qt::Key_A);
-                qInfo().noquote() << "line" << line << "keystroke ms" << lap.take(count);
+                    if (paint)
+                        view->grab();
+                }
+                const QString took = lap.take(count);
+                const auto *visual = qobject_cast<vn::VisualView *>(view);
+                qInfo().noquote() << "line" << line << "keystroke ms" << took
+                                  << (visual ? (visual->isBlockOpen() ? "(as source)" : "(rendered)") : "");
             }
             if (lines.size() >= 2) {
                 // Back to the last line typed on, then away: the first move

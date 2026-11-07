@@ -287,6 +287,13 @@ protected:
 
     // The row at viewport y and its top, or -1 past the end.
     int rowAt(qreal y, qreal *top);
+    // Whether the blinking carets are drawn at the moment.
+    bool caretBlinkOn() const { return m_caretOn; }
+    // Called when an edit made through this view starts (once per undo step,
+    // also for undo and redo), before the document changes.
+    virtual void editStarting() {}
+    // Types text at every caret (replacing selections), undone as typing is.
+    void insertTextAtCarets(const QString &text);
 
     // Left edge of text in viewport coordinates.
     qreal textLeft() const;
@@ -372,7 +379,6 @@ private:
     bool canEdit() const;
     void beginEdit();
     void endEdit();
-    void insertTextAtCarets(const QString &text);
     void deleteAtCarets(QTextCursor::MoveOperation op);
     void insertNewline();
     void insertTab();

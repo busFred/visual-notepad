@@ -123,6 +123,46 @@ no bevels. Values live in `src/Theme.h`.
   than http, https, mailto and file. Text files (scripts too) open in the
   app; network paths (UNC, `file://host`) are refused outright.
 
+## Visual editor
+
+The hybrid editor shows every block rendered and is typed into like a word
+processor (`VisualView`, "Rendered editing").
+
+- A click puts the caret where it lands in the rendered text; the block
+  stays rendered. Links and task boxes act on the click. A double click
+  opens the block as Markdown source, the caret at the clicked spot (in
+  source a double click selects a word). The block closes again when the
+  caret moves out of it, on Esc, or on a click in a side margin, on a blank
+  line or below the end. Losing the focus shows it rendered meanwhile.
+  Read-only views open nothing.
+- Typing in rendered text goes into the source where the caret renders: at
+  the edge of bold, italic, code, strikethrough or link text it takes the
+  formatting of the character before the caret (at the start of a block or
+  line, of the one after). `` * _ # ` [ ] < | \ ~ `` (and `$` with math on)
+  are inserted escaped, as are `- + > =` and the dot or parenthesis of
+  `1.` at the start of a line, so they show as typed. Text typed on a blank
+  line becomes a paragraph of its own.
+- Enter starts a new paragraph; in a list, a new item with the same marker
+  (numbered on); in a quote, a new paragraph in it; in a heading, a
+  paragraph after the heading. Backspace and Delete take one rendered
+  character (with its escape) and remove markup they leave empty (`****`,
+  `[](url)`). A selection in one block (mouse or Shift+arrows) is replaced
+  or deleted the same way, and Format > Bold and the like wrap it. Arrows,
+  Home and End move through the rendered text, from block to block over
+  blank lines, without opening anything.
+- Every edit is checked first: the block, parsed and rendered with it, must
+  show what was typed (white space aside, typographic quotes and dashes as
+  typed). What fails that, or cannot be done in rendered text (a selection
+  over several blocks, joining two blocks, several carets, Ctrl+Backspace,
+  Shift+Enter, Tab, an input method composing, typing in a table, code or
+  front matter) opens the block as source and is done there. Math, diagrams,
+  pictures and raw HTML take no typing until opened with a double click, as
+  where it would go is unknown.
+- A block edited in rendered text renders again at once from a parse of its
+  own source (only that block; its link definitions and footnotes elsewhere
+  show after the document's reparse, 120 ms after typing stops). Undo and
+  redo work as in source, the caret drawn where it renders.
+
 ## Table editing
 
 Pipe tables (GFM) can be edited without touching the pipes. The work is text
@@ -143,7 +183,7 @@ does), called through `vn::md::tableEdit`.
 - In the Markdown views, Tab and Shift+Tab move between cells (selecting the
   cell's text), Tab in the last cell adds a row, and Enter adds a row below.
   Nothing is rewritten while moving or typing.
-- Visual editor: a table opened for editing shows a floating toolbar (rows,
+- Visual editor: a table holding the caret shows a floating toolbar (rows,
   columns, alignment, a More menu) above it, and is realigned once the caret
   has left it after an edit (one undo step; the other views leave tables
   alone until Realign).
@@ -155,7 +195,7 @@ does), called through `vn::md::tableEdit`.
   continue in another cell (Tab after the last cell adds a row). The table
   toolbar and the Table menu act on that cell. A table is edited this way
   only if the block is exactly one pipe table; to edit its source, move the
-  caret into it with the keys. Read-only views do not open the box.
+  caret into it with the keys and type. Read-only views do not open the box.
 - A table is found by the same rules as the formatter (header and delimiter
   lines with as many cells, rows with a leading and closing pipe, quote and
   list prefixes, not inside fenced code). Rows with fewer cells get empty

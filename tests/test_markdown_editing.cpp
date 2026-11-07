@@ -623,14 +623,16 @@ void TestMarkdownEditing::ctrlClickOpensLink()
 
     // The visual view's source rows work the same way.
     tab->setViewMode(DocumentTab::ViewMode::Visual);
-    TextView *visual = tab->visualView();
+    VisualView *visual = tab->visualView();
     tab->activateWindow();
     visual->setFocus();
     QVERIFY(QTest::qWaitForWindowActive(tab));
     QTextCursor c(tab->document());
-    visual->setTextCursor(c); // Opens the block as source.
+    visual->setTextCursor(c);
+    visual->openBlockAtCaret(); // As a double click does.
     spy.clear();
-    for (int x = 10; x < 300 && spy.isEmpty(); x += 4)
+    // (A click in the side margin would close the block.)
+    for (int x = 30; x < 300 && spy.isEmpty(); x += 4)
         QTest::mouseClick(visual->viewport(), Qt::LeftButton, Qt::ControlModifier, QPoint(x, y));
     QVERIFY(!spy.isEmpty());
 }
