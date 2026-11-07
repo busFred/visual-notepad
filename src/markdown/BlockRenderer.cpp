@@ -32,6 +32,7 @@
 #include <QXmlStreamReader>
 
 #include <algorithm>
+#include <functional>
 #include <atomic>
 #include <deque>
 
@@ -1672,20 +1673,75 @@ std::optional<QRectF> RenderedBlock::tableCellRect(int row, int col) const
     return QRectF(QPointF(left, top), QPointF(right, bottom)).translated(contentOffset());
 }
 
-std::optional<RenderedBlock::TableCellHit> RenderedBlock::tableCellAt(const QPointF &point) const
+int RenderedBlock::TableGrid::colAt(qreal x) const
 {
-    const QTextTable *table = theTable();
-    if (!table)
-        return std::nullopt;
-    // The cells tile the table (see tableCellRect): the one holding the point.
-    for (int row = 0; row < table->rows(); ++row) {
-        for (int col = 0; col < table->columns(); ++col) {
-            const auto rect = tableCellRect(row, col);
-            if (rect && rect->contains(point))
-                return TableCellHit{row, col, *rect};
+    const auto it = std::upper_bound(xs.begin() + 1, xs.end() - 1, x);
+    return int(it - (xs.begin() + 1));
+}
+
+int RenderedBlock::TableGrid::rowAt(qreal y) const
+{
+    const auto it = std::upper_bound(ys.begin() + 1, ys.end() - 1, y);
+    return int(it - (ys.begin() + 1));
+}
+
+const RenderedBlock::TableGrid *RenderedBlock::tableGrid() const
+{
+    if (!m_tableGrid) {
+        m_tableGrid.emplace();
+        const QSize size = tableCells();
+        if (size.width() > 0 && size.height() > 0) {
+            TableGrid grid;
+            for (int col = 0; col < size.width(); ++col) {
+                const auto rect = tableCellRect(0, col);
+                if (!rect)
+                    return nullptr;
+                grid.xs.push_back(rect->left());
+                if (col + 1 == size.width())
+                    grid.xs.push_back(rect->right());
+            }
+            for (int row = 0; row < size.height(); ++row) {
+                const auto rect = tableCellRect(row, 0);
+                if (!rect)
+                    return nullptr;
+                grid.ys.push_back(rect->top());
+                if (row + 1 == size.height())
+                    grid.ys.push_back(rect->bottom());
+            }
+            // Merged cells (an HTML table's colspan, rowspan) give columns or
+            // rows no width of their own: no grid for such a table.
+            const auto increasing = [](const std::vector<qreal> &v) {
+                return std::adjacent_find(v.begin(), v.end(), std::greater_equal<qreal>()) == v.end();
+            };
+            if (increasing(grid.xs) && increasing(grid.ys))
+                *m_tableGrid = std::move(grid);
         }
     }
-    return std::nullopt;
+    return m_tableGrid->has_value() ? &**m_tableGrid : nullptr;
+}
+
+std::optional<RenderedBlock::TableCellHit> RenderedBlock::tableCellAt(const QPointF &point) const
+{
+    const TableGrid *grid = tableGrid();
+    if (!grid) {
+        // No grid (merged cells): the first cell that holds the point.
+        const QTextTable *table = theTable();
+        for (int row = 0; table && row < table->rows(); ++row) {
+            for (int col = 0; col < table->columns(); ++col) {
+                const auto rect = tableCellRect(row, col);
+                if (rect && rect->contains(point))
+                    return TableCellHit{row, col, *rect};
+            }
+        }
+        return std::nullopt;
+    }
+    if (point.x() < grid->xs.front() || point.x() >= grid->xs.back() || point.y() < grid->ys.front()
+        || point.y() >= grid->ys.back())
+        return std::nullopt;
+    // The cells tile the table (see tableCellRect): the one holding the point.
+    const int row = grid->rowAt(point.y());
+    const int col = grid->colAt(point.x());
+    return TableCellHit{row, col, QRectF(QPointF(grid->xs[col], grid->ys[row]), QPointF(grid->xs[col + 1], grid->ys[row + 1]))};
 }
 
 QString RenderedBlock::anchorAt(const QPointF &point) const

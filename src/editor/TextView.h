@@ -194,8 +194,11 @@ public:
     // Applies the operation to the whole table as one undo step, realigned,
     // and puts the caret where the operation says. False if it was refused.
     bool editTable(md::TableOp op, const QString &arg = {});
-    // The same for the table holding `line`, naming the cell (row, col).
-    bool editTableAt(int line, md::TableOp op, int row, int col, const QString &arg = {}, bool moveCaret = true);
+    // The same for the table holding `line`, naming the cell (row, col);
+    // `rows` and `cols` above 0 make it about that many rows and columns
+    // from there (see md::tableEdit).
+    bool editTableAt(int line, md::TableOp op, int row, int col, const QString &arg = {}, bool moveCaret = true,
+                     int rows = 0, int cols = 0);
     // A table edited with the caret in it is realigned once the caret has
     // left it (typing in it leaves it as it is meanwhile). Off by default.
     void setRealignTablesOnLeave(bool on);

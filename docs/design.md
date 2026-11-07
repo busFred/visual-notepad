@@ -196,6 +196,29 @@ does), called through `vn::md::tableEdit`.
   toolbar and the Table menu act on that cell. A table is edited this way
   only if the block is exactly one pipe table; to edit its source, move the
   caret into it with the keys and type. Read-only views do not open the box.
+- Visual editor, editable: cells, rows and columns of a rendered table
+  (pipe or HTML; not read-only views) are selected as in a word processor.
+  A thin band above the table's columns points a down arrow (a cursor
+  drawn from a small pixmap), and one left of its rows a right arrow; a
+  click there selects that column or row, a drag along it several, Shift+click
+  extends. Dragging from one cell to another selects the rectangle between
+  them (a click without a drag still opens the cell box; a drag from a cell
+  no longer selects text). The selection is painted over the table in the
+  theme's selection colour; Esc, a click elsewhere or the next edit drops it,
+  Delete or Backspace clears the cells' text. The context menu over a
+  selection offers Insert N Rows Above/Below, Delete N Rows, Insert N Columns
+  Left/Right, Delete N Columns, Align Columns, Clear Cells and then the Table
+  menu (singular for one); the toolbar's buttons act on the selection too.
+  Each is one undo step, made by one edit in the core
+  (`table::edit_range`: rows and columns counted from the first or last
+  selected; Delete Rows skips a pipe table's header, and all the body rows
+  leave one empty; the last column stays). The row and column commands are
+  off for HTML tables with merged cells. Where two rows meet at the table's
+  left edge, or two columns at its top edge, a plus and a line across the
+  table show; a click inserts a row or column there. Nothing is looked up
+  while pointing but the table's cell edges, found once for each render
+  (`RenderedBlock::tableGrid`); only the mark and the selection's rectangle
+  are painted again.
 - A table is found by the same rules as the formatter (header and delimiter
   lines with as many cells, rows with a leading and closing pipe, quote and
   list prefixes, not inside fenced code). Rows with fewer cells get empty

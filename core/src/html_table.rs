@@ -624,7 +624,24 @@ fn plain(src: &str) -> String {
 }
 
 /// Edit only the necessary source ranges, returning the containing whole lines.
+#[cfg(test)]
 pub fn edit(src: &str, line: usize, op: TableOp, row: usize, col: usize, arg: &str) -> TableEdit {
+    edit_rect(src, line, op, row, col, 1, 1, arg)
+}
+
+/// `edit`, with `SetCell` setting all the cells of the `span_rows` x
+/// `span_cols` rectangle that starts at (`row`, `col`).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn edit_rect(
+    src: &str,
+    line: usize,
+    op: TableOp,
+    row: usize,
+    col: usize,
+    span_rows: usize,
+    span_cols: usize,
+    arg: &str,
+) -> TableEdit {
     let Some(t) = find(src, line) else {
         return refused();
     };
@@ -648,10 +665,21 @@ pub fn edit(src: &str, line: usize, op: TableOp, row: usize, col: usize, arg: &s
     let (mut target_row, mut target_col) = (row, col);
     let mut changes = Vec::new();
     match op {
-        TableOp::SetCell => changes.push((
-            t.cell(row, col).unwrap().text_range(src),
-            arg.trim().replace("\r\n", "\n").replace(['\r', '\n'], "<br>"),
-        )),
+        TableOp::SetCell => {
+            let value = arg.trim().replace("\r\n", "\n").replace(['\r', '\n'], "<br>");
+            // (A merged cell is in several places of the grid: set it once.)
+            let mut done = std::collections::HashSet::new();
+            for r in row..(row + span_rows).min(t.rows.len()) {
+                for c in col..(col + span_cols).min(t.cols) {
+                    if let Some(cell) = t.cell(r, c) {
+                        let range = cell.text_range(src);
+                        if done.insert(range.start) {
+                            changes.push((range, value.clone()));
+                        }
+                    }
+                }
+            }
+        }
         TableOp::RowAbove | TableOp::RowBelow => {
             let after = op == TableOp::RowBelow;
             target_row = row + usize::from(after);
@@ -861,6 +889,41 @@ mod tests {
     }
     fn value(src: &str, row: usize, col: usize) -> String {
         cell(src, 0, row, col).text
+    }
+
+    #[test]
+    fn ranges_of_html_rows_and_cells() {
+        use crate::table::edit_range;
+        let apply = |src: &str, e: &TableEdit| {
+            let lines: Vec<&str> = src.split('\n').collect();
+            let mut out: Vec<&str> = lines[..e.first_line].to_vec();
+            out.extend(e.replacement.split('\n'));
+            out.extend(&lines[e.last_line + 1..]);
+            out.join("\n")
+        };
+        let e = edit_range(LINES, 0, TableOp::SetCell, 0, 0, 2, 2, "");
+        let out = apply(LINES, &e);
+        assert!(out.contains("<th></th>") && out.contains("<td></td>") && !out.contains("10") && !out.contains(">x<"));
+        assert!(out.contains(">y<"));
+        assert!(out.contains("<tr data-x='1'>"));
+        assert_eq!(out.matches("<td></td>").count(), 2);
+        // Both body rows: one empty row stays, as a body row.
+        let e = edit_range(LINES, 0, TableOp::DeleteRow, 1, 0, 5, 1, "");
+        let out = apply(LINES, &e);
+        assert!(e.ok && out.matches("<tr").count() == 2 && out.contains("<td></td>") && !out.contains("10"));
+        // The header row is not deleted.
+        let e = edit_range(LINES, 0, TableOp::DeleteRow, 0, 0, 2, 1, "");
+        let out = apply(LINES, &e);
+        assert!(out.contains("<th>a</th>") && !out.contains("10") && out.contains(">2<"));
+        let e = edit_range(LINES, 0, TableOp::RowBelow, 1, 0, 2, 1, "");
+        assert_eq!(apply(LINES, &e).matches("<tr").count(), 5);
+        let e = edit_range(INLINE, 0, TableOp::ColumnRight, 0, 0, 1, 2, "");
+        assert_eq!(apply(INLINE, &e).matches("<td></td>").count(), 4);
+        // Merged cells are set once.
+        let merged = "<table><tr><th colspan=\"2\">h</th></tr><tr><td>a</td><td>b</td></tr></table>";
+        let e = edit_range(merged, 0, TableOp::SetCell, 0, 0, 1, 2, "");
+        assert_eq!(apply(merged, &e), "<table><tr><th colspan=\"2\"></th></tr><tr><td>a</td><td>b</td></tr></table>");
+        assert!(!edit_range(merged, 0, TableOp::RowBelow, 1, 0, 2, 1, "").ok);
     }
 
     #[test]
