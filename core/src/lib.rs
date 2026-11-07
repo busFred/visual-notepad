@@ -170,6 +170,19 @@ mod ffi {
         fn table_info(text: &str, line: usize, column: usize) -> TableInfo;
         /// The table holding `line` after `op` on the cell at (`row`, `col`).
         fn table_edit(text: &str, line: usize, op: TableOp, row: usize, col: usize, arg: &str) -> TableEdit;
+        /// `table_edit` for the `rows` x `cols` cells starting at (`row`,
+        /// `col`): see `table::edit_range`.
+        #[allow(clippy::too_many_arguments)]
+        fn table_edit_range(
+            text: &str,
+            line: usize,
+            op: TableOp,
+            row: usize,
+            col: usize,
+            rows: usize,
+            cols: usize,
+            arg: &str,
+        ) -> TableEdit;
         /// Where cell (`row`, `col`) of the table holding `line` is.
         fn table_cell(text: &str, line: usize, row: usize, col: usize) -> TableCell;
         fn outline(markdown: &str) -> Vec<Heading>;
@@ -305,6 +318,34 @@ fn table_info(text: &str, line: usize, column: usize) -> ffi::TableInfo {
 fn table_edit(text: &str, line: usize, op: ffi::TableOp, row: usize, col: usize, arg: &str) -> ffi::TableEdit {
     guarded(
         || table::edit(text, line, op, row, col, arg),
+        || ffi::TableEdit {
+            ok: false,
+            changed: false,
+            remove: false,
+            first_line: 0,
+            last_line: 0,
+            replacement: String::new(),
+            caret_line: 0,
+            caret_column: 0,
+            keep_before: 0,
+            keep_after: 0,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn table_edit_range(
+    text: &str,
+    line: usize,
+    op: ffi::TableOp,
+    row: usize,
+    col: usize,
+    rows: usize,
+    cols: usize,
+    arg: &str,
+) -> ffi::TableEdit {
+    guarded(
+        || table::edit_range(text, line, op, row, col, rows, cols, arg),
         || ffi::TableEdit {
             ok: false,
             changed: false,

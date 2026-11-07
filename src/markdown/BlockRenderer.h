@@ -132,6 +132,22 @@ public:
     std::optional<TableCellHit> tableCellAt(const QPointF &point) const;
     // The rectangle of a cell, relative to the block's top-left.
     std::optional<QRectF> tableCellRect(int row, int col) const;
+    // Where the cells' edges are, relative to the block's top-left: the left
+    // edge of each column and the right edge of the last (cols + 1 values),
+    // the top of each row and the bottom of the last (rows + 1 values). Made
+    // once, so pointing at a table is cheap; null if the block is not one
+    // table.
+    struct TableGrid
+    {
+        std::vector<qreal> xs;
+        std::vector<qreal> ys;
+        int cols() const { return int(xs.size()) - 1; }
+        int rows() const { return int(ys.size()) - 1; }
+        // The column or row holding a coordinate, clamped to the table's.
+        int colAt(qreal x) const;
+        int rowAt(qreal y) const;
+    };
+    const TableGrid *tableGrid() const;
 
     // A picture the viewer can enlarge: a local file (path), a downloaded
     // one (url), or a generated one (math, diagram; both empty).
@@ -189,6 +205,7 @@ private:
     Part m_part; // Of a code box; the whole box by default.
     std::vector<LineAnchor> m_lineAnchors;
     mutable QString m_renderedText; // Cached; null until asked for.
+    mutable std::optional<std::optional<TableGrid>> m_tableGrid; // Empty until asked for.
 };
 
 // The picture in downloaded bytes, or null: also for an SVG that names a

@@ -100,8 +100,14 @@ bool tableOpAvailable(const TableInfo &info, TableOp op);
 // `text` is the whole document with "\n" line breaks.
 TableInfo tableInfo(const QString &text, int line, int column);
 // `row` and `col` name the cell the operation is about; `arg` is the new
-// text of the cell for SetCell.
-TableEdit tableEdit(const QString &text, int line, TableOp op, int row, int col, const QString &arg = {});
+// text of the cell for SetCell. With `rows` or `cols` above 0 the operation
+// is about that many rows and columns from there (a selection): inserted
+// above/after the first/last, deleted (never the header, never all columns;
+// all the body rows leave one empty), aligned, or set to `arg`.
+TableEdit tableEdit(const QString &text, int line, TableOp op, int row, int col, const QString &arg = {},
+                    int rows = 0, int cols = 0);
+// Sets whether `op` applies to `info` (for a selection of cells).
+void setTableOpAvailable(TableInfo &info, TableOp op, bool available);
 TableCell tableCell(const QString &text, int line, int row, int col);
 QString formatDocument(const QString &text);
 QString rebaseLinks(const QString &text, const QString &fromDir, const QString &toDir);

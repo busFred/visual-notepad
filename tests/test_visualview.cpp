@@ -26,6 +26,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QMenu>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QRegularExpression>
@@ -188,6 +189,8 @@ public:
     // The viewport y range of the row holding a line, or false.
     bool boundsOfLine(int line, qreal *top, qreal *bottom) { return lineBounds(line, top, bottom); }
     qreal textStart() const { return textLeft(); }
+    using VisualView::hasTableSelection;
+    using VisualView::populateSelectionMenu;
 
     int lineAt(qreal y)
     {
@@ -263,6 +266,13 @@ private Q_SLOTS:
     void tableIsRealignedWhenTheCaretLeavesIt();
     void tableToolbarFollowsTheCaret();
     void toolbarWorksWithACellOpen();
+    void clickingAColumnEdgeSelectsTheColumn();
+    void draggingAlongTheLeftEdgeSelectsRows();
+    void deletingRowsKeepsTheHeader();
+    void draggingFromCellToCellSelectsARectangle();
+    void quickInsertAddsRowsAndColumns();
+    void tableSelectionNeedsAnEditableView();
+    void selectionMenuAndToolbarActOnTheSelection();
     void htmlTableCellsAreEditedInPlace();
     void insertedTableOpensItsFirstCell();
     void clickingATableCellEditsIt();
@@ -337,6 +347,8 @@ private:
 
     // Viewport y where a click lands on the given source line, or -1.
     int yOfLine(int line, int x = 60);
+    // A table of five rows and three columns on line 2, rendered; read-write.
+    void useSelectionTable();
     int countColor(const QImage &image, const QColor &color) const;
 };
 
@@ -761,6 +773,413 @@ void TestVisualView::toolbarWorksWithACellOpen()
     QVERIFY(m_doc->findBlockByNumber(27).text().remove(u'|').trimmed().isEmpty());
 }
 
+namespace {
+
+const char *selectionTable = "Intro\n\n"
+                             "| Fruit | Qty | Note |\n"
+                             "|:------|----:|------|\n"
+                             "| pear  | 3   | ripe |\n"
+                             "| plum  | 4   | sour |\n"
+                             "| fig   | 5   | soft |\n"
+                             "| kiwi  | 6   | firm |\n"
+                             "\nEnd";
+
+// The cells of the table on line 2, read back from the source: one list of
+// texts a row, without the delimiter line.
+QList<QStringList> tableCells(QTextDocument *doc)
+{
+    QList<QStringList> rows;
+    for (QTextBlock b = doc->findBlockByNumber(2); b.isValid() && b.text().contains(u'|'); b = b.next()) {
+        if (b.blockNumber() == 3)
+            continue;
+        QStringList cells;
+        for (const QString &cell : b.text().split(u'|'))
+            cells << cell.trimmed();
+        cells.removeFirst();
+        cells.removeLast();
+        rows << cells;
+    }
+    return rows;
+}
+
+// A menu entry by its text, or null.
+QAction *menuAction(QMenu *menu, const QString &text)
+{
+    for (QAction *action : menu->actions()) {
+        if (action->text() == text)
+            return action;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+void TestVisualView::useSelectionTable()
+{
+    m_view->setReadOnly(false);
+    m_view->setMarkdownEditing(true);
+    m_doc->setPlainText(QString::fromUtf8(selectionTable));
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(0)));
+    m_model->flush();
+    QTest::qWait(20);
+}
+
+void TestVisualView::clickingAColumnEdgeSelectsTheColumn()
+{
+    useSelectionTable();
+    const int expanded = m_view->expandedBlockCount(); // (The block with the caret shows its source.)
+    QWidget *viewport = m_view->viewport();
+    const QRect header = m_view->tableCellViewRect(2, 0, 1);
+    QVERIFY(header.isValid());
+    // Just above the header cell: the arrow pointing down, not the text cursor.
+    const QPoint above(header.center().x(), header.top() - 6);
+    QTest::mouseMove(viewport, above);
+    QCOMPARE(viewport->cursor().shape(), Qt::BitmapCursor);
+    QVERIFY(!static_cast<ProbeView *>(m_view)->hasTableSelection());
+    const QImage plain = m_view->grab().toImage();
+    QTest::mouseClick(viewport, Qt::LeftButton, {}, above);
+    auto *probe = static_cast<ProbeView *>(m_view);
+    QVERIFY(probe->hasTableSelection());
+    // No cell box, no source: the table stays rendered; the column is shaded.
+    QVERIFY(!cellEditor(viewport));
+    QCOMPARE(m_view->expandedBlockCount(), expanded);
+    const QImage shaded = m_view->grab().toImage();
+    const QRect body = m_view->tableCellViewRect(2, 3, 1);
+    QVERIFY(plain.pixel(body.center()) != shaded.pixel(body.center()));
+    const QRect other = m_view->tableCellViewRect(2, 3, 0);
+    QCOMPARE(plain.pixel(other.center()), shaded.pixel(other.center()));
+    if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
+        QVERIFY(shaded.save(dir + QStringLiteral("/table-column-selected.png")));
+    // Esc drops it.
+    QTest::keyClick(viewport, Qt::Key_Escape);
+    QVERIFY(!probe->hasTableSelection());
+    QCOMPARE(m_view->grab().toImage().pixel(body.center()), plain.pixel(body.center()));
+    // A click elsewhere drops it too; Delete clears the column's cells, as one step.
+    QTest::mouseClick(viewport, Qt::LeftButton, {}, above);
+    QVERIFY(probe->hasTableSelection());
+    QTest::mouseClick(viewport, Qt::LeftButton, {}, QPoint(viewport->width() - 20, 10));
+    QVERIFY(!probe->hasTableSelection());
+    const QString before = m_doc->toPlainText();
+    QTest::mouseClick(viewport, Qt::LeftButton, {}, above);
+    QTest::keyClick(viewport, Qt::Key_Delete);
+    QVERIFY(!probe->hasTableSelection());
+    const QList<QStringList> cells = tableCells(m_doc);
+    QCOMPARE(cells.size(), 5);
+    for (const QStringList &row : cells) {
+        QCOMPARE(row.at(1), QString());
+        QVERIFY(!row.at(0).isEmpty() && !row.at(2).isEmpty());
+    }
+    m_doc->undo();
+    QCOMPARE(m_doc->toPlainText(), before);
+    m_model->flush(); // (The table is shown again.)
+    QTest::qWait(20);
+    // Shift+click on another column's edge extends the selection to it.
+    QTest::mouseClick(viewport, Qt::LeftButton, {}, above);
+    const QRect last = m_view->tableCellViewRect(2, 0, 2);
+    QTest::mouseClick(viewport, Qt::LeftButton, Qt::ShiftModifier, QPoint(last.center().x(), last.top() - 6));
+    QTest::keyClick(viewport, Qt::Key_Delete);
+    for (const QStringList &row : tableCells(m_doc)) {
+        QVERIFY(!row.at(0).isEmpty());
+        QCOMPARE(row.at(1), QString());
+        QCOMPARE(row.at(2), QString());
+    }
+    m_doc->undo();
+    QCOMPARE(m_doc->toPlainText(), before);
+    m_model->flush(); // (The table is shown again.)
+    QTest::qWait(20);
+}
+
+void TestVisualView::draggingAlongTheLeftEdgeSelectsRows()
+{
+    useSelectionTable();
+    const int expanded = m_view->expandedBlockCount(); // (The block with the caret shows its source.)
+    QWidget *viewport = m_view->viewport();
+    auto *probe = static_cast<ProbeView *>(m_view);
+    const QString before = m_doc->toPlainText();
+    const QRect first = m_view->tableCellViewRect(2, 2, 0);
+    const QRect second = m_view->tableCellViewRect(2, 3, 0);
+    QVERIFY(first.isValid() && second.isValid());
+    const int x = first.left() - 6;
+    QTest::mouseMove(viewport, QPoint(x, first.center().y()));
+    QCOMPARE(viewport->cursor().shape(), Qt::BitmapCursor);
+    QTest::mousePress(viewport, Qt::LeftButton, {}, QPoint(x, first.center().y()));
+    QTest::mouseMove(viewport, QPoint(x, second.center().y()));
+    QTest::mouseRelease(viewport, Qt::LeftButton, {}, QPoint(x, second.center().y()));
+    QVERIFY(probe->hasTableSelection());
+    QCOMPARE(m_view->expandedBlockCount(), expanded);
+
+    QMenu menu;
+    probe->populateSelectionMenu(&menu);
+    QVERIFY(menuAction(&menu, QStringLiteral("Insert 2 Rows Above")));
+    QVERIFY(menuAction(&menu, QStringLiteral("Insert 2 Rows Below")));
+    // (Every column is in the rows.)
+    QVERIFY(menuAction(&menu, QStringLiteral("Insert 3 Columns Left")));
+    QVERIFY(!menuAction(&menu, QStringLiteral("Delete 3 Columns"))->isEnabled());
+    QAction *remove = menuAction(&menu, QStringLiteral("Delete 2 Rows"));
+    QVERIFY(remove && remove->isEnabled());
+    remove->trigger();
+    QVERIFY(!probe->hasTableSelection());
+    const QList<QStringList> cells = tableCells(m_doc);
+    QCOMPARE(cells.size(), 3);
+    QCOMPARE(cells.at(1).at(0), QStringLiteral("pear"));
+    QCOMPARE(cells.at(2).at(0), QStringLiteral("kiwi"));
+    // One undo brings both back.
+    m_doc->undo();
+    QCOMPARE(m_doc->toPlainText(), before);
+    m_model->flush(); // (The table is shown again.)
+    QTest::qWait(20);
+
+    // Rows inserted above and below, as many as are selected.
+    QTest::mousePress(viewport, Qt::LeftButton, {}, QPoint(x, first.center().y()));
+    QTest::mouseMove(viewport, QPoint(x, second.center().y()));
+    QTest::mouseRelease(viewport, Qt::LeftButton, {}, QPoint(x, second.center().y()));
+    QMenu again;
+    probe->populateSelectionMenu(&again);
+    menuAction(&again, QStringLiteral("Insert 2 Rows Below"))->trigger();
+    QList<QStringList> inserted = tableCells(m_doc);
+    QCOMPARE(inserted.size(), 7);
+    QCOMPARE(inserted.at(3).at(0), QStringLiteral("fig"));
+    QCOMPARE(inserted.at(4).at(0), QString());
+    QCOMPARE(inserted.at(5).at(0), QString());
+    QCOMPARE(inserted.at(6).at(0), QStringLiteral("kiwi"));
+    m_doc->undo();
+    QCOMPARE(m_doc->toPlainText(), before);
+    m_model->flush(); // (The table is shown again.)
+    QTest::qWait(20);
+}
+
+void TestVisualView::deletingRowsKeepsTheHeader()
+{
+    useSelectionTable();
+    const int expanded = m_view->expandedBlockCount(); // (The block with the caret shows its source.)
+    QWidget *viewport = m_view->viewport();
+    auto *probe = static_cast<ProbeView *>(m_view);
+    const QRect header = m_view->tableCellViewRect(2, 0, 0);
+    const QRect bottom = m_view->tableCellViewRect(2, 4, 0);
+    const int x = header.left() - 6;
+    // The whole table, header to the last row.
+    QTest::mousePress(viewport, Qt::LeftButton, {}, QPoint(x, header.center().y()));
+    QTest::mouseMove(viewport, QPoint(x, bottom.center().y()));
+    QTest::mouseRelease(viewport, Qt::LeftButton, {}, QPoint(x, bottom.center().y()));
+    QVERIFY(probe->hasTableSelection());
+    QMenu menu;
+    probe->populateSelectionMenu(&menu);
+    QAction *remove = menuAction(&menu, QStringLiteral("Delete 5 Rows"));
+    QVERIFY(remove && remove->isEnabled());
+    remove->trigger();
+    // The header stays, and one empty row (a table with nothing under its header is none).
+    const QList<QStringList> cells = tableCells(m_doc);
+    QCOMPARE(cells.size(), 2);
+    QCOMPARE(cells.at(0), (QStringList{"Fruit", "Qty", "Note"}));
+    QCOMPARE(cells.at(1), (QStringList{"", "", ""}));
+    // The header alone cannot be deleted.
+    m_model->flush();
+    QTest::qWait(20);
+    const QRect only = m_view->tableCellViewRect(2, 0, 0);
+    QVERIFY(only.isValid());
+    QTest::mouseClick(viewport, Qt::LeftButton, {}, QPoint(only.left() - 6, only.center().y()));
+    QVERIFY(probe->hasTableSelection());
+    QMenu header_only;
+    probe->populateSelectionMenu(&header_only);
+    QVERIFY(!menuAction(&header_only, QStringLiteral("Delete Row"))->isEnabled());
+    QVERIFY(!menuAction(&header_only, QStringLiteral("Insert Row Above"))->isEnabled());
+    QVERIFY(menuAction(&header_only, QStringLiteral("Insert Row Below"))->isEnabled());
+}
+
+void TestVisualView::draggingFromCellToCellSelectsARectangle()
+{
+    useSelectionTable();
+    const int expanded = m_view->expandedBlockCount(); // (The block with the caret shows its source.)
+    QWidget *viewport = m_view->viewport();
+    auto *probe = static_cast<ProbeView *>(m_view);
+    const QString before = m_doc->toPlainText();
+    // A click on a cell still opens its box.
+    const QRect a = m_view->tableCellViewRect(2, 1, 1);
+    QTest::mouseClick(viewport, Qt::LeftButton, {}, a.center());
+    QVERIFY(cellEditor(viewport));
+    QTest::keyClick(cellEditor(viewport), Qt::Key_Escape);
+    QVERIFY(!probe->hasTableSelection());
+    // A drag from (1, 1) to (2, 2) selects four cells.
+    const QRect b = m_view->tableCellViewRect(2, 2, 2);
+    QTest::mousePress(viewport, Qt::LeftButton, {}, a.center());
+    QTest::mouseMove(viewport, a.center() + QPoint(QApplication::startDragDistance() + 3, 0));
+    QTest::mouseMove(viewport, b.center());
+    QTest::mouseRelease(viewport, Qt::LeftButton, {}, b.center());
+    QVERIFY(probe->hasTableSelection());
+    QVERIFY(!cellEditor(viewport));
+    QCOMPARE(m_view->expandedBlockCount(), expanded);
+    QCOMPARE(m_doc->toPlainText(), before);
+    QMenu menu;
+    probe->populateSelectionMenu(&menu);
+    QAction *clear = menuAction(&menu, QStringLiteral("Clear Cells"));
+    QVERIFY(clear && clear->isEnabled());
+    QVERIFY(menuAction(&menu, QStringLiteral("Insert 2 Columns Right")));
+    // Shown over the table.
+    const QImage shaded = m_view->grab().toImage();
+    if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
+        QVERIFY(shaded.save(dir + QStringLiteral("/table-cells-selected.png")));
+    clear->trigger();
+    const QList<QStringList> cells = tableCells(m_doc);
+    QCOMPARE(cells.at(0), (QStringList{"Fruit", "Qty", "Note"}));
+    QCOMPARE(cells.at(1), (QStringList{"pear", "", ""}));
+    QCOMPARE(cells.at(2), (QStringList{"plum", "", ""}));
+    QCOMPARE(cells.at(3), (QStringList{"fig", "5", "soft"}));
+    m_doc->undo();
+    QCOMPARE(m_doc->toPlainText(), before);
+    m_model->flush(); // (The table is shown again.)
+    QTest::qWait(20);
+    // Backspace clears too, and dragging back out of the table's edge clamps.
+    QTest::mousePress(viewport, Qt::LeftButton, {}, b.center());
+    QTest::mouseMove(viewport, b.center() + QPoint(QApplication::startDragDistance() + 3, 0));
+    QTest::mouseMove(viewport, QPoint(viewport->width() - 4, viewport->height() - 4));
+    QTest::mouseRelease(viewport, Qt::LeftButton, {}, QPoint(viewport->width() - 4, viewport->height() - 4));
+    QVERIFY(probe->hasTableSelection());
+    QTest::keyClick(viewport, Qt::Key_Backspace);
+    const QList<QStringList> after = tableCells(m_doc);
+    QCOMPARE(after.at(1), (QStringList{"pear", "3", "ripe"}));
+    QCOMPARE(after.at(2), (QStringList{"plum", "4", ""}));
+    QCOMPARE(after.at(4), (QStringList{"kiwi", "6", ""}));
+}
+
+void TestVisualView::quickInsertAddsRowsAndColumns()
+{
+    useSelectionTable();
+    const int expanded = m_view->expandedBlockCount(); // (The block with the caret shows its source.)
+    QWidget *viewport = m_view->viewport();
+    const QString before = m_doc->toPlainText();
+    // Where rows 2 and 3 meet, at the table's left edge: the mark shows.
+    const QRect upper = m_view->tableCellViewRect(2, 2, 0);
+    const QRect lower = m_view->tableCellViewRect(2, 3, 0);
+    const QPoint border(upper.left() - 6, (upper.bottom() + lower.top()) / 2);
+    const QImage plain = m_view->grab().toImage();
+    QTest::mouseMove(viewport, border);
+    QCOMPARE(viewport->cursor().shape(), Qt::PointingHandCursor);
+    const QImage marked = m_view->grab().toImage();
+    QVERIFY(marked != plain);
+    // (A line across the table at the border.)
+    QVERIFY(marked.pixel(upper.center().x(), border.y()) != plain.pixel(upper.center().x(), border.y()));
+    if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
+        QVERIFY(marked.save(dir + QStringLiteral("/table-quick-insert.png")));
+    // Away from it, the mark is gone.
+    QTest::mouseMove(viewport, QPoint(viewport->width() - 10, 10));
+    QCOMPARE(m_view->grab().toImage(), plain);
+    QTest::mouseClick(viewport, Qt::LeftButton, {}, border);
+    QList<QStringList> rows = tableCells(m_doc);
+    QCOMPARE(rows.size(), 6);
+    QCOMPARE(rows.at(2).at(0), QStringLiteral("plum"));
+    QCOMPARE(rows.at(3).at(0), QString());
+    QCOMPARE(rows.at(4).at(0), QStringLiteral("fig"));
+    m_doc->undo();
+    QCOMPARE(m_doc->toPlainText(), before);
+    m_model->flush(); // (The table is shown again.)
+    QTest::qWait(20);
+
+    // Where columns 0 and 1 meet, at the top edge.
+    const QRect left = m_view->tableCellViewRect(2, 0, 0);
+    const QRect right = m_view->tableCellViewRect(2, 0, 1);
+    const QPoint top((left.right() + right.left()) / 2, left.top() - 6);
+    QTest::mouseMove(viewport, top);
+    QCOMPARE(viewport->cursor().shape(), Qt::PointingHandCursor);
+    QTest::mouseClick(viewport, Qt::LeftButton, {}, top);
+    rows = tableCells(m_doc);
+    QCOMPARE(rows.at(0), (QStringList{"Fruit", "", "Qty", "Note"}));
+    QCOMPARE(rows.at(1), (QStringList{"pear", "", "3", "ripe"}));
+    m_doc->undo();
+    QCOMPARE(m_doc->toPlainText(), before);
+    m_model->flush(); // (The table is shown again.)
+    QTest::qWait(20);
+    // Not above the first row: the border under the header is the first one.
+    const QRect headerRow = m_view->tableCellViewRect(2, 0, 0);
+    QTest::mouseMove(viewport, QPoint(headerRow.left() - 6, headerRow.top() + 3));
+    QCOMPARE(viewport->cursor().shape(), Qt::BitmapCursor);
+}
+
+void TestVisualView::tableSelectionNeedsAnEditableView()
+{
+    useSelectionTable();
+    const int expanded = m_view->expandedBlockCount(); // (The block with the caret shows its source.)
+    QWidget *viewport = m_view->viewport();
+    auto *probe = static_cast<ProbeView *>(m_view);
+    const QRect header = m_view->tableCellViewRect(2, 0, 1);
+    const QRect a = m_view->tableCellViewRect(2, 1, 0);
+    const QRect b = m_view->tableCellViewRect(2, 2, 1);
+    const QPoint above(header.center().x(), header.top() - 6);
+    const QPoint border(a.left() - 6, a.bottom());
+    m_view->setReadOnly(true);
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(0)));
+    QTest::qWait(20);
+    const QImage plain = m_view->grab().toImage();
+    QTest::mouseMove(viewport, above);
+    QVERIFY(viewport->cursor().shape() != Qt::BitmapCursor);
+    QTest::mouseClick(viewport, Qt::LeftButton, {}, above);
+    QVERIFY(!probe->hasTableSelection());
+    QTest::mouseMove(viewport, border);
+    QCOMPARE(m_view->grab().toImage(), plain);
+    QTest::mousePress(viewport, Qt::LeftButton, {}, a.center());
+    QTest::mouseMove(viewport, a.center() + QPoint(QApplication::startDragDistance() + 3, 0));
+    QTest::mouseMove(viewport, b.center());
+    QTest::mouseRelease(viewport, Qt::LeftButton, {}, b.center());
+    QVERIFY(!probe->hasTableSelection());
+    // Not a plain-text view either.
+    m_view->setReadOnly(false);
+    m_view->setMarkdownEditing(false);
+    QTest::mouseClick(viewport, Qt::LeftButton, {}, above);
+    QVERIFY(!probe->hasTableSelection());
+}
+
+void TestVisualView::selectionMenuAndToolbarActOnTheSelection()
+{
+    useSelectionTable();
+    const int expanded = m_view->expandedBlockCount(); // (The block with the caret shows its source.)
+    QWidget *viewport = m_view->viewport();
+    auto *probe = static_cast<ProbeView *>(m_view);
+    const QString before = m_doc->toPlainText();
+    const QRect c0 = m_view->tableCellViewRect(2, 0, 0);
+    const QRect c1 = m_view->tableCellViewRect(2, 0, 1);
+    QTest::mousePress(viewport, Qt::LeftButton, {}, QPoint(c0.center().x(), c0.top() - 6));
+    QTest::mouseMove(viewport, QPoint(c1.center().x(), c1.top() - 6));
+    QTest::mouseRelease(viewport, Qt::LeftButton, {}, QPoint(c1.center().x(), c1.top() - 6));
+    QVERIFY(probe->hasTableSelection());
+    QMenu menu;
+    probe->populateSelectionMenu(&menu);
+    QVERIFY(menuAction(&menu, QStringLiteral("Insert 2 Columns Left")));
+    QVERIFY(menuAction(&menu, QStringLiteral("Insert 2 Columns Right")));
+    QAction *remove = menuAction(&menu, QStringLiteral("Delete 2 Columns"));
+    QVERIFY(remove && remove->isEnabled());
+    QMenu *align = nullptr;
+    for (QAction *action : menu.actions()) {
+        if (action->menu() && action->text() == QStringLiteral("Align Columns"))
+            align = action->menu();
+    }
+    QVERIFY(align);
+    menuAction(align, QStringLiteral("Right"))->trigger();
+    QCOMPARE(m_doc->findBlockByNumber(3).text(), QStringLiteral("| ----: | --: | ---- |"));
+    m_doc->undo();
+    QCOMPARE(m_doc->toPlainText(), before);
+    m_model->flush(); // (The table is shown again.)
+    QTest::qWait(20);
+
+    // The toolbar's buttons act on the selection: "- Col" deletes both.
+    QTest::mousePress(viewport, Qt::LeftButton, {}, QPoint(c0.center().x(), c0.top() - 6));
+    QTest::mouseMove(viewport, QPoint(c1.center().x(), c1.top() - 6));
+    QTest::mouseRelease(viewport, Qt::LeftButton, {}, QPoint(c1.center().x(), c1.top() - 6));
+    QTest::qWait(10);
+    auto *bar = viewport->findChild<QWidget *>(QStringLiteral("TableToolbar"));
+    QVERIFY(bar && !bar->isHidden());
+    QToolButton *column = nullptr;
+    for (QToolButton *b : bar->findChildren<QToolButton *>(QStringLiteral("TableToolButton"))) {
+        if (b->toolTip() == QLatin1String("Delete the column"))
+            column = b;
+    }
+    QVERIFY(column && column->isEnabled());
+    column->click();
+    QCOMPARE(tableCells(m_doc).at(0), (QStringList{"Note"}));
+    m_doc->undo();
+    QCOMPARE(m_doc->toPlainText(), before);
+    m_model->flush(); // (The table is shown again.)
+    QTest::qWait(20);
+}
+
 void TestVisualView::htmlTableCellsAreEditedInPlace()
 {
     m_view->setReadOnly(false);
@@ -772,24 +1191,11 @@ void TestVisualView::htmlTableCellsAreEditedInPlace()
     m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(0)));
     m_model->flush();
     QTest::qWait(20);
-    qreal top = 0;
-    qreal bottom = 0;
-    auto *probe = static_cast<ProbeView *>(m_view);
-    QVERIFY(probe->boundsOfLine(2, &top, &bottom));
-    // Down the first column until a click opens a box: the header cell.
-    QPlainTextEdit *editor = nullptr;
-    // (The <div> centers the table.)
-    for (int y = int(top) + 2; y < int(bottom) && !editor; y += 4) {
-        for (int x = int(probe->textStart()) + 4; x < m_view->viewport()->width() && !editor; x += 8) {
-            QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(x, y));
-            editor = cellEditor(m_view->viewport());
-            if (!editor) {
-                // Not a cell: the click opened the block's source. Close it.
-                m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(0)));
-                m_model->flush();
-            }
-        }
-    }
+    // (The <div> centers the table.) Click its first cell, the header.
+    const QRect first = m_view->tableCellViewRect(2, 0, 0);
+    QVERIFY(first.isValid());
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, first.center());
+    QPlainTextEdit *editor = cellEditor(m_view->viewport());
     QVERIFY(editor);
     QCOMPARE(editor->toPlainText(), QStringLiteral("Name"));
     // The block stays rendered, and the toolbar shows for it.
@@ -1200,10 +1606,11 @@ void TestVisualView::selectingInALongTableKeepsTheScroll()
 
     QTest::mousePress(visual->viewport(), Qt::LeftButton, {}, QPoint(100, 100));
     QTest::mouseMove(visual->viewport(), QPoint(300, 160));
-    QVERIFY(visual->textCursor().hasSelection());
-    QVERIFY(visual->textCursor().blockNumber() > 285);
+    // (Editable, a drag from a cell selects cells, not text.)
+    QVERIFY(visual->textCursor().hasSelection() || !locked);
+    QVERIFY(visual->textCursor().blockNumber() > 285 || !locked);
     QTest::mouseRelease(visual->viewport(), Qt::LeftButton, {}, QPoint(300, 160));
-    QVERIFY(visual->textCursor().hasSelection());
+    QVERIFY(visual->textCursor().hasSelection() || !locked);
     QVERIFY2(qAbs(visual->topLinePosition() - before) < 3, qPrintable(QString::number(visual->topLinePosition())));
     QVERIFY2(qAbs(source->topLinePosition() - sourceBefore) < 3, qPrintable(QString::number(source->topLinePosition())));
 

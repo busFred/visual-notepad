@@ -9,6 +9,7 @@
 #include "TableCellEditor.h"
 
 #include <QCache>
+#include <QCursor>
 #include <QHash>
 #include <QSet>
 #include <QStringList>
@@ -21,6 +22,7 @@
 
 class QFrame;
 class QLabel;
+class QMenu;
 
 namespace vn {
 
@@ -55,6 +57,9 @@ public:
     // A new table stays rendered, with its first header's box open (its
     // text selected, to type over), as a word processor does.
     void insertTable(int rows, int cols) override;
+    // For tests: where a cell of the rendered table starting at `line` is, in
+    // viewport coordinates; null if it is not shown as a table.
+    QRect tableCellViewRect(int line, int row, int col);
 
 Q_SIGNALS:
     // A link was clicked in rendered text (not a task checkbox).
@@ -71,8 +76,17 @@ protected:
     std::vector<LineAnchor> rowLineAnchors(const Row &row, qreal height) override;
     void paintLineBackground(QPainter &painter, int line, const QRectF &rect) override;
     void rowsMayHaveChanged() override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
+    void contextMenuEvent(QContextMenuEvent *event) override;
+    bool viewportEvent(QEvent *event) override;
+    // The commands on the selected cells, rows or columns (the context menu
+    // of a selection); the labels count what is selected.
+    void populateSelectionMenu(QMenu *menu);
+    bool hasTableSelection() const { return m_tableSel.active; }
     QTextCursor lineUnitAt(int position) const override;
     void changeEvent(QEvent *event) override;
     void focusInEvent(QFocusEvent *event) override;
@@ -177,8 +191,106 @@ private:
         int row = 0;
         int col = 0;
         QPoint pos;
-        QTextCursor caret;
+        QPointF point; // In the block.
     } m_pendingCell;
+
+    // Cells, rows and columns selected in a rendered table (editable view):
+    // by dragging from one cell to another, or along the band just above the
+    // table (columns) or left of it (rows). The selection is painted over the
+    // rendered table and goes with the first edit of the document.
+    enum class SelectionMode { Cells, Columns, Rows };
+    struct TableSelection
+    {
+        bool active = false;
+        SelectionMode mode = SelectionMode::Cells;
+        int line = -1; // First line of the table's block.
+        int at = 0;    // The table's first line, in the block.
+        int rows = 0;  // Size of the table.
+        int cols = 0;
+        int anchorRow = 0;
+        int anchorCol = 0;
+        int row = 0; // The far corner.
+        int col = 0;
+        int revision = -1; // Of the document.
+        int top() const { return mode == SelectionMode::Columns ? 0 : qMin(anchorRow, row); }
+        int bottom() const { return mode == SelectionMode::Columns ? rows - 1 : qMax(anchorRow, row); }
+        int left() const { return mode == SelectionMode::Rows ? 0 : qMin(anchorCol, col); }
+        int right() const { return mode == SelectionMode::Rows ? cols - 1 : qMax(anchorCol, col); }
+        bool operator==(const TableSelection &other) const
+        {
+            return active == other.active && mode == other.mode && line == other.line && anchorRow == other.anchorRow
+                   && anchorCol == other.anchorCol && row == other.row && col == other.col;
+        }
+    };
+    // What a rendered table is, as far as the source says (see checkTable).
+    struct TableCheck
+    {
+        int line = -1;
+        int revision = -1;
+        const RenderedBlock *block = nullptr;
+        bool ok = false; // One table, with the cells the source has.
+        bool canInsert = false;
+        int at = 0;
+        md::TableInfo info;
+    };
+    // Where the pointer is on a table: on a cell, on the band above a column
+    // or left of a row, or at a border between two columns or rows.
+    enum class TableZone { None, Cell, Column, Row, InsertColumn, InsertRow };
+    struct TableSpot
+    {
+        TableZone zone = TableZone::None;
+        int line = -1;
+        int at = 0;
+        int rows = 0;
+        int cols = 0;
+        int index = -1; // The column or row, or the border (0 is before the first).
+        int row = -1;   // For a cell.
+        int col = -1;
+        qreal top = 0;  // Of the table's block, in the viewport.
+        const RenderedBlock::TableGrid *grid = nullptr;
+    };
+    // The quick-insert mark shown: a line along a border and a plus on it.
+    struct TableHover
+    {
+        TableZone zone = TableZone::None;
+        int line = -1;
+        int index = -1;
+        QPointF center;   // Of the plus, in the viewport.
+        QPointF from;     // The ends of the line.
+        QPointF to;
+        QRect area;       // To repaint.
+    };
+    struct TableDrag
+    {
+        bool active = false;
+    };
+    const TableCheck &checkTable(const Row &row, const Render *render);
+    TableSpot tableSpotAt(const QPointF &point);
+    void setTableHover(const TableSpot &spot);
+    void clearTableHover();
+    void tablePressed(const TableSpot &spot, QMouseEvent *event);
+    void insertAtBorder(const TableSpot &spot);
+    // Starts (or with `extend`, grows) a selection on the table of `spot`.
+    void selectTableCells(SelectionMode mode, const TableSpot &spot, int row, int col, bool extend);
+    void updateTableDrag(const QPointF &point);
+    void setTableSelection(const TableSelection &selection);
+    void clearTableSelection();
+    // False (and forgets the selection) if the document changed since.
+    bool tableSelectionValid();
+    // Where the selection is, in the viewport; false if not in view.
+    bool selectionViewRect(QRectF *rect);
+    void paintTableOverlay(QPaintEvent *event);
+    // Runs a table command on the selected rows, columns or cells.
+    bool selectionOperation(md::TableOp op);
+    // The table info of the selection's first cell, with what each command
+    // does on the selection (not on the cell alone) in `available`.
+    md::TableInfo selectionInfo();
+    bool dragStartedOnCell(QMouseEvent *event);
+    TableSelection m_tableSel;
+    TableHover m_tableHover;
+    TableDrag m_tableDrag;
+    TableCheck m_tableCheck;
+    QHash<int, QCursor> m_edgeCursors; // The arrows at a table's edges, by pixel ratio.
 
     TableToolbar *m_tableToolbar = nullptr;
     bool m_toolbarUpdatePending = false;

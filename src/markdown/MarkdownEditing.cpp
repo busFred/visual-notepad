@@ -195,6 +195,17 @@ bool tableOpAvailable(const TableInfo &info, TableOp op)
     return info.found && bit < 32 && (info.available & (quint32(1) << bit));
 }
 
+void setTableOpAvailable(TableInfo &info, TableOp op, bool available)
+{
+    const auto bit = static_cast<unsigned>(coreOp(op));
+    if (bit >= 32)
+        return;
+    if (available)
+        info.available |= quint32(1) << bit;
+    else
+        info.available &= ~(quint32(1) << bit);
+}
+
 TableInfo tableInfo(const QString &text, int line, int column)
 {
     const QByteArray utf8 = text.toUtf8();
@@ -216,12 +227,15 @@ TableInfo tableInfo(const QString &text, int line, int column)
     return info;
 }
 
-TableEdit tableEdit(const QString &text, int line, TableOp op, int row, int col, const QString &arg)
+TableEdit tableEdit(const QString &text, int line, TableOp op, int row, int col, const QString &arg, int rows, int cols)
 {
     const QByteArray utf8 = text.toUtf8();
     const QByteArray argUtf8 = arg.toUtf8();
-    const core::TableEdit r = core::table_edit(str(utf8), size_t(qMax(line, 0)), coreOp(op), size_t(qMax(row, 0)),
-                                               size_t(qMax(col, 0)), str(argUtf8));
+    const core::TableEdit r = rows > 0 || cols > 0
+        ? core::table_edit_range(str(utf8), size_t(qMax(line, 0)), coreOp(op), size_t(qMax(row, 0)), size_t(qMax(col, 0)),
+                                 size_t(qMax(rows, 1)), size_t(qMax(cols, 1)), str(argUtf8))
+        : core::table_edit(str(utf8), size_t(qMax(line, 0)), coreOp(op), size_t(qMax(row, 0)), size_t(qMax(col, 0)),
+                           str(argUtf8));
     TableEdit edit;
     edit.ok = r.ok;
     if (!r.ok)

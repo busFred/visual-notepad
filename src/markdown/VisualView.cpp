@@ -9,12 +9,16 @@
 #include "TableToolbar.h"
 
 #include <QApplication>
+#include <QContextMenuEvent>
+#include <QCursor>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QTextBlock>
@@ -44,9 +48,52 @@ constexpr int renderMax = 512;
 constexpr int renderKiB = 16 * 1024;
 constexpr int renderHardMax = 2 * renderMax;
 
+// Pointing at a table's edge: how far the band above (and left of) the table
+// reaches out of it and into it, how near a border the quick-insert mark
+// shows, and the mark's size and distance from the table.
+constexpr qreal tableBandOut = 14;
+constexpr qreal tableBandIn = 2;
+constexpr qreal insertReach = 6;
+constexpr qreal markRadius = 6.5;
+constexpr qreal markOffset = 7.5;
+
 bool sameChar(QChar a, QChar b)
 {
     return a == b || (a.isSpace() && b.isSpace());
+}
+
+// The pointer over a column's top edge (an arrow down) or a row's left edge
+// (an arrow right); Qt has no such cursors. Made once for each pixel ratio.
+QCursor edgeArrowCursor(bool down, qreal ratio)
+{
+    static QHash<int, QCursor> cursors;
+    const int key = int(ratio * 100) * 2 + (down ? 1 : 0);
+    if (const auto found = cursors.constFind(key); found != cursors.cend())
+        return *found;
+    constexpr int size = 24;
+    QPixmap pixmap(QSize(size, size) * ratio);
+    pixmap.setDevicePixelRatio(ratio);
+    pixmap.fill(Qt::transparent);
+    QPainterPath arrow;
+    arrow.moveTo(9, 2);
+    arrow.lineTo(15, 2);
+    arrow.lineTo(15, 12);
+    arrow.lineTo(20, 12);
+    arrow.lineTo(12, 22);
+    arrow.lineTo(4, 12);
+    arrow.lineTo(9, 12);
+    arrow.closeSubpath();
+    if (!down)
+        arrow = QTransform(0, 1, 1, 0, 0, 0).map(arrow); // The same, turned to the right.
+    QPainter p(&pixmap);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(QPen(Qt::white, 2.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.drawPath(arrow);
+    p.setPen(Qt::NoPen);
+    p.setBrush(Qt::black);
+    p.drawPath(arrow);
+    p.end();
+    return QCursor(pixmap, down ? 12 : 22, down ? 22 : 12);
 }
 
 } // namespace
@@ -87,6 +134,8 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
     setTextMargins(sideMargin, sideMargin, topMargin);
     viewport()->setMouseTracking(true);
     connect(this, &TextView::scrolled, this, &VisualView::scheduleToolbarUpdate);
+    // (The mark of the quick insert is kept in viewport coordinates.)
+    connect(this, &TextView::scrolled, this, &VisualView::clearTableHover);
     connect(model, &MarkdownModel::optionsChanged, this, [this] {
         clearRenderCache();
         relayout();
@@ -178,6 +227,10 @@ void VisualView::setHighlightActiveBlock(bool on)
 void VisualView::rowsMayHaveChanged()
 {
     scheduleToolbarUpdate();
+    // An edit ends the selection of cells, and moves what the mark pointed at.
+    clearTableHover();
+    if (m_tableSel.active && m_tableSel.revision != document()->revision())
+        clearTableSelection();
     // A hidden view (Source mode) waits until it is shown, so edits don't
     // re-parse the document for nothing.
     if (!isVisible()) {
@@ -385,7 +438,7 @@ void VisualView::updateTableToolbar()
     // the cell box, and the toolbar with it, before the button is released.
     // The search stops at a widget whose focus proxy has the focus already.
     m_tableToolbar->setFocusProxy(m_cellEditor);
-    m_tableToolbar->setState(info);
+    m_tableToolbar->setState(m_tableSel.active ? selectionInfo() : info);
     m_tableToolbar->adjustSize();
     const QSize size = m_tableToolbar->size();
     constexpr int gap = 4;
@@ -416,7 +469,10 @@ void VisualView::toolbarOperation(md::TableOp op)
         if (s.op == op && info.found && info.alignment == s.alignment)
             op = md::TableOp::AlignNone;
     }
-    editTable(op);
+    if (m_tableSel.active)
+        selectionOperation(op);
+    else
+        editTable(op);
     setFocus();
 }
 
@@ -431,27 +487,25 @@ bool VisualView::tableCellPressed(const Row &r, const QPointF &point, QMouseEven
     if (!render)
         return false;
     const auto hit = render->block->tableCellAt(point);
-    if (!hit)
+    if (!hit || !checkTable(r, render).ok)
         return false;
-    // Not consumed: the press goes on to place the caret and start a drag;
-    // mouseReleaseEvent decides whether it was a click.
-    m_pendingCell = {true, r.firstLine, hit->row, hit->col, event->position().toPoint(), textCursor()};
-    return false;
+    // Consumed: the caret stays where it is. A click (no drag) opens the box
+    // when the button comes up; a drag selects the cells from this one to
+    // where the button comes up (see mouseMoveEvent).
+    m_pendingCell = {true, r.firstLine, hit->row, hit->col, event->position().toPoint(), point};
+    return true;
 }
 
-bool VisualView::openCellEditor(int line, int row, int col)
+const VisualView::TableCheck &VisualView::checkTable(const Row &r, const Render *render)
 {
-    if (m_cellEditor)
-        closeCellEditor(TableCellEditor::Exit::Commit);
-    const int index = rowOfLine(line);
-    if (index < 0 || index >= rowCount())
-        return false;
-    const Row r = this->row(index);
-    if (!r.rendered || r.firstLine != line)
-        return false;
-    const Render *render = rendered(r);
-    if (!render)
-        return false;
+    const int revision = document()->revision();
+    TableCheck &check = m_tableCheck;
+    if (check.line == r.firstLine && check.revision == revision && check.block == render->block.get())
+        return check;
+    check = {};
+    check.line = r.firstLine;
+    check.revision = revision;
+    check.block = render->block.get();
     // The block must be one table (and not, say, front matter, shown as a
     // table), the rendered one with the cells the source has: a pipe table,
     // or an HTML block that renders as nothing but its <table>.
@@ -467,9 +521,35 @@ bool VisualView::openCellEditor(int line, int row, int col)
     }
     const int lines = r.lastLine - r.firstLine;
     const QSize cells = render->block->tableCells();
-    if (!info.found || info.firstLine != at || info.lastLine > lines || (!info.html && info.lastLine != lines)
-        || cells.height() != info.rows || cells.width() != info.cols || row >= info.rows || col >= info.cols)
+    check.ok = info.found && info.firstLine == at && info.lastLine <= lines && (info.html || info.lastLine == lines)
+               && cells.height() == info.rows && cells.width() == info.cols;
+    check.at = at;
+    check.info = info;
+    // Not in a table with merged cells, where a row or column is not a row
+    // or column of the source.
+    check.canInsert = check.ok && md::tableOpAvailable(info, md::TableOp::RowBelow)
+                      && md::tableOpAvailable(info, md::TableOp::ColumnRight);
+    return check;
+}
+
+bool VisualView::openCellEditor(int line, int row, int col)
+{
+    clearTableSelection();
+    if (m_cellEditor)
+        closeCellEditor(TableCellEditor::Exit::Commit);
+    const int index = rowOfLine(line);
+    if (index < 0 || index >= rowCount())
         return false;
+    const Row r = this->row(index);
+    if (!r.rendered || r.firstLine != line)
+        return false;
+    const Render *render = rendered(r);
+    if (!render)
+        return false;
+    const TableCheck &check = checkTable(r, render);
+    if (!check.ok || row >= check.info.rows || col >= check.info.cols)
+        return false;
+    const int at = check.at;
     const md::TableCell cell = md::tableCell(render->source, at, row, col);
     if (!cell.found)
         return false;
@@ -1021,6 +1101,7 @@ void VisualView::paintEvent(QPaintEvent *event)
     }
     ++m_frame;
     TextView::paintEvent(event);
+    paintTableOverlay(event);
 }
 
 RenderedSelection VisualView::selectionForRow(const Row &r, const RenderedBlock *block, const QString &source) const
@@ -1101,18 +1182,27 @@ QTextCursor VisualView::lineUnitAt(int position) const
 
 void VisualView::mouseReleaseEvent(QMouseEvent *event)
 {
+    if (m_tableDrag.active && event->button() == Qt::LeftButton) {
+        // The selection of cells, rows or columns is made as it was dragged.
+        m_tableDrag = {};
+        return;
+    }
     const bool wasSelecting = isMouseSelecting();
     const PendingCell pending = std::exchange(m_pendingCell, PendingCell());
     TextView::mouseReleaseEvent(event);
-    if (pending.active && event->button() == Qt::LeftButton && !hasSelection() && !isReadOnly()
+    if (pending.active && event->button() == Qt::LeftButton && !isReadOnly()
         && (event->position().toPoint() - pending.pos).manhattanLength() <= QApplication::startDragDistance()) {
         // A click on a cell of a rendered table: its box, not the table's
-        // source. The caret goes back to where it was.
-        const QTextCursor clicked = textCursor();
-        setTextCursor(pending.caret);
+        // source.
         if (openCellEditor(pending.line, pending.row, pending.col))
             return;
-        setTextCursor(clicked);
+        // No box for this table: the click is a click on its text.
+        const int index = rowOfLine(pending.line);
+        if (index >= 0 && index < rowCount() && row(index).rendered) {
+            QTextCursor cursor(document());
+            cursor.setPosition(hitTestRenderedRow(row(index), pending.point));
+            setTextCursor(cursor);
+        }
     }
     realignLeftTable();
     // Editable: the blocks the selection touches open for editing now.
@@ -1255,7 +1345,57 @@ void VisualView::toggleTask(int line)
 
 void VisualView::mouseMoveEvent(QMouseEvent *event)
 {
+    if (m_tableDrag.active) {
+        if (event->buttons() & Qt::LeftButton) {
+            updateTableDrag(event->position());
+            return;
+        }
+        m_tableDrag = {}; // (The release went elsewhere.)
+    }
+    if (m_pendingCell.active && (event->buttons() & Qt::LeftButton)
+        && (event->position().toPoint() - m_pendingCell.pos).manhattanLength() > QApplication::startDragDistance()) {
+        // A drag from a cell: the cells from it to the pointer are selected.
+        const PendingCell pending = std::exchange(m_pendingCell, PendingCell());
+        const int index = rowOfLine(pending.line);
+        if (index >= 0 && index < rowCount() && row(index).rendered) {
+            const Row r = row(index);
+            const Render *render = memoized(r);
+            if (render && render->block && render->block->tableGrid()) {
+                const TableCheck &check = checkTable(r, render);
+                TableSpot spot;
+                spot.line = r.firstLine;
+                spot.at = check.at;
+                spot.rows = check.info.rows;
+                spot.cols = check.info.cols;
+                if (check.ok && !m_cellEditor) {
+                    selectTableCells(SelectionMode::Cells, spot, pending.row, pending.col, false);
+                    m_tableDrag.active = true;
+                    updateTableDrag(event->position());
+                    return;
+                }
+            }
+        }
+    }
     if (event->buttons() == Qt::NoButton) {
+        // The edges of a table: arrows to select a column or a row, and the
+        // marks to insert one.
+        const TableSpot spot = tableSpotAt(event->position());
+        setTableHover(spot);
+        if (spot.zone != TableZone::None && spot.zone != TableZone::Cell) {
+            if (spot.zone == TableZone::Column || spot.zone == TableZone::Row) {
+                const bool down = spot.zone == TableZone::Column;
+                const qreal ratio = viewport()->devicePixelRatioF();
+                const int key = int(ratio * 100) * 2 + (down ? 1 : 0);
+                auto cursor = m_edgeCursors.find(key);
+                if (cursor == m_edgeCursors.end())
+                    cursor = m_edgeCursors.insert(key, edgeArrowCursor(down, ratio));
+                viewport()->setCursor(*cursor);
+            } else {
+                viewport()->setCursor(Qt::PointingHandCursor);
+            }
+            QToolTip::hideText();
+            return;
+        }
         // Pointing hand and URL tooltip over links in rendered text.
         qreal top = 0;
         const int index = rowAt(event->position().y(), &top);
@@ -1275,6 +1415,561 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
             QToolTip::hideText();
     }
     TextView::mouseMoveEvent(event);
+}
+
+bool VisualView::viewportEvent(QEvent *event)
+{
+    if (event->type() == QEvent::Leave)
+        clearTableHover();
+    return TextView::viewportEvent(event);
+}
+
+// ---------------------------------------------------------------------------
+// Selecting cells, rows and columns; quick insert
+
+VisualView::TableSpot VisualView::tableSpotAt(const QPointF &p)
+{
+    if (isReadOnly() || !markdownEditing())
+        return {};
+    // The row under the pointer, then the one that starts just below it (the
+    // band above a table is in the space before it).
+    const auto inRow = [&](int index, qreal top) -> TableSpot {
+        if (index < 0)
+            return {};
+        const Row r = row(index);
+        if (!r.rendered)
+            return {};
+        const Render *render = memoized(r);
+        if (!render || !render->block)
+            return {};
+        const RenderedBlock::TableGrid *grid = render->block->tableGrid();
+        if (!grid)
+            return {};
+        const TableCheck &check = checkTable(r, render);
+        if (!check.ok)
+            return {};
+        TableSpot spot;
+        spot.line = r.firstLine;
+        spot.at = check.at;
+        spot.rows = grid->rows();
+        spot.cols = grid->cols();
+        spot.top = top;
+        spot.grid = grid;
+        const qreal lx = p.x() - textLeft();
+        const qreal ly = p.y() - top;
+        const qreal x0 = grid->xs.front();
+        const qreal x1 = grid->xs.back();
+        const qreal y0 = grid->ys.front();
+        const qreal y1 = grid->ys.back();
+        // The border nearest to a coordinate, no nearer the start than
+        // `first`, and whether it is near enough (and its cells wide enough)
+        // for the mark.
+        const auto border = [](const std::vector<qreal> &edges, qreal v, int first, int *index) {
+            const int count = int(edges.size());
+            int k = int(std::lower_bound(edges.begin() + first, edges.end(), v) - edges.begin());
+            if (k >= count || (k > first && v - edges[k - 1] < edges[k] - v))
+                --k;
+            *index = k;
+            qreal room = insertReach;
+            if (k > 0)
+                room = qMin(room, (edges[k] - edges[k - 1]) / 3);
+            if (k + 1 < count)
+                room = qMin(room, (edges[k + 1] - edges[k]) / 3);
+            return qAbs(v - edges[k]) <= room;
+        };
+        if (ly >= y0 - tableBandOut && ly < y0 + tableBandIn && lx >= x0 - insertReach && lx <= x1 + insertReach) {
+            int k = 0;
+            if (check.canInsert && border(grid->xs, lx, 0, &k)) {
+                spot.zone = TableZone::InsertColumn;
+                spot.index = k;
+                return spot;
+            }
+            if (lx >= x0 && lx < x1) {
+                spot.zone = TableZone::Column;
+                spot.index = grid->colAt(lx);
+                return spot;
+            }
+        }
+        if (lx >= x0 - tableBandOut && lx < x0 + tableBandIn && ly >= y0 - insertReach && ly <= y1 + insertReach) {
+            int k = 0;
+            if (check.canInsert && border(grid->ys, ly, 1, &k)) {
+                spot.zone = TableZone::InsertRow;
+                spot.index = k;
+                return spot;
+            }
+            if (ly >= y0 && ly < y1) {
+                spot.zone = TableZone::Row;
+                spot.index = grid->rowAt(ly);
+                return spot;
+            }
+        }
+        if (lx >= x0 && lx < x1 && ly >= y0 && ly < y1) {
+            spot.zone = TableZone::Cell;
+            spot.row = grid->rowAt(ly);
+            spot.col = grid->colAt(lx);
+        }
+        return spot;
+    };
+    qreal top = 0;
+    const int index = rowAt(p.y(), &top);
+    TableSpot spot = inRow(index, top);
+    if (spot.zone != TableZone::None)
+        return spot;
+    qreal below = 0;
+    const int next = rowAt(p.y() + tableBandOut, &below);
+    if (next < 0 || next == index)
+        return {};
+    return inRow(next, below);
+}
+
+void VisualView::setTableHover(const TableSpot &spot)
+{
+    const bool insert = spot.zone == TableZone::InsertColumn || spot.zone == TableZone::InsertRow;
+    if (!insert) {
+        clearTableHover();
+        return;
+    }
+    if (m_tableHover.zone == spot.zone && m_tableHover.line == spot.line && m_tableHover.index == spot.index)
+        return;
+    const QRect old = m_tableHover.area;
+    const bool column = spot.zone == TableZone::InsertColumn;
+    const RenderedBlock::TableGrid &g = *spot.grid;
+    const qreal left = textLeft();
+    TableHover hover;
+    hover.zone = spot.zone;
+    hover.line = spot.line;
+    hover.index = spot.index;
+    if (column) {
+        const qreal x = left + g.xs[spot.index];
+        hover.center = QPointF(x, spot.top + g.ys.front() - markOffset);
+        hover.from = QPointF(x, spot.top + g.ys.front() - markOffset);
+        hover.to = QPointF(x, spot.top + g.ys.back());
+    } else {
+        const qreal y = spot.top + g.ys[spot.index];
+        hover.center = QPointF(left + g.xs.front() - markOffset, y);
+        hover.from = QPointF(left + g.xs.front() - markOffset, y);
+        hover.to = QPointF(left + g.xs.back(), y);
+    }
+    hover.area = QRectF(hover.from, hover.to).normalized().adjusted(-markRadius - 2, -markRadius - 2, markRadius + 2, markRadius + 2).toAlignedRect();
+    m_tableHover = hover;
+    if (!old.isNull())
+        viewport()->update(old);
+    viewport()->update(hover.area);
+}
+
+void VisualView::clearTableHover()
+{
+    if (m_tableHover.zone == TableZone::None)
+        return;
+    const QRect area = m_tableHover.area;
+    m_tableHover = {};
+    viewport()->update(area);
+}
+
+void VisualView::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton && !isReadOnly() && markdownEditing()) {
+        TableSpot spot = tableSpotAt(event->position());
+        const bool shift = (event->modifiers() & ~Qt::KeypadModifier) == Qt::ShiftModifier;
+        const bool onBand = spot.zone != TableZone::None && spot.zone != TableZone::Cell;
+        if (onBand && m_cellEditor) {
+            // What was typed goes in first, and may change the table's widths.
+            closeCellEditor(TableCellEditor::Exit::Commit);
+            spot = tableSpotAt(event->position());
+        }
+        if (spot.zone != TableZone::None && spot.zone != TableZone::Cell) {
+            setFocus(Qt::MouseFocusReason);
+            event->accept();
+            tablePressed(spot, event);
+            return;
+        }
+        if (m_tableSel.active) {
+            if (shift && spot.zone == TableZone::Cell && spot.line == m_tableSel.line && tableSelectionValid()) {
+                // Shift+click on a cell grows the selection to it.
+                setFocus(Qt::MouseFocusReason);
+                event->accept();
+                selectTableCells(m_tableSel.mode, spot, spot.row, spot.col, true);
+                return;
+            }
+            clearTableSelection();
+        }
+    }
+    TextView::mousePressEvent(event);
+}
+
+void VisualView::mouseDoubleClickEvent(QMouseEvent *event)
+{
+    // A quick second click on an edge is another click on it, not a word.
+    if (event->button() == Qt::LeftButton && !isReadOnly() && markdownEditing()) {
+        const TableSpot spot = tableSpotAt(event->position());
+        if (spot.zone != TableZone::None && spot.zone != TableZone::Cell) {
+            mousePressEvent(event);
+            return;
+        }
+    }
+    TextView::mouseDoubleClickEvent(event);
+}
+
+void VisualView::tablePressed(const TableSpot &spot, QMouseEvent *event)
+{
+    const bool extend = (event->modifiers() & ~Qt::KeypadModifier) == Qt::ShiftModifier;
+    switch (spot.zone) {
+    case TableZone::InsertColumn:
+    case TableZone::InsertRow:
+        clearTableSelection();
+        insertAtBorder(spot);
+        break;
+    case TableZone::Column:
+        selectTableCells(SelectionMode::Columns, spot, 0, spot.index, extend);
+        m_tableDrag.active = true;
+        break;
+    case TableZone::Row:
+        selectTableCells(SelectionMode::Rows, spot, spot.index, 0, extend);
+        m_tableDrag.active = true;
+        break;
+    default:
+        break;
+    }
+}
+
+void VisualView::insertAtBorder(const TableSpot &spot)
+{
+    clearTableHover();
+    const int line = spot.line + spot.at;
+    using Op = md::TableOp;
+    bool done = false;
+    if (spot.zone == TableZone::InsertRow)
+        done = editTableAt(line, Op::RowBelow, spot.index - 1, 0, {}, false);
+    else if (spot.index < spot.cols)
+        done = editTableAt(line, Op::ColumnLeft, 0, spot.index, {}, false);
+    else
+        done = editTableAt(line, Op::ColumnRight, 0, spot.cols - 1, {}, false);
+    if (done)
+        m_model->flush(); // Show it now.
+    scheduleToolbarUpdate();
+}
+
+void VisualView::selectTableCells(SelectionMode mode, const TableSpot &spot, int row, int col, bool extend)
+{
+    TableSelection s;
+    if (extend && m_tableSel.active && m_tableSel.line == spot.line && m_tableSel.mode == mode) {
+        s = m_tableSel;
+    } else {
+        s.active = true;
+        s.mode = mode;
+        s.line = spot.line;
+        s.at = spot.at;
+        s.rows = spot.rows;
+        s.cols = spot.cols;
+        s.anchorRow = row;
+        s.anchorCol = col;
+    }
+    s.row = row;
+    s.col = col;
+    s.revision = document()->revision();
+    setTableSelection(s);
+}
+
+void VisualView::updateTableDrag(const QPointF &p)
+{
+    if (!m_tableSel.active)
+        return;
+    const int index = rowOfLine(m_tableSel.line);
+    if (index < 0 || index >= rowCount())
+        return;
+    const Row r = row(index);
+    qreal top = 0;
+    qreal bottom = 0;
+    const Render *render = r.rendered ? memoized(r) : nullptr;
+    const RenderedBlock::TableGrid *grid = render && render->block ? render->block->tableGrid() : nullptr;
+    if (!grid || !lineBounds(m_tableSel.line, &top, &bottom))
+        return;
+    // (The table's edges clamp: a pointer past the table selects up to its end.)
+    TableSelection s = m_tableSel;
+    const int col = grid->colAt(p.x() - textLeft());
+    const int row = grid->rowAt(p.y() - top);
+    if (s.mode != SelectionMode::Rows)
+        s.col = col;
+    if (s.mode != SelectionMode::Columns)
+        s.row = row;
+    if (s == m_tableSel)
+        return;
+    setTableSelection(s);
+}
+
+bool VisualView::tableSelectionValid()
+{
+    if (!m_tableSel.active)
+        return false;
+    if (m_tableSel.revision != document()->revision()) {
+        clearTableSelection();
+        return false;
+    }
+    return true;
+}
+
+bool VisualView::selectionViewRect(QRectF *rect)
+{
+    const TableSelection &s = m_tableSel;
+    if (!s.active)
+        return false;
+    const int index = rowOfLine(s.line);
+    if (index < 0 || index >= rowCount())
+        return false;
+    const Row r = row(index);
+    if (!r.rendered || r.firstLine != s.line)
+        return false;
+    const Render *render = memoized(r);
+    const RenderedBlock::TableGrid *grid = render && render->block ? render->block->tableGrid() : nullptr;
+    qreal top = 0;
+    qreal bottom = 0;
+    if (!grid || grid->rows() != s.rows || grid->cols() != s.cols || !lineBounds(s.line, &top, &bottom))
+        return false;
+    const qreal left = textLeft();
+    *rect = QRectF(QPointF(left + grid->xs[s.left()], top + grid->ys[s.top()]),
+                   QPointF(left + grid->xs[s.right() + 1], top + grid->ys[s.bottom() + 1]));
+    return true;
+}
+
+void VisualView::setTableSelection(const TableSelection &selection)
+{
+    QRectF before;
+    QRectF after;
+    const bool hadBefore = selectionViewRect(&before);
+    m_tableSel = selection;
+    const bool hasAfter = selectionViewRect(&after);
+    // Only what changes is painted again.
+    if (hadBefore && hasAfter)
+        viewport()->update(before.united(after).adjusted(-3, -3, 3, 3).toAlignedRect());
+    else
+        viewport()->update();
+    // The table commands (the toolbar, the Table menu) act on the first cell.
+    setTableTarget(selection.line + selection.at, selection.top(), selection.left());
+    scheduleToolbarUpdate();
+}
+
+void VisualView::clearTableSelection()
+{
+    if (!m_tableSel.active)
+        return;
+    QRectF rect;
+    const bool shown = selectionViewRect(&rect);
+    m_tableSel = {};
+    m_tableDrag = {};
+    if (!m_cellEditor)
+        setTableTarget(-1);
+    if (shown)
+        viewport()->update(rect.adjusted(-3, -3, 3, 3).toAlignedRect());
+    else
+        viewport()->update();
+    scheduleToolbarUpdate();
+}
+
+md::TableInfo VisualView::selectionInfo()
+{
+    md::TableInfo info = tableAtCaret();
+    if (!m_tableSel.active || !info.found)
+        return info;
+    const TableSelection &s = m_tableSel;
+    const int line = s.line + s.at;
+    using Op = md::TableOp;
+    // Whether a command is accepted at a cell of the table.
+    const auto allowed = [&](Op op, int row, int col) {
+        const md::TableCell cell = tableCellOf(line, row, col);
+        return cell.found && md::tableOpAvailable(tableInfoAt(cell.line, cell.start), op);
+    };
+    const bool allColumns = s.right() - s.left() + 1 >= s.cols;
+    md::setTableOpAvailable(info, Op::RowAbove, allowed(Op::RowAbove, s.top(), s.left()));
+    md::setTableOpAvailable(info, Op::RowBelow, allowed(Op::RowBelow, s.bottom(), s.left()));
+    md::setTableOpAvailable(info, Op::ColumnLeft, allowed(Op::ColumnLeft, s.top(), s.left()));
+    md::setTableOpAvailable(info, Op::ColumnRight, allowed(Op::ColumnRight, s.top(), s.right()));
+    // (Deleting rows is about the last one: the header cannot be.)
+    md::setTableOpAvailable(info, Op::DeleteRow, allowed(Op::DeleteRow, s.bottom(), s.left()));
+    md::setTableOpAvailable(info, Op::DeleteColumn, !allColumns && allowed(Op::DeleteColumn, s.top(), s.left()));
+    md::setTableOpAvailable(info, Op::SetCell, allowed(Op::SetCell, s.top(), s.left()));
+    return info;
+}
+
+bool VisualView::selectionOperation(md::TableOp op)
+{
+    if (!tableSelectionValid())
+        return false;
+    const TableSelection s = m_tableSel;
+    const int line = s.line + s.at;
+    const int rows = s.bottom() - s.top() + 1;
+    const int cols = s.right() - s.left() + 1;
+    using Op = md::TableOp;
+    bool done = false;
+    switch (op) {
+    case Op::RowAbove:
+    case Op::ColumnLeft:
+    case Op::DeleteRow:
+    case Op::DeleteColumn:
+    case Op::AlignNone:
+    case Op::AlignLeft:
+    case Op::AlignCenter:
+    case Op::AlignRight:
+    case Op::SetCell:
+        done = editTableAt(line, op, s.top(), s.left(), {}, false, rows, cols);
+        break;
+    case Op::RowBelow:
+        done = editTableAt(line, op, s.bottom(), s.left(), {}, false, rows, cols);
+        break;
+    case Op::ColumnRight:
+        done = editTableAt(line, op, s.top(), s.right(), {}, false, rows, cols);
+        break;
+    default:
+        done = editTable(op); // On the first cell.
+        break;
+    }
+    if (done)
+        m_model->flush(); // Show the new table now.
+    clearTableSelection();
+    scheduleToolbarUpdate();
+    return done;
+}
+
+void VisualView::populateSelectionMenu(QMenu *menu)
+{
+    if (!m_tableSel.active)
+        return;
+    using Op = md::TableOp;
+    const md::TableInfo info = selectionInfo();
+    const int rows = m_tableSel.bottom() - m_tableSel.top() + 1;
+    const int cols = m_tableSel.right() - m_tableSel.left() + 1;
+    const auto add = [&](QMenu *to, const QString &title, Op op) {
+        QAction *action = to->addAction(title, this, [this, op] { selectionOperation(op); });
+        action->setEnabled(md::tableOpAvailable(info, op));
+        return action;
+    };
+    add(menu, rows == 1 ? tr("Insert Row Above") : tr("Insert %1 Rows Above").arg(rows), Op::RowAbove);
+    add(menu, rows == 1 ? tr("Insert Row Below") : tr("Insert %1 Rows Below").arg(rows), Op::RowBelow);
+    add(menu, rows == 1 ? tr("Delete Row") : tr("Delete %1 Rows").arg(rows), Op::DeleteRow);
+    menu->addSeparator();
+    add(menu, cols == 1 ? tr("Insert Column Left") : tr("Insert %1 Columns Left").arg(cols), Op::ColumnLeft);
+    add(menu, cols == 1 ? tr("Insert Column Right") : tr("Insert %1 Columns Right").arg(cols), Op::ColumnRight);
+    add(menu, cols == 1 ? tr("Delete Column") : tr("Delete %1 Columns").arg(cols), Op::DeleteColumn);
+    menu->addSeparator();
+    QMenu *align = menu->addMenu(cols == 1 ? tr("Align Column") : tr("Align Columns"));
+    align->setEnabled(md::tableOpAvailable(info, Op::AlignLeft));
+    const struct
+    {
+        const char *title;
+        Op op;
+        md::TableAlignment alignment;
+    } alignments[] = {{QT_TR_NOOP("Left"), Op::AlignLeft, md::TableAlignment::Left},
+                      {QT_TR_NOOP("Center"), Op::AlignCenter, md::TableAlignment::Center},
+                      {QT_TR_NOOP("Right"), Op::AlignRight, md::TableAlignment::Right},
+                      {QT_TR_NOOP("None"), Op::AlignNone, md::TableAlignment::None}};
+    for (const auto &a : alignments) {
+        QAction *action = add(align, tr(a.title), a.op);
+        action->setCheckable(true);
+        action->setChecked(info.alignment == a.alignment);
+    }
+    menu->addSeparator();
+    add(menu, tr("Clear Cells"), Op::SetCell);
+    menu->addSeparator();
+    populateTableMenu(menu->addMenu(tr("Table")));
+}
+
+void VisualView::contextMenuEvent(QContextMenuEvent *event)
+{
+    if (m_tableSel.active && tableSelectionValid()) {
+        QRectF rect;
+        if (selectionViewRect(&rect) && rect.contains(event->pos())) {
+            QMenu menu(this);
+            populateSelectionMenu(&menu);
+            menu.exec(event->globalPos());
+            return;
+        }
+        clearTableSelection();
+    }
+    TextView::contextMenuEvent(event);
+}
+
+void VisualView::keyPressEvent(QKeyEvent *event)
+{
+    if (m_tableSel.active) {
+        const auto mods = event->modifiers() & ~Qt::KeypadModifier;
+        switch (event->key()) {
+        case Qt::Key_Escape:
+            clearTableSelection();
+            event->accept();
+            return;
+        case Qt::Key_Delete:
+        case Qt::Key_Backspace:
+            if (mods == Qt::NoModifier) {
+                selectionOperation(md::TableOp::SetCell);
+                event->accept();
+                return;
+            }
+            break;
+        case Qt::Key_Shift:
+        case Qt::Key_Control:
+        case Qt::Key_Alt:
+        case Qt::Key_AltGr:
+        case Qt::Key_Meta:
+        case Qt::Key_CapsLock:
+            break;
+        default:
+            // Typing or moving the caret leaves the selection (a shortcut,
+            // Ctrl+S, does not).
+            if (!(mods & Qt::ControlModifier))
+                clearTableSelection();
+            break;
+        }
+    }
+    TextView::keyPressEvent(event);
+}
+
+QRect VisualView::tableCellViewRect(int line, int row, int col)
+{
+    const int index = rowOfLine(line);
+    if (index < 0 || index >= rowCount())
+        return {};
+    const Row r = this->row(index);
+    const Render *render = r.rendered && r.firstLine == line ? memoized(r) : nullptr;
+    qreal top = 0;
+    qreal bottom = 0;
+    if (!render || !render->block || !lineBounds(line, &top, &bottom))
+        return {};
+    const auto rect = render->block->tableCellRect(row, col);
+    if (!rect)
+        return {};
+    return rect->translated(textLeft(), top).toAlignedRect();
+}
+
+void VisualView::paintTableOverlay(QPaintEvent *event)
+{
+    QRectF selected;
+    const bool shade = m_tableSel.active && m_tableSel.revision == document()->revision() && selectionViewRect(&selected)
+                       && selected.intersects(event->rect());
+    const bool mark = m_tableHover.zone != TableZone::None && m_tableHover.area.intersects(event->rect());
+    if (!shade && !mark)
+        return;
+    QPainter painter(viewport());
+    painter.setClipRegion(event->region());
+    painter.setRenderHint(QPainter::Antialiasing);
+    const QColor accent = theme::color(theme::Role::accent);
+    if (shade) {
+        QColor tint = theme::color(theme::Role::selection);
+        tint.setAlpha(110);
+        painter.fillRect(selected, tint);
+        painter.setPen(QPen(accent, 1.5));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(selected.adjusted(0.75, 0.75, -0.75, -0.75));
+    }
+    if (mark) {
+        painter.setPen(QPen(accent, 2));
+        painter.drawLine(m_tableHover.from, m_tableHover.to);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(accent);
+        painter.drawEllipse(m_tableHover.center, markRadius, markRadius);
+        painter.setPen(QPen(theme::color(theme::Role::editor), 1.8, Qt::SolidLine, Qt::RoundCap));
+        const QPointF c = m_tableHover.center;
+        painter.drawLine(c + QPointF(-3, 0), c + QPointF(3, 0));
+        painter.drawLine(c + QPointF(0, -3), c + QPointF(0, 3));
+    }
 }
 
 void VisualView::focusInEvent(QFocusEvent *event)

@@ -318,14 +318,15 @@ bool TextView::editTable(md::TableOp op, const QString &arg)
     return editTableAt(textCursor().blockNumber(), op, info.row, info.col, arg);
 }
 
-bool TextView::editTableAt(int line, md::TableOp op, int row, int col, const QString &arg, bool moveCaret)
+bool TextView::editTableAt(int line, md::TableOp op, int row, int col, const QString &arg, bool moveCaret, int rows,
+                           int cols)
 {
     if (!m_markdown || !canEdit())
         return false;
     const TableWindow window = tableWindow(line);
     if (window.firstLine < 0)
         return false;
-    md::TableEdit edit = md::tableEdit(window.text, line - window.firstLine, op, row, col, arg);
+    md::TableEdit edit = md::tableEdit(window.text, line - window.firstLine, op, row, col, arg, rows, cols);
     if (!edit.ok)
         return false;
     edit.firstLine += window.firstLine;

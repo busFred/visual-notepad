@@ -358,9 +358,25 @@ pub(super) fn refused() -> TableEdit {
 /// Applies `op` to the table holding `line`. `row` and `col` name the cell
 /// the operation is about; `arg` is the new text for `SetCell`.
 pub fn edit(text: &str, line: usize, op: TableOp, row: usize, col: usize, arg: &str) -> TableEdit {
+    edit_rect(text, line, op, row, col, 1, 1, arg)
+}
+
+/// `edit`, with `SetCell` setting the text of all the cells of the
+/// `span_rows` x `span_cols` rectangle that starts at (`row`, `col`).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn edit_rect(
+    text: &str,
+    line: usize,
+    op: TableOp,
+    row: usize,
+    col: usize,
+    span_rows: usize,
+    span_cols: usize,
+    arg: &str,
+) -> TableEdit {
     let lines: Vec<&str> = text.split('\n').collect();
     let Some((first, end)) = find_in(&lines, line) else {
-        return crate::html_table::edit(text, line, op, row, col, arg);
+        return crate::html_table::edit_rect(text, line, op, row, col, span_rows, span_cols, arg);
     };
     let Some(mut table) = Table::parse(&lines[first..end]) else {
         return refused();
@@ -514,7 +530,14 @@ pub fn edit(text: &str, line: usize, op: TableOp, row: usize, col: usize, arg: &
                 replacement, caret_line: first + target.line, caret_column: target.start, keep_before, keep_after };
         }
         TableOp::Realign => {}
-        TableOp::SetCell => table.cells[row][col] = clean_cell(arg),
+        TableOp::SetCell => {
+            let value = clean_cell(arg);
+            for r in row..(row + span_rows).min(rows) {
+                for c in col..(col + span_cols).min(cols) {
+                    table.cells[r][c] = value.clone();
+                }
+            }
+        }
         _ => return refused(),
     }
     let output = table.lines();
@@ -534,6 +557,101 @@ pub fn edit(text: &str, line: usize, op: TableOp, row: usize, col: usize, arg: &
         replacement: output.join("\n"),
         caret_line,
         caret_column,
+        keep_before,
+        keep_after,
+    }
+}
+
+/// A command on several rows or columns at once (a selection of cells), as
+/// one edit of the table's lines. `row` and `col` are where it starts, for
+/// `rows` rows and `cols` columns:
+/// - `RowAbove`, `RowBelow`: that many blank rows above/below `row`;
+/// - `ColumnLeft`, `ColumnRight`: that many blank columns left/right of `col`;
+/// - `DeleteRow`: the rows `row..row + rows`, except the header; deleting all
+///   the others leaves one empty row;
+/// - `DeleteColumn`: the columns `col..col + cols` (never all of them);
+/// - `AlignNone`..`AlignRight`: the columns `col..col + cols`;
+/// - `SetCell`: the rectangle of cells gets `arg`.
+///
+/// Anything else is `edit` on the one cell. Refused if any step is.
+#[allow(clippy::too_many_arguments)]
+pub fn edit_range(
+    text: &str,
+    line: usize,
+    op: TableOp,
+    row: usize,
+    col: usize,
+    rows: usize,
+    cols: usize,
+    arg: &str,
+) -> TableEdit {
+    let (rows, cols) = (rows.max(1), cols.max(1));
+    let mut steps: Vec<(TableOp, usize, usize)> = Vec::new();
+    match op {
+        TableOp::SetCell => return edit_rect(text, line, op, row, col, rows, cols, arg),
+        TableOp::RowAbove | TableOp::RowBelow => steps.extend((0..rows).map(|_| (op, row, col))),
+        TableOp::ColumnLeft | TableOp::ColumnRight | TableOp::DeleteColumn => {
+            steps.extend((0..cols).map(|_| (op, row, col)));
+        }
+        TableOp::AlignNone | TableOp::AlignLeft | TableOp::AlignCenter | TableOp::AlignRight => {
+            steps.extend((0..cols).map(|c| (op, row, col + c)));
+        }
+        TableOp::DeleteRow => {
+            let whole = info(text, line, 0);
+            if !whole.found {
+                return refused();
+            }
+            // The header stays; so does one row if all the others go.
+            let first_deletable = usize::from(!edit(text, line, op, 0, 0, "").ok);
+            let start = row.max(first_deletable);
+            let end = (row + rows).min(whole.rows);
+            if start >= end {
+                return refused();
+            }
+            if start == first_deletable && end == whole.rows {
+                // All but the first go, and that one is emptied.
+                steps.extend((start + 1..end).map(|_| (op, start + 1, 0)));
+                steps.extend((0..whole.cols).map(|c| (TableOp::SetCell, start, c)));
+            } else {
+                steps.extend((start..end).map(|_| (op, start, 0)));
+            }
+        }
+        _ => return edit(text, line, op, row, col, arg),
+    }
+
+    let original: Vec<&str> = text.split('\n').collect();
+    let mut current = text.to_string();
+    let mut at = line;
+    let mut span: Option<(usize, usize)> = None;
+    let mut last: Option<TableEdit> = None;
+    for (step, r, c) in steps {
+        let result = edit(&current, at, step, r, c, if step == TableOp::SetCell { "" } else { arg });
+        if !result.ok || result.remove {
+            return refused();
+        }
+        let now: Vec<&str> = current.split('\n').collect();
+        let mut next: Vec<&str> = now[..result.first_line].to_vec();
+        next.extend(result.replacement.split('\n'));
+        next.extend(&now[result.last_line + 1..]);
+        span.get_or_insert((result.first_line, result.last_line));
+        at = result.first_line;
+        current = next.join("\n");
+        last = Some(result);
+    }
+    let (Some((first, end)), Some(last)) = (span, last) else {
+        return refused();
+    };
+    let output: Vec<String> = last.replacement.split('\n').map(String::from).collect();
+    let (keep_before, keep_after) = unchanged_ends(&original[first..=end], &output);
+    TableEdit {
+        ok: true,
+        changed: keep_before < output.len() || output.len() != end + 1 - first,
+        remove: false,
+        first_line: first,
+        last_line: end,
+        replacement: last.replacement,
+        caret_line: last.caret_line,
+        caret_column: last.caret_column,
         keep_before,
         keep_after,
     }
@@ -686,6 +804,75 @@ mod tests {
         assert_eq!(r.replacement, "| a   | b   |\n| --- | --- |\n| 1   | 2   |");
         assert_eq!(r.caret_line, 2);
         assert!(!run(T, 0, TableOp::DeleteRow, 0, 0).ok);
+    }
+
+    fn range(text: &str, op: TableOp, row: usize, col: usize, rows: usize, cols: usize) -> TableEdit {
+        edit_range(text, 0, op, row, col, rows, cols, "")
+    }
+
+    /// The lines of the table after `edit` replaced the lines it names.
+    fn applied(text: &str, edit: &TableEdit) -> String {
+        let lines: Vec<&str> = text.split('\n').collect();
+        let mut out: Vec<&str> = lines[..edit.first_line].to_vec();
+        out.extend(edit.replacement.split('\n'));
+        out.extend(&lines[edit.last_line + 1..]);
+        out.join("\n")
+    }
+
+    const WIDE: &str =
+        "| a   | b   | c   |\n| --- | --- | --- |\n| 1   | 2   | 3   |\n| 4   | 5   | 6   |\n| 7   | 8   | 9   |";
+
+    #[test]
+    fn several_rows_and_columns_are_inserted_at_once() {
+        let r = range(WIDE, TableOp::RowBelow, 1, 0, 2, 1);
+        assert_eq!(
+            applied(WIDE, &r),
+            "| a   | b   | c   |\n| --- | --- | --- |\n| 1   | 2   | 3   |\n|     |     |     |\n|     |     |     |\n| 4   | 5   | 6   |\n| 7   | 8   | 9   |"
+        );
+        let r = range(WIDE, TableOp::RowAbove, 2, 0, 2, 1);
+        assert_eq!(applied(WIDE, &r).split('\n').count(), 7);
+        assert!(applied(WIDE, &r).contains("| 1   | 2   | 3   |\n|     |     |     |\n|     |     |     |\n| 4 "));
+        assert!(!range(WIDE, TableOp::RowAbove, 0, 0, 2, 1).ok);
+        let r = range(WIDE, TableOp::ColumnRight, 0, 1, 1, 2);
+        assert_eq!(applied(WIDE, &r).split('\n').next().unwrap().matches('|').count(), 6);
+        assert!(applied(WIDE, &r).starts_with("| a   | b   |     |     | c   |"));
+        let r = range(WIDE, TableOp::ColumnLeft, 0, 0, 1, 2);
+        assert!(applied(WIDE, &r).starts_with("|     |     | a   | b   | c   |"));
+    }
+
+    #[test]
+    fn several_rows_and_columns_are_deleted_at_once() {
+        let r = range(WIDE, TableOp::DeleteRow, 2, 0, 2, 1);
+        assert_eq!(applied(WIDE, &r), "| a   | b   | c   |\n| --- | --- | --- |\n| 1   | 2   | 3   |");
+        // The header is skipped.
+        let r = range(WIDE, TableOp::DeleteRow, 0, 0, 3, 1);
+        assert_eq!(applied(WIDE, &r), "| a   | b   | c   |\n| --- | --- | --- |\n| 7   | 8   | 9   |");
+        assert!(!range(WIDE, TableOp::DeleteRow, 0, 0, 1, 1).ok);
+        // All the body rows: one empty row stays.
+        let r = range(WIDE, TableOp::DeleteRow, 1, 0, 9, 1);
+        assert_eq!(applied(WIDE, &r), "| a   | b   | c   |\n| --- | --- | --- |\n|     |     |     |");
+        let r = range(WIDE, TableOp::DeleteColumn, 0, 0, 1, 2);
+        assert_eq!(applied(WIDE, &r), "| c   |\n| --- |\n| 3   |\n| 6   |\n| 9   |");
+        assert!(!range(WIDE, TableOp::DeleteColumn, 0, 0, 1, 3).ok);
+    }
+
+    #[test]
+    fn a_range_is_aligned_and_cleared() {
+        let r = range(WIDE, TableOp::AlignRight, 0, 1, 1, 2);
+        assert_eq!(applied(WIDE, &r).split('\n').nth(1).unwrap(), "| --- | --: | --: |");
+        let r = range(WIDE, TableOp::SetCell, 1, 1, 2, 2);
+        assert_eq!(
+            applied(WIDE, &r),
+            "| a   | b   | c   |\n| --- | --- | --- |\n| 1   |     |     |\n| 4   |     |     |\n| 7   | 8   | 9   |"
+        );
+        // Only the lines that changed are marked.
+        assert_eq!((r.keep_before, r.keep_after), (2, 1));
+        // A rectangle past the table's end stops at the end.
+        let r = range(WIDE, TableOp::SetCell, 3, 2, 5, 5);
+        assert!(applied(WIDE, &r).ends_with("| 4   | 5   | 6   |\n| 7   | 8   |     |"));
+        // Nothing to change.
+        let r = range(WIDE, TableOp::Realign, 0, 0, 3, 3);
+        assert!(r.ok && !r.changed);
     }
 
     #[test]
