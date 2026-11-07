@@ -391,42 +391,43 @@ pub(super) fn edit_rect(
             if row == 0 {
                 return refused();
             }
-            table.insert_row(row);
+            for _ in 0..span_rows {
+                table.insert_row(row);
+            }
         }
         TableOp::RowBelow => {
-            table.insert_row(row + 1);
+            for _ in 0..span_rows {
+                table.insert_row(row + 1);
+            }
             at_row = row + 1;
         }
-        TableOp::ColumnLeft => {
+        TableOp::ColumnLeft | TableOp::ColumnRight => {
+            let at = col + usize::from(op == TableOp::ColumnRight);
             for r in &mut table.cells {
-                r.insert(col, String::new());
+                r.splice(at..at, std::iter::repeat_n(String::new(), span_cols));
             }
-            table.align.insert(col, (false, false));
-        }
-        TableOp::ColumnRight => {
-            for r in &mut table.cells {
-                r.insert(col + 1, String::new());
-            }
-            table.align.insert(col + 1, (false, false));
-            at_col = col + 1;
+            table.align.splice(at..at, std::iter::repeat_n((false, false), span_cols));
+            at_col = at;
         }
         TableOp::DeleteRow => {
             if row == 0 {
                 return refused();
             }
-            table.cells.remove(row);
-            table.prefixes.remove(row);
+            let end = (row + span_rows).min(rows);
+            table.cells.drain(row..end);
+            table.prefixes.drain(row..end);
             at_row = row.min(table.rows() - 1);
         }
         TableOp::DeleteColumn => {
-            if cols == 1 {
+            let end = (col + span_cols).min(cols);
+            if end - col >= cols {
                 return refused();
             }
             for r in &mut table.cells {
-                r.remove(col);
+                r.drain(col..end);
             }
-            table.align.remove(col);
-            at_col = col.min(cols - 2);
+            table.align.drain(col..end);
+            at_col = col.min(table.cols() - 1);
         }
         TableOp::DeleteTable => {
             return TableEdit {
@@ -476,10 +477,17 @@ pub(super) fn edit_rect(
             table.align.swap(col, col + 1);
             at_col = col + 1;
         }
-        TableOp::AlignNone => table.align[col] = (false, false),
-        TableOp::AlignLeft => table.align[col] = (true, false),
-        TableOp::AlignCenter => table.align[col] = (true, true),
-        TableOp::AlignRight => table.align[col] = (false, true),
+        TableOp::AlignNone | TableOp::AlignLeft | TableOp::AlignCenter | TableOp::AlignRight => {
+            let value = match op {
+                TableOp::AlignLeft => (true, false),
+                TableOp::AlignCenter => (true, true),
+                TableOp::AlignRight => (false, true),
+                _ => (false, false),
+            };
+            for a in &mut table.align[col..(col + span_cols).min(cols)] {
+                *a = value;
+            }
+        }
         TableOp::SortAscending | TableOp::SortDescending => {
             if rows < 3 {
                 return refused();
@@ -586,15 +594,33 @@ pub fn edit_range(
     arg: &str,
 ) -> TableEdit {
     let (rows, cols) = (rows.max(1), cols.max(1));
-    let mut steps: Vec<(TableOp, usize, usize)> = Vec::new();
+    // A pipe table takes the whole range in one step; an HTML table, one
+    // row or column at a time (a step is (op, row, col, rows, cols)).
+    let native = find_in(&text.split('\n').collect::<Vec<_>>(), line).is_some();
+    let mut steps: Vec<(TableOp, usize, usize, usize, usize)> = Vec::new();
     match op {
         TableOp::SetCell => return edit_rect(text, line, op, row, col, rows, cols, arg),
-        TableOp::RowAbove | TableOp::RowBelow => steps.extend((0..rows).map(|_| (op, row, col))),
+        _ if native && op != TableOp::DeleteRow && matches!(
+            op,
+            TableOp::RowAbove
+                | TableOp::RowBelow
+                | TableOp::ColumnLeft
+                | TableOp::ColumnRight
+                | TableOp::DeleteColumn
+                | TableOp::AlignNone
+                | TableOp::AlignLeft
+                | TableOp::AlignCenter
+                | TableOp::AlignRight
+        ) =>
+        {
+            return edit_rect(text, line, op, row, col, rows, cols, arg);
+        }
+        TableOp::RowAbove | TableOp::RowBelow => steps.extend((0..rows).map(|_| (op, row, col, 1, 1))),
         TableOp::ColumnLeft | TableOp::ColumnRight | TableOp::DeleteColumn => {
-            steps.extend((0..cols).map(|_| (op, row, col)));
+            steps.extend((0..cols).map(|_| (op, row, col, 1, 1)));
         }
         TableOp::AlignNone | TableOp::AlignLeft | TableOp::AlignCenter | TableOp::AlignRight => {
-            steps.extend((0..cols).map(|c| (op, row, col + c)));
+            steps.extend((0..cols).map(|c| (op, row, col + c, 1, 1)));
         }
         TableOp::DeleteRow => {
             let whole = info(text, line, 0);
@@ -602,18 +628,28 @@ pub fn edit_range(
                 return refused();
             }
             // The header stays; so does one row if all the others go.
-            let first_deletable = usize::from(!edit(text, line, op, 0, 0, "").ok);
+            let first_deletable = if native { 1 } else { usize::from(!edit(text, line, op, 0, 0, "").ok) };
             let start = row.max(first_deletable);
             let end = (row + rows).min(whole.rows);
             if start >= end {
                 return refused();
             }
-            if start == first_deletable && end == whole.rows {
-                // All but the first go, and that one is emptied.
-                steps.extend((start + 1..end).map(|_| (op, start + 1, 0)));
-                steps.extend((0..whole.cols).map(|c| (TableOp::SetCell, start, c)));
-            } else {
-                steps.extend((start..end).map(|_| (op, start, 0)));
+            let all = start == first_deletable && end == whole.rows;
+            // All but the first go, and that one is emptied.
+            let from = start + usize::from(all);
+            if from < end {
+                if native {
+                    steps.push((op, from, 0, end - from, 1));
+                } else {
+                    steps.extend((from..end).map(|_| (op, from, 0, 1, 1)));
+                }
+            }
+            if all {
+                if native {
+                    steps.push((TableOp::SetCell, start, 0, 1, whole.cols));
+                } else {
+                    steps.extend((0..whole.cols).map(|c| (TableOp::SetCell, start, c, 1, 1)));
+                }
             }
         }
         _ => return edit(text, line, op, row, col, arg),
@@ -624,8 +660,9 @@ pub fn edit_range(
     let mut at = line;
     let mut span: Option<(usize, usize)> = None;
     let mut last: Option<TableEdit> = None;
-    for (step, r, c) in steps {
-        let result = edit(&current, at, step, r, c, if step == TableOp::SetCell { "" } else { arg });
+    for (step, r, c, span_rows, span_cols) in steps {
+        let result =
+            edit_rect(&current, at, step, r, c, span_rows, span_cols, if step == TableOp::SetCell { "" } else { arg });
         if !result.ok || result.remove {
             return refused();
         }

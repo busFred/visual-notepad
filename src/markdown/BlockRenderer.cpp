@@ -32,6 +32,7 @@
 #include <QXmlStreamReader>
 
 #include <algorithm>
+#include <functional>
 #include <atomic>
 #include <deque>
 
@@ -1707,7 +1708,13 @@ const RenderedBlock::TableGrid *RenderedBlock::tableGrid() const
                 if (row + 1 == size.height())
                     grid.ys.push_back(rect->bottom());
             }
-            *m_tableGrid = std::move(grid);
+            // Merged cells (an HTML table's colspan, rowspan) give columns or
+            // rows no width of their own: no grid for such a table.
+            const auto increasing = [](const std::vector<qreal> &v) {
+                return std::adjacent_find(v.begin(), v.end(), std::greater_equal<qreal>()) == v.end();
+            };
+            if (increasing(grid.xs) && increasing(grid.ys))
+                *m_tableGrid = std::move(grid);
         }
     }
     return m_tableGrid->has_value() ? &**m_tableGrid : nullptr;
@@ -1716,7 +1723,19 @@ const RenderedBlock::TableGrid *RenderedBlock::tableGrid() const
 std::optional<RenderedBlock::TableCellHit> RenderedBlock::tableCellAt(const QPointF &point) const
 {
     const TableGrid *grid = tableGrid();
-    if (!grid || point.x() < grid->xs.front() || point.x() >= grid->xs.back() || point.y() < grid->ys.front()
+    if (!grid) {
+        // No grid (merged cells): the first cell that holds the point.
+        const QTextTable *table = theTable();
+        for (int row = 0; table && row < table->rows(); ++row) {
+            for (int col = 0; col < table->columns(); ++col) {
+                const auto rect = tableCellRect(row, col);
+                if (rect && rect->contains(point))
+                    return TableCellHit{row, col, *rect};
+            }
+        }
+        return std::nullopt;
+    }
+    if (point.x() < grid->xs.front() || point.x() >= grid->xs.back() || point.y() < grid->ys.front()
         || point.y() >= grid->ys.back())
         return std::nullopt;
     // The cells tile the table (see tableCellRect): the one holding the point.

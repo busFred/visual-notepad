@@ -274,6 +274,7 @@ private Q_SLOTS:
     void tableSelectionNeedsAnEditableView();
     void selectionMenuAndToolbarActOnTheSelection();
     void htmlTableCellsAreEditedInPlace();
+    void mergedHtmlCellsOpenTheCellClicked();
     void insertedTableOpensItsFirstCell();
     void clickingATableCellEditsIt();
     void cellEditorKeysMoveBetweenCells();
@@ -1215,6 +1216,27 @@ void TestVisualView::htmlTableCellsAreEditedInPlace()
     // The rest of the source is as it was.
     QCOMPARE(m_doc->findBlockByNumber(2).text(), QStringLiteral("<div align=\"center\">"));
     QCOMPARE(m_doc->findBlockByNumber(4).text(), QStringLiteral("  <tr><th>Name</th><th>Qty</th></tr>"));
+}
+
+void TestVisualView::mergedHtmlCellsOpenTheCellClicked()
+{
+    m_view->setReadOnly(false);
+    m_view->setMarkdownEditing(true);
+    m_doc->setPlainText(QStringLiteral("Intro\n\n<table>\n<tr><th colspan=\"2\">head</th></tr>\n"
+                                       "<tr><td>left</td><td>right</td></tr>\n</table>\n\nEnd"));
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(0)));
+    m_model->flush();
+    QTest::qWait(20);
+    // The header spans both columns: each body cell still opens its own box.
+    for (const auto &[col, text] : {std::pair{0, QStringLiteral("left")}, std::pair{1, QStringLiteral("right")}}) {
+        const QRect cell = m_view->tableCellViewRect(2, 1, col);
+        QVERIFY(cell.isValid());
+        QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, cell.center());
+        QPlainTextEdit *editor = cellEditor(m_view->viewport());
+        QVERIFY(editor);
+        QCOMPARE(editor->toPlainText(), text);
+        QTest::keyClick(editor, Qt::Key_Escape);
+    }
 }
 
 void TestVisualView::insertedTableOpensItsFirstCell()
