@@ -744,6 +744,8 @@ void TestVisualView::toolbarWorksWithACellOpen()
             below = b;
     }
     QVERIFY(below && below->isEnabled());
+    // The ordinary pointer over the buttons, not the viewport's text cursor.
+    QCOMPARE(below->cursor().shape(), Qt::ArrowCursor);
     QWidget *window = m_view->window();
     const QPoint at = below->mapTo(window, below->rect().center());
     QTest::keyClicks(editor, QStringLiteral(" Mint"));

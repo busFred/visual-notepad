@@ -45,6 +45,9 @@ TableToolbar::TableToolbar(QWidget *parent)
     setObjectName(QStringLiteral("TableToolbar"));
     setAttribute(Qt::WA_StyledBackground);
     setFocusPolicy(Qt::NoFocus);
+    // A child of the editor's viewport, which has the text cursor: the
+    // buttons get the ordinary pointer.
+    setCursor(Qt::ArrowCursor);
     auto *layout = new QHBoxLayout(this);
     layout->setContentsMargins(4, 3, 4, 3);
     layout->setSpacing(2);
