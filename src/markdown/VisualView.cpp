@@ -13,6 +13,8 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenu>
+#include <QInputMethodEvent>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
@@ -23,6 +25,8 @@
 #include <QToolTip>
 
 #include <algorithm>
+#include <climits>
+#include <string_view>
 #include <optional>
 #include <utility>
 
@@ -43,13 +47,206 @@ constexpr int renderCacheKiB = 48 * 1024;
 constexpr int renderMax = 512;
 constexpr int renderKiB = 16 * 1024;
 constexpr int renderHardMax = 2 * renderMax;
+// Typing goes into the rendering of blocks up to this size (source
+// characters and lines): each keystroke renders the block again, which
+// takes about 1 ms a KiB for a paragraph and more for a list (13 ms for 200
+// items). Larger blocks open as source when typed into.
+constexpr int liveEditChars = 2000;
+constexpr int liveEditLines = 40;
 
+// The ASCII a typographic character is typed as (the typographer makes
+// these of quotes, dashes and dots).
+QChar typedAs(QChar c)
+{
+    switch (c.unicode()) {
+    case 0x201C: // “ ” „
+    case 0x201D:
+    case 0x201E:
+        return u'"';
+    case 0x2018: // ‘ ’ ‚
+    case 0x2019:
+    case 0x201A:
+        return u'\'';
+    case 0x2013: // – —
+    case 0x2014:
+        return u'-';
+    case 0x2026: // …
+        return u'.';
+    default:
+        return c;
+    }
+}
+
+// Whether rendered character a can be source character b.
 bool sameChar(QChar a, QChar b)
 {
-    return a == b || (a.isSpace() && b.isSpace());
+    return a == b || (a.isSpace() && b.isSpace()) || typedAs(a) == b;
+}
+
+// The extra source characters a typographic character stands for: "--"
+// for –, "..." for …
+int typedExtra(QChar c)
+{
+    switch (c.unicode()) {
+    case 0x2013:
+        return 1;
+    case 0x2014:
+    case 0x2026:
+        return 2;
+    default:
+        return 0;
+    }
+}
+
+bool isLineBreak(QChar c)
+{
+    return c == u'\n' || c == QChar::ParagraphSeparator || c == QChar::LineSeparator;
+}
+
+// The source index of the character rendered character `index` was matched
+// with (as sourceOffsetFor matches them), or -1.
+int matchOf(const QString &rendered, const QString &source, int index)
+{
+    int r = 0;
+    for (int s = 0; s < source.size() && r <= index; ++s) {
+        if (sameChar(rendered.at(r), source.at(s))) {
+            if (r == index)
+                return s;
+            ++r;
+        }
+    }
+    return -1;
+}
+
+// Text with whitespace dropped and typographic characters as typed, to
+// compare a render with what was expected of it.
+QString comparable(const QString &text)
+{
+    QString out;
+    out.reserve(text.size());
+    for (const QChar c : text) {
+        if (c.isSpace() || isLineBreak(c))
+            continue;
+        const QChar typed = typedAs(c);
+        out += typed;
+        for (int i = 0; i < typedExtra(c); ++i)
+            out += typed;
+    }
+    return out;
+}
+
+// Characters Markdown would read as syntax anywhere, typed into rendered
+// text: inserted with a backslash so they show as typed.
+bool escapedAnywhere(QChar c, bool math)
+{
+    switch (c.unicode()) {
+    case '*':
+    case '_':
+    case '#':
+    case '`':
+    case '[':
+    case ']':
+    case '<':
+    case '|':
+    case '\\':
+    case '~':
+        return true;
+    case '$':
+        return math;
+    default:
+        return false;
+    }
+}
+
+// `typed` escaped for insertion into a source line after `before` (the
+// line's text up to the insertion point); contentStart is where the line's
+// text starts (after indentation, list and quote markers).
+QString escapeTyped(const QString &typed, const QString &before, int contentStart, bool math)
+{
+    QString out;
+    // What the line holds from its content start, as it grows.
+    QString content = before.mid(qMin(contentStart, int(before.size())));
+    for (const QChar c : typed) {
+        bool escape = escapedAnywhere(c, math);
+        const bool atStart = content.trimmed().isEmpty();
+        if (atStart && (c == u'-' || c == u'+' || c == u'>' || c == u'='))
+            escape = true;
+        // "1." or "1)" at the start of a line starts a list.
+        if ((c == u'.' || c == u')') && !content.isEmpty()) {
+            const QString t = content.trimmed();
+            escape = escape || (!t.isEmpty() && std::all_of(t.cbegin(), t.cend(), [](QChar d) { return d.isDigit(); }));
+        }
+        if (escape)
+            out += u'\\';
+        out += c;
+        content += c;
+    }
+    return out;
+}
+
+bool isBlank(const QString &line)
+{
+    return line.trimmed().isEmpty();
+}
+
+// Where a line's text starts: after indentation, quote and list markers.
+int contentStartOf(const QString &line)
+{
+    const md::ListLine item = md::parseListLine(line);
+    if (item.valid)
+        return item.contentStart;
+    int i = 0;
+    while (i < line.size() && line.at(i).isSpace())
+        ++i;
+    return i;
+}
+
+// Whether a block is Markdown text: a paragraph, heading, list or quote
+// written in Markdown, not in HTML.
+bool isTextual(const core::Block &block, const QString &source)
+{
+    if (block.kind != core::BlockKind::Html)
+        return false;
+    for (const QChar c : source) {
+        if (c == u'<')
+            return false;
+        if (!c.isSpace())
+            break;
+    }
+    const std::string_view html(block.html.data(), block.html.size());
+    const auto starts = [&](std::string_view prefix) { return html.substr(0, prefix.size()) == prefix; };
+    return starts("<p") || starts("<ul") || starts("<ol") || starts("<blockquote")
+           || (html.size() > 2 && starts("<h") && html[2] >= '1' && html[2] <= '6');
 }
 
 } // namespace
+
+int caretSourceOffset(const QString &rendered, const QString &source, int k)
+{
+    const int n = int(rendered.size());
+    if (n == 0)
+        return int(source.size());
+    if (k <= 0) {
+        const int m = matchOf(rendered, source, 0);
+        return m >= 0 ? m : int(source.size());
+    }
+    k = qMin(k, n);
+    const int before = matchOf(rendered, source, k - 1);
+    if (before < 0)
+        return int(source.size());
+    // After a line or paragraph break (a source line break, rendered as one
+    // or as a space): before the next character, past the next line's markers.
+    if (k < n && (isLineBreak(rendered.at(k - 1)) || source.at(before) == u'\n')) {
+        const int m = matchOf(rendered, source, k);
+        if (m >= 0)
+            return m;
+    }
+    int after = before + 1;
+    const QChar typed = typedAs(rendered.at(k - 1));
+    for (int i = 0; i < typedExtra(rendered.at(k - 1)) && after < source.size() && source.at(after) == typed; ++i)
+        ++after;
+    return after;
+}
 
 int sourceOffsetFor(const QString &renderedPrefix, const QString &source)
 {
@@ -103,7 +300,12 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
         if (isVisible())
             m_model->flushInBackground();
     });
-    connect(model, &MarkdownModel::reparsed, this, &VisualView::relayout);
+    connect(model, &MarkdownModel::reparsed, this, [this] {
+        // Every block is parsed now: what was live renders from the parse.
+        m_liveStart = QTextCursor();
+        m_liveEnd = QTextCursor();
+        relayout();
+    });
     connect(model, &MarkdownModel::reparsed, this, &VisualView::updateRemoteBanner);
     connect(&DiagramNotifier::instance(), &DiagramNotifier::ready, this, &VisualView::asyncRenderReady);
     connect(&RemoteImages::instance(), &RemoteImages::ready, this, &VisualView::asyncRenderReady);
@@ -678,9 +880,19 @@ void VisualView::rebuildRows()
         && m_rowsRevision == m_model->revision())
         return;
 
-    // Line ranges carets touch, widened to whole spans, sorted and merged.
+    // The open blocks close when the caret moves out of them (a move: no
+    // edit since the rows were built).
+    if (m_sourceOpen && !m_openLines.empty() && !m_rowsStale && m_rowsRevision == m_model->revision()
+        && int(m_lineToRow.size()) == lines) {
+        const int caret = textCursor().blockNumber();
+        if (std::none_of(m_openLines.begin(), m_openLines.end(),
+                         [caret](const auto &range) { return range.first <= caret && caret <= range.second; }))
+            m_sourceOpen = false;
+    }
+    // Line ranges carets touch, widened to whole spans, sorted and merged:
+    // the open blocks.
     std::vector<std::pair<int, int>> expanded;
-    if (!isReadOnly() && hasFocus()) {
+    if (!isReadOnly() && m_sourceOpen) {
         for (const QTextCursor &c : cursors()) {
             int from = document()->findBlock(c.selectionStart()).blockNumber();
             int to = document()->findBlock(c.selectionEnd()).blockNumber();
@@ -700,8 +912,23 @@ void VisualView::rebuildRows()
         }
         expanded = std::move(merged);
     }
+    m_openLines = expanded;
+    if (!hasFocus())
+        expanded.clear();
+    // A caret on a blank line between blocks (or between the blocks of
+    // lines edited in rendered text) shows that line as source.
+    std::vector<int> caretGaps;
+    if (!isReadOnly() && hasFocus()) {
+        for (const QTextCursor &c : cursors()) {
+            const int line = c.blockNumber();
+            const int at = m_model->spanAt(line);
+            if (at < 0 || (spans[at].block < 0 && isBlank(c.block().text())))
+                caretGaps.push_back(line);
+        }
+        std::sort(caretGaps.begin(), caretGaps.end());
+    }
     if (!m_rowsStale && m_rowsRevision == m_model->revision() && int(m_lineToRow.size()) == lines
-        && expanded == m_rowsExpanded)
+        && expanded == m_rowsExpanded && caretGaps == m_rowsCaretGaps)
         return;
 
     // Rows that matched the document and now open or close for editing
@@ -724,6 +951,13 @@ void VisualView::rebuildRows()
             ++next;
         return next < expanded.size() && expanded[next].first <= last;
     };
+    int liveFirst = -1;
+    int liveLast = -2;
+    liveLines(&liveFirst, &liveLast);
+    const auto gapRow = [&](int l) {
+        m_lineToRow[l] = int(m_rows.size());
+        m_rows.push_back({{l, l, !touched(l, l) && !std::binary_search(caretGaps.begin(), caretGaps.end(), l)}, -1});
+    };
     size_t s = 0;
     int line = 0;
     while (line < lines) {
@@ -735,9 +969,27 @@ void VisualView::rebuildRows()
             const bool open = touched(line, last);
             if (open)
                 m_expandedBlocks.insert(int(s));
-            // Edited lines with nothing parsed to stand in show as source
-            // until the reparse.
-            if (open || (span.block < 0 && span.previous < 0)) {
+            // Lines edited in rendered text show the blocks a parse of
+            // their own source makes, with blank lines between them.
+            if (!open && span.block < 0 && line <= liveLast && last >= liveFirst) {
+                const rust::Vec<core::Block> &blocks = liveBlocks(m_model->sourceText(line, last));
+                int l = line;
+                for (const core::Block &b : blocks) {
+                    const int first = line + int(b.first_line);
+                    const int end = qMin(last, line + int(b.last_line));
+                    if (first < l || end < first)
+                        continue;
+                    while (l < first)
+                        gapRow(l++);
+                    for (; l <= end; ++l)
+                        m_lineToRow[l] = int(m_rows.size());
+                    m_rows.push_back({{first, end, true}, int(s)});
+                }
+                while (l <= last)
+                    gapRow(l++);
+            } else if (open || (span.block < 0 && span.previous < 0)) {
+                // Edited lines with nothing parsed to stand in show as
+                // source until the reparse.
                 for (int l = line; l <= last; ++l) {
                     m_lineToRow[l] = int(m_rows.size());
                     m_rows.push_back({{l, l, false}, int(s)});
@@ -761,13 +1013,12 @@ void VisualView::rebuildRows()
             continue;
         }
         // A line outside every block (blank): a small gap unless edited.
-        m_lineToRow[line] = int(m_rows.size());
-        m_rows.push_back({{line, line, !touched(line, line)}, -1});
-        ++line;
+        gapRow(line++);
     }
     m_rowsStale = false;
     m_rowsRevision = m_model->revision();
     m_rowsExpanded = std::move(expanded);
+    m_rowsCaretGaps = std::move(caretGaps);
     if (keptPlace)
         restorePlace(*keptPlace);
 }
@@ -867,9 +1118,14 @@ const VisualView::Render *VisualView::rendered(const Row &r)
     if (index < 0 || index >= int(spans.size()))
         return nullptr;
     const MarkdownModel::Span &span = spans[index];
-    // An edited block shows its last parse until the reparse.
+    // An edited block shows its last parse until the reparse, unless it was
+    // edited in rendered text (see rebuildRows).
     const int blockIndex = span.block >= 0 ? span.block : span.previous;
-    if (blockIndex < 0)
+    int liveFirst = -1;
+    int liveLast = -2;
+    const bool live = span.block < 0 && liveLines(&liveFirst, &liveLast) && span.first <= liveLast
+                      && span.last >= liveFirst && !m_partSpans.contains(index);
+    if (blockIndex < 0 && !live)
         return nullptr;
 
     const RenderContext ctx = context();
@@ -885,6 +1141,15 @@ const VisualView::Render *VisualView::rendered(const Row &r)
         return &it->second;
     }
 
+    Render memo;
+    if (live) {
+        const rust::Vec<core::Block> &blocks = liveBlocks(m_model->sourceText(span.first, span.last));
+        const auto it = std::find_if(blocks.begin(), blocks.end(),
+                                     [&](const core::Block &b) { return int(b.first_line) == r.firstLine - span.first; });
+        if (it == blocks.end())
+            return nullptr;
+        memo = liveRender(*it, m_model->sourceText(r.firstLine, r.lastLine), r.firstLine, ctx);
+    } else {
     const core::Block &block = m_model->parsedBlock(blockIndex);
     // A part of a long code box: the lines of the row, and where it sits in the box.
     const bool inParts = m_partSpans.contains(index);
@@ -910,21 +1175,11 @@ const VisualView::Render *VisualView::rendered(const Row &r)
     // Identical blocks render identically, so the source (by hash, checked
     // on a hit) is the key. A stand-in pairs an old parse with new source:
     // never mistake it for the real render of that source.
-    QString key = QStringLiteral("%1|%2|%3|%4|%5|%6|%7|%8|%9")
-                      .arg(int(ctx.width))
-                      .arg(ctx.font.pointSizeF())
-                      .arg(ctx.font.family())
-                      .arg(ctx.lineHeight)
-                      .arg(int(block.kind))
-                      .arg(ctx.codeFont.family())
-                      .arg(ctx.devicePixelRatio)
-                      .arg(source.size())
-                      .arg(qHash(source));
+    QString key = renderKey(ctx, block.kind, source);
     if (inParts)
         key += QStringLiteral("|part:%1%2%3").arg(int(part.first)).arg(int(part.last)).arg(int(part.wrapAnywhere));
     else if (span.block < 0)
         key += QStringLiteral("|stale:%1:%2").arg(m_model->parseGeneration()).arg(blockIndex);
-    Render memo;
     const Render *hit = m_cache.object(key);
     if (hit && hit->source == source) {
         memo = *hit;
@@ -933,10 +1188,11 @@ const VisualView::Render *VisualView::rendered(const Row &r)
                                                              : RenderedBlock::create(block, source, ctx));
         const int cost = created->cost() + int(source.size() / 512);
         ++m_renderCount;
-        memo = {source, key, created, cost};
+        memo = {source, key, created, block.kind, cost, isTextual(block, source)};
         if (created->isPending())
             m_pendingKeys.insert(key);
         m_cache.insert(key, new Render(memo), cost);
+    }
     }
     memo.used = m_frame;
     Render &kept = m_renders[r.firstLine] = std::move(memo);
@@ -961,6 +1217,92 @@ const VisualView::Render *VisualView::rendered(const Row &r)
         m_renders.erase(it);
     }
     return &kept;
+}
+
+QString VisualView::renderKey(const RenderContext &ctx, core::BlockKind kind, const QString &source) const
+{
+    // Identical blocks render identically, so the source (by hash, checked
+    // on a hit) is the key.
+    return QStringLiteral("%1|%2|%3|%4|%5|%6|%7|%8|%9")
+        .arg(int(ctx.width))
+        .arg(ctx.font.pointSizeF())
+        .arg(ctx.font.family())
+        .arg(ctx.lineHeight)
+        .arg(int(kind))
+        .arg(ctx.codeFont.family())
+        .arg(ctx.devicePixelRatio)
+        .arg(source.size())
+        .arg(qHash(source));
+}
+
+bool VisualView::liveLines(int *first, int *last) const
+{
+    if (m_liveStart.isNull() || m_liveEnd.isNull())
+        return false;
+    *first = m_liveStart.blockNumber();
+    *last = m_liveEnd.blockNumber();
+    return true;
+}
+
+const rust::Vec<core::Block> &VisualView::liveBlocks(const QString &source)
+{
+    for (const LiveParse &parse : m_liveParses) {
+        if (parse.source == source)
+            return parse.blocks;
+    }
+    const QByteArray utf8 = source.toUtf8();
+    m_liveParses.push_front({source, core::blocks(rust::Str(utf8.constData(), utf8.size()), m_model->options())});
+    // A few: the block typed in, before and after the edit, and its rows.
+    while (m_liveParses.size() > 4)
+        m_liveParses.pop_back();
+    return m_liveParses.front().blocks;
+}
+
+VisualView::Render VisualView::liveRender(const core::Block &parsed, const QString &source, int firstLine,
+                                          const RenderContext &ctx)
+{
+    // Not the key of the document parse's render: a block parsed alone does
+    // not see the link definitions and footnotes of the others.
+    QString key = renderKey(ctx, parsed.kind, source) + QLatin1String("|live");
+    // Task boxes name their line in the document.
+    const std::string_view html(parsed.html.data(), parsed.html.size());
+    const bool tasks = html.find("vn-task:") != std::string_view::npos;
+    if (tasks)
+        key += QStringLiteral("|at:%1").arg(firstLine);
+    const Render *hit = m_cache.object(key);
+    if (hit && hit->source == source)
+        return *hit;
+    core::Block block = parsed;
+    if (tasks) {
+        static const QRegularExpression task(QStringLiteral("vn-task:(\\d+)"));
+        QString text = QString::fromUtf8(parsed.html.data(), qsizetype(parsed.html.size()));
+        QString out;
+        qsizetype at = 0;
+        for (auto it = task.globalMatch(text); it.hasNext();) {
+            const QRegularExpressionMatch m = it.next();
+            out += QStringView(text).mid(at, m.capturedStart(1) - at);
+            out += QString::number(m.captured(1).toInt() + firstLine - int(parsed.first_line));
+            at = m.capturedEnd(1);
+        }
+        out += QStringView(text).mid(at);
+        const QByteArray utf8 = out.toUtf8();
+        block.html = rust::String(utf8.constData(), utf8.size());
+    }
+    const std::shared_ptr<RenderedBlock> created(RenderedBlock::create(block, source, ctx));
+    const int cost = created->cost() + int(source.size() / 512);
+    ++m_renderCount;
+    Render memo{source, key, created, parsed.kind, cost, isTextual(parsed, source)};
+    if (created->isPending())
+        m_pendingKeys.insert(key);
+    m_cache.insert(key, new Render(memo), cost);
+    return memo;
+}
+
+QString VisualView::renderedTextAt(int line)
+{
+    const Row r = row(rowOfLine(line));
+    const RenderedBlock *block = r.rendered ? renderedForRow(r) : nullptr;
+    return block ? block->renderedText() : QString();
 }
 
 const RenderedBlock *VisualView::renderedForRow(const Row &r)
@@ -998,9 +1340,32 @@ qreal VisualView::renderedRowHeight(const Row &r, qreal)
 
 void VisualView::paintRenderedRow(QPainter &painter, const Row &r, const QRectF &rect)
 {
-    if (const Render *render = rendered(r)) {
-        const RenderedBlock *block = render->block.get();
-        block->paint(painter, rect.topLeft(), rect.width(), selectionForRow(r, block, render->source));
+    const Render *render = rendered(r);
+    if (!render)
+        return;
+    const RenderedBlock *block = render->block.get();
+    block->paint(painter, rect.topLeft(), rect.width(), selectionForRow(r, block, render->source));
+    // Carets in rendered text (editable views): where their source position
+    // renders.
+    if (m_paintCarets.empty())
+        return;
+    QTextDocument *doc = document();
+    const int start = doc->findBlockByNumber(r.firstLine).position();
+    const QTextBlock last = doc->findBlockByNumber(r.lastLine);
+    const int end = last.position() + last.length() - 1;
+    auto it = std::lower_bound(m_paintCarets.begin(), m_paintCarets.end(), start);
+    QString text;
+    for (; it != m_paintCarets.end() && *it <= end; ++it) {
+        int k = *it - start;
+        if (block->kind() == RenderedBlock::Kind::Rich) {
+            if (text.isNull())
+                text = block->renderedText();
+            k = renderedOffsetFor(text, render->source, k);
+        }
+        QRectF caret(0, 0, 2, qMin<qreal>(lineHeight(), block->height()));
+        if (const auto at = block->caretRect(k))
+            caret = *at;
+        painter.fillRect(caret.translated(rect.topLeft()), theme::color(theme::Role::text));
     }
 }
 
@@ -1020,7 +1385,15 @@ void VisualView::paintEvent(QPaintEvent *event)
         }
     }
     ++m_frame;
+    // The carets drawn in rendered text (TextView draws those in source rows).
+    m_paintCarets.clear();
+    if (hasFocus() && caretBlinkOn() && !isReadOnly()) {
+        for (const QTextCursor &c : cursors())
+            m_paintCarets.push_back(c.position());
+        std::sort(m_paintCarets.begin(), m_paintCarets.end());
+    }
     TextView::paintEvent(event);
+    m_paintCarets.clear();
 }
 
 RenderedSelection VisualView::selectionForRow(const Row &r, const RenderedBlock *block, const QString &source) const
@@ -1146,14 +1519,12 @@ int VisualView::hitTestRenderedRow(const Row &r, const QPointF &point)
         return first.position();
     const RenderedBlock *block = render->block.get();
 
-    const MarkdownModel::Span &span = m_model->spans()[s];
-    const auto &info = m_model->parsedBlock(span.block >= 0 ? span.block : span.previous);
-    switch (info.kind) {
+    switch (render->kind) {
     case core::BlockKind::Html: {
         const int pos = block->hitTest(point);
         if (pos < 0)
             return first.position();
-        return first.position() + sourceOffsetFor(block->renderedText().left(pos), render->source);
+        return first.position() + caretSourceOffset(block->renderedText(), render->source, pos);
     }
     case core::BlockKind::Code:
     case core::BlockKind::FrontMatter: {
@@ -1304,6 +1675,765 @@ void VisualView::changeEvent(QEvent *event)
     if (event->type() == QEvent::FontChange)
         clearRenderCache();
     TextView::changeEvent(event);
+}
+
+// ---------------------------------------------------------------------------
+// Rendered editing
+//
+// The caret of an editable view sits in rendered text as in a word
+// processor: a click places it, typing goes in where it renders and the
+// block renders again (from a parse of its own source; see liveRender).
+// Every edit is checked before it is made: its block, parsed and rendered
+// with it, must show what was typed (whitespace aside). An edit that fails
+// that, or that rendered text cannot express (several blocks, joining two,
+// several carets), opens the block as source and is made there; pictures
+// and raw HTML take no typing until opened with a double click.
+
+namespace {
+
+// What a backslash escapes in Markdown (CommonMark's ASCII punctuation).
+bool isAsciiPunctuation(QChar c)
+{
+    return QLatin1String("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~").contains(c);
+}
+
+bool isDelimiter(QChar c)
+{
+    return c == u'*' || c == u'_' || c == u'~' || c == u'`';
+}
+
+// Removes the source of rendered characters [from, to) (escapes included)
+// from source; *at is where the first of them was.
+QString removeRendered(const QString &rendered, const QString &source, int from, int to, int *at)
+{
+    std::vector<bool> removed(source.size(), false);
+    int r = 0;
+    for (int s = 0; s < source.size() && r < to; ++s) {
+        if (!sameChar(rendered.at(r), source.at(s)))
+            continue;
+        if (r >= from) {
+            removed[s] = true;
+            if (s > 0 && source.at(s - 1) == u'\\' && isAsciiPunctuation(source.at(s)))
+                removed[s - 1] = true;
+            const QChar typed = typedAs(rendered.at(r));
+            for (int i = 0; i < typedExtra(rendered.at(r)) && s + 1 < source.size() && source.at(s + 1) == typed; ++i)
+                removed[++s] = true;
+        }
+        ++r;
+    }
+    QString out;
+    out.reserve(source.size());
+    *at = -1;
+    for (int s = 0; s < source.size(); ++s) {
+        if (removed[s]) {
+            if (*at < 0)
+                *at = int(out.size());
+            continue;
+        }
+        out += source.at(s);
+    }
+    if (*at < 0)
+        *at = int(out.size());
+    return out;
+}
+
+// Removes markup left empty at `*at` ("****", "``", "[](url)").
+QString removeEmptyMarkup(QString source, int *at)
+{
+    for (int pass = 0; pass < 4; ++pass) {
+        const int p = *at;
+        if (p > 0 && p < source.size() && isDelimiter(source.at(p)) && source.at(p - 1) == source.at(p)) {
+            int left = p;
+            while (left > 0 && source.at(left - 1) == source.at(p))
+                --left;
+            int right = p;
+            while (right < source.size() && source.at(right) == source.at(p))
+                ++right;
+            if (p - left == right - p) {
+                source.remove(p, right - p);
+                source.remove(left, p - left);
+                *at = left;
+                continue;
+            }
+        }
+        if (p > 0 && source.at(p - 1) == u'[' && QStringView(source).mid(p).startsWith(QLatin1String("]("))) {
+            int depth = 0;
+            int close = -1;
+            for (int i = p + 1; i < source.size() && close < 0; ++i) {
+                if (source.at(i) == u'\n')
+                    break;
+                if (source.at(i) == u'(')
+                    ++depth;
+                else if (source.at(i) == u')' && --depth == 0)
+                    close = i;
+            }
+            if (close > 0) {
+                source.remove(p - 1, close - p + 2);
+                *at = p - 1;
+                continue;
+            }
+        }
+        break;
+    }
+    return source;
+}
+
+// The line of `text` holding offset p: [*start, *end).
+void lineAround(const QString &text, int p, int *start, int *end)
+{
+    *start = p > 0 ? int(text.lastIndexOf(u'\n', p - 1)) + 1 : 0;
+    const int next = int(text.indexOf(u'\n', p));
+    *end = next < 0 ? int(text.size()) : next;
+}
+
+} // namespace
+
+int VisualView::Spot::offsetOf(int position) const
+{
+    if (block->kind() != RenderedBlock::Kind::Rich)
+        return position - start;
+    return renderedOffsetFor(text, source, position - start);
+}
+
+std::optional<VisualView::Spot> VisualView::spotAt(int position)
+{
+    const QTextBlock b = document()->findBlock(position);
+    if (!b.isValid())
+        return std::nullopt;
+    const int index = rowOfLine(b.blockNumber());
+    if (index < 0 || index >= int(m_rows.size()) || !m_rows[index].row.rendered || m_rows[index].span < 0)
+        return std::nullopt;
+    const Row r = m_rows[index].row;
+    const Render *render = rendered(r);
+    if (!render)
+        return std::nullopt;
+    Spot spot;
+    spot.index = index;
+    spot.row = r;
+    spot.start = document()->findBlockByNumber(r.firstLine).position();
+    spot.source = render->source;
+    spot.block = render->block;
+    if (spot.block->kind() == RenderedBlock::Kind::Rich) {
+        spot.text = spot.block->renderedText();
+        spot.textual = render->textual && spot.block->tableCells().isEmpty();
+        spot.editable = spot.textual && spot.source.size() <= liveEditChars
+                        && r.lastLine - r.firstLine < liveEditLines;
+    }
+    return spot;
+}
+
+bool VisualView::rendersAs(const QString &source, int firstLine, const QString &expected)
+{
+    const RenderContext ctx = context();
+    const rust::Vec<core::Block> &blocks = liveBlocks(source);
+    // Where each line of the source starts, for the blocks' own sources.
+    std::vector<int> starts{0};
+    for (int i = 0; i < source.size(); ++i) {
+        if (source.at(i) == u'\n')
+            starts.push_back(i + 1);
+    }
+    const auto lineEnd = [&](size_t line) {
+        return line + 1 < starts.size() ? starts[line + 1] - 1 : int(source.size());
+    };
+    QString text;
+    for (const core::Block &b : blocks) {
+        if (b.kind != core::BlockKind::Html || b.first_line >= starts.size())
+            return false;
+        const int from = starts[b.first_line];
+        const int to = lineEnd(qMin<size_t>(b.last_line, starts.size() - 1));
+        const Render render = liveRender(b, source.mid(from, to - from), firstLine + int(b.first_line), ctx);
+        if (!render.textual)
+            return false;
+        text += render.block->renderedText();
+        text += u'\n';
+    }
+    return comparable(text) == comparable(expected);
+}
+
+void VisualView::applyEdit(int from, int to, const QString &text, int caret)
+{
+    const QTextCursor c = textCursor();
+    if (c.hasSelection() || c.position() != from || to != from) {
+        QTextCursor range(document());
+        range.setPosition(from);
+        range.setPosition(to, QTextCursor::KeepAnchor);
+        setTextCursor(range);
+    }
+    // As typing does: one undo step with the typing around it.
+    insertTextAtCarets(text);
+    if (caret >= 0 && textCursor().position() != caret) {
+        QTextCursor at(document());
+        at.setPosition(qBound(0, caret, document()->characterCount() - 1));
+        setTextCursor(at);
+    }
+}
+
+namespace {
+
+// The change between two versions of a row's source: [*from, *to) of the
+// old one becomes *text; the common start goes no further than `hint`.
+void changeBetween(const QString &before, const QString &after, int hint, int *from, int *to, QString *text)
+{
+    int pre = 0;
+    const int maxPre = qMin(hint, int(qMin(before.size(), after.size())));
+    while (pre < maxPre && before.at(pre) == after.at(pre))
+        ++pre;
+    int suf = 0;
+    while (suf < before.size() - pre && suf < after.size() - pre
+           && before.at(before.size() - 1 - suf) == after.at(after.size() - 1 - suf))
+        ++suf;
+    *from = pre;
+    *to = int(before.size()) - suf;
+    *text = after.mid(pre, after.size() - suf - pre);
+}
+
+} // namespace
+
+bool VisualView::typeRendered(const QString &typed)
+{
+    const QTextCursor c = textCursor();
+    const std::optional<Spot> spot = spotAt(c.position());
+    if (!spot || !spot->editable)
+        return false;
+    const int ka = spot->offsetOf(c.selectionStart());
+    const int kb = spot->offsetOf(c.selectionEnd());
+    const QString expected = spot->text.left(ka) + typed + spot->text.mid(kb);
+    QString base = spot->source;
+    // Where the text may go in the source: the caret itself (after a space
+    // typed at the end, say, which does not render), else where a caret
+    // before rendered character ka goes (past the markers at a line's start).
+    QList<int> candidates;
+    if (c.hasSelection() && kb > ka) {
+        int at = 0;
+        base = removeRendered(spot->text, spot->source, ka, kb, &at);
+        candidates.append(at);
+    } else {
+        candidates.append(c.position() - spot->start);
+        const int canonical = caretSourceOffset(spot->text, spot->source, ka);
+        if (canonical != candidates.first())
+            candidates.append(canonical);
+    }
+    const bool math = m_model->options().math;
+    for (const int p : std::as_const(candidates)) {
+        int lineStart = 0;
+        int lineEnd = 0;
+        lineAround(base, p, &lineStart, &lineEnd);
+        const QString line = base.mid(lineStart, lineEnd - lineStart);
+        const QString escaped = escapeTyped(typed, line.left(p - lineStart), contentStartOf(line), math);
+        const QString after = base.left(p) + escaped + base.mid(p);
+        if (!rendersAs(after, spot->row.firstLine, expected))
+            continue;
+        int from = 0;
+        int to = 0;
+        QString text;
+        changeBetween(spot->source, after, c.hasSelection() ? int(spot->source.size()) : p, &from, &to, &text);
+        applyEdit(spot->start + from, spot->start + to, text, spot->start + p + int(escaped.size()));
+        return true;
+    }
+    return false;
+}
+
+bool VisualView::typeOnBlankLine(const QString &typed)
+{
+    const QTextCursor c = textCursor();
+    const QTextBlock line = c.block();
+    if (c.hasSelection() || !isBlank(line.text()))
+        return false;
+    // A paragraph of its own: blank lines around it.
+    const QTextBlock prev = line.previous();
+    const QTextBlock next = line.next();
+    const bool blankBefore = !prev.isValid() || isBlank(prev.text());
+    const bool blankAfter = !next.isValid() || isBlank(next.text());
+    const QString escaped = escapeTyped(typed, QString(), 0, m_model->options().math);
+    if (!rendersAs(escaped, line.blockNumber() + (blankBefore ? 0 : 1), typed))
+        return false;
+    const QString lead = blankBefore ? QString() : QStringLiteral("\n");
+    applyEdit(line.position(), line.position() + line.length() - 1,
+              lead + escaped + (blankAfter ? QString() : QStringLiteral("\n")),
+              line.position() + int(lead.size() + escaped.size()));
+    return true;
+}
+
+bool VisualView::deleteRendered(bool forward)
+{
+    const QTextCursor c = textCursor();
+    const std::optional<Spot> spot = spotAt(c.position());
+    if (!spot || !spot->editable)
+        return false;
+    const QString &text = spot->text;
+    int ka = spot->offsetOf(c.selectionStart());
+    int kb = spot->offsetOf(c.selectionEnd());
+    if (!c.hasSelection() || ka == kb) {
+        const int k = spot->offsetOf(c.position());
+        if (forward) {
+            if (k >= text.size())
+                return false;
+            ka = k;
+            kb = k + (text.at(k).isHighSurrogate() && k + 1 < text.size() ? 2 : 1);
+        } else {
+            if (k <= 0)
+                return false;
+            ka = k - (text.at(k - 1).isLowSurrogate() && k >= 2 ? 2 : 1);
+            kb = k;
+        }
+        // Joining the lines, items or paragraphs of a block: as source.
+        for (int i = ka; i < kb; ++i) {
+            if (isLineBreak(text.at(i)))
+                return false;
+        }
+    }
+    const QString expected = text.left(ka) + text.mid(kb);
+    int at = 0;
+    const QString removed = removeRendered(text, spot->source, ka, kb, &at);
+    int cleanAt = at;
+    const QString cleaned = removeEmptyMarkup(removed, &cleanAt);
+    for (const auto &[after, caret] : {std::pair(cleaned, cleanAt), std::pair(removed, at)}) {
+        if (!rendersAs(after, spot->row.firstLine, expected))
+            continue;
+        int from = 0;
+        int to = 0;
+        QString change;
+        changeBetween(spot->source, after, caret, &from, &to, &change);
+        applyEdit(spot->start + from, spot->start + to, change, spot->start + caret);
+        return true;
+    }
+    return false;
+}
+
+bool VisualView::enterRendered()
+{
+    const QTextCursor c = textCursor();
+    const std::optional<Spot> spot = spotAt(c.position());
+    if (!spot || !spot->editable || c.hasSelection())
+        return false;
+    const QString &source = spot->source;
+    const int firstEnd = source.contains(u'\n') ? int(source.indexOf(u'\n')) : int(source.size());
+    static const QRegularExpression atx(QStringLiteral("^ {0,3}#{1,6}(?:[ \\t]|$)"));
+    static const QRegularExpression setext(QStringLiteral("\\n {0,3}(?:=+|-+)[ \\t]*$"));
+    const bool heading = atx.match(QStringView(source).first(firstEnd)).hasMatch()
+                         || (firstEnd < source.size() && !source.startsWith(u'>') && !md::parseListLine(source.left(firstEnd)).valid
+                             && setext.match(source).hasMatch());
+    const int k = spot->offsetOf(c.position());
+    if (heading) {
+        // A new paragraph after the heading, wherever the caret is in it.
+        const QString after = source + QStringLiteral("\n\n");
+        if (!rendersAs(after, spot->row.firstLine, spot->text))
+            return false;
+        const int end = spot->start + int(source.size());
+        applyEdit(end, end, QStringLiteral("\n\n"), end + 2);
+        return true;
+    }
+    QList<int> candidates{c.position() - spot->start};
+    if (const int canonical = caretSourceOffset(spot->text, source, k); canonical != candidates.first())
+        candidates.append(canonical);
+    for (const int p : std::as_const(candidates)) {
+        int lineStart = 0;
+        int lineEnd = 0;
+        lineAround(source, p, &lineStart, &lineEnd);
+        // The list item the caret's line is in: its marker line, at or above.
+        md::ListLine item;
+        for (int at = lineStart; !item.valid || item.isQuote;) {
+            int s = 0;
+            int e = 0;
+            lineAround(source, at, &s, &e);
+            item = md::parseListLine(source.mid(s, e - s));
+            if (item.valid && (!item.isQuote || s == lineStart))
+                break;
+            if (s == 0)
+                break;
+            at = s - 1;
+        }
+        QString insert;
+        QString expected = spot->text;
+        if (item.valid && !item.isQuote) {
+            if (item.empty)
+                return false; // Ending the list: as source.
+            insert = QStringLiteral("\n") + item.nextPrefix();
+            if (!item.box.isEmpty())
+                expected.insert(k, QChar(0x2610)); // The new item's box.
+        } else if (item.valid && item.isQuote) {
+            // A new paragraph in the quote.
+            insert = QStringLiteral("\n") + item.lead.trimmed() + QStringLiteral("\n") + item.lead;
+        } else {
+            insert = QStringLiteral("\n\n");
+        }
+        const QString after = source.left(p) + insert + source.mid(p);
+        if (!rendersAs(after, spot->row.firstLine, expected))
+            continue;
+        applyEdit(spot->start + p, spot->start + p, insert, spot->start + p + int(insert.size()));
+        return true;
+    }
+    return false;
+}
+
+void VisualView::moveRendered(int key, bool select)
+{
+    const QTextCursor c = textCursor();
+    const std::optional<Spot> spot = spotAt(c.position());
+    if (!spot || spot->block->kind() != RenderedBlock::Kind::Rich)
+        return;
+    const QString &text = spot->text;
+    const int n = int(text.size());
+    const int k = spot->offsetOf(c.position());
+    int target = -1;
+    const auto rowEdge = [&](int direction) {
+        // The nearest block in that direction (blank lines skipped): its
+        // end going back, its start going on.
+        for (int i = spot->index + direction; i >= 0 && i < int(m_rows.size()); i += direction) {
+            if (m_rows[i].span < 0)
+                continue;
+            const Row r = m_rows[i].row;
+            QTextDocument *doc = document();
+            if (!r.rendered) {
+                const QTextBlock b = doc->findBlockByNumber(direction < 0 ? r.lastLine : r.firstLine);
+                return direction < 0 ? b.position() + b.length() - 1 : b.position();
+            }
+            const Render *render = rendered(r);
+            if (!render)
+                continue;
+            const int start = doc->findBlockByNumber(r.firstLine).position();
+            if (render->block->kind() == RenderedBlock::Kind::Rich) {
+                const QString t = render->block->renderedText();
+                return start + caretSourceOffset(t, render->source, direction < 0 ? int(t.size()) : 0);
+            }
+            return direction < 0 ? start + int(render->source.size()) : start;
+        }
+        return -1;
+    };
+    switch (key) {
+    case Qt::Key_Left:
+    case Qt::Key_Right: {
+        const bool left = key == Qt::Key_Left;
+        if (!select && c.hasSelection()) {
+            target = left ? c.selectionStart() : c.selectionEnd();
+            break;
+        }
+        if (left) {
+            if (k > 0)
+                target = spot->positionOf(k - (k >= 2 && text.at(k - 1).isLowSurrogate() ? 2 : 1));
+            else
+                target = rowEdge(-1);
+        } else {
+            if (k < n)
+                target = spot->positionOf(k + (k + 1 < n && text.at(k).isHighSurrogate() ? 2 : 1));
+            else
+                target = rowEdge(1);
+        }
+        break;
+    }
+    case Qt::Key_Home:
+    case Qt::Key_End: {
+        auto [start, end] = spot->block->lineAt(k);
+        // A wrapped line ends with the space it wrapped at.
+        if (end > start && end < n && !isLineBreak(text.at(end)) && text.at(end - 1).isSpace())
+            --end;
+        target = spot->positionOf(key == Qt::Key_Home ? start : end);
+        break;
+    }
+    case Qt::Key_Up:
+    case Qt::Key_Down: {
+        const int direction = key == Qt::Key_Up ? -1 : 1;
+        const std::optional<QRectF> caret = spot->block->caretRect(k);
+        if (!caret)
+            return;
+        const qreal x = m_verticalPosition == c.position() && m_verticalX >= 0 ? m_verticalX : caret->left();
+        const qreal y = direction < 0 ? caret->top() - 1 : caret->bottom() + 1;
+        if (y >= 0 && y < spot->block->height()) {
+            const int hit = spot->block->hitTest(QPointF(x, y));
+            const std::optional<QRectF> to = hit >= 0 ? spot->block->caretRect(hit) : std::nullopt;
+            if (to && (direction < 0 ? to->top() < caret->top() - 0.5 : to->top() > caret->top() + 0.5))
+                target = spot->positionOf(hit);
+        }
+        for (int i = spot->index + direction; target < 0 && i >= 0 && i < int(m_rows.size()); i += direction) {
+            if (m_rows[i].span < 0)
+                continue;
+            const Row r = m_rows[i].row;
+            const QTextBlock first = document()->findBlockByNumber(r.firstLine);
+            if (!r.rendered) {
+                target = first.position();
+                break;
+            }
+            const Render *render = rendered(r);
+            if (!render)
+                continue;
+            const RenderedBlock *block = render->block.get();
+            if (block->kind() == RenderedBlock::Kind::Rich) {
+                const QString t = block->renderedText();
+                const std::optional<QRectF> edge = block->caretRect(direction < 0 ? int(t.size()) : 0);
+                const qreal ty = edge ? edge->center().y() : 0;
+                target = first.position() + caretSourceOffset(t, render->source, qMax(0, block->hitTest(QPointF(x, ty))));
+            } else {
+                target = hitTestRenderedRow(r, QPointF(x, direction < 0 ? qMax<qreal>(0, block->height() - 1) : 0));
+            }
+        }
+        if (target < 0)
+            return;
+        QTextCursor moved = c;
+        moved.setPosition(target, select ? QTextCursor::KeepAnchor : QTextCursor::MoveAnchor);
+        setTextCursor(moved);
+        m_verticalX = x;
+        m_verticalPosition = textCursor().position();
+        return;
+    }
+    default:
+        return;
+    }
+    if (target < 0)
+        return;
+    QTextCursor moved = c;
+    moved.setPosition(target, select ? QTextCursor::KeepAnchor : QTextCursor::MoveAnchor);
+    setTextCursor(moved);
+}
+
+void VisualView::openBlockAtCaret()
+{
+    if (isReadOnly())
+        return;
+    m_sourceOpen = true;
+    m_openLines.clear(); // Not a caret move out of them: see rebuildRows.
+    if (isVisible())
+        rebuildRows();
+    scheduleToolbarUpdate();
+    viewport()->update();
+}
+
+void VisualView::closeBlocks()
+{
+    if (!m_sourceOpen)
+        return;
+    m_sourceOpen = false;
+    m_openLines.clear();
+    if (isVisible())
+        rebuildRows();
+    scheduleToolbarUpdate();
+    viewport()->update();
+}
+
+void VisualView::openAndForward(QKeyEvent *event, int caret)
+{
+    if (caret >= 0) {
+        QTextCursor at(document());
+        at.setPosition(qBound(0, caret, document()->characterCount() - 1));
+        setTextCursor(at);
+    }
+    openBlockAtCaret();
+    TextView::keyPressEvent(event);
+}
+
+bool VisualView::renderedKey(QKeyEvent *event)
+{
+    if (isReadOnly() || m_sourceOpen)
+        return false;
+    const auto mods = event->modifiers() & ~Qt::KeypadModifier;
+    const bool shift = mods & Qt::ShiftModifier;
+    const bool ctrl = mods & Qt::ControlModifier;
+    const bool alt = mods & Qt::AltModifier;
+    const int key = event->key();
+    const QString text = event->text();
+    // As TextView takes text: AltGr arrives as Ctrl+Alt on Windows.
+    const bool typing = !text.isEmpty() && text.at(0).isPrint() && (!ctrl || alt) && !(alt && !ctrl);
+    const bool erase = key == Qt::Key_Backspace || (key == Qt::Key_Delete && !(shift && !ctrl));
+    const bool enter = key == Qt::Key_Return || key == Qt::Key_Enter;
+    const bool tab = (key == Qt::Key_Tab || key == Qt::Key_Backtab) && !ctrl && !alt;
+    const bool edit = typing || erase || enter || tab;
+    // Several carets: their edits are made in the source.
+    if (cursorCount() > 1) {
+        if (!edit)
+            return false;
+        openAndForward(event);
+        return true;
+    }
+    const QTextCursor c = textCursor();
+    const std::optional<Spot> spot = spotAt(c.position());
+    if (!spot) {
+        // A blank line (shown as source for the caret) or source lines.
+        if (typing && typeOnBlankLine(text))
+            return true;
+        if (edit && c.hasSelection() && spotAt(c.anchor())) {
+            openAndForward(event);
+            return true;
+        }
+        return false;
+    }
+    const bool inRow = c.selectionStart() >= spot->start && c.selectionEnd() <= spot->start + spot->source.size();
+    const bool rich = spot->block->kind() == RenderedBlock::Kind::Rich;
+    if (!ctrl && !alt && rich && inRow
+        && (key == Qt::Key_Left || key == Qt::Key_Right || key == Qt::Key_Up || key == Qt::Key_Down
+            || key == Qt::Key_Home || key == Qt::Key_End)) {
+        moveRendered(key, shift);
+        return true;
+    }
+    if (!edit)
+        return false;
+    // A selection over more than one block: edited as source.
+    if (!inRow) {
+        openAndForward(event);
+        return true;
+    }
+    if (!spot->editable) {
+        // Tab moves between the cells of a table, as in source.
+        if (tab && tableAtCaret().found)
+            return false;
+        // Pictures (math, diagrams) and raw HTML take no typing until
+        // opened (a double click): where it would go is not known.
+        const bool table = rich && !spot->block->tableCells().isEmpty();
+        if (spot->block->kind() == RenderedBlock::Kind::Image || spot->block->kind() == RenderedBlock::Kind::Empty
+            || (rich && !table && !spot->textual))
+            return true;
+        // Code, front matter, tables and long text: their source.
+        openAndForward(event);
+        return true;
+    }
+    if (typing) {
+        if (!typeRendered(text))
+            openAndForward(event);
+        return true;
+    }
+    if (erase) {
+        const bool forward = key == Qt::Key_Delete;
+        if (!ctrl && deleteRendered(forward))
+            return true;
+        // At the start (end) of the block: joined with the one before
+        // (after), in source.
+        const int k = spot->offsetOf(c.position());
+        if (!ctrl && !c.hasSelection() && !forward && k == 0)
+            openAndForward(event, spot->start);
+        else if (!ctrl && !c.hasSelection() && forward && k >= spot->text.size())
+            openAndForward(event, spot->start + int(spot->source.size()));
+        else
+            openAndForward(event);
+        return true;
+    }
+    if (enter && !ctrl && !shift && enterRendered())
+        return true;
+    openAndForward(event);
+    return true;
+}
+
+void VisualView::keyPressEvent(QKeyEvent *event)
+{
+    const auto mods = event->modifiers() & ~Qt::KeypadModifier;
+    if (event->key() == Qt::Key_Escape && mods == Qt::NoModifier && m_sourceOpen && !isReadOnly()) {
+        closeBlocks();
+        return;
+    }
+    if (event->key() != Qt::Key_Up && event->key() != Qt::Key_Down)
+        m_verticalX = -1;
+    if (renderedKey(event))
+        return;
+    TextView::keyPressEvent(event);
+}
+
+void VisualView::inputMethodEvent(QInputMethodEvent *event)
+{
+    if (!isReadOnly() && !m_sourceOpen && cursorCount() == 1) {
+        const std::optional<Spot> spot = spotAt(textCursor().position());
+        const QString commit = event->commitString();
+        if (event->preeditString().isEmpty() && event->replacementLength() == 0 && !commit.isEmpty()) {
+            if ((spot && spot->editable && typeRendered(commit)) || (!spot && typeOnBlankLine(commit))) {
+                event->accept();
+                return;
+            }
+        }
+        // Composing (or what rendered text cannot take): in the source.
+        if (spot && (!commit.isEmpty() || !event->preeditString().isEmpty()))
+            openBlockAtCaret();
+    }
+    TextView::inputMethodEvent(event);
+}
+
+bool VisualView::event(QEvent *event)
+{
+    // Esc closes an open block before any window shortcut sees it.
+    if (event->type() == QEvent::ShortcutOverride && m_sourceOpen && !isReadOnly()) {
+        const auto *key = static_cast<QKeyEvent *>(event);
+        if (key->key() == Qt::Key_Escape && (key->modifiers() & ~Qt::KeypadModifier) == Qt::NoModifier) {
+            event->accept();
+            return true;
+        }
+    }
+    return TextView::event(event);
+}
+
+void VisualView::editStarting()
+{
+    // The lines this edit starts in (whole blocks): their blocks render
+    // live (see rebuildRows).
+    if (!isVisible())
+        return;
+    const bool spans = m_model->hasUsableSpans() && !m_model->isAwaitingParse();
+    QTextDocument *doc = document();
+    int first = INT_MAX;
+    int last = -1;
+    for (const QTextCursor &c : cursors()) {
+        int from = doc->findBlock(c.selectionStart()).blockNumber();
+        int to = doc->findBlock(c.selectionEnd()).blockNumber();
+        if (spans) {
+            if (const int s = m_model->spanAt(from); s >= 0)
+                from = m_model->spans()[s].first;
+            if (const int s = m_model->spanAt(to); s >= 0)
+                to = m_model->spans()[s].last;
+        }
+        first = qMin(first, from);
+        last = qMax(last, to);
+    }
+    if (last < 0)
+        return;
+    m_liveStart = QTextCursor(doc->findBlockByNumber(first));
+    m_liveStart.setKeepPositionOnInsert(true);
+    m_liveEnd = QTextCursor(doc->findBlockByNumber(qMin(last, doc->blockCount() - 1)));
+    m_liveEnd.movePosition(QTextCursor::EndOfBlock);
+}
+
+bool VisualView::blankAt(const QPointF &point)
+{
+    if (point.x() < textLeft() || point.x() > textLeft() + textWidth())
+        return true;
+    qreal top = 0;
+    const int index = rowAt(point.y(), &top);
+    return index < 0 || (index < int(m_rows.size()) && m_rows[index].span < 0);
+}
+
+void VisualView::mousePressEvent(QMouseEvent *event)
+{
+    // A click on blank space shows everything rendered (the caret goes
+    // where the click puts it; nothing opens).
+    if (event->button() == Qt::LeftButton && m_sourceOpen && blankAt(event->position())) {
+        m_sourceOpen = false;
+        m_openLines.clear();
+    }
+    m_verticalX = -1;
+    TextView::mousePressEvent(event);
+}
+
+void VisualView::mouseDoubleClickEvent(QMouseEvent *event)
+{
+    // A double click on a rendered block opens it as source, the caret where
+    // the click was (in source, a double click selects a word).
+    if (event->button() == Qt::LeftButton && !isReadOnly()) {
+        qreal top = 0;
+        const int index = rowAt(event->position().y(), &top);
+        const Row r = index >= 0 ? row(index) : Row();
+        if (index >= 0 && r.rendered && spanForRow(r) >= 0) {
+            const QPointF point(event->position().x() - textLeft(), event->position().y() - top);
+            const RenderedBlock *block = renderedForRow(r);
+            // Links and task boxes act on the first click alone.
+            if (block && !block->anchorAt(point).isEmpty())
+                return;
+            const int position = hitTestRenderedRow(r, point);
+            m_pendingCell = {};
+            closeCellEditor(TableCellEditor::Exit::Commit);
+            m_sourceOpen = true;
+            m_openLines.clear();
+            QTextCursor at(document());
+            at.setPosition(qBound(0, position, document()->characterCount() - 1));
+            setTextCursor(at);
+            rebuildRows();
+            ensureCursorVisible();
+            return;
+        }
+    }
+    TextView::mouseDoubleClickEvent(event);
 }
 
 } // namespace vn

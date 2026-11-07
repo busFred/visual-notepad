@@ -2323,6 +2323,8 @@ bool TextView::canEdit() const
 
 void TextView::beginEdit()
 {
+    if (m_editDepth == 0)
+        editStarting();
     if (m_editDepth++ == 0) {
         // Entries only line up with undo steps while every change went through us.
         if (m_doc->revision() != m_syncedRevision)
@@ -3311,6 +3313,7 @@ void TextView::undoRedo(bool undo)
     // as long as no change bypassed them.
     if (m_doc->revision() != m_syncedRevision)
         m_undoEntries.clear();
+    editStarting();
     const int steps = m_doc->availableUndoSteps();
     // Entries are keyed by the undo position right after their step; redo's
     // key is only known once it has run.

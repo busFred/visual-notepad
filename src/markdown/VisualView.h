@@ -1,7 +1,8 @@
-// The hybrid Markdown editor: every top-level block is shown rendered, except
-// blocks holding a caret, which show their source for editing (the
-// behaviour of VS Code's Markdown editor). Locked (read-only) shows
-// everything rendered.
+// The hybrid Markdown editor: every top-level block is shown rendered, and
+// typing goes into rendered text as in a word processor (see keyPressEvent).
+// A double click (or an edit rendered text cannot take) opens the block as
+// its source until the caret leaves it, Esc or a click on blank space.
+// Locked (read-only) shows everything rendered.
 #pragma once
 
 #include "../editor/TextView.h"
@@ -12,9 +13,11 @@
 #include <QHash>
 #include <QSet>
 #include <QStringList>
+#include <QTextCursor>
 
 #include <deque>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -36,6 +39,11 @@ class TableToolbar;
 // renderedOffsetFor(rendered, source, sourceOffsetFor(rendered.left(k), source)) == k.
 int sourceOffsetFor(const QString &renderedPrefix, const QString &source);
 int renderedOffsetFor(const QString &rendered, const QString &source, int sourceOffset);
+// Where a caret placed before rendered character k (after k characters)
+// goes in the source: after the source of character k - 1, so typing there
+// takes its formatting (a word processor's rule); at the start of the block
+// or of a line of it, before the source of character k (after list markers).
+int caretSourceOffset(const QString &rendered, const QString &source, int k);
 
 class VisualView : public TextView
 {
@@ -46,12 +54,22 @@ public:
 
     void setBaseDirectory(const QString &directory);
     void setHighlightActiveBlock(bool on);
-    // Blocks currently shown as source because a caret or selection touches them.
+    // Blocks currently shown as source (opened, and the view has the focus).
     int expandedBlockCount() const { return int(m_expandedBlocks.size()); }
+    // Whether the blocks holding the carets are open as source (they show
+    // so while the view has the focus).
+    bool isBlockOpen() const { return m_sourceOpen; }
+    // Opens the blocks holding the carets as source, as a double click does;
+    // closing shows everything rendered again (as Esc does).
+    void openBlockAtCaret();
+    void closeBlocks();
     // For tests: renders kept in hand besides the cache.
     int memoizedRenderCount() const { return int(m_renders.size()); }
     // For tests: blocks (and parts of blocks) rendered so far.
     int renderCount() const { return m_renderCount; }
+    // For tests: the rendered text of the row showing a line (null for
+    // source rows).
+    QString renderedTextAt(int line);
     // A new table stays rendered, with its first header's box open (its
     // text selected, to type over), as a word processor does.
     void insertTable(int rows, int cols) override;
@@ -71,8 +89,14 @@ protected:
     std::vector<LineAnchor> rowLineAnchors(const Row &row, qreal height) override;
     void paintLineBackground(QPainter &painter, int line, const QRectF &rect) override;
     void rowsMayHaveChanged() override;
+    void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
+    void inputMethodEvent(QInputMethodEvent *event) override;
+    bool event(QEvent *event) override;
+    void editStarting() override;
     QTextCursor lineUnitAt(int position) const override;
     void changeEvent(QEvent *event) override;
     void focusInEvent(QFocusEvent *event) override;
@@ -94,7 +118,11 @@ private:
         QString source;
         QString key;
         std::shared_ptr<RenderedBlock> block;
+        core::BlockKind kind = core::BlockKind::Html;
         int cost = 0;     // KiB, of the block.
+        // Markdown text (paragraphs, headings, lists, quotes) rather than
+        // raw HTML, code or pictures: typing can go into its rendering.
+        bool textual = false;
         quint64 used = 0; // The last frame (see m_frame) that asked for it.
     };
     // What the view knows of a block it may show in parts (see
@@ -156,6 +184,54 @@ private:
     bool placeCellEditor();
     void tableTargetEditing() override;
 
+    // Editing in rendered text (VisualView.cpp, "Rendered editing").
+    // Blocks edited in rendered text render from a parse of their own source
+    // at once (a "live" render), not from the last parse of the document.
+    // The live lines are those of the last edit made through this view.
+    bool liveLines(int *first, int *last) const;
+    // The blocks of a source parsed alone; the last few are kept.
+    const rust::Vec<core::Block> &liveBlocks(const QString &source);
+    // The render of a block of a live parse (lines firstLine.. of the
+    // document); made once per source, kept in m_cache.
+    Render liveRender(const core::Block &block, const QString &source, int firstLine, const RenderContext &ctx);
+    QString renderKey(const RenderContext &ctx, core::BlockKind kind, const QString &source) const;
+    // The rendered row holding a document position, with its render.
+    struct Spot
+    {
+        int index = -1; // Row.
+        Row row;
+        int start = 0;  // Document position of the row.
+        QString source;
+        QString text;   // Rendered.
+        std::shared_ptr<RenderedBlock> block;
+        // Markdown text: not a table, raw HTML, a picture.
+        bool textual = false;
+        // Text that typing goes into (not too long to render per keystroke).
+        bool editable = false;
+        int offsetOf(int position) const; // Rendered offset of a document position.
+        int positionOf(int k) const { return start + caretSourceOffset(text, source, k); }
+    };
+    std::optional<Spot> spotAt(int position);
+    // Whether `source` (lines from firstLine on) renders as `expected`
+    // (whitespace aside); its renders are kept for the paint.
+    bool rendersAs(const QString &source, int firstLine, const QString &expected);
+    // Replaces [from, to) of the row's source (Spot::start on) as one edit
+    // made by typing, and puts the caret at `caret` (a document position).
+    void applyEdit(int from, int to, const QString &text, int caret);
+    // Key handlers for a caret in rendered text; false: not handled.
+    bool renderedKey(QKeyEvent *event);
+    bool typeRendered(const QString &text);
+    bool typeOnBlankLine(const QString &text);
+    bool deleteRendered(bool forward);
+    bool enterRendered();
+    void moveRendered(int key, bool select);
+    // An edit rendered text cannot take: open the caret's block as source
+    // (at `caret` if not -1) and let the source editor make it.
+    void openAndForward(QKeyEvent *event, int caret = -1);
+    // Whether a viewport point is off the text: the side margins, a blank
+    // line between blocks, below the end.
+    bool blankAt(const QPointF &point);
+
     struct CellTarget
     {
         int line = -1; // First line of the table's block.
@@ -190,6 +266,25 @@ private:
     std::vector<RowInfo> m_rows;
     std::vector<int> m_lineToRow;
     QSet<int> m_expandedBlocks; // Span indices.
+    // Blocks holding the carets show as source (while focused): set by a
+    // double click or a fallback edit, cleared by Esc, a click on blank space
+    // or the caret moving out of them (see rebuildRows).
+    bool m_sourceOpen = false;
+    std::vector<std::pair<int, int>> m_openLines; // The open blocks' lines, last built.
+    // The lines of the last edit made through this view (see liveLines).
+    QTextCursor m_liveStart;
+    QTextCursor m_liveEnd;
+    struct LiveParse
+    {
+        QString source;
+        rust::Vec<core::Block> blocks;
+    };
+    std::deque<LiveParse> m_liveParses;
+    // Up and Down in rendered text keep the x they started from.
+    qreal m_verticalX = -1;
+    int m_verticalPosition = -1;
+    // Carets of the paint in progress (see paintRenderedRow).
+    std::vector<int> m_paintCarets;
     QSet<int> m_partSpans;      // Spans shown in parts (see RenderedBlock::createPart).
     bool m_rowsStale = true;
     // The rows are the source, line by line, while the model parses the
@@ -204,6 +299,7 @@ private:
     // nothing don't rebuild them.
     int m_rowsRevision = -1;
     std::vector<std::pair<int, int>> m_rowsExpanded; // Line ranges shown as source.
+    std::vector<int> m_rowsCaretGaps; // Blank lines shown as source for a caret.
 
     // Renders by size, fonts and source; bounded by cost (KiB).
     QCache<QString, Render> m_cache;

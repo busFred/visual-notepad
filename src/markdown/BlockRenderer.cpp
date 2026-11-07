@@ -1743,6 +1743,38 @@ QImage RenderedBlock::pictureImage(const Picture &picture) const
     return image;
 }
 
+std::optional<QRectF> RenderedBlock::caretRect(int position) const
+{
+    if (!m_doc || (m_kind != Kind::Rich && m_kind != Kind::Code))
+        return std::nullopt;
+    position = qBound(0, position, m_doc->characterCount() - 1);
+    const QTextBlock block = m_doc->findBlock(position);
+    const QTextLayout *layout = block.isValid() ? block.layout() : nullptr;
+    if (!layout)
+        return std::nullopt;
+    const int inBlock = position - block.position();
+    const QTextLine line = layout->lineForTextPosition(inBlock);
+    if (!line.isValid())
+        return std::nullopt;
+    // The block's rectangle has the layout's origin, in document coordinates
+    // (table cells included), as collectLineAnchors reads it.
+    const QPointF origin = m_doc->documentLayout()->blockBoundingRect(block).topLeft() + contentOffset();
+    return QRectF(origin.x() + line.cursorToX(inBlock), origin.y() + line.y(), 2, line.height());
+}
+
+std::pair<int, int> RenderedBlock::lineAt(int position) const
+{
+    if (!m_doc)
+        return {0, 0};
+    position = qBound(0, position, m_doc->characterCount() - 1);
+    const QTextBlock block = m_doc->findBlock(position);
+    const QTextLayout *layout = block.isValid() ? block.layout() : nullptr;
+    const QTextLine line = layout ? layout->lineForTextPosition(position - block.position()) : QTextLine();
+    if (!line.isValid())
+        return {position, position};
+    return {block.position() + line.textStart(), block.position() + line.textStart() + line.textLength()};
+}
+
 QString RenderedBlock::renderedText() const
 {
     if (m_renderedText.isNull() && m_doc)

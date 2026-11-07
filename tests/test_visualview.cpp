@@ -252,6 +252,18 @@ private Q_SLOTS:
     void blocksWithoutCaretAreRendered();
     void caretExpandsItsBlock();
     void typingInExpandedBlockKeepsRows();
+    void singleClickKeepsTheBlockRendered();
+    void doubleClickOpensTheSource();
+    void escAndBlankClicksCloseTheBlock();
+    void typingGoesIntoRenderedText();
+    void typingAtTheEndOfBoldContinuesIt();
+    void typedMarkdownCharactersAreEscaped();
+    void enterInAListContinuesIt();
+    void enterInAHeadingStartsAParagraph();
+    void backspaceRemovesEmptiedMarkup();
+    void selectionIsReplacedAndFormatted();
+    void arrowsMoveThroughRenderedText();
+    void editsOverSeveralBlocksOpenThem();
     void taskCheckboxToggles();
     void linkClickEmits();
     void unfocusedRendersEverything();
@@ -337,6 +349,8 @@ private:
 
     // Viewport y where a click lands on the given source line, or -1.
     int yOfLine(int line, int x = 60);
+    // Puts text in the view's document, parsed, with the caret at position.
+    void setDocument(const QString &text, int position);
     int countColor(const QImage &image, const QColor &color) const;
 };
 
@@ -348,6 +362,15 @@ int TestVisualView::yOfLine(int line, int x)
             return y;
     }
     return -1;
+}
+
+void TestVisualView::setDocument(const QString &text, int position)
+{
+    m_doc->setPlainText(text);
+    m_model->flush();
+    QTextCursor c(m_doc);
+    c.setPosition(position);
+    m_view->setTextCursor(c);
 }
 
 int TestVisualView::countColor(const QImage &image, const QColor &color) const
@@ -428,10 +451,16 @@ void TestVisualView::blocksWithoutCaretAreRendered()
 
 void TestVisualView::caretExpandsItsBlock()
 {
-    // Put the caret in the "Goals" paragraph (line 9): its two lines become
-    // source rows, everything else stays rendered.
-    const QImage before = m_view->grab().toImage();
+    // A caret in the "Goals" paragraph (line 9) leaves it rendered; opened,
+    // its two lines become source rows, everything else stays rendered.
     m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(9)));
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QVERIFY(static_cast<ProbeView *>(m_view)->lineIsRendered(9));
+    const QImage before = m_view->grab().toImage();
+    m_view->openBlockAtCaret();
+    QCOMPARE(m_view->expandedBlockCount(), 1);
+    QVERIFY(!static_cast<ProbeView *>(m_view)->lineIsRendered(9));
+    QVERIFY(!static_cast<ProbeView *>(m_view)->lineIsRendered(10));
     const QImage after = m_view->grab().toImage();
     QVERIFY(before != after);
     QCOMPARE(m_model->blockAt(9), m_model->blockAt(10));
@@ -440,6 +469,7 @@ void TestVisualView::caretExpandsItsBlock()
 void TestVisualView::typingInExpandedBlockKeepsRows()
 {
     m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(9)));
+    m_view->openBlockAtCaret();
     QTest::keyClicks(m_view, QStringLiteral("New "));
     QVERIFY(m_doc->findBlockByNumber(9).text().startsWith(QLatin1String("New A light")));
     // A new paragraph splits the block; the view must follow.
@@ -449,6 +479,311 @@ void TestVisualView::typingInExpandedBlockKeepsRows()
     QTest::keyClicks(m_view, QStringLiteral("Third paragraph"));
     QVERIFY(m_model->blockAt(11) != m_model->blockAt(9));
     QVERIFY(!m_view->grab().isNull());
+}
+
+void TestVisualView::singleClickKeepsTheBlockRendered()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const int y = yOfLine(9, 100);
+    QVERIFY(y >= 0);
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(100, y));
+    QCOMPARE(m_view->textCursor().blockNumber(), 9);
+    QVERIFY(!m_view->textCursor().hasSelection());
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QVERIFY(!m_view->isBlockOpen());
+    QVERIFY(view->lineIsRendered(9));
+    // The caret is drawn in the rendered text.
+    QVERIFY(!m_view->grab().isNull());
+}
+
+void TestVisualView::doubleClickOpensTheSource()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const int y = yOfLine(9, 100);
+    QVERIFY(y >= 0);
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(100, y));
+    const int clicked = m_view->textCursor().position();
+    QTest::mouseDClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(100, y));
+    QTest::mouseRelease(m_view->viewport(), Qt::LeftButton, {}, QPoint(100, y));
+    QVERIFY(m_view->isBlockOpen());
+    QCOMPARE(m_view->expandedBlockCount(), 1);
+    QVERIFY(!view->lineIsRendered(9));
+    // The caret where the click mapped to, not a word selected.
+    QCOMPARE(m_view->textCursor().position(), clicked);
+    QVERIFY(!m_view->textCursor().hasSelection());
+    // In the source, a double click selects a word, and the block stays open.
+    qreal top = 0;
+    qreal bottom = 0;
+    QVERIFY(view->boundsOfLine(9, &top, &bottom));
+    const QPoint word(int(view->textStart()) + 30, int((top + bottom) / 2));
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, word);
+    QTest::mouseDClick(m_view->viewport(), Qt::LeftButton, {}, word);
+    QTest::mouseRelease(m_view->viewport(), Qt::LeftButton, {}, word);
+    QVERIFY(m_view->textCursor().hasSelection());
+    QCOMPARE(m_view->expandedBlockCount(), 1);
+    // A read-only view opens nothing.
+    m_view->closeBlocks();
+    m_view->setReadOnly(true);
+    const int y2 = yOfLine(17, 100);
+    QTest::mouseDClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(100, y2));
+    QTest::mouseRelease(m_view->viewport(), Qt::LeftButton, {}, QPoint(100, y2));
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+}
+
+void TestVisualView::escAndBlankClicksCloseTheBlock()
+{
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(9)));
+    m_view->openBlockAtCaret();
+    QCOMPARE(m_view->expandedBlockCount(), 1);
+    QTest::keyClick(m_view, Qt::Key_Escape);
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QVERIFY(!m_view->isBlockOpen());
+    QCOMPARE(m_view->textCursor().blockNumber(), 9);
+    // A click in the side margin closes it too, and opens nothing.
+    m_view->openBlockAtCaret();
+    QCOMPARE(m_view->expandedBlockCount(), 1);
+    qreal top = 0;
+    qreal bottom = 0;
+    QVERIFY(static_cast<ProbeView *>(m_view)->boundsOfLine(17, &top, &bottom));
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(5, int((top + bottom) / 2)));
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QVERIFY(!m_view->isBlockOpen());
+    // The caret leaving an open block closes it.
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(9)));
+    m_view->openBlockAtCaret();
+    QCOMPARE(m_view->expandedBlockCount(), 1);
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(17)));
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QVERIFY(!m_view->isBlockOpen());
+}
+
+void TestVisualView::typingGoesIntoRenderedText()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    setDocument(QStringLiteral("# Title\n\nHello world\n"), 14);
+    m_view->grab();
+    const int renders = m_view->renderCount();
+    QTest::keyClicks(m_view, QStringLiteral(" big"));
+    QCOMPARE(m_doc->findBlockByNumber(2).text(), QStringLiteral("Hello big world"));
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QVERIFY(view->lineIsRendered(2));
+    // Shown at once (before the reparse), the edited block alone rendered again.
+    QVERIFY(m_model->hasPendingEdits());
+    QCOMPARE(m_view->renderedTextAt(2), QStringLiteral("Hello big world"));
+    QCOMPARE(m_view->renderCount() - renders, 4);
+    QVERIFY(!m_view->grab().isNull());
+    QCOMPARE(m_view->renderCount() - renders, 4);
+    // Undone as typing in source is.
+    QTest::keyClick(m_view, Qt::Key_Z, Qt::ControlModifier);
+    const QString undone = m_doc->findBlockByNumber(2).text();
+    QCOMPARE(m_view->renderedTextAt(2), undone);
+    QTest::keyClick(m_view, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(m_doc->findBlockByNumber(2).text(), QStringLiteral("Hello big world"));
+    // Backspace and Delete take rendered characters.
+    QTest::keyClick(m_view, Qt::Key_Backspace);
+    QTest::keyClick(m_view, Qt::Key_Delete);
+    QCOMPARE(m_doc->findBlockByNumber(2).text(), QStringLiteral("Hello biworld"));
+    // Typed on a blank line: a paragraph of its own.
+    QTextCursor blank(m_doc->findBlockByNumber(1));
+    m_view->setTextCursor(blank);
+    QTest::keyClicks(m_view, QStringLiteral("New"));
+    QCOMPARE(m_doc->toPlainText(), QStringLiteral("# Title\n\nNew\n\nHello biworld\n"));
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QCOMPARE(m_view->renderedTextAt(2), QStringLiteral("New"));
+    QTRY_VERIFY(!m_model->hasPendingEdits());
+    QVERIFY(view->rowsConsistent());
+    QCOMPARE(m_view->renderedTextAt(2), QStringLiteral("New"));
+    // The same typing in source, undone.
+    setDocument(QStringLiteral("# Title\n\nHello world\n"), 14);
+    m_view->openBlockAtCaret();
+    QTest::keyClicks(m_view, QStringLiteral(" big"));
+    QTest::keyClick(m_view, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(m_doc->findBlockByNumber(2).text(), undone);
+}
+
+void TestVisualView::typingAtTheEndOfBoldContinuesIt()
+{
+    setDocument(QStringLiteral("Say **bold** now\n"), 0);
+    // "Say bold": the caret after the d, inside the run.
+    for (int i = 0; i < 8; ++i)
+        QTest::keyClick(m_view, Qt::Key_Right);
+    QTest::keyClicks(m_view, QStringLiteral("er"));
+    QCOMPARE(m_doc->firstBlock().text(), QStringLiteral("Say **bolder** now"));
+    // Before the run (after the space), new text is not bold.
+    QTextCursor c(m_doc);
+    c.setPosition(4);
+    m_view->setTextCursor(c);
+    QTest::keyClicks(m_view, QStringLiteral("so "));
+    QCOMPARE(m_doc->firstBlock().text(), QStringLiteral("Say so **bolder** now"));
+    QCOMPARE(m_view->renderedTextAt(0), QStringLiteral("Say so bolder now"));
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+}
+
+void TestVisualView::typedMarkdownCharactersAreEscaped()
+{
+    setDocument(QStringLiteral("Plain text\n"), 10);
+    QTest::keyClicks(m_view, QStringLiteral(" *not* [x] `y` a_b # | ~ \\"));
+    QCOMPARE(m_doc->firstBlock().text(),
+             QStringLiteral("Plain text \\*not\\* \\[x\\] \\`y\\` a\\_b \\# \\| \\~ \\\\"));
+    QCOMPARE(m_view->renderedTextAt(0), QStringLiteral("Plain text *not* [x] `y` a_b # | ~ \\"));
+    // At the start of a line, list and quote markers are escaped too.
+    setDocument(QStringLiteral("\n"), 0);
+    QTest::keyClicks(m_view, QStringLiteral("- 1. > x"));
+    QCOMPARE(m_doc->firstBlock().text(), QStringLiteral("\\- 1. > x"));
+    setDocument(QStringLiteral("\n"), 0);
+    QTest::keyClicks(m_view, QStringLiteral("12. x"));
+    QCOMPARE(m_doc->firstBlock().text(), QStringLiteral("12\\. x"));
+    QCOMPARE(m_view->renderedTextAt(0), QStringLiteral("12. x"));
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+}
+
+void TestVisualView::enterInAListContinuesIt()
+{
+    setDocument(QStringLiteral("- one\n- two\n\n1. first\n"), 5);
+    QTest::keyClick(m_view, Qt::Key_Return);
+    QTest::keyClicks(m_view, QStringLiteral("new"));
+    QCOMPARE(m_doc->toPlainText(), QStringLiteral("- one\n- new\n- two\n\n1. first\n"));
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QTextCursor c(m_doc->findBlockByNumber(4));
+    c.movePosition(QTextCursor::EndOfBlock);
+    m_view->setTextCursor(c);
+    QTest::keyClick(m_view, Qt::Key_Return);
+    QTest::keyClicks(m_view, QStringLiteral("second"));
+    QCOMPARE(m_doc->findBlockByNumber(5).text(), QStringLiteral("2. second"));
+    // In a paragraph, Enter starts a new one.
+    setDocument(QStringLiteral("one two\n"), 3);
+    QTest::keyClick(m_view, Qt::Key_Return);
+    QCOMPARE(m_doc->toPlainText(), QStringLiteral("one\n\n two\n"));
+    QCOMPARE(m_view->textCursor().blockNumber(), 2);
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QVERIFY(static_cast<ProbeView *>(m_view)->rowsConsistent());
+}
+
+void TestVisualView::enterInAHeadingStartsAParagraph()
+{
+    setDocument(QStringLiteral("# Title\n\nText\n"), 4);
+    QTest::keyClick(m_view, Qt::Key_Return);
+    QTest::keyClicks(m_view, QStringLiteral("New"));
+    QCOMPARE(m_doc->toPlainText(), QStringLiteral("# Title\n\nNew\n\nText\n"));
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QCOMPARE(m_view->renderedTextAt(0), QStringLiteral("Title"));
+}
+
+void TestVisualView::backspaceRemovesEmptiedMarkup()
+{
+    // The caret after the b: deleting it leaves no empty "****".
+    setDocument(QStringLiteral("a **b** c\n"), 5);
+    QTest::keyClick(m_view, Qt::Key_Backspace);
+    QCOMPARE(m_doc->firstBlock().text(), QStringLiteral("a  c"));
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    // An escape goes with its character.
+    setDocument(QStringLiteral("x \\* \\| y\n"), 7);
+    QTest::keyClick(m_view, Qt::Key_Backspace);
+    QCOMPARE(m_doc->firstBlock().text(), QStringLiteral("x \\*  y"));
+    QTest::keyClick(m_view, Qt::Key_Left);
+    QTest::keyClick(m_view, Qt::Key_Backspace);
+    QCOMPARE(m_doc->firstBlock().text(), QStringLiteral("x   y"));
+    // At the start of a block: joined with the line before, as source.
+    setDocument(QStringLiteral("one\n\ntwo\n"), 5);
+    QTest::keyClick(m_view, Qt::Key_Backspace);
+    QCOMPARE(m_doc->toPlainText(), QStringLiteral("one\ntwo\n"));
+    QVERIFY(m_view->isBlockOpen());
+    QCOMPARE(m_view->expandedBlockCount(), 1);
+}
+
+void TestVisualView::selectionIsReplacedAndFormatted()
+{
+    setDocument(QStringLiteral("Hello big world\n"), 6);
+    QTest::keyClick(m_view, Qt::Key_Right, Qt::ShiftModifier);
+    QTest::keyClick(m_view, Qt::Key_Right, Qt::ShiftModifier);
+    QTest::keyClick(m_view, Qt::Key_Right, Qt::ShiftModifier);
+    QCOMPARE(m_view->textCursor().selectedText(), QStringLiteral("big"));
+    QTest::keyClicks(m_view, QStringLiteral("small"));
+    QCOMPARE(m_doc->firstBlock().text(), QStringLiteral("Hello small world"));
+    // Bold on a selection: wrapped, still rendered.
+    QTextCursor c(m_doc);
+    c.setPosition(12);
+    c.setPosition(17, QTextCursor::KeepAnchor);
+    m_view->setTextCursor(c);
+    m_view->formatMarkdown(TextView::MarkdownFormat::Bold);
+    QCOMPARE(m_doc->firstBlock().text(), QStringLiteral("Hello small **world**"));
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QCOMPARE(m_view->renderedTextAt(0), QStringLiteral("Hello small world"));
+    // Typing over a bold selection keeps it bold.
+    c.setPosition(14);
+    c.setPosition(19, QTextCursor::KeepAnchor);
+    m_view->setTextCursor(c);
+    QTest::keyClicks(m_view, QStringLiteral("there"));
+    QCOMPARE(m_doc->firstBlock().text(), QStringLiteral("Hello small **there**"));
+    // Deleting all of it removes the markup.
+    c.setPosition(14);
+    c.setPosition(19, QTextCursor::KeepAnchor);
+    m_view->setTextCursor(c);
+    QTest::keyClick(m_view, Qt::Key_Delete);
+    QCOMPARE(m_doc->firstBlock().text(), QStringLiteral("Hello small "));
+}
+
+void TestVisualView::arrowsMoveThroughRenderedText()
+{
+    setDocument(QStringLiteral("# Head\n\nSome **x** text\n"), 2);
+    // Right from the end of the heading: the start of the paragraph's text.
+    for (int i = 0; i < 4; ++i)
+        QTest::keyClick(m_view, Qt::Key_Right);
+    QCOMPARE(m_view->textCursor().position(), 6);
+    QTest::keyClick(m_view, Qt::Key_Right);
+    QCOMPARE(m_view->textCursor().position(), 8);
+    QTest::keyClick(m_view, Qt::Key_Left);
+    QCOMPARE(m_view->textCursor().position(), 6);
+    QTest::keyClick(m_view, Qt::Key_Down);
+    QCOMPARE(m_view->textCursor().blockNumber(), 2);
+    QTest::keyClick(m_view, Qt::Key_End);
+    QCOMPARE(m_view->textCursor().position(), m_doc->findBlockByNumber(2).position() + 15);
+    QTest::keyClick(m_view, Qt::Key_Home);
+    QCOMPARE(m_view->textCursor().position(), m_doc->findBlockByNumber(2).position());
+    QTest::keyClick(m_view, Qt::Key_Up);
+    QCOMPARE(m_view->textCursor().blockNumber(), 0);
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+}
+
+void TestVisualView::editsOverSeveralBlocksOpenThem()
+{
+    // A selection from the "Goals" paragraph into the list: typing replaces
+    // it in the source, the blocks open.
+    QTextCursor c(m_doc->findBlockByNumber(10));
+    c.setPosition(m_doc->findBlockByNumber(12).position() + 4, QTextCursor::KeepAnchor);
+    m_view->setTextCursor(c);
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    QTest::keyClicks(m_view, QStringLiteral("Z"));
+    QCOMPARE(m_doc->findBlockByNumber(10).text(), QStringLiteral("Z] Visual editor"));
+    QVERIFY(m_view->isBlockOpen());
+    QVERIFY(m_view->expandedBlockCount() >= 1);
+    // Several carets: typed in the source too.
+    m_view->closeBlocks();
+    QTextCursor first(m_doc->findBlockByNumber(17));
+    QTextCursor second(m_doc->findBlockByNumber(9));
+    m_view->setCursors({first, second}, 0);
+    QTest::keyClicks(m_view, QStringLiteral("Q"));
+    QVERIFY(m_doc->findBlockByNumber(17).text().startsWith(u'Q'));
+    QVERIFY(m_view->isBlockOpen());
+    // Typing in a picture does nothing.
+    m_view->closeBlocks();
+    const QString before = m_doc->toPlainText();
+    const QTextBlock tex = m_doc->find(QStringLiteral("f\\colon")).block();
+    QVERIFY(tex.previous().text().startsWith(QLatin1String("$$")));
+    m_view->setTextCursor(QTextCursor(tex));
+    QTest::keyClicks(m_view, QStringLiteral("w"));
+    QCOMPARE(m_doc->toPlainText(), before);
+    QCOMPARE(m_view->expandedBlockCount(), 0);
+    // A block too long to render again at every keystroke: typed into as
+    // source (escapes are for rendered text only).
+    QString list;
+    for (int i = 0; i < 60; ++i)
+        list += QStringLiteral("- item %1\n").arg(i);
+    setDocument(list, 6);
+    QTest::keyClicks(m_view, QStringLiteral("*"));
+    QCOMPARE(m_doc->firstBlock().text(), QStringLiteral("- item* 0"));
+    QVERIFY(m_view->isBlockOpen());
+    QCOMPARE(m_view->expandedBlockCount(), 1);
 }
 
 void TestVisualView::taskCheckboxToggles()
@@ -495,6 +830,7 @@ void TestVisualView::linkClickEmits()
 void TestVisualView::unfocusedRendersEverything()
 {
     m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(9)));
+    m_view->openBlockAtCaret();
     const QImage focused = m_view->grab().toImage();
     m_view->clearFocus();
     QVERIFY(m_view->grab().toImage() != focused);
@@ -503,6 +839,7 @@ void TestVisualView::unfocusedRendersEverything()
 void TestVisualView::lockedRendersEverything()
 {
     m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(9)));
+    m_view->openBlockAtCaret();
     const QImage editing = m_view->grab().toImage();
     m_view->setReadOnly(true);
     const QImage locked = m_view->grab().toImage();
@@ -584,14 +921,22 @@ void TestVisualView::editableDragDefersExpansion()
     const int y1 = yOfLine(9);
     const int y2 = yOfLine(17);
     QVERIFY(y1 >= 0 && y2 > y1);
+    // A block open as source, the drag starting in it.
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(100, y1));
+    QTest::mouseDClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(100, y1));
+    QTest::mouseRelease(m_view->viewport(), Qt::LeftButton, {}, QPoint(100, y1));
+    QCOMPARE(m_view->expandedBlockCount(), 1);
+    const int y3 = y2 + 40; // The open paragraph is taller now.
     QTest::mousePress(m_view->viewport(), Qt::LeftButton, {}, QPoint(100, y1));
-    QTest::mouseMove(m_view->viewport(), QPoint(300, y2));
-    // Mid-drag nothing opens for editing, so nothing moves under the pointer.
+    QTest::mouseMove(m_view->viewport(), QPoint(300, y3));
+    // Mid-drag nothing opens or closes, so nothing moves under the pointer.
     QVERIFY(m_view->textCursor().hasSelection());
-    const int during = m_view->expandedBlockCount();
-    QTest::mouseRelease(m_view->viewport(), Qt::LeftButton, {}, QPoint(300, y2));
+    QCOMPARE(m_view->expandedBlockCount(), 1);
+    QTest::mouseRelease(m_view->viewport(), Qt::LeftButton, {}, QPoint(300, y3));
     QVERIFY(m_view->textCursor().hasSelection());
-    QVERIFY(m_view->expandedBlockCount() > during);
+    // The selection ended outside the open block: it closed, and the
+    // selection shows in rendered text.
+    QCOMPARE(m_view->expandedBlockCount(), 0);
 }
 
 void TestVisualView::tableIsRealignedWhenTheCaretLeavesIt()
@@ -1259,6 +1604,7 @@ void TestVisualView::editsReparseLater()
 void TestVisualView::caretMovesDontReparse()
 {
     m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(9)));
+    m_view->openBlockAtCaret();
     QTest::keyClicks(m_view, QStringLiteral("New "));
     // The paragraph being typed in stays open as source.
     QVERIFY(m_view->expandedBlockCount() == 1);
