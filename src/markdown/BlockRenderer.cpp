@@ -1680,96 +1680,81 @@ void RenderedBlock::paintItemMarker(QPainter &painter, const QPointF &topLeft, b
 {
     if (!m_item.list)
         return;
-    // QTextDocumentLayoutPrivate::drawListItem (Qt 6.12) for each block of
-    // the list (the item's first, or more for an irregular item), with the
-    // number the item has in the whole list and the style its list had.
+    // The marker as Qt draws it for a whole list (its size and place come
+    // from the item's font), with the number the item has in the whole list.
+    // Numbers for an ordered list, else the list's bullet.
+    int style = m_item.style;
+    if (ordered)
+        style = QTextListFormat::ListDecimal;
+    else if (style == QTextListFormat::ListDecimal)
+        style = QTextListFormat::ListDisc;
     painter.save();
     painter.translate(topLeft + contentOffset());
+    painter.setRenderHint(QPainter::Antialiasing);
     for (int i = 0; i < m_item.list->count(); ++i) {
         const QTextBlock block = m_item.list->item(i);
-        const QTextCharFormat charFormat = block.charFormat();
-        const QFont font = charFormat.font();
-        const QFontMetrics metrics(font);
         const QTextLayout *layout = block.layout();
         if (!layout || layout->lineCount() == 0)
             continue;
-        const QTextLine firstLine = layout->lineAt(0);
-        QPointF pos = layout->position().toPoint();
-        pos.ry() += qRound(firstLine.ascent()) - metrics.ascent();
-        const Qt::LayoutDirection direction = block.textDirection();
-        const QRectF textRect = firstLine.naturalTextRect();
-        pos += textRect.topLeft().toPoint();
-        if (direction == Qt::RightToLeft)
-            pos.rx() += textRect.width();
+        const QTextCharFormat format = block.charFormat();
+        const QFont font = format.font();
+        const QFontMetrics metrics(font);
+        const QTextLine line = layout->lineAt(0);
+        const bool rtl = block.textDirection() == Qt::RightToLeft;
+        // The text's first line, in whole pixels; the marker's line has the
+        // marker's font, its top where that font's ascent meets the line's.
+        const QRectF text = line.naturalTextRect();
+        const QPoint start = layout->position().toPoint() + text.topLeft().toPoint();
+        const int lineTop = start.y() + qRound(line.ascent()) - metrics.ascent();
+        const int textEdge = rtl ? start.x() + int(text.width()) : start.x();
 
-        int style = m_item.style;
-        if (ordered && style != QTextListFormat::ListDecimal)
-            style = QTextListFormat::ListDecimal;
-        if (!ordered && style == QTextListFormat::ListDecimal)
-            style = QTextListFormat::ListDisc;
-        QString text;
-        QSizeF size;
+        QString label;
+        int width = 0;
+        int height = 0;
         switch (style) {
         case QTextListFormat::ListDecimal:
-            text = direction == Qt::RightToLeft ? u'.' + QString::number(number + i) : QString::number(number + i) + u'.';
-            size = QSizeF(metrics.horizontalAdvance(text), metrics.height());
+            label = rtl ? QStringLiteral(".%1").arg(number + i) : QStringLiteral("%1.").arg(number + i);
+            width = metrics.horizontalAdvance(label);
+            height = metrics.height();
             break;
-        case QTextListFormat::ListSquare:
-        case QTextListFormat::ListCircle:
         case QTextListFormat::ListDisc:
-            size.setWidth(metrics.lineSpacing() / 3);
-            size.setHeight(size.width());
+        case QTextListFormat::ListCircle:
+        case QTextListFormat::ListSquare:
+            width = height = metrics.lineSpacing() / 3;
             break;
         default:
             continue;
         }
-        QRectF r(pos, size);
-        qreal xoff = metrics.horizontalAdvance(u' ');
-        if (direction == Qt::LeftToRight)
-            xoff = -xoff - size.width();
-        r.translate(xoff, (metrics.height() / 2) - (size.height() / 2));
+        // A space between the marker and the text, on the text's start side.
+        const int space = metrics.horizontalAdvance(u' ');
+        const qreal left = rtl ? textEdge + space : textEdge - space - width;
+        const QRectF box(left, lineTop + metrics.height() / 2.0 - height / 2.0, width, height);
 
-        painter.save();
-        painter.setRenderHint(QPainter::Antialiasing);
+        QBrush ink;
         if (selected) {
-            // The selection's format, as paint() makes it.
-            const QColor selectionText = theme::color(theme::Role::selectionText);
-            painter.setPen(QPen(selectionText != theme::color(theme::Role::text) ? QBrush(selectionText) : QBrush(), 0));
-            painter.fillRect(r, theme::color(theme::Role::selection));
+            // The selection's colours, as paint() uses them.
+            ink = theme::color(theme::Role::selectionText);
+            painter.fillRect(box, theme::color(theme::Role::selection));
         } else {
-            QBrush foreground = charFormat.foreground();
-            if (foreground == Qt::NoBrush)
-                foreground = theme::color(theme::Role::text);
-            painter.setPen(QPen(foreground, 0));
+            ink = format.foreground();
+            if (ink.style() == Qt::NoBrush)
+                ink = theme::color(theme::Role::text);
         }
-        switch (style) {
-        case QTextListFormat::ListDecimal: {
-            QTextLayout numberLayout(text, font);
-            numberLayout.setCacheEnabled(true);
-            QTextOption option(Qt::AlignLeft | Qt::AlignAbsolute);
-            option.setTextDirection(direction);
-            numberLayout.setTextOption(option);
-            numberLayout.beginLayout();
-            QTextLine line = numberLayout.createLine();
-            if (line.isValid())
-                line.setLeadingIncluded(true);
-            numberLayout.endLayout();
-            numberLayout.draw(&painter, QPointF(r.left(), pos.y()));
-            break;
-        }
-        case QTextListFormat::ListSquare:
-            painter.fillRect(r, painter.pen().brush());
-            break;
-        case QTextListFormat::ListCircle:
-            painter.drawEllipse(r.translated(0.5, 0.5));
-            break;
-        default:
-            painter.setBrush(painter.pen().brush());
+        if (style == QTextListFormat::ListDecimal) {
+            painter.setFont(font);
+            painter.setPen(QPen(ink, 0));
+            painter.drawText(QPointF(box.left(), lineTop + metrics.ascent()), label);
+        } else if (style == QTextListFormat::ListSquare) {
+            painter.fillRect(box, ink);
+        } else if (style == QTextListFormat::ListCircle) {
+            painter.setPen(QPen(ink, 0));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(box.translated(0.5, 0.5));
+        } else {
             painter.setPen(Qt::NoPen);
-            painter.drawEllipse(r);
-            break;
+            painter.setBrush(ink);
+            painter.drawEllipse(box);
         }
-        painter.restore();
     }
     painter.restore();
 }
