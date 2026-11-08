@@ -231,7 +231,38 @@ public:
     }
 
     QTextCursor unitAt(int position) const { return lineUnitAt(position); }
+
+    int rowIndexOf(int line) const { return rowOfLine(line); }
+    int firstLineOfRow(int index) const { return row(index).firstLine; }
+    qreal heightOfRow(int index) { return row(index).rendered ? renderedRowHeight(row(index), 0) : -1; }
+    // Where the row's lines start: (line, y) from the row's top.
+    QList<QPointF> anchorsOfRow(int index)
+    {
+        QList<QPointF> anchors;
+        for (const LineAnchor &a : rowLineAnchors(row(index), heightOfRow(index)))
+            anchors.append(QPointF(a.line, a.y));
+        return anchors;
+    }
 };
+
+// A rendered list as a view shows it: its text, its height and where its
+// lines start, from its top.
+struct ListShape
+{
+    QString text;
+    qreal height = 0;
+    QList<QPointF> lines;
+    int rows = 0;
+};
+
+// A list of `count` items made from `item` (%1 is the number), and its lines.
+QString listOf(const QString &item, int count)
+{
+    QString text;
+    for (int i = 1; i <= count; ++i)
+        text += item.arg(i) + u'\n';
+    return text;
+}
 
 void wheel(TextView *view, qreal dy)
 {
@@ -268,6 +299,14 @@ private Q_SLOTS:
     void arrowsMoveThroughRenderedText();
     void editsOverSeveralBlocksOpenThem();
     void taskCheckboxToggles();
+    void longListsShowAnItemARow_data();
+    void longListsShowAnItemARow();
+    void typingInALongListRendersOneItem();
+    void enterInALongOrderedListRenumbers();
+    void backspaceAndDeleteJoinItems();
+    void editsAroundALongListsItems();
+    void taskBoxesAndLinksInALongList();
+    void irregularListsRenderWhole();
     void linkClickEmits();
     void unfocusedRendersEverything();
     void lockedRendersEverything();
@@ -362,6 +401,10 @@ private:
     int yOfLine(int line, int x = 60);
     // Puts text in the view's document, parsed, with the caret at position.
     void setDocument(const QString &text, int position);
+    ListShape shapeOf(int first, int last);
+    // Lines [first, last] of `text` are a list: shown an item a row, it
+    // looks as it does whole.
+    void compareWithWholeList(const QString &text, int first, int last);
     // A table of five rows and three columns on line 2, rendered; read-write.
     void useSelectionTable();
     int countColor(const QImage &image, const QColor &color) const;
@@ -384,6 +427,70 @@ void TestVisualView::setDocument(const QString &text, int position)
     QTextCursor c(m_doc);
     c.setPosition(position);
     m_view->setTextCursor(c);
+}
+
+ListShape TestVisualView::shapeOf(int first, int last)
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    ListShape shape;
+    for (int i = view->rowIndexOf(first); i <= view->rowIndexOf(last); ++i) {
+        const int line = view->firstLineOfRow(i);
+        if (shape.rows > 0) {
+            shape.text += u'\n';
+            shape.lines.append(QPointF(line, shape.height));
+        }
+        shape.text += m_view->renderedTextAt(line);
+        for (const QPointF &a : view->anchorsOfRow(i)) {
+            // (An item and its first paragraph both mark their line.)
+            const QPointF at(a.x(), shape.height + a.y());
+            if (shape.lines.isEmpty() || shape.lines.last() != at)
+                shape.lines.append(at);
+        }
+        shape.height += view->heightOfRow(i);
+        ++shape.rows;
+    }
+    return shape;
+}
+
+void TestVisualView::compareWithWholeList(const QString &text, int first, int last)
+{
+    m_view->clearFocus(); // No caret in the pictures.
+    setDocument(text, 0);
+    m_view->scrollToLine(first);
+    m_view->grab();
+    // (The scroll bar differs: it counts rows.)
+    const QImage itemsImage = m_view->viewport()->grab().toImage();
+    const ListShape items = shapeOf(first, last);
+    VisualView::setItemRowsEnabled(false);
+    const auto restore = qScopeGuard([] { VisualView::setItemRowsEnabled(true); });
+    setDocument(text, 0);
+    m_view->scrollToLine(first);
+    m_view->grab();
+    const QImage wholeImage = m_view->viewport()->grab().toImage();
+    const ListShape whole = shapeOf(first, last);
+    QCOMPARE(whole.rows, 1);
+    QVERIFY2(items.rows == last - first + 1 || items.rows > 1, "an item a row");
+    QCOMPARE(items.text, whole.text);
+    QCOMPARE(items.height, whole.height);
+    QCOMPARE(items.lines.size(), whole.lines.size());
+    for (int i = 0; i < whole.lines.size(); ++i) {
+        QCOMPARE(items.lines[i].x(), whole.lines[i].x());
+        QCOMPARE(items.lines[i].y(), whole.lines[i].y());
+    }
+    // The same picture, but for antialiasing: the markers (and Qt's own in
+    // nested lists) are placed from the item's top, not the list's, which
+    // rounds to whole pixels from another fraction.
+    QCOMPARE(itemsImage.size(), wholeImage.size());
+    int differ = 0;
+    for (int y = 0; y < itemsImage.height(); ++y) {
+        for (int x = 0; x < itemsImage.width(); ++x)
+            differ += itemsImage.pixel(x, y) != wholeImage.pixel(x, y);
+    }
+    if (!qEnvironmentVariableIsEmpty("VN_SCREENSHOT_DIR")) {
+        itemsImage.save(QDir(qEnvironmentVariable("VN_SCREENSHOT_DIR")).filePath(QStringLiteral("list-items.png")));
+        wholeImage.save(QDir(qEnvironmentVariable("VN_SCREENSHOT_DIR")).filePath(QStringLiteral("list-whole.png")));
+    }
+    QVERIFY2(differ < itemsImage.width() * itemsImage.height() / 200, qPrintable(QString::number(differ)));
 }
 
 int TestVisualView::countColor(const QImage &image, const QColor &color) const
@@ -787,16 +894,25 @@ void TestVisualView::editsOverSeveralBlocksOpenThem()
     QTest::keyClicks(m_view, QStringLiteral("w"));
     QCOMPARE(m_doc->toPlainText(), before);
     QCOMPARE(m_view->expandedBlockCount(), 0);
-    // A block too long to render again at every keystroke: typed into as
-    // source (escapes are for rendered text only).
+    // A block too long to render again at every keystroke (a paragraph over
+    // 2000 characters): typed into as source (escapes are for rendered text
+    // only).
+    QString paragraph;
+    for (int i = 0; i < 300; ++i)
+        paragraph += QStringLiteral("word%1 ").arg(i);
+    setDocument(paragraph.trimmed() + u'\n', 4);
+    QTest::keyClicks(m_view, QStringLiteral("*"));
+    QVERIFY(m_doc->firstBlock().text().startsWith(QLatin1String("word*0 word1")));
+    QVERIFY(m_view->isBlockOpen());
+    QCOMPARE(m_view->expandedBlockCount(), 1);
+    // A long list is typed into an item at a time, whatever its length.
     QString list;
     for (int i = 0; i < 60; ++i)
         list += QStringLiteral("- item %1\n").arg(i);
     setDocument(list, 6);
     QTest::keyClicks(m_view, QStringLiteral("*"));
-    QCOMPARE(m_doc->firstBlock().text(), QStringLiteral("- item* 0"));
-    QVERIFY(m_view->isBlockOpen());
-    QCOMPARE(m_view->expandedBlockCount(), 1);
+    QCOMPARE(m_doc->firstBlock().text(), QStringLiteral("- item\\* 0"));
+    QVERIFY(!m_view->isBlockOpen());
 }
 
 void TestVisualView::taskCheckboxToggles()
@@ -822,6 +938,259 @@ void TestVisualView::taskCheckboxToggles()
     QVERIFY(m_doc->findBlockByNumber(13).text().startsWith(QLatin1String("- [x]")));
     QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, first);
     QVERIFY(m_doc->findBlockByNumber(12).text().startsWith(QLatin1String("- [ ]")));
+}
+
+void TestVisualView::longListsShowAnItemARow_data()
+{
+    QTest::addColumn<QString>("text");
+    QTest::addColumn<int>("first");
+    QTest::addColumn<int>("last");
+    const QString after = QStringLiteral("\nAfter.\n");
+    QTest::newRow("bullets") << QStringLiteral("# Items\n\n")
+                                    + listOf(QStringLiteral("- item %1 with **bold**, `code` and a [link](https://example.com/%1)"), 300)
+                                    + after
+                             << 2 << 301;
+    QTest::newRow("ordered from 7") << listOf(QStringLiteral("%1. item"), 40).replace(QStringLiteral("1. item\n2."), QStringLiteral("7. item\n2."))
+                                    << 0 << 39;
+    QTest::newRow("tasks") << listOf(QStringLiteral("- [ ] task %1 to do"), 30) << 0 << 29;
+    QTest::newRow("some tasks") << listOf(QStringLiteral("- [x] task %1\n- plain %1"), 15) << 0 << 29;
+    QTest::newRow("loose") << listOf(QStringLiteral("- item %1\n"), 30) << 0 << 58;
+    QTest::newRow("nested") << listOf(QStringLiteral("1. outer %1\n   - inner a\n   - inner b\n     1. deep"), 20) << 0 << 79;
+    QTest::newRow("paragraphs and code")
+        << listOf(QStringLiteral("- first %1\n\n  second paragraph\n\n  ```\n  code\n  ```\n\n  > quoted"), 20) << 0 << 179;
+    QTest::newRow("wrapping") << listOf(QStringLiteral("- %1 ") + QStringLiteral("long words ").repeated(40), 20) << 0 << 19;
+}
+
+void TestVisualView::longListsShowAnItemARow()
+{
+    QFETCH(QString, text);
+    QFETCH(int, first);
+    QFETCH(int, last);
+    compareWithWholeList(text, first, last);
+}
+
+void TestVisualView::typingInALongListRendersOneItem()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    setDocument(listOf(QStringLiteral("- item %1 with **bold** text"), 300), 0);
+    QTextCursor c(m_doc->findBlockByNumber(150));
+    c.movePosition(QTextCursor::EndOfBlock);
+    m_view->setTextCursor(c);
+    m_view->grab();
+    QCOMPARE(m_view->itemMarkerAt(150), QStringLiteral("\u2022"));
+    const int renders = m_view->renderCount();
+    QTest::keyClicks(m_view, QStringLiteral("xy"));
+    QCOMPARE(m_doc->findBlockByNumber(150).text(), QStringLiteral("- item 151 with **bold** textxy"));
+    QVERIFY(!m_view->isBlockOpen());
+    QCOMPARE(m_view->renderedTextAt(150), QStringLiteral("item 151 with bold textxy"));
+    m_view->grab();
+    // The item alone, once a keystroke.
+    QCOMPARE(m_view->renderCount() - renders, 2);
+    QVERIFY(view->rowsConsistent());
+    // The document's parse after the pause renders nothing again.
+    QTRY_VERIFY(!m_model->hasPendingEdits());
+    m_view->grab();
+    QCOMPARE(m_view->renderCount() - renders, 2);
+    QCOMPARE(m_view->renderedTextAt(150), QStringLiteral("item 151 with bold textxy"));
+    QVERIFY(view->rowsConsistent());
+    // Typed in a nested item: its item again.
+    setDocument(listOf(QStringLiteral("- item %1\n  - inner %1"), 30), 0);
+    c = QTextCursor(m_doc->findBlockByNumber(21));
+    c.movePosition(QTextCursor::EndOfBlock);
+    m_view->setTextCursor(c);
+    m_view->grab();
+    const int before = m_view->renderCount();
+    QTest::keyClicks(m_view, QStringLiteral("z"));
+    QCOMPARE(m_doc->findBlockByNumber(21).text(), QStringLiteral("  - inner 11z"));
+    QCOMPARE(m_view->renderedTextAt(20), QStringLiteral("item 11\ninner 11z"));
+    m_view->grab();
+    QCOMPARE(m_view->renderCount() - before, 1);
+    QVERIFY(!m_view->isBlockOpen());
+}
+
+void TestVisualView::enterInALongOrderedListRenumbers()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    setDocument(listOf(QStringLiteral("%1. item %1"), 300), 0);
+    QTextCursor c(m_doc->findBlockByNumber(149));
+    c.movePosition(QTextCursor::EndOfBlock);
+    m_view->setTextCursor(c);
+    m_view->grab();
+    const int renders = m_view->renderCount();
+    QTest::keyClick(m_view, Qt::Key_Return);
+    m_view->grab();
+    // The new item alone (the one it was split from is unchanged).
+    QVERIFY2(m_view->renderCount() - renders <= 2, qPrintable(QString::number(m_view->renderCount() - renders)));
+    QCOMPARE(m_doc->findBlockByNumber(150).text(), QStringLiteral("151. "));
+    QCOMPARE(m_view->itemMarkerAt(150), QStringLiteral("151."));
+    QTest::keyClicks(m_view, QStringLiteral("new"));
+    QCOMPARE(m_doc->findBlockByNumber(150).text(), QStringLiteral("151. new"));
+    QCOMPARE(m_doc->findBlockByNumber(151).text(), QStringLiteral("151. item 151"));
+    QVERIFY(!m_view->isBlockOpen());
+    QCOMPARE(m_view->itemMarkerAt(0), QStringLiteral("1."));
+    QCOMPARE(m_view->itemMarkerAt(149), QStringLiteral("150."));
+    QCOMPARE(m_view->itemMarkerAt(151), QStringLiteral("152."));
+    QCOMPARE(m_view->itemMarkerAt(300), QStringLiteral("301."));
+    QCOMPARE(m_view->renderedTextAt(150), QStringLiteral("new"));
+    QVERIFY(view->rowsConsistent());
+    QTRY_VERIFY(!m_model->hasPendingEdits());
+    QCOMPARE(m_view->itemMarkerAt(151), QStringLiteral("152."));
+    QCOMPARE(m_view->itemMarkerAt(300), QStringLiteral("301."));
+    // A list starting at 5 counts from there.
+    setDocument(listOf(QStringLiteral("%1) item"), 40).replace(QStringLiteral("1) item\n2)"), QStringLiteral("5) item\n2)")), 0);
+    QCOMPARE(m_view->itemMarkerAt(0), QStringLiteral("5."));
+    QCOMPARE(m_view->itemMarkerAt(39), QStringLiteral("44."));
+}
+
+void TestVisualView::backspaceAndDeleteJoinItems()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    setDocument(listOf(QStringLiteral("- item %1 **b**"), 300), 0);
+    // At the start of item 151's text (after its marker).
+    QTextCursor c(m_doc->findBlockByNumber(150));
+    c.setPosition(c.position() + 2);
+    m_view->setTextCursor(c);
+    m_view->grab();
+    const int renders = m_view->renderCount();
+    QTest::keyClick(m_view, Qt::Key_Backspace);
+    QCOMPARE(m_doc->findBlockByNumber(149).text(), QStringLiteral("- item 150 **b**item 151 **b**"));
+    QCOMPARE(m_doc->findBlockByNumber(150).text(), QStringLiteral("- item 152 **b**"));
+    QCOMPARE(m_doc->blockCount(), 300);
+    QVERIFY(!m_view->isBlockOpen());
+    QCOMPARE(m_view->renderedTextAt(149), QStringLiteral("item 150 bitem 151 b"));
+    QCOMPARE(m_view->textCursor().position(), m_doc->findBlockByNumber(149).position() + 16);
+    m_view->grab();
+    // The joined item, and the one that comes into view at the bottom.
+    QVERIFY(m_view->renderCount() - renders <= 2);
+    // Delete at the end of an item's text joins the next one to it.
+    c = QTextCursor(m_doc->findBlockByNumber(10));
+    c.movePosition(QTextCursor::EndOfBlock);
+    m_view->setTextCursor(c);
+    QTest::keyClick(m_view, Qt::Key_Delete);
+    QCOMPARE(m_doc->findBlockByNumber(10).text(), QStringLiteral("- item 11 **b**item 12 **b**"));
+    QVERIFY(!m_view->isBlockOpen());
+    QVERIFY(view->rowsConsistent());
+    // A selection over items is deleted as in the whole list (as source:
+    // the markers between them would stay in rendered text).
+    c = QTextCursor(m_doc->findBlockByNumber(20));
+    c.setPosition(c.position() + 4);
+    c.setPosition(m_doc->findBlockByNumber(22).position() + 4, QTextCursor::KeepAnchor);
+    m_view->setTextCursor(c);
+    QTest::keyClick(m_view, Qt::Key_Delete);
+    QCOMPARE(m_doc->findBlockByNumber(20).text(), QStringLiteral("- item 24 **b**"));
+    m_view->closeBlocks();
+    // In a short list too.
+    setDocument(QStringLiteral("- one\n- two\n"), 8);
+    QTest::keyClick(m_view, Qt::Key_Backspace);
+    QCOMPARE(m_doc->toPlainText(), QStringLiteral("- onetwo\n"));
+    QVERIFY(!m_view->isBlockOpen());
+    // The first item of a long list joins the block before, as source.
+    setDocument(QStringLiteral("Before\n\n") + listOf(QStringLiteral("- item %1"), 30), 10);
+    QTest::keyClick(m_view, Qt::Key_Backspace);
+    QVERIFY(m_view->isBlockOpen());
+}
+
+void TestVisualView::editsAroundALongListsItems()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    // Edits in two items before the parse: both are parsed again, the rest
+    // keeps its items.
+    setDocument(listOf(QStringLiteral("- item %1"), 100), 0);
+    QTextCursor c(m_doc->findBlockByNumber(10));
+    c.movePosition(QTextCursor::EndOfBlock);
+    m_view->setTextCursor(c);
+    QTest::keyClick(m_view, Qt::Key_Return);
+    QTest::keyClicks(m_view, QStringLiteral("a"));
+    c = QTextCursor(m_doc->findBlockByNumber(60));
+    c.movePosition(QTextCursor::EndOfBlock);
+    m_view->setTextCursor(c);
+    QTest::keyClicks(m_view, QStringLiteral("b"));
+    QVERIFY(m_model->hasPendingEdits());
+    QCOMPARE(m_view->renderedTextAt(11), QStringLiteral("a"));
+    QCOMPARE(m_view->renderedTextAt(60), QStringLiteral("item 60b"));
+    QCOMPARE(m_view->renderedTextAt(99), QStringLiteral("item 99"));
+    QCOMPARE(m_view->itemMarkerAt(100), QStringLiteral("\u2022"));
+    QVERIFY(view->rowsConsistent());
+    // A different bullet starts another list: the edited list shows whole
+    // until the parse says so.
+    QTextCursor star(m_doc->findBlockByNumber(30));
+    star.setPosition(star.position() + 1, QTextCursor::KeepAnchor);
+    star.insertText(QStringLiteral("*"));
+    m_view->grab();
+    QCOMPARE(m_view->itemMarkerAt(30), QString());
+    QTRY_VERIFY(!m_model->hasPendingEdits());
+    QCOMPARE(m_view->itemMarkerAt(31), QStringLiteral("\u2022"));
+    QVERIFY(view->rowsConsistent());
+    // Typing into a list from another view (Split): its items show it.
+    setDocument(listOf(QStringLiteral("- item %1"), 100), 0);
+    QTextCursor other(m_doc->findBlockByNumber(70));
+    other.movePosition(QTextCursor::EndOfBlock);
+    other.insertText(QStringLiteral(" more"));
+    m_view->grab();
+    QCOMPARE(m_view->renderedTextAt(70), QStringLiteral("item 71 more"));
+    QCOMPARE(m_view->itemMarkerAt(70), QStringLiteral("\u2022"));
+    QVERIFY(view->rowsConsistent());
+}
+
+void TestVisualView::taskBoxesAndLinksInALongList()
+{
+    // (Another bullet: another list.)
+    QString text = listOf(QStringLiteral("- [ ] task %1"), 150) + u'\n' + listOf(QStringLiteral("* see [page %1](https://example.com/%1)"), 150);
+    setDocument(text, 0);
+    // A box far down the list (its line in the document, not the item's).
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(120)));
+    m_view->grab();
+    auto *view = static_cast<ProbeView *>(m_view);
+    qreal top = 0;
+    qreal bottom = 0;
+    QVERIFY(view->boundsOfLine(120, &top, &bottom));
+    bool clicked = false;
+    for (int x = int(view->textStart()); x < int(view->textStart()) + 120 && !clicked; x += 2) {
+        const QPoint at(x, int(top) + 8);
+        QTest::mouseMove(m_view->viewport(), at);
+        if (m_view->viewport()->cursor().shape() == Qt::PointingHandCursor) {
+            QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, at + QPoint(2, 0));
+            clicked = true;
+        }
+    }
+    QVERIFY(clicked);
+    QCOMPARE(m_doc->findBlockByNumber(120).text(), QStringLiteral("- [x] task 121"));
+    QVERIFY(!m_view->isBlockOpen());
+    QCOMPARE(m_doc->findBlockByNumber(119).text(), QStringLiteral("- [ ] task 120"));
+    // A list of tasks has no bullets; one with some plain items has.
+    QCOMPARE(m_view->itemMarkerAt(120), QString());
+    QCOMPARE(m_view->itemMarkerAt(200), QStringLiteral("\u2022"));
+    // Links.
+    QSignalSpy spy(m_view, &VisualView::linkActivated);
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(250)));
+    m_view->grab();
+    QVERIFY(view->boundsOfLine(250, &top, &bottom));
+    for (int x = int(view->textStart()); x < int(view->textStart()) + 300 && spy.isEmpty(); x += 3) {
+        const QPoint at(x, int(top) + 8);
+        QTest::mouseMove(m_view->viewport(), at);
+        if (m_view->viewport()->cursor().shape() == Qt::PointingHandCursor)
+            QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, at);
+    }
+    QCOMPARE(spy.size(), 1);
+    QCOMPARE(spy.first().first().toString(), QStringLiteral("https://example.com/100"));
+}
+
+void TestVisualView::irregularListsRenderWhole()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    // An item opening with a list (Qt starts it without a marker): whole.
+    setDocument(listOf(QStringLiteral("- item %1"), 30) + QStringLiteral("- - nested first\n"), 0);
+    m_view->grab();
+    QCOMPARE(m_view->itemMarkerAt(0), QString());
+    QCOMPARE(view->renderedRowsOver(0, 30), 1);
+    // Raw HTML spanning items: whole.
+    setDocument(QStringLiteral("- <b>open\n") + listOf(QStringLiteral("- item %1"), 30) + QStringLiteral("- close</b>\n"), 0);
+    m_view->grab();
+    QCOMPARE(view->renderedRowsOver(0, 31), 1);
+    // A short list: whole.
+    setDocument(listOf(QStringLiteral("- item %1"), 10), 0);
+    QCOMPARE(view->renderedRowsOver(0, 9), 1);
+    QCOMPARE(m_view->itemMarkerAt(0), QString());
 }
 
 void TestVisualView::linkClickEmits()

@@ -146,10 +146,11 @@ processor (`VisualView`, "Rendered editing").
   (numbered on); in a quote, a new paragraph in it; in a heading, a
   paragraph after the heading. Backspace and Delete take one rendered
   character (with its escape) and remove markup they leave empty (`****`,
-  `[](url)`). A selection in one block (mouse or Shift+arrows) is replaced
-  or deleted the same way, and Format > Bold and the like wrap it. Arrows,
-  Home and End move through the rendered text, from block to block over
-  blank lines, without opening anything.
+  `[](url)`); at the start of a list item (the end of one) they join it to
+  the item before (after): its marker and box go. A selection in one block
+  (mouse or Shift+arrows) is replaced or deleted the same way, and Format >
+  Bold and the like wrap it. Arrows, Home and End move through the rendered
+  text, from block to block over blank lines, without opening anything.
 - Every edit is checked first: the block, parsed and rendered with it, must
   show what was typed (white space aside, typographic quotes and dashes as
   typed). What fails that, or cannot be done in rendered text (a selection
@@ -157,11 +158,29 @@ processor (`VisualView`, "Rendered editing").
   Shift+Enter, Tab, an input method composing, typing in a table, code or
   front matter) opens the block as source and is done there. Math, diagrams,
   pictures and raw HTML take no typing until opened with a double click, as
-  where it would go is unknown.
+  where it would go is unknown. A block over 2000 characters or 40 lines
+  (a long list: an item) opens as source when typed into: it renders again
+  at every keystroke, about 1 ms a KiB for a paragraph.
 - A block edited in rendered text renders again at once from a parse of its
   own source (only that block; its link definitions and footnotes elsewhere
   show after the document's reparse, 120 ms after typing stops). Undo and
   redo work as in source, the caret drawn where it renders.
+- A long top-level list (16 items or 2 KB of HTML on) shows an item a row:
+  each item renders on its own (`RenderedBlock::createItem`) and the view
+  draws its bullet or number as Qt draws a list's (`drawListItem`), so
+  typing in an item, Enter or a join renders that item alone and the items
+  after are only renumbered; only the rows on screen are laid out. It looks
+  as the whole list does (Qt's margins between items, the same heights and
+  line positions; markers round to pixels from the item's top, within half
+  a pixel of the whole list's), except that an empty item shows its marker
+  on an empty line where Qt drops it. Edits since the last parse are kept
+  as line ranges: the items they touch are parsed again on their own (and
+  must stay items of the list: same bullet or delimiter and indentation),
+  the others keep the parse's rendering, also after the reparse when their
+  HTML is unchanged. A list shows whole if an item cannot render alone as
+  it does in the list: raw HTML other than the core's tags or out of
+  balance in an item, an item opening with a list or a code block of
+  several lines, a table.
 
 ## Table editing
 

@@ -30,6 +30,8 @@
 
 #include <algorithm>
 #include <climits>
+#include <functional>
+#include <string>
 #include <string_view>
 #include <optional>
 #include <utility>
@@ -53,10 +55,17 @@ constexpr int renderKiB = 16 * 1024;
 constexpr int renderHardMax = 2 * renderMax;
 // Typing goes into the rendering of blocks up to this size (source
 // characters and lines): each keystroke renders the block again, which
-// takes about 1 ms a KiB for a paragraph and more for a list (13 ms for 200
-// items). Larger blocks open as source when typed into.
+// takes about 1 ms a KiB for a paragraph. Larger blocks open as source when
+// typed into. A long list renders an item at a time (see itemRows): the
+// limit is on the item.
 constexpr int liveEditChars = 2000;
 constexpr int liveEditLines = 40;
+// Lists show an item a row from this many items or bytes of HTML on: an
+// item renders in about 0.06 ms, a whole list in 0.035 ms an item (16 items:
+// 0.55 ms a keystroke), and rows of items lay out only those on screen.
+constexpr int itemRowsMinItems = 16;
+constexpr int itemRowsMinHtml = 2048;
+bool itemRowsEnabled = true; // For tests.
 
 // Pointing at a table's edge: how far the band above (and left of) the table
 // reaches out of it and into it, how near a border the quick-insert mark
@@ -129,6 +138,14 @@ int matchOf(const QString &rendered, const QString &source, int index)
         }
     }
     return -1;
+}
+
+// Where the line break after a list item's rendered text is in its source
+// (the whole list's text has one there): what sourceOffsetFor matches it with.
+int itemBreak(const QString &rendered, const QString &source)
+{
+    const int at = matchOf(rendered + u'\n', source, int(rendered.size()));
+    return at >= 0 ? at : int(source.size());
 }
 
 // Text with whitespace dropped and typographic characters as typed, to
@@ -266,6 +283,274 @@ QCursor edgeArrowCursor(bool down, qreal ratio)
     return QCursor(pixmap, down ? 12 : 22, down ? 22 : 12);
 }
 
+bool startsWith(std::string_view text, size_t at, std::string_view prefix)
+{
+    return at <= text.size() && text.substr(at, prefix.size()) == prefix;
+}
+
+// The number written at `at` (digits), or -1.
+int numberAt(std::string_view text, size_t at)
+{
+    int n = 0;
+    size_t i = at;
+    for (; i < text.size() && i < at + 9 && text[i] >= '0' && text[i] <= '9'; ++i)
+        n = n * 10 + (text[i] - '0');
+    return i > at ? n : -1;
+}
+
+// Whether an item of a list (the HTML after its <li> and line anchor)
+// starts with something Qt puts on the item's first line: text, inline
+// markup, a paragraph or heading with some, a one-line code block. Qt drops
+// an empty item, starts an item that opens with a list without a marker and
+// numbers each line of a code block that opens one (see
+// RenderedBlock::isRegularItem): such a list shows whole.
+bool startsRegularly(std::string_view s)
+{
+    for (int steps = 0; steps < 16; ++steps) {
+        if (s.empty() || startsWith(s, 0, "</"))
+            return false;
+        if (s[0] != '<')
+            return true;
+        if (startsWith(s, 0, "<a name=\"")) {
+            const size_t end = s.find("</a>");
+            if (end == std::string_view::npos)
+                return false;
+            s.remove_prefix(end + 4);
+            continue;
+        }
+        if (startsWith(s, 0, "<p>") || startsWith(s, 0, "<p ") || startsWith(s, 0, "<blockquote>")
+            || (s.size() > 3 && startsWith(s, 0, "<h") && s[2] >= '1' && s[2] <= '6' && s[3] == '>')) {
+            s.remove_prefix(s.find('>') + 1);
+            continue;
+        }
+        if (startsWith(s, 0, "<pre>")) {
+            const size_t end = s.find("</pre>");
+            return end != std::string_view::npos && end > 5 && s.substr(5, end - 5).find('\n') == std::string_view::npos;
+        }
+        for (const std::string_view tag : {"<a ", "<strong>", "<em>", "<s>", "<code>", "<img ", "<sup>", "<br", "<hr"}) {
+            if (startsWith(s, 0, tag))
+                return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+// Tags the core writes in a list (render.rs), and those of them without an
+// end tag. Raw HTML with any other tag, or with these out of balance in an
+// item, keeps its list whole.
+bool isListTag(std::string_view name)
+{
+    static constexpr std::string_view names[] = {"ul", "ol", "li", "p", "h1", "h2", "h3", "h4", "h5", "h6",
+                                                  "em", "strong", "s", "code", "a", "img", "sup", "br",
+                                                  "pre", "blockquote", "hr"};
+    return std::find(std::begin(names), std::end(names), name) != std::end(names);
+}
+
+bool isVoidTag(std::string_view name)
+{
+    return name == "br" || name == "img" || name == "hr";
+}
+
+} // namespace
+
+// The top-level items of a list's HTML (core/src/render.rs writes
+// <ul>/<ol start="N">, then <li> items, each but the first starting with
+// the anchor of its line), for showing them one by one.
+struct VisualView::ListItems
+{
+    bool ok = false;
+    bool ordered = false;
+    int start = 1;
+    struct Item
+    {
+        int from = 0; // <li>...</li> in the HTML.
+        int to = 0;
+        int line = 0; // First source line, from the block's.
+        bool task = false;
+    };
+    std::vector<Item> items;
+    std::vector<int> plainBefore; // Items before item i that are not tasks (one more than items).
+
+    static ListItems split(std::string_view html)
+    {
+        ListItems result;
+        if (!startsWith(html, 0, "<ul") && !startsWith(html, 0, "<ol"))
+            return {};
+        result.ordered = html[1] == 'o';
+        const size_t openEnd = html.find('>');
+        if (openEnd == std::string_view::npos)
+            return {};
+        if (result.ordered) {
+            const std::string_view open = html.substr(0, openEnd);
+            const size_t at = open.find("start=\"");
+            if (at != std::string_view::npos)
+                result.start = numberAt(open, at + 7);
+            if (result.start < 0)
+                return {};
+        }
+        std::vector<std::string_view> open{html.substr(1, 2)};
+        size_t i = openEnd + 1;
+        size_t itemFrom = 0;
+        while (i < html.size()) {
+            const size_t lt = html.find('<', i);
+            if (lt == std::string_view::npos)
+                return {};
+            // Between items: nothing (the core writes no white space there).
+            if (open.size() == 1 && lt != i)
+                return {};
+            size_t j = lt + 1;
+            const bool closing = j < html.size() && html[j] == '/';
+            if (closing)
+                ++j;
+            const size_t nameStart = j;
+            while (j < html.size() && ((html[j] >= 'a' && html[j] <= 'z') || (html[j] >= '0' && html[j] <= '9')))
+                ++j;
+            const std::string_view name = html.substr(nameStart, j - nameStart);
+            const size_t gt = html.find('>', j);
+            if (name.empty() || gt == std::string_view::npos || !isListTag(name))
+                return {};
+            if (closing) {
+                if (open.back() != name)
+                    return {};
+                open.pop_back();
+                if (open.empty()) {
+                    // The list's end: the end of the block.
+                    if (gt + 1 != html.size() || result.items.empty())
+                        return {};
+                    result.plainBefore.resize(result.items.size() + 1);
+                    for (size_t k = 0; k < result.items.size(); ++k)
+                        result.plainBefore[k + 1] = result.plainBefore[k] + !result.items[k].task;
+                    result.ok = true;
+                    return result;
+                }
+                if (open.size() == 1) {
+                    // An item ends: its line, task box and first content.
+                    Item item;
+                    item.from = int(itemFrom);
+                    item.to = int(gt + 1);
+                    std::string_view content = html.substr(itemFrom + 4, gt + 1 - 5 - (itemFrom + 4));
+                    static constexpr std::string_view anchor = "<a name=\"vn-line:";
+                    if (startsWith(content, 0, anchor)) {
+                        item.line = numberAt(content, anchor.size());
+                        const size_t end = content.find("</a>");
+                        if (item.line <= 0 || end == std::string_view::npos)
+                            return {};
+                        content.remove_prefix(end + 4);
+                    }
+                    // Lines rise from item to item (the first is the block's).
+                    if (result.items.empty() ? item.line != 0 : item.line <= result.items.back().line)
+                        return {};
+                    item.task = startsWith(content, 0, "<a class=\"task\"");
+                    // (An empty item renders as an empty line with its marker
+                    // where Qt would drop it: see RenderedBlock::createItem.)
+                    if (!content.empty() && !startsRegularly(content))
+                        return {};
+                    result.items.push_back(item);
+                }
+            } else if (!isVoidTag(name) && html[gt - 1] != '/') {
+                if (open.size() == 1) {
+                    if (!startsWith(html, lt, "<li>"))
+                        return {};
+                    itemFrom = lt;
+                }
+                open.push_back(name);
+            } else if (open.size() == 1) {
+                return {};
+            }
+            i = gt + 1;
+        }
+        return {};
+    }
+
+    // The HTML of an item alone, as RenderedBlock::createItem takes it: the
+    // lines its anchors and task boxes name made relative to its first line
+    // (taskBase: the line the HTML's boxes count from, the item's included),
+    // its math numbered from 0 (*math gets the TeX of each), so that an item
+    // renders the same wherever it is.
+    static QString itemHtml(std::string_view html, const Item &item, int taskBase, bool ordered,
+                            const std::function<QString(int)> &mathOf, QStringList *math)
+    {
+        const std::string_view text = html.substr(item.from, item.to - item.from);
+        std::string out;
+        out.reserve(text.size() + 16);
+        out += ordered ? "<ol>" : "<ul>";
+        size_t at = 0;
+        for (size_t found = text.find("vn-"); found != std::string_view::npos; found = text.find("vn-", found + 3)) {
+            static constexpr std::string_view line = "<a name=\"vn-line:";
+            static constexpr std::string_view task = "href=\"vn-task:";
+            static constexpr std::string_view mathInline = "src=\"vn-math:";
+            static constexpr std::string_view mathDisplay = "src=\"vn-math-display:";
+            // Which of the four, and where its number is.
+            std::string_view prefix;
+            for (const std::string_view p : {line, task, mathInline, mathDisplay}) {
+                const size_t vn = p.find("vn-");
+                if (found >= vn && startsWith(text, found - vn, p)) {
+                    prefix = p;
+                    break;
+                }
+            }
+            if (prefix.empty())
+                continue;
+            const size_t tagStart = found - prefix.find("vn-");
+            const size_t numberStart = tagStart + prefix.size();
+            const int n = numberAt(text, numberStart);
+            if (n < 0)
+                continue;
+            size_t numberEnd = numberStart;
+            while (numberEnd < text.size() && text[numberEnd] >= '0' && text[numberEnd] <= '9')
+                ++numberEnd;
+            if (prefix == line) {
+                const int relative = n - item.line;
+                if (relative <= 0) {
+                    // The item's own first line: none, as in a parse of the item alone.
+                    const size_t end = text.find("</a>", numberEnd);
+                    if (end == std::string_view::npos)
+                        continue;
+                    out.append(text.substr(at, tagStart - at));
+                    at = end + 4;
+                    found = at - 3;
+                    continue;
+                }
+                out.append(text.substr(at, numberStart - at));
+                out += std::to_string(relative);
+            } else if (prefix == task) {
+                out.append(text.substr(at, numberStart - at));
+                out += std::to_string(n - taskBase);
+            } else {
+                out.append(text.substr(at, numberStart - at));
+                out += std::to_string(math->size());
+                math->append(mathOf(n));
+            }
+            at = numberEnd;
+            found = at - 3;
+        }
+        out.append(text.substr(at));
+        out += ordered ? "</ol>" : "</ul>";
+        return QString::fromUtf8(out.data(), qsizetype(out.size()));
+    }
+};
+
+namespace {
+
+// The marker of a list item line, to compare items: its indentation, and
+// its bullet or the delimiter of its number.
+struct MarkerKind
+{
+    bool valid = false;
+    int indent = 0;
+    QChar marker;
+    bool operator==(const MarkerKind &other) const = default;
+};
+
+MarkerKind markerKind(const QString &line)
+{
+    const md::ListLine item = md::parseListLine(line);
+    if (!item.valid || item.isQuote || !item.lead.trimmed().isEmpty())
+        return {};
+    return {true, int(item.lead.size()), item.ordered ? item.delimiter : item.marker.at(0)};
+}
+
 } // namespace
 
 int caretSourceOffset(const QString &rendered, const QString &source, int k)
@@ -353,8 +638,18 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
         // Every block is parsed now: what was live renders from the parse.
         m_liveStart = QTextCursor();
         m_liveEnd = QTextCursor();
+        m_editRanges.clear();
+        m_editsKnown = true;
+        m_editsGeneration = m_model->parseGeneration();
+        m_editLines = document()->blockCount();
         relayout();
     });
+    // Before the views hear of it (DocumentLayout::changed comes after).
+    connect(document(), &QTextDocument::contentsChange, this, &VisualView::noteEdit);
+    // Edits made before this view was: only a parse tells which lines they were.
+    m_editLines = document()->blockCount();
+    m_editsGeneration = model->parseGeneration();
+    m_editsKnown = !model->hasPendingEdits();
     connect(model, &MarkdownModel::reparsed, this, &VisualView::updateRemoteBanner);
     connect(&DiagramNotifier::instance(), &DiagramNotifier::ready, this, &VisualView::asyncRenderReady);
     connect(&RemoteImages::instance(), &RemoteImages::ready, this, &VisualView::asyncRenderReady);
@@ -385,6 +680,8 @@ void VisualView::setBaseDirectory(const QString &directory)
 
 void VisualView::clearRenderCache()
 {
+    m_contextValid = false;
+    m_itemMemo.clear();
     m_cache.clear();
     m_pendingKeys.clear();
     resetRenders();
@@ -406,6 +703,7 @@ void VisualView::asyncRenderReady()
     for (const QString &key : std::as_const(m_pendingKeys))
         m_cache.remove(key);
     m_pendingKeys.clear();
+    std::erase_if(m_itemMemo, [](const auto &entry) { return entry.second.block->isPending(); });
     std::erase_if(m_renderOrder, [this](int line) {
         const auto it = m_renders.find(line);
         if (!it->second.block->isPending())
@@ -425,6 +723,70 @@ void VisualView::setHighlightActiveBlock(bool on)
 
 // ---------------------------------------------------------------------------
 // Rows
+
+void VisualView::noteEdit(int from, int, int added)
+{
+    // As MarkdownModel::documentChanged: lines [first, oldLast] became
+    // [first, lastNew].
+    QTextDocument *doc = document();
+    const int count = doc->blockCount();
+    const int delta = count - m_editLines;
+    m_editLines = count;
+    // A parse since (some parse silently): the edits before it are in it.
+    if (m_editsGeneration != m_model->parseGeneration()) {
+        m_editsGeneration = m_model->parseGeneration();
+        m_editRanges.clear();
+        m_editsKnown = true;
+    }
+    if (!m_editsKnown)
+        return;
+    const int first = qMax(0, doc->findBlock(from).blockNumber());
+    const int endPos = qBound(0, from + added, doc->characterCount() - 1);
+    const int lastNew = qMax(first, doc->findBlock(endPos).blockNumber());
+    const int oldLast = lastNew - delta; // Of the lines before this edit.
+    if (oldLast < first) {
+        m_editsKnown = false;
+        m_editRanges.clear();
+        return;
+    }
+    // The ranges it overlaps (where they are before this edit) become one
+    // with it.
+    std::vector<EditRange> ranges;
+    ranges.reserve(m_editRanges.size() + 1);
+    int shift = 0;  // Lines added by the ranges before it.
+    int merged = 0; // ... by those it overlaps.
+    int unionFirst = first;
+    int unionLast = oldLast;
+    bool placed = false;
+    const auto place = [&] {
+        ranges.push_back({unionFirst - shift, unionLast - shift - merged, unionLast + delta - unionFirst + 1});
+        placed = true;
+    };
+    for (const EditRange &r : m_editRanges) {
+        const int rangeFirst = r.first + shift + merged;
+        const int rangeLast = rangeFirst + r.lines - 1;
+        if (rangeLast < first) {
+            ranges.push_back(r);
+            shift += r.delta();
+        } else if (rangeFirst > oldLast) {
+            if (!placed)
+                place();
+            ranges.push_back(r);
+        } else {
+            unionFirst = qMin(unionFirst, rangeFirst);
+            unionLast = qMax(unionLast, rangeLast);
+            merged += r.delta();
+        }
+    }
+    if (!placed)
+        place();
+    m_editRanges = std::move(ranges);
+    // Edits all over: the lists edited are parsed again whole.
+    if (m_editRanges.size() > 64) {
+        m_editsKnown = false;
+        m_editRanges.clear();
+    }
+}
 
 void VisualView::rowsMayHaveChanged()
 {
@@ -936,6 +1298,9 @@ void VisualView::rebuildRows()
         }
         m_expandedBlocks.clear();
         m_partSpans.clear();
+        m_itemSpans.clear();
+        m_itemLists.clear();
+        m_itemRows.clear();
         m_rowsExpanded.clear();
         m_rowsStale = false;
         m_rowsRevision = -1;
@@ -1023,6 +1388,9 @@ void VisualView::rebuildRows()
     m_rows.reserve(spans.size() * 2 + 16);
     m_expandedBlocks.clear();
     m_partSpans.clear();
+    m_itemSpans.clear();
+    m_itemLists.clear();
+    m_itemRows.clear();
     m_lineToRow.assign(lines, 0);
     // Queries come in ascending line order, so one pass over the ranges.
     size_t next = 0;
@@ -1049,9 +1417,11 @@ void VisualView::rebuildRows()
             const bool open = touched(line, last);
             if (open)
                 m_expandedBlocks.insert(int(s));
-            // Lines edited in rendered text show the blocks a parse of
-            // their own source makes, with blank lines between them.
-            if (!open && span.block < 0 && line <= liveLast && last >= liveFirst) {
+            if (!open && (span.block >= 0 || span.previous >= 0) && itemRows(int(s), line, last)) {
+                // A long list: a row an item.
+            } else if (!open && span.block < 0 && line <= liveLast && last >= liveFirst) {
+                // Lines edited in rendered text show the blocks a parse of
+                // their own source makes, with blank lines between them.
                 const rust::Vec<core::Block> &blocks = liveBlocks(m_model->sourceText(line, last));
                 int l = line;
                 for (const core::Block &b : blocks) {
@@ -1144,6 +1514,21 @@ int VisualView::spanForRow(const Row &r) const
 // ---------------------------------------------------------------------------
 // Rendering
 
+const RenderContext &VisualView::renderContext()
+{
+    const qreal width = textWidth();
+    if (!m_contextValid || m_contextFrame != m_frame || m_contextRevision != m_model->revision()
+        || m_contextWidth != width || m_context.devicePixelRatio != devicePixelRatioF()) {
+        m_context = context();
+        m_contextKey = renderKey(m_context, core::BlockKind::Html, QString());
+        m_contextFrame = m_frame;
+        m_contextRevision = m_model->revision();
+        m_contextWidth = width;
+        m_contextValid = true;
+    }
+    return m_context;
+}
+
 RenderContext VisualView::context() const
 {
     RenderContext ctx;
@@ -1191,6 +1576,261 @@ bool VisualView::madeInParts(int s)
     return box.parts == 1;
 }
 
+const VisualView::ListItems &VisualView::parsedItems(int blockIndex)
+{
+    if (m_listItemsGeneration != m_model->parseGeneration()) {
+        m_listItems.clear();
+        m_irregularLists.clear();
+        m_itemMemo.clear();
+        m_listItemsGeneration = m_model->parseGeneration();
+    }
+    std::shared_ptr<const ListItems> &items = m_listItems[blockIndex];
+    if (!items) {
+        const core::Block &block = m_model->parsedBlock(blockIndex);
+        items = std::make_shared<const ListItems>(ListItems::split({block.html.data(), block.html.size()}));
+    }
+    return *items;
+}
+
+void VisualView::irregularItem(int blockIndex)
+{
+    if (m_listItemsGeneration != m_model->parseGeneration() || m_irregularLists.contains(blockIndex))
+        return;
+    m_irregularLists.insert(blockIndex);
+    // Not under the paint or layout asking for the item: once it is done.
+    QTimer::singleShot(0, this, [this] {
+        m_rowsStale = true;
+        relayout();
+    });
+}
+
+const VisualView::ItemRow *VisualView::itemOfRow(int index) const
+{
+    if (index < 0 || index >= int(m_rows.size()) || m_rows[index].item < 0)
+        return nullptr;
+    return &m_itemRows[m_rows[index].item];
+}
+
+int VisualView::neighbourItem(int index, int direction) const
+{
+    const ItemRow *item = itemOfRow(index);
+    const ItemRow *other = itemOfRow(index + direction);
+    return item && other && other->list == item->list ? index + direction : -1;
+}
+
+void VisualView::setItemRowsEnabled(bool on)
+{
+    itemRowsEnabled = on;
+}
+
+QString VisualView::itemMarkerAt(int line)
+{
+    const int index = rowOfLine(line);
+    const ItemRow *item = itemOfRow(index);
+    if (!item || m_rows[index].row.firstLine != line || !m_itemLists[item->list].markers)
+        return {};
+    const ItemList &list = m_itemLists[item->list];
+    return list.ordered ? QString::number(list.start + item->index) + u'.' : QStringLiteral("\u2022");
+}
+
+bool VisualView::itemRows(int s, int line, int last)
+{
+    if (!itemRowsEnabled)
+        return false;
+    const MarkdownModel::Span &span = m_model->spans()[s];
+    const int blockIndex = span.block >= 0 ? span.block : span.previous;
+    const core::Block &block = m_model->parsedBlock(blockIndex);
+    const std::string_view html(block.html.data(), block.html.size());
+    // Quick for the blocks that are not long lists.
+    if (block.kind != core::BlockKind::Html || !(startsWith(html, 0, "<ul") || startsWith(html, 0, "<ol"))
+        || (int(block.last_line - block.first_line) + 1 < itemRowsMinItems && int(html.size()) < itemRowsMinHtml))
+        return false;
+    const ListItems &parsed = parsedItems(blockIndex);
+    const int n = int(parsed.items.size());
+    if (!parsed.ok || n < 2 || (n < itemRowsMinItems && int(html.size()) < itemRowsMinHtml)
+        || m_irregularLists.contains(blockIndex))
+        return false;
+
+    ItemList list;
+    list.ordered = parsed.ordered;
+    list.start = parsed.start;
+    list.block = blockIndex;
+    const int listIndex = int(m_itemLists.size());
+    std::vector<ItemRow> items;
+    std::vector<int> firsts; // The first line of each item now.
+    const int parsedFirst = int(block.first_line);
+    const auto addParsed = [&](int k, int shift) {
+        const ListItems::Item &item = parsed.items[k];
+        items.push_back({listIndex, int(items.size()), item.from, item.to, item.line, parsedFirst + item.line, -1, k});
+        firsts.push_back(parsedFirst + item.line + shift);
+    };
+    int plain = 0;
+    if (span.block >= 0) {
+        if (parsedFirst != line)
+            return false;
+        for (int k = 0; k < n; ++k)
+            addParsed(k, 0);
+        plain = parsed.plainBefore[n];
+    } else {
+        // Edited since the parse: the runs of items the edits touched are
+        // parsed again (each alone, as a list of its own), the others are as
+        // parsed, moved by the lines added or taken before them.
+        const auto itemEnd = [&](int k) {
+            return k + 1 < n ? parsedFirst + parsed.items[k + 1].line - 1 : int(block.last_line);
+        };
+        const bool known = m_editsKnown && m_editsGeneration == m_model->parseGeneration();
+        std::vector<char> dirty(n, !known);
+        std::vector<int> shifts(n, 0); // An item's lines now, from the parse's.
+        if (known) {
+            size_t r = 0;
+            int shift = 0;
+            for (int k = 0; k < n; ++k) {
+                while (r < m_editRanges.size() && m_editRanges[r].last < parsedFirst + parsed.items[k].line)
+                    shift += m_editRanges[r++].delta();
+                shifts[k] = shift;
+                dirty[k] = r < m_editRanges.size() && m_editRanges[r].first <= itemEnd(k);
+            }
+            // Lines edited next to the list may have joined it.
+            if (parsedFirst + shifts[0] != line)
+                dirty[0] = true;
+            if (itemEnd(n - 1) + shifts[n - 1] != last)
+                dirty[n - 1] = true;
+        }
+        QTextDocument *doc = document();
+        const MarkerKind kind = markerKind(doc->findBlockByNumber(line).text());
+        if (!kind.valid)
+            return false;
+        int plainLive = 0;
+        for (int k = 0; k < n;) {
+            if (!dirty[k]) {
+                addParsed(k, shifts[k]);
+                ++k;
+                continue;
+            }
+            int end = k;
+            while (end + 1 < n && dirty[end + 1])
+                ++end;
+            const int from = k == 0 ? line : parsedFirst + parsed.items[k].line + shifts[k];
+            const int to = end == n - 1 ? last : parsedFirst + parsed.items[end + 1].line + shifts[end + 1] - 1;
+            if (from > to || to > last)
+                return false;
+            // At the list's start, nothing must run into it.
+            if (k == 0 && line > 0 && !isBlank(doc->findBlockByNumber(line - 1).text()))
+                return false;
+            const rust::Vec<core::Block> &blocks = liveBlocks(m_model->sourceText(from, to));
+            if (blocks.size() != 1 || blocks[0].first_line != 0)
+                return false;
+            const core::Block &again = blocks[0];
+            const std::string_view liveHtml(again.html.data(), again.html.size());
+            const ListItems live = ListItems::split(liveHtml);
+            if (!live.ok || (live.ordered != parsed.ordered && !(k == 0 && end == n - 1)))
+                return false;
+            // They and the item after them must be items of the list: the
+            // same bullet (or number delimiter) and indentation.
+            for (const ListItems::Item &item : live.items) {
+                if (markerKind(doc->findBlockByNumber(from + item.line).text()) != kind)
+                    return false;
+            }
+            if (end < n - 1 && markerKind(doc->findBlockByNumber(to + 1).text()) != kind)
+                return false;
+            if (k == 0) {
+                list.ordered = live.ordered;
+                list.start = live.start;
+            }
+            ItemList::Live group;
+            group.html = QByteArray(liveHtml.data(), qsizetype(liveHtml.size()));
+            for (const auto &tex : again.inline_math)
+                group.math.push_back(QString::fromUtf8(tex.data(), qsizetype(tex.size())));
+            for (const ListItems::Item &item : live.items) {
+                items.push_back({listIndex, int(items.size()), item.from, item.to, item.line, item.line,
+                                 int(list.live.size()), -1});
+                firsts.push_back(from + item.line);
+            }
+            list.live.push_back(std::move(group));
+            plainLive += live.plainBefore.back();
+            k = end + 1;
+        }
+        for (int k = 0; k < n; ++k)
+            plain += !dirty[k] && !parsed.items[k].task;
+        plain += plainLive;
+    }
+    // The items' lines cover the span's, in order.
+    if (firsts.front() != line)
+        return false;
+    for (size_t k = 1; k < firsts.size(); ++k) {
+        if (firsts[k] <= firsts[k - 1] || firsts[k] > last)
+            return false;
+    }
+    list.markers = plain > 0;
+    for (size_t k = 0; k < items.size(); ++k) {
+        const int from = firsts[k];
+        const int to = k + 1 < firsts.size() ? firsts[k + 1] - 1 : last;
+        for (int l = from; l <= to; ++l)
+            m_lineToRow[l] = int(m_rows.size());
+        m_rows.push_back({{from, to, true}, s, int(m_itemRows.size())});
+        m_itemRows.push_back(items[k]);
+    }
+    m_itemLists.push_back(std::move(list));
+    m_itemSpans.insert(s);
+    return true;
+}
+
+VisualView::Render VisualView::itemRender(const ItemRow &item, const QString &source, const RenderContext &ctx)
+{
+    const ItemList &list = m_itemLists[item.list];
+    const ListItems::Item range{item.from, item.to, item.line, false};
+    QStringList math;
+    QString html;
+    if (item.live >= 0) {
+        const ItemList::Live &live = list.live[item.live];
+        html = ListItems::itemHtml({live.html.constData(), size_t(live.html.size())}, range, item.taskBase, list.ordered,
+                                   [&](int i) { return i < int(live.math.size()) ? live.math[i] : QString(); }, &math);
+    } else {
+        const core::Block &block = m_model->parsedBlock(list.block);
+        html = ListItems::itemHtml({block.html.data(), block.html.size()}, range, item.taskBase, list.ordered,
+                                   [&](int i) {
+                                       return i < int(block.inline_math.size())
+                                                  ? QString::fromUtf8(block.inline_math[i].data(),
+                                                                      qsizetype(block.inline_math[i].size()))
+                                                  : QString();
+                                   },
+                                   &math);
+    }
+    return itemRender(html, math, source, ctx);
+}
+
+VisualView::Render VisualView::itemRender(const QString &html, const QStringList &math, const QString &source,
+                                          const RenderContext &ctx)
+{
+    // Keyed by both: an item's rendering is its HTML's (which holds what
+    // the parse of the whole document resolved), its mapping to the text
+    // the source's.
+    QString made = html;
+    for (const QString &tex : math)
+        made += u'\x1f' + tex;
+    const QString key = renderKey(ctx, core::BlockKind::Html, source)
+                        + QStringLiteral("|item:%1:%2").arg(made.size()).arg(qHash(made));
+    const Render *hit = m_cache.object(key);
+    if (hit && hit->source == source && hit->html == made)
+        return *hit;
+    core::Block block{};
+    block.kind = core::BlockKind::Html;
+    const QByteArray utf8 = html.toUtf8();
+    block.html = rust::String(utf8.constData(), size_t(utf8.size()));
+    for (const QString &tex : math) {
+        const QByteArray bytes = tex.toUtf8();
+        block.inline_math.push_back(rust::String(bytes.constData(), size_t(bytes.size())));
+    }
+    const std::shared_ptr<RenderedBlock> created(RenderedBlock::createItem(block, source, ctx));
+    const int cost = created->cost() + int((source.size() + made.size()) / 512);
+    ++m_renderCount;
+    Render memo{source, key, created, core::BlockKind::Html, cost, true, 0, made};
+    if (created->isPending())
+        m_pendingKeys.insert(key);
+    m_cache.insert(key, new Render(memo), cost);
+    return memo;
+}
+
 const VisualView::Render *VisualView::rendered(const Row &r)
 {
     const int index = spanForRow(r);
@@ -1201,28 +1841,55 @@ const VisualView::Render *VisualView::rendered(const Row &r)
     // An edited block shows its last parse until the reparse, unless it was
     // edited in rendered text (see rebuildRows).
     const int blockIndex = span.block >= 0 ? span.block : span.previous;
+    const ItemRow *item = itemOfRow(rowOfLine(r.firstLine));
     int liveFirst = -1;
     int liveLast = -2;
-    const bool live = span.block < 0 && liveLines(&liveFirst, &liveLast) && span.first <= liveLast
+    const bool live = !item && span.block < 0 && liveLines(&liveFirst, &liveLast) && span.first <= liveLast
                       && span.last >= liveFirst && !m_partSpans.contains(index);
-    if (blockIndex < 0 && !live)
+    if (blockIndex < 0 && !live && !item)
         return nullptr;
 
-    const RenderContext ctx = context();
-    if (m_rendersRevision != m_model->revision() || m_rendersWidth != ctx.width
-        || m_rendersDpr != ctx.devicePixelRatio) {
+    const qreal width = textWidth();
+    const qreal dpr = devicePixelRatioF();
+    if (m_rendersRevision != m_model->revision() || m_rendersWidth != width || m_rendersDpr != dpr) {
         resetRenders();
         m_rendersRevision = m_model->revision();
-        m_rendersWidth = ctx.width;
-        m_rendersDpr = ctx.devicePixelRatio;
+        m_rendersWidth = width;
+        m_rendersDpr = dpr;
     }
     if (const auto it = m_renders.find(r.firstLine); it != m_renders.end()) {
         it->second.used = m_frame;
         return &it->second;
     }
 
+    const RenderContext &ctx = renderContext();
     Render memo;
-    if (live) {
+    if (item) {
+        const int listBlock = m_itemLists[item->list].block;
+        if (item->parsed >= 0) {
+            // An item of the parse not edited since: the same whatever the
+            // edits elsewhere (the cache's key would take reading its
+            // source and HTML again at every keystroke).
+            parsedItems(listBlock); // (A new parse clears the memo.)
+            if (m_itemMemoKey != m_contextKey) {
+                m_itemMemo.clear();
+                m_itemMemoKey = m_contextKey;
+            }
+            const quint64 id = (quint64(quint32(listBlock)) << 32) | quint32(item->parsed);
+            if (const auto it = m_itemMemo.find(id); it != m_itemMemo.end()) {
+                memo = it->second;
+            } else {
+                memo = itemRender(*item, m_model->sourceText(r.firstLine, r.lastLine), ctx);
+                if (m_itemMemo.size() >= size_t(renderMax / 2))
+                    m_itemMemo.clear(); // (The cache keeps them.)
+                m_itemMemo.emplace(id, memo);
+            }
+        } else {
+            memo = itemRender(*item, m_model->sourceText(r.firstLine, r.lastLine), ctx);
+        }
+        if (memo.block->kind() == RenderedBlock::Kind::Rich && !memo.block->isRegularItem())
+            irregularItem(listBlock);
+    } else if (live) {
         const rust::Vec<core::Block> &blocks = liveBlocks(m_model->sourceText(span.first, span.last));
         const auto it = std::find_if(blocks.begin(), blocks.end(),
                                      [&](const core::Block &b) { return int(b.first_line) == r.firstLine - span.first; });
@@ -1408,14 +2075,27 @@ qreal VisualView::renderedRowHeight(const Row &r, qreal)
     // a view it shows after showing it, and a mode switch shows it in a
     // half first): blocks not rendered at this width are measured roughly,
     // and rendered at the width the paint finds (see paintEvent).
+    const int index = rowOfLine(r.firstLine);
+    const int next = itemOfRow(index) ? neighbourItem(index, 1) : -1;
     if (m_unpainted) {
-        if (const Render *render = memoized(r))
-            return render->block->height();
+        const Render *render = memoized(r);
+        const Render *after = next >= 0 ? memoized(m_rows[next].row) : nullptr;
+        if (render && (!itemOfRow(index) || next < 0 || after))
+            return render->block->itemAdvance(after ? after->block.get() : nullptr);
         m_estimated = true;
         return lineHeight() * (r.lastLine - r.firstLine + 1);
     }
-    const RenderedBlock *block = renderedForRow(r);
-    return block ? block->height() : lineHeight();
+    const Render *render = rendered(r);
+    if (!render)
+        return lineHeight();
+    // A list item reaches down to the next one (whose margin counts).
+    const std::shared_ptr<RenderedBlock> block = render->block;
+    std::shared_ptr<RenderedBlock> after;
+    if (next >= 0) {
+        if (const Render *nextRender = rendered(m_rows[next].row))
+            after = nextRender->block;
+    }
+    return block->itemAdvance(after.get());
 }
 
 void VisualView::paintRenderedRow(QPainter &painter, const Row &r, const QRectF &rect)
@@ -1424,7 +2104,13 @@ void VisualView::paintRenderedRow(QPainter &painter, const Row &r, const QRectF 
     if (!render)
         return;
     const RenderedBlock *block = render->block.get();
-    block->paint(painter, rect.topLeft(), rect.width(), selectionForRow(r, block, render->source));
+    const RenderedSelection selection = selectionForRow(r, block, render->source);
+    block->paint(painter, rect.topLeft(), rect.width(), selection);
+    if (const ItemRow *item = itemOfRow(rowOfLine(r.firstLine))) {
+        const ItemList &list = m_itemLists[item->list];
+        if (list.markers)
+            block->paintItemMarker(painter, rect.topLeft(), list.ordered, list.start + item->index, selection.markerSelected);
+    }
     // Carets in rendered text (editable views): where their source position
     // renders.
     if (m_paintCarets.empty())
@@ -1518,6 +2204,26 @@ RenderedSelection VisualView::selectionForRow(const Row &r, const RenderedBlock 
             const int to = b >= rowEnd ? int(text.size()) : renderedOffsetFor(text, source, b - rowStart);
             if (to > from)
                 result.ranges.append({from, to});
+            const int index = rowOfLine(r.firstLine);
+            if (!itemOfRow(index))
+                break;
+            // An item of a long list: what the whole list would show of the
+            // line break between items (see RenderedSelection).
+            const int next = neighbourItem(index, 1);
+            if (next >= 0 && b > rowStart) {
+                const int breakAt = rowStart + itemBreak(text, source);
+                if (a <= breakAt && b > breakAt)
+                    result.runsOn = true;
+            }
+            const int previous = neighbourItem(index, -1);
+            if (previous >= 0 && a < rowStart && to >= 1) {
+                // From before the previous item's line break.
+                const Row before = m_rows[previous].row;
+                const Render *render = memoized(before);
+                const int start = doc->findBlockByNumber(before.firstLine).position();
+                result.markerSelected
+                    = !render || a <= start + itemBreak(render->block->renderedText(), render->source);
+            }
             break;
         }
         case RenderedBlock::Kind::Empty:
@@ -1534,7 +2240,8 @@ QTextCursor VisualView::lineUnitAt(int position) const
     const QTextBlock b = document()->findBlock(position);
     const int index = rowOfLine(b.blockNumber());
     Row r = row(index);
-    if (r.rendered && index < int(m_rows.size()) && m_partSpans.contains(m_rows[index].span)) {
+    if (r.rendered && index < int(m_rows.size())
+        && (m_partSpans.contains(m_rows[index].span) || m_itemSpans.contains(m_rows[index].span))) {
         int first = index;
         int last = index;
         while (first > 0 && m_rows[first - 1].span == m_rows[index].span)
@@ -1647,7 +2354,9 @@ bool VisualView::renderedRowPressed(const Row &r, const QPointF &point, QMouseEv
     if (anchor.isEmpty())
         return openPicture(block, point, event) || tableCellPressed(r, point, event);
     if (anchor.startsWith(QLatin1String("vn-task:"))) {
-        toggleTask(anchor.section(u':', 1).toInt());
+        // A list item's boxes count from its first line.
+        const int line = anchor.section(u':', 1).toInt();
+        toggleTask(itemOfRow(rowOfLine(r.firstLine)) ? r.firstLine + line : line);
         return true;
     }
     Q_EMIT linkActivated(anchor);
@@ -2504,6 +3213,7 @@ std::optional<VisualView::Spot> VisualView::spotAt(int position)
         return std::nullopt;
     Spot spot;
     spot.index = index;
+    spot.lastIndex = index;
     spot.row = r;
     spot.start = document()->findBlockByNumber(r.firstLine).position();
     spot.source = render->source;
@@ -2511,15 +3221,100 @@ std::optional<VisualView::Spot> VisualView::spotAt(int position)
     if (spot.block->kind() == RenderedBlock::Kind::Rich) {
         spot.text = spot.block->renderedText();
         spot.textual = render->textual && spot.block->tableCells().isEmpty();
+        // (A long list's item is limited alone, as it renders alone.)
+        spot.items = itemOfRow(index) != nullptr;
         spot.editable = spot.textual && spot.source.size() <= liveEditChars
                         && r.lastLine - r.firstLine < liveEditLines;
     }
     return spot;
 }
 
-bool VisualView::rendersAs(const QString &source, int firstLine, const QString &expected)
+std::optional<VisualView::Spot> VisualView::spotOverItems(int first, int last)
 {
-    const RenderContext ctx = context();
+    const ItemRow *a = itemOfRow(first);
+    const ItemRow *b = itemOfRow(last);
+    if (!a || !b || a->list != b->list || first > last)
+        return std::nullopt;
+    Spot spot;
+    spot.index = first;
+    spot.lastIndex = last;
+    spot.row = {m_rows[first].row.firstLine, m_rows[last].row.lastLine, true};
+    spot.start = document()->findBlockByNumber(spot.row.firstLine).position();
+    spot.source = m_model->sourceText(spot.row.firstLine, spot.row.lastLine);
+    for (int i = first; i <= last; ++i) {
+        const Render *render = rendered(m_rows[i].row);
+        if (!render || render->block->kind() != RenderedBlock::Kind::Rich)
+            return std::nullopt;
+        // As the whole list's text: a line break between items.
+        if (i > first)
+            spot.text += u'\n';
+        spot.text += render->block->renderedText();
+        if (i == first)
+            spot.block = render->block;
+    }
+    // Its cost is that of the items it covers (an edit of a selection).
+    spot.textual = true;
+    spot.items = true;
+    spot.editable = true;
+    return spot;
+}
+
+std::optional<VisualView::Spot> VisualView::spotFor(const QTextCursor &cursor)
+{
+    if (cursor.hasSelection()) {
+        QTextDocument *doc = document();
+        const int first = rowOfLine(doc->findBlock(cursor.selectionStart()).blockNumber());
+        const int last = rowOfLine(doc->findBlock(cursor.selectionEnd()).blockNumber());
+        if (first != last) {
+            if (std::optional<Spot> spot = spotOverItems(first, last))
+                return spot;
+        }
+    }
+    return spotAt(cursor.position());
+}
+
+QString VisualView::itemsText(const core::Block &block, const QString &source, const RenderContext &ctx)
+{
+    const std::string_view html(block.html.data(), block.html.size());
+    const ListItems items = ListItems::split(html);
+    if (!items.ok)
+        return {};
+    // Each item's lines, as its row will have them (blank lines after it
+    // included), from where each line of `source` starts.
+    std::vector<int> starts{0};
+    for (int i = 0; i < source.size(); ++i) {
+        if (source.at(i) == u'\n')
+            starts.push_back(i + 1);
+    }
+    const auto mathOf = [&](int i) {
+        return i < int(block.inline_math.size())
+                   ? QString::fromUtf8(block.inline_math[i].data(), qsizetype(block.inline_math[i].size()))
+                   : QString();
+    };
+    QString text;
+    for (size_t k = 0; k < items.items.size(); ++k) {
+        const ListItems::Item &item = items.items[k];
+        const size_t first = block.first_line + item.line;
+        const size_t next = k + 1 < items.items.size() ? block.first_line + items.items[k + 1].line : starts.size();
+        if (first >= starts.size() || next > starts.size())
+            return {};
+        const int from = starts[first];
+        const int to = next < starts.size() ? starts[next] - 1 : int(source.size());
+        QStringList math;
+        const QString itemHtml = ListItems::itemHtml(html, item, int(block.first_line) + item.line, items.ordered, mathOf, &math);
+        const Render render = itemRender(itemHtml, math, source.mid(from, to - from), ctx);
+        if (render.block->kind() != RenderedBlock::Kind::Rich || !render.block->isRegularItem())
+            return {};
+        if (k > 0)
+            text += u'\n';
+        text += render.block->renderedText();
+    }
+    return text;
+}
+
+bool VisualView::rendersAs(const QString &source, int firstLine, const QString &expected, bool items)
+{
+    const RenderContext &ctx = renderContext();
     const rust::Vec<core::Block> &blocks = liveBlocks(source);
     // Where each line of the source starts, for the blocks' own sources.
     std::vector<int> starts{0};
@@ -2536,6 +3331,16 @@ bool VisualView::rendersAs(const QString &source, int firstLine, const QString &
             return false;
         const int from = starts[b.first_line];
         const int to = lineEnd(qMin<size_t>(b.last_line, starts.size() - 1));
+        // A long list's items render one by one, as their rows will (the
+        // last with the blank lines after it).
+        if (items && blocks.size() == 1) {
+            const QString itemText = itemsText(b, source, ctx);
+            if (!itemText.isNull()) {
+                text += itemText;
+                text += u'\n';
+                continue;
+            }
+        }
         const Render render = liveRender(b, source.mid(from, to - from), firstLine + int(b.first_line), ctx);
         if (!render.textual)
             return false;
@@ -2587,7 +3392,7 @@ void changeBetween(const QString &before, const QString &after, int hint, int *f
 bool VisualView::typeRendered(const QString &typed)
 {
     const QTextCursor c = textCursor();
-    const std::optional<Spot> spot = spotAt(c.position());
+    const std::optional<Spot> spot = spotFor(c);
     if (!spot || !spot->editable)
         return false;
     const int ka = spot->offsetOf(c.selectionStart());
@@ -2616,7 +3421,7 @@ bool VisualView::typeRendered(const QString &typed)
         const QString line = base.mid(lineStart, lineEnd - lineStart);
         const QString escaped = escapeTyped(typed, line.left(p - lineStart), contentStartOf(line), math);
         const QString after = base.left(p) + escaped + base.mid(p);
-        if (!rendersAs(after, spot->row.firstLine, expected))
+        if (!rendersAs(after, spot->row.firstLine, expected, spot->items))
             continue;
         int from = 0;
         int to = 0;
@@ -2652,7 +3457,7 @@ bool VisualView::typeOnBlankLine(const QString &typed)
 bool VisualView::deleteRendered(bool forward)
 {
     const QTextCursor c = textCursor();
-    const std::optional<Spot> spot = spotAt(c.position());
+    const std::optional<Spot> spot = spotFor(c);
     if (!spot || !spot->editable)
         return false;
     const QString &text = spot->text;
@@ -2660,6 +3465,16 @@ bool VisualView::deleteRendered(bool forward)
     int kb = spot->offsetOf(c.selectionEnd());
     if (!c.hasSelection() || ka == kb) {
         const int k = spot->offsetOf(c.position());
+        // At the edge of a long list's item: joined with the item before
+        // (after), over the line break between them.
+        if (spot->items && spot->index == spot->lastIndex && (forward ? k >= text.size() : k <= 0)) {
+            const int other = neighbourItem(spot->index, forward ? 1 : -1);
+            const std::optional<Spot> both
+                = other < 0 ? std::nullopt : spotOverItems(qMin(other, spot->index), qMax(other, spot->index));
+            if (!both)
+                return false;
+            return joinItems(*both, forward ? int(text.size()) : int(both->text.size() - text.size()) - 1);
+        }
         if (forward) {
             if (k >= text.size())
                 return false;
@@ -2671,10 +3486,11 @@ bool VisualView::deleteRendered(bool forward)
             ka = k - (text.at(k - 1).isLowSurrogate() && k >= 2 ? 2 : 1);
             kb = k;
         }
-        // Joining the lines, items or paragraphs of a block: as source.
+        // Joining list items: the item after goes on the line of the one
+        // before; the lines or paragraphs of a block: as source.
         for (int i = ka; i < kb; ++i) {
             if (isLineBreak(text.at(i)))
-                return false;
+                return joinItems(*spot, i);
         }
     }
     const QString expected = text.left(ka) + text.mid(kb);
@@ -2683,7 +3499,7 @@ bool VisualView::deleteRendered(bool forward)
     int cleanAt = at;
     const QString cleaned = removeEmptyMarkup(removed, &cleanAt);
     for (const auto &[after, caret] : {std::pair(cleaned, cleanAt), std::pair(removed, at)}) {
-        if (!rendersAs(after, spot->row.firstLine, expected))
+        if (!rendersAs(after, spot->row.firstLine, expected, spot->items))
             continue;
         int from = 0;
         int to = 0;
@@ -2693,6 +3509,56 @@ bool VisualView::deleteRendered(bool forward)
         return true;
     }
     return false;
+}
+
+bool VisualView::joinItems(const Spot &spot, int breakAt)
+{
+    const QString &text = spot.text;
+    const QString &source = spot.source;
+    if (breakAt < 0 || breakAt >= text.size() || !isLineBreak(text.at(breakAt)))
+        return false;
+    // The break is matched with the end of the first item's line; the next
+    // line that is not blank is the second item's, which must start one.
+    const int matched = matchOf(text, source, breakAt);
+    if (matched < 0)
+        return false;
+    const int lineBreak = int(source.indexOf(u'\n', matched));
+    if (lineBreak < 0)
+        return false;
+    int next = lineBreak + 1;
+    int lineStart = 0;
+    int lineEnd = 0;
+    for (lineAround(source, next, &lineStart, &lineEnd); isBlank(source.mid(lineStart, lineEnd - lineStart));
+         lineAround(source, next, &lineStart, &lineEnd)) {
+        if (lineEnd >= source.size())
+            return false;
+        next = lineEnd + 1;
+    }
+    const md::ListLine item = md::parseListLine(source.mid(lineStart, lineEnd - lineStart));
+    if (!item.valid || item.isQuote)
+        return false;
+    // From the end of the first item's last line that is not blank to the
+    // second item's text: its marker and box go.
+    int end = lineStart - 1;
+    while (end > 0) {
+        const int start = int(source.lastIndexOf(u'\n', end - 1)) + 1;
+        if (!isBlank(source.mid(start, end - start)))
+            break;
+        end = start - 1;
+    }
+    if (end != lineBreak)
+        return false;
+    const int contentStart = lineStart + item.contentStart;
+    const QString joined = source.left(end) + source.mid(contentStart);
+    int skip = 1; // The break, and the box rendered after it.
+    if (!item.box.isEmpty() && breakAt + 2 < text.size()
+        && (text.at(breakAt + 1) == QChar(0x2610) || text.at(breakAt + 1) == QChar(0x2611)))
+        skip += text.at(breakAt + 2).isSpace() ? 2 : 1;
+    const QString expected = text.left(breakAt) + text.mid(breakAt + skip);
+    if (!rendersAs(joined, spot.row.firstLine, expected, spot.items))
+        return false;
+    applyEdit(spot.start + end, spot.start + contentStart, QString(), spot.start + end);
+    return true;
 }
 
 bool VisualView::enterRendered()
@@ -2753,7 +3619,7 @@ bool VisualView::enterRendered()
             insert = QStringLiteral("\n\n");
         }
         const QString after = source.left(p) + insert + source.mid(p);
-        if (!rendersAs(after, spot->row.firstLine, expected))
+        if (!rendersAs(after, spot->row.firstLine, expected, spot->items))
             continue;
         applyEdit(spot->start + p, spot->start + p, insert, spot->start + p + int(insert.size()));
         return true;
@@ -2939,7 +3805,7 @@ bool VisualView::renderedKey(QKeyEvent *event)
         return true;
     }
     const QTextCursor c = textCursor();
-    const std::optional<Spot> spot = spotAt(c.position());
+    const std::optional<Spot> spot = spotFor(c);
     if (!spot) {
         // A blank line (shown as source for the caret) or source lines.
         if (typing && typeOnBlankLine(text))
@@ -2989,11 +3855,14 @@ bool VisualView::renderedKey(QKeyEvent *event)
         if (!ctrl && deleteRendered(forward))
             return true;
         // At the start (end) of the block: joined with the one before
-        // (after), in source.
+        // (after), in source. (A long list's item that is not its first or
+        // last is inside the block.)
         const int k = spot->offsetOf(c.position());
-        if (!ctrl && !c.hasSelection() && !forward && k == 0)
+        const bool blockStart = !spot->items || neighbourItem(spot->index, -1) < 0;
+        const bool blockEnd = !spot->items || neighbourItem(spot->lastIndex, 1) < 0;
+        if (!ctrl && !c.hasSelection() && !forward && k == 0 && blockStart)
             openAndForward(event, spot->start);
-        else if (!ctrl && !c.hasSelection() && forward && k >= spot->text.size())
+        else if (!ctrl && !c.hasSelection() && forward && k >= spot->text.size() && blockEnd)
             openAndForward(event, spot->start + int(spot->source.size()));
         else
             openAndForward(event);

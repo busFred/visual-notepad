@@ -22,6 +22,7 @@
 #include <vector>
 
 class QPainter;
+class QTextList;
 class QTextTable;
 
 namespace vn {
@@ -46,7 +47,13 @@ struct RenderedSelection
 {
     QList<QPair<int, int>> ranges;
     bool whole = false;
-    bool isEmpty() const { return ranges.isEmpty() && !whole; }
+    // A list item rendered on its own (RenderedBlock::createItem): the
+    // selection runs on into the next item (Qt marks the end of the item's
+    // last line then), and comes from an item before (its marker shows
+    // selected).
+    bool runsOn = false;
+    bool markerSelected = false;
+    bool isEmpty() const { return ranges.isEmpty() && !whole && !runsOn && !markerSelected; }
 };
 
 // Mermaid diagrams render on a worker thread (they can take a while);
@@ -95,6 +102,27 @@ public:
     // A part, from the lines of the source it covers.
     static std::unique_ptr<RenderedBlock> createPart(const QString &source, const Part &part,
                                                      const RenderContext &context);
+    // One top-level item of a list, alone: `block` is its HTML in its list's
+    // tags (<ul><li>...</li></ul> or <ol>...), and it renders as it does in
+    // the whole list, except that its marker (bullet or number) is left to
+    // paintItemMarker(), so that items renumber without rendering again.
+    // Its height is the item's own: itemAdvance() adds the space down to the
+    // next item. A view shows a long list so, an item a row (VisualView).
+    static std::unique_ptr<RenderedBlock> createItem(const core::Block &block, const QString &source,
+                                                     const RenderContext &context);
+    // How far below this item's top the next item starts in the whole list
+    // (its margins and the next item's, as Qt's layout spaces them), or for
+    // the last item (next null) where the list ends.
+    qreal itemAdvance(const RenderedBlock *next) const;
+    // Whether the item renders as it does in the whole list: one marker, on
+    // its first line (Qt drops an empty item, starts an item that opens
+    // with a list without a marker and numbers each line of a code block
+    // that opens one). Views render a list with others whole.
+    bool isRegularItem() const { return m_item.regular; }
+    // Draws the item's marker as Qt draws it in the whole list: a bullet, or
+    // `number` of an ordered list; `selected` as when a selection from an
+    // item before runs over it.
+    void paintItemMarker(QPainter &painter, const QPointF &topLeft, bool ordered, int number, bool selected) const;
     // The distinct http(s) addresses of the pictures an HTML block asks Qt for
     // when it is laid out and painted (entities and styles decoded by Qt
     // itself), whether or not downloads are allowed. Nothing is requested.
@@ -191,6 +219,8 @@ public:
     const std::vector<LineAnchor> &lineAnchors() const { return m_lineAnchors; }
 
 private:
+    static std::unique_ptr<RenderedBlock> create(const core::Block &block, const QString &source,
+                                                 const RenderContext &context, bool item);
     static std::unique_ptr<RenderedBlock> codeBox(std::unique_ptr<RenderedBlock> result, const QString &source,
                                                   const RenderContext &context);
     QPointF contentOffset() const;
@@ -209,6 +239,17 @@ private:
     bool m_centered = false;
     bool m_pending = false;
     Part m_part; // Of a code box; the whole box by default.
+    // Of an item made by createItem: its list (in m_doc), whose marker style
+    // was taken off for paintItemMarker, and its outer margins.
+    struct Item
+    {
+        bool made = false;
+        bool regular = false;
+        QTextList *list = nullptr;
+        int style = 0; // QTextListFormat::Style
+        qreal topMargin = 0;
+        qreal bottomMargin = 0;
+    } m_item;
     std::vector<LineAnchor> m_lineAnchors;
     mutable QString m_renderedText; // Cached; null until asked for.
     mutable std::optional<std::optional<TableGrid>> m_tableGrid; // Empty until asked for.

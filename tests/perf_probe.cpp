@@ -6,7 +6,8 @@
 // its last cell) and caret moves between them; the first move away from an
 // edited table is shown apart, as the visual view realigns the table then.
 // VN_PROBE_KEY=backspace types Backspace instead of "a" (VN_PROBE_COUNT
-// times, 20 by default): a row that gets narrower, not wider. In the visual
+// times, 20 by default): a row that gets narrower, not wider; =enter types
+// Enter then "a" (a new list item, timed per pair). In the visual
 // editor the keystrokes go into rendered text; VN_PROBE_OPEN=1 opens the
 // line's block as source first. VN_PROBE_PAINT=1 paints after each one.
 #include "DocumentTab.h"
@@ -96,6 +97,7 @@ int main(int argc, char **argv)
             for (const QString &s : probeLines.split(u','))
                 lines.append(s.toInt());
             const bool backspace = qEnvironmentVariable("VN_PROBE_KEY") == QLatin1String("backspace");
+            const bool enter = qEnvironmentVariable("VN_PROBE_KEY") == QLatin1String("enter");
             const int count = qEnvironmentVariableIsSet("VN_PROBE_COUNT") ? qEnvironmentVariableIntValue("VN_PROBE_COUNT") : 20;
             const bool paint = qEnvironmentVariableIntValue("VN_PROBE_PAINT") != 0;
             const auto place = [&](int line) {
@@ -114,6 +116,8 @@ int main(int argc, char **argv)
                 view->grab();
                 lap.restart();
                 for (int k = 0; k < count; ++k) {
+                    if (enter)
+                        QTest::keyClick(view, Qt::Key_Return);
                     QTest::keyClick(view, backspace ? Qt::Key_Backspace : Qt::Key_A);
                     if (paint)
                         view->grab();

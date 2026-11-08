@@ -26,10 +26,12 @@
 #include <QSet>
 #include <QTextBlock>
 #include <QTextLayout>
+#include <QTextList>
 #include <QTextTable>
 #include <QThreadPool>
 #include <QUrl>
 #include <QXmlStreamReader>
+#include <QtMath>
 
 #include <algorithm>
 #include <functional>
@@ -1378,6 +1380,18 @@ void RenderedBlock::setLayoutGuardEnabled(bool on)
 std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, const QString &source,
                                                      const RenderContext &context)
 {
+    return create(block, source, context, false);
+}
+
+std::unique_ptr<RenderedBlock> RenderedBlock::createItem(const core::Block &block, const QString &source,
+                                                         const RenderContext &context)
+{
+    return create(block, source, context, true);
+}
+
+std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, const QString &source,
+                                                     const RenderContext &context, bool item)
+{
     auto result = std::unique_ptr<RenderedBlock>(new RenderedBlock);
     RenderedBlock &r = *result;
     r.m_width = context.width;
@@ -1438,8 +1452,40 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         doc->setHtml(html);
         doc->dropNetworkImages();
         doc->fitImages(context.width);
+        if (item && !doc->begin().textList() && doc->blockCount() == 1 && doc->begin().text().isEmpty()) {
+            // An empty item, which Qt drops: an empty line of the list as one
+            // with text would make it (the text taken out again).
+            const qsizetype li = html.indexOf(QLatin1String("<li>"));
+            if (li >= 0) {
+                doc->setHtml(QString(html).insert(li + 4, u'x'));
+                QTextCursor text(doc.get());
+                text.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
+                text.removeSelectedText();
+            }
+        }
+        if (item) {
+            // The item's list is the one at the first level (its own lists
+            // are deeper). Its marker is drawn by paintItemMarker instead,
+            // with the number the item has in the whole list.
+            r.m_item.made = true;
+            const QTextBlock first = doc->begin();
+            for (QTextBlock b = first; b.isValid() && !r.m_item.list; b = b.next()) {
+                if (QTextList *list = b.textList(); list && list->format().indent() == 1)
+                    r.m_item.list = list;
+            }
+            if (QTextList *list = r.m_item.list) {
+                r.m_item.regular = first.textList() == list && list->count() == 1;
+                QTextListFormat format = list->format();
+                r.m_item.style = format.style();
+                format.setStyle(QTextListFormat::ListStyleUndefined);
+                list->setFormat(format);
+            }
+            r.m_item.topMargin = first.blockFormat().topMargin();
+            r.m_item.bottomMargin = doc->lastBlock().blockFormat().bottomMargin();
+        }
         doc->setTextWidth(context.width);
-        r.m_height = doc->size().height() + blockGap;
+        // An item ends where the next starts (see itemAdvance).
+        r.m_height = doc->size().height() + (item ? 0 : blockGap);
         // Backgrounds are asked for when painted: start their downloads now.
         if (context.allowRemoteImages && mayLoadPictures(QByteArrayView(block.html.data(), qsizetype(block.html.size()))))
             doc->loadPaintedPictures();
@@ -1579,6 +1625,26 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
             ctx.clip = painter.clipBoundingRect();
         ctx.palette.setColor(QPalette::Text, theme::color(theme::Role::text));
         const QColor selectionText = theme::color(theme::Role::selectionText);
+        if (selection.runsOn && m_item.made) {
+            // In the whole list a selection that goes on to the next item
+            // takes the line break after this one: Qt marks it (in
+            // QTextLayout::draw) by a quarter of the line's height after the
+            // last line. This item ends its document, which has no break.
+            const QTextBlock last = m_doc->lastBlock();
+            const QTextLayout *layout = last.layout();
+            if (layout && layout->lineCount() > 0) {
+                QRectF line = layout->lineAt(layout->lineCount() - 1).naturalTextRect();
+                line.translate(layout->position());
+                line.setBottom(qCeil(line.bottom()));
+                QPainterPath mark;
+                mark.addRect(QRectF(line.right(), line.top(), line.height() / 4, line.height()));
+                painter.save();
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(theme::color(theme::Role::selection));
+                painter.drawPath(mark);
+                painter.restore();
+            }
+        }
         for (const auto &range : selection.ranges) {
             QAbstractTextDocumentLayout::Selection sel;
             sel.cursor = QTextCursor(m_doc.get());
@@ -1596,6 +1662,116 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
         return;
     }
     }
+}
+
+qreal RenderedBlock::itemAdvance(const RenderedBlock *next) const
+{
+    if (!m_item.made)
+        return m_height;
+    if (!next || !next->m_item.made)
+        return m_height + blockGap;
+    // As QTextDocumentLayout spaces two blocks: the larger of the margins
+    // between them, in its fixed point (1/64 px).
+    return m_height + qRound(qMax(m_item.bottomMargin, next->m_item.topMargin) * 64) / 64.0;
+}
+
+void RenderedBlock::paintItemMarker(QPainter &painter, const QPointF &topLeft, bool ordered, int number,
+                                    bool selected) const
+{
+    if (!m_item.list)
+        return;
+    // QTextDocumentLayoutPrivate::drawListItem (Qt 6.12) for each block of
+    // the list (the item's first, or more for an irregular item), with the
+    // number the item has in the whole list and the style its list had.
+    painter.save();
+    painter.translate(topLeft + contentOffset());
+    for (int i = 0; i < m_item.list->count(); ++i) {
+        const QTextBlock block = m_item.list->item(i);
+        const QTextCharFormat charFormat = block.charFormat();
+        const QFont font = charFormat.font();
+        const QFontMetrics metrics(font);
+        const QTextLayout *layout = block.layout();
+        if (!layout || layout->lineCount() == 0)
+            continue;
+        const QTextLine firstLine = layout->lineAt(0);
+        QPointF pos = layout->position().toPoint();
+        pos.ry() += qRound(firstLine.ascent()) - metrics.ascent();
+        const Qt::LayoutDirection direction = block.textDirection();
+        const QRectF textRect = firstLine.naturalTextRect();
+        pos += textRect.topLeft().toPoint();
+        if (direction == Qt::RightToLeft)
+            pos.rx() += textRect.width();
+
+        int style = m_item.style;
+        if (ordered && style != QTextListFormat::ListDecimal)
+            style = QTextListFormat::ListDecimal;
+        if (!ordered && style == QTextListFormat::ListDecimal)
+            style = QTextListFormat::ListDisc;
+        QString text;
+        QSizeF size;
+        switch (style) {
+        case QTextListFormat::ListDecimal:
+            text = direction == Qt::RightToLeft ? u'.' + QString::number(number + i) : QString::number(number + i) + u'.';
+            size = QSizeF(metrics.horizontalAdvance(text), metrics.height());
+            break;
+        case QTextListFormat::ListSquare:
+        case QTextListFormat::ListCircle:
+        case QTextListFormat::ListDisc:
+            size.setWidth(metrics.lineSpacing() / 3);
+            size.setHeight(size.width());
+            break;
+        default:
+            continue;
+        }
+        QRectF r(pos, size);
+        qreal xoff = metrics.horizontalAdvance(u' ');
+        if (direction == Qt::LeftToRight)
+            xoff = -xoff - size.width();
+        r.translate(xoff, (metrics.height() / 2) - (size.height() / 2));
+
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing);
+        if (selected) {
+            // The selection's format, as paint() makes it.
+            const QColor selectionText = theme::color(theme::Role::selectionText);
+            painter.setPen(QPen(selectionText != theme::color(theme::Role::text) ? QBrush(selectionText) : QBrush(), 0));
+            painter.fillRect(r, theme::color(theme::Role::selection));
+        } else {
+            QBrush foreground = charFormat.foreground();
+            if (foreground == Qt::NoBrush)
+                foreground = theme::color(theme::Role::text);
+            painter.setPen(QPen(foreground, 0));
+        }
+        switch (style) {
+        case QTextListFormat::ListDecimal: {
+            QTextLayout numberLayout(text, font);
+            numberLayout.setCacheEnabled(true);
+            QTextOption option(Qt::AlignLeft | Qt::AlignAbsolute);
+            option.setTextDirection(direction);
+            numberLayout.setTextOption(option);
+            numberLayout.beginLayout();
+            QTextLine line = numberLayout.createLine();
+            if (line.isValid())
+                line.setLeadingIncluded(true);
+            numberLayout.endLayout();
+            numberLayout.draw(&painter, QPointF(r.left(), pos.y()));
+            break;
+        }
+        case QTextListFormat::ListSquare:
+            painter.fillRect(r, painter.pen().brush());
+            break;
+        case QTextListFormat::ListCircle:
+            painter.drawEllipse(r.translated(0.5, 0.5));
+            break;
+        default:
+            painter.setBrush(painter.pen().brush());
+            painter.setPen(Qt::NoPen);
+            painter.drawEllipse(r);
+            break;
+        }
+        painter.restore();
+    }
+    painter.restore();
 }
 
 int RenderedBlock::hitTest(const QPointF &point) const
