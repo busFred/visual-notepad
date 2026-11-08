@@ -72,6 +72,12 @@ public:
     // For tests: the rendered text of the row showing a line (null for
     // source rows).
     QString renderedTextAt(int line);
+    // For tests: off, long lists render whole as short ones do (see itemRows).
+    static void setItemRowsEnabled(bool on);
+    // For tests: the marker drawn for the long list's item that starts on
+    // `line` ("12." or a bullet), or null if none is (not such an item, a
+    // list of tasks).
+    QString itemMarkerAt(int line);
     // A new table stays rendered, with its first header's box open (its
     // text selected, to type over), as a word processor does.
     void insertTable(int rows, int cols) override;
@@ -122,6 +128,37 @@ private:
     {
         Row row;
         int span = -1; // Index into the model's spans, -1 for gaps.
+        int item = -1; // Index into m_itemRows: a row of a long list's item.
+    };
+    // Long lists show an item a row (see itemRows): each item renders on its
+    // own (RenderedBlock::createItem) and the view draws its marker, so that
+    // typing in an item, or adding one, renders that item alone, however
+    // long the list.
+    struct ListItems; // The items of a list's HTML (VisualView.cpp).
+    struct ItemList
+    {
+        bool ordered = false;
+        bool markers = true; // Not a list of tasks only.
+        int start = 1;
+        int block = -1;      // The parsed list; its HTML holds the items not edited since.
+        // Runs of items edited since the parse, each parsed again on its own.
+        struct Live
+        {
+            QByteArray html;
+            std::vector<QString> math;
+        };
+        std::vector<Live> live;
+    };
+    struct ItemRow
+    {
+        int list = -1;  // In m_itemLists.
+        int index = 0;  // In the list.
+        int from = 0;   // The item's <li>...</li> in its HTML.
+        int to = 0;
+        int line = 0;   // Its first line, from the first line of its HTML.
+        int taskBase = 0; // The line its HTML's task boxes count from.
+        int live = -1;  // In ItemList::live, or -1: in the parsed list.
+        int parsed = -1; // Its index in the parsed list, if it is from it.
     };
     // A render and the source it was made from.
     struct Render
@@ -135,6 +172,7 @@ private:
         // raw HTML, code or pictures: typing can go into its rendering.
         bool textual = false;
         quint64 used = 0; // The last frame (see m_frame) that asked for it.
+        QString html; // A list item's (RenderedBlock::createItem): what it was made from.
     };
     // What the view knows of a block it may show in parts (see
     // RenderedBlock::createPart), for one parse.
@@ -155,6 +193,8 @@ private:
     void restorePlace(const Place &place);
     void rebuildRows();
     RenderContext context() const;
+    // context(), made once for a frame (it reads fonts and settings).
+    const RenderContext &renderContext();
     // The render of a rendered row (a block, or a part of one), or null.
     const Render *rendered(const Row &row);
     const RenderedBlock *renderedForRow(const Row &row);
@@ -164,6 +204,26 @@ private:
     LongBox &longBox(int blockIndex);
     // Whether a span shows as a code box in parts.
     bool madeInParts(int span);
+    // Adds rows for the items of the span (lines line..last) if it is a long
+    // list that can be shown so; false (and nothing added) otherwise.
+    bool itemRows(int span, int line, int last);
+    // The items of a list of the last parse (blocks of either size), once a parse.
+    const ListItems &parsedItems(int blockIndex);
+    // The render of an item row (see ItemRow), made once per source and HTML.
+    Render itemRender(const ItemRow &item, const QString &source, const RenderContext &ctx);
+    Render itemRender(const QString &html, const QStringList &math, const QString &source, const RenderContext &ctx);
+    // Renders the items of a list block of a parse made apart (see rendersAs)
+    // as rows would: the block's text, or null if it is not a list shown so.
+    QString itemsText(const core::Block &block, const QString &source, const RenderContext &ctx);
+    const ItemRow *itemOfRow(int index) const;
+    // The row index of an item next to the one in row `index` (direction -1
+    // or 1), or -1 if there is none in its list.
+    int neighbourItem(int index, int direction) const;
+    // An item of the parsed list `blockIndex` renders irregularly
+    // (RenderedBlock::isRegularItem): the list shows whole, this parse.
+    void irregularItem(int blockIndex);
+    // Notes an edit's lines (see m_editRanges).
+    void noteEdit(int from, int removed, int added);
     void toggleTask(int line);
     bool zoomClick(const QMouseEvent *event) const;
     bool openPicture(const RenderedBlock *block, const QPointF &point, const QMouseEvent *event);
@@ -210,7 +270,9 @@ private:
     struct Spot
     {
         int index = -1; // Row.
-        Row row;
+        int lastIndex = -1; // Several rows: the items of a long list.
+        Row row;        // Of several rows: from the first's first line to the last's last.
+        bool items = false; // Rows of a long list's items: parses of it render so (see rendersAs).
         int start = 0;  // Document position of the row.
         QString source;
         QString text;   // Rendered.
@@ -223,9 +285,19 @@ private:
         int positionOf(int k) const { return start + caretSourceOffset(text, source, k); }
     };
     std::optional<Spot> spotAt(int position);
+    // The items in rows [first, last] of a long list as one spot (their
+    // texts with a line break between them, as the whole list's).
+    std::optional<Spot> spotOverItems(int first, int last);
+    // The spot of a caret: its row, or the items its selection covers.
+    std::optional<Spot> spotFor(const QTextCursor &cursor);
     // Whether `source` (lines from firstLine on) renders as `expected`
-    // (whitespace aside); its renders are kept for the paint.
-    bool rendersAs(const QString &source, int firstLine, const QString &expected);
+    // (whitespace aside); its renders are kept for the paint. `items`: a
+    // long list renders an item at a time, as its rows will.
+    bool rendersAs(const QString &source, int firstLine, const QString &expected, bool items = false);
+    // Backspace (or Delete) over the line break in rendered character
+    // `breakAt` of the spot's text: joins a list item with the one before
+    // (after). False if it is not between two list items.
+    bool joinItems(const Spot &spot, int breakAt);
     // Replaces [from, to) of the row's source (Spot::start on) as one edit
     // made by typing, and puts the caret at `caret` (a document position).
     void applyEdit(int from, int to, const QString &text, int caret);
@@ -393,6 +465,41 @@ private:
         rust::Vec<core::Block> blocks;
     };
     std::deque<LiveParse> m_liveParses;
+    // The lines edited since the last parse (see noteEdit): lines
+    // [first, last] of the parse are now `lines` lines; the others moved by
+    // the lines added or taken before them. Sorted, apart. Unknown: edits
+    // the view did not see (it was made after them), or too many ranges.
+    struct EditRange
+    {
+        int first = 0;
+        int last = 0;
+        int lines = 0;
+        int delta() const { return lines - (last - first + 1); }
+    };
+    std::vector<EditRange> m_editRanges;
+    bool m_editsKnown = false;
+    int m_editLines = 0; // The document's lines after the last edit noted.
+    int m_editsGeneration = -1; // The parse the edits are counted from.
+    // Rows of long lists' items (see itemRows), as the rows were last built.
+    std::vector<ItemList> m_itemLists;
+    std::vector<ItemRow> m_itemRows;
+    QSet<int> m_itemSpans; // Spans shown an item a row.
+    // The items of parsed lists (by block index), for m_listItemsGeneration's parse.
+    std::unordered_map<int, std::shared_ptr<const ListItems>> m_listItems;
+    int m_listItemsGeneration = -1;
+    QSet<int> m_irregularLists; // Parsed blocks shown whole (see irregularItem), this parse.
+    // The renders of items of parsed lists not edited since (by block index
+    // and item), which edits elsewhere leave as they are; for the render
+    // context of m_itemMemoKey.
+    std::unordered_map<quint64, Render> m_itemMemo;
+    QString m_itemMemoKey;
+    // renderContext()'s, for the frame, revision and width it was made at.
+    RenderContext m_context;
+    quint64 m_contextFrame = 0;
+    int m_contextRevision = -1;
+    qreal m_contextWidth = -1;
+    bool m_contextValid = false;
+    QString m_contextKey; // renderKey() of it.
     // Up and Down in rendered text keep the x they started from.
     qreal m_verticalX = -1;
     int m_verticalPosition = -1;
