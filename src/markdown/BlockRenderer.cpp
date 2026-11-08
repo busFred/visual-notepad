@@ -1741,9 +1741,19 @@ void RenderedBlock::paintItemMarker(QPainter &painter, const QPointF &topLeft, b
                 ink = theme::color(theme::Role::text);
         }
         if (style == QTextListFormat::ListDecimal) {
-            painter.setFont(font);
+            // Laid out as the item's text is (fractional metrics, as on
+            // macOS, place the baseline off a whole pixel).
+            QTextLayout number(label, font, m_doc->documentLayout()->paintDevice());
+            QTextOption option(Qt::AlignLeft | Qt::AlignAbsolute);
+            option.setTextDirection(block.textDirection());
+            number.setTextOption(option);
+            number.beginLayout();
+            QTextLine numberLine = number.createLine();
+            if (numberLine.isValid())
+                numberLine.setLeadingIncluded(true);
+            number.endLayout();
             painter.setPen(QPen(ink, 0));
-            painter.drawText(QPointF(box.left(), lineTop + metrics.ascent()), label);
+            number.draw(&painter, QPointF(box.left(), lineTop));
         } else if (style == QTextListFormat::ListSquare) {
             painter.fillRect(box, ink);
         } else if (style == QTextListFormat::ListCircle) {
