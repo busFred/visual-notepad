@@ -181,7 +181,10 @@ void TestMath::aFormulaThatNeverEndsIsGivenUp()
     QVERIFY(math::lastRenderFellBack());
     QCOMPARE(math::workerStarts(), starts);
     QVERIFY2(timer.elapsed() < 500, qPrintable(QString::number(timer.elapsed())));
-    // The next one that never ends gets less time.
+    // The next one that never ends gets less time. (A new worker is
+    // started first: that takes over a second on a slow machine.)
+    math::render(QStringLiteral("y"), inlineStyle());
+    QVERIFY(!math::lastRenderFellBack());
     timer.restart();
     math::render(QStringLiteral("\\newcommand{\\zw}{\\zw\\zw}\\zw"), inlineStyle());
     QVERIFY(math::lastRenderFellBack());
