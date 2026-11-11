@@ -215,6 +215,11 @@ void TestMath::aFormulaLeavesNothingBehind()
 {
     QFETCH(QString, tex);
     const QString plain = QStringLiteral("\\frac{\\alpha}{b}+x^2");
+    // Where one worker draws formula after formula (Windows, macOS), it is
+    // replaced after tex, and on Windows a few pixels of a glyph depend on
+    // which formulas a worker has drawn before. So both pictures are a new
+    // worker's first: tex comes before the first one too.
+    math::render(tex, inlineStyle());
     const QImage before = math::render(plain, inlineStyle());
     QVERIFY(!math::lastRenderFellBack());
     math::render(tex, inlineStyle());
