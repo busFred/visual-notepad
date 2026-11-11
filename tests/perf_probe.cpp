@@ -144,6 +144,22 @@ int main(int argc, char **argv)
                 qInfo().noquote() << "caret move within the second line's block ms" << lap.take(20);
             }
         }
+        if (qEnvironmentVariableIntValue("VN_PROBE_ZOOM") != 0) {
+            // Painting the whole tab (both views in split mode) again,
+            // nothing changed; then zooming in and back out a step at a
+            // time, each step painted.
+            tab.grab();
+            lap.restart();
+            for (int k = 0; k < 20; ++k)
+                tab.grab();
+            qInfo().noquote() << argv[i] << "repaint ms" << lap.take(20);
+            const QList<int> steps = {110, 125, 150, 175, 200, 175, 150, 125, 110, 100};
+            for (int zoom : steps) {
+                tab.setZoom(zoom);
+                tab.grab();
+            }
+            qInfo().noquote() << argv[i] << "zoom step+paint ms" << lap.take(int(steps.size()));
+        }
         view->scrollToLine(90000);
         view->grab();
         qInfo().noquote() << argv[i] << "jump+paint ms" << lap.take();

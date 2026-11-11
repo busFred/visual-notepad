@@ -82,6 +82,8 @@ add_library(vn_app STATIC
     src/markdown/MarkdownEditing.h
     src/markdown/MarkdownModel.cpp
     src/markdown/MarkdownModel.h
+    src/markdown/MathObject.cpp
+    src/markdown/MathObject.h
     src/markdown/MathRenderer.cpp
     src/markdown/MathRenderer.h
     src/markdown/RemoteImages.cpp

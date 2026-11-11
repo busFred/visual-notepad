@@ -8,6 +8,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QVariantMap>
+#include <QtMath>
 
 using namespace vn;
 
@@ -52,6 +53,9 @@ class TestMath : public QObject
 private Q_SLOTS:
     void fractionIsTallerThanText();
     void displayIsLargerThanInline();
+    void baselineIsReported_data();
+    void baselineIsReported();
+    void shapesScaleToAnySize();
     void colourIsApplied();
     void devicePixelRatioScalesPixels();
     void invalidTexFallsBack();
@@ -85,6 +89,78 @@ void TestMath::displayIsLargerThanInline()
     const QSizeF a = logicalSize(inl);
     const QSizeF b = logicalSize(disp);
     QVERIFY(b.height() > a.height());
+}
+
+// Rows from the top of the first, and from the bottom of the last, with ink.
+static int clearRowsAtTop(const QImage &image)
+{
+    for (int y = 0; y < image.height(); ++y)
+        for (int x = 0; x < image.width(); ++x)
+            if (qAlpha(image.pixel(x, y)) > 0)
+                return y;
+    return image.height();
+}
+
+static int clearRowsAtBottom(const QImage &image)
+{
+    return clearRowsAtTop(image.flipped(Qt::Vertical));
+}
+
+void TestMath::baselineIsReported_data()
+{
+    QTest::addColumn<QString>("tex");
+    QTest::addColumn<qreal>("ratio");
+    // No ink below the baseline but the edge of a curve.
+    QTest::newRow("letter") << QStringLiteral("x") << 1.0;
+    QTest::newRow("letter at 2x") << QStringLiteral("x") << 2.0;
+    QTest::newRow("equation") << QStringLiteral("k = 32") << 1.0;
+    // Longer than any formula: shown as source text.
+    QTest::newRow("source text") << QStringLiteral("x").repeated(30'000) << 1.0;
+}
+
+void TestMath::baselineIsReported()
+{
+    QFETCH(QString, tex);
+    QFETCH(qreal, ratio);
+    math::Style style = inlineStyle();
+    style.devicePixelRatio = ratio;
+    const QImage image = math::render(tex, style);
+    QVERIFY(!image.isNull());
+    const int row = math::baselineRow(image);
+    QVERIFY(row > 0 && row < image.height());
+    // The ink ends at the baseline, within a pixel; the picture is no taller
+    // than the ink and its padding (once, the depth was added twice).
+    const int inkEnd = image.height() - clearRowsAtBottom(image);
+    QVERIFY2(qAbs(inkEnd - row) <= qCeil(ratio), qPrintable(QStringLiteral("%1 %2").arg(inkEnd).arg(row)));
+    if (!math::lastRenderFellBack())
+        QVERIFY2(image.height() - inkEnd <= qCeil(2 * ratio), qPrintable(QString::number(image.height() - inkEnd)));
+}
+
+void TestMath::shapesScaleToAnySize()
+{
+    // Laid out once and drawn at any size: ten times the size is ten times
+    // the picture (with its pixel of margin), and as sharp.
+    const auto formula = math::layout(QStringLiteral("\\frac{a}{b}+\\sqrt{x}"), false);
+    QVERIFY(!math::lastRenderFellBack());
+    math::Style small = inlineStyle();
+    small.pixelSize = 20;
+    math::Style large = inlineStyle();
+    large.pixelSize = 200;
+    const QImage a = math::toImage(*formula, small);
+    const QImage b = math::toImage(*formula, large).convertToFormat(QImage::Format_ARGB32);
+    QVERIFY2(qAbs((b.width() - 2) - 10 * (a.width() - 2)) <= 10, qPrintable(QStringLiteral("%1 %2").arg(a.width()).arg(b.width())));
+    QVERIFY2(qAbs((b.height() - 2) - 10 * (a.height() - 2)) <= 10, qPrintable(QStringLiteral("%1 %2").arg(a.height()).arg(b.height())));
+    // Edges one pixel wide: few partly covered pixels beside the covered
+    // ones (a picture magnified ten times is mostly blurred edge).
+    int partial = 0, full = 0;
+    for (int y = 0; y < b.height(); ++y) {
+        for (int x = 0; x < b.width(); ++x) {
+            const int alpha = qAlpha(b.pixel(x, y));
+            full += alpha == 255;
+            partial += alpha > 0 && alpha < 255;
+        }
+    }
+    QVERIFY2(full > 0 && partial < full / 2, qPrintable(QStringLiteral("%1 partly, %2 fully").arg(partial).arg(full)));
 }
 
 void TestMath::colourIsApplied()

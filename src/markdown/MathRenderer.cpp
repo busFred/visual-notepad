@@ -13,7 +13,10 @@
 #include <QFont>
 #include <QFontMetricsF>
 #include <QGuiApplication>
+#include <QPaintDevice>
+#include <QPaintEngine>
 #include <QPainter>
+#include <QPainterPathStroker>
 #include <QPointer>
 #include <QProcess>
 #include <QProcessEnvironment>
@@ -24,6 +27,7 @@
 #include <QtGlobal>
 
 #include <atomic>
+#include <climits>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -75,10 +79,23 @@ constexpr qsizetype maxSourceChars = 300;
 // writes comes near, and MicroTeX's time grows faster than the length.
 constexpr qsizetype maxTexChars = 20'000;
 
-// The largest picture a formula may make, in device pixels: a side, and
-// both together (64 MB of pixels). "\rule{30000pt}{30000pt}" would be 3.5 GB.
+// The largest formula, a side in pixels at layoutPixelSize (500 em: some
+// 8,000 pixels at the usual size); "\rule{30000pt}{30000pt}" is shown as its
+// source. And the most shapes, path elements (a glyph has 20 to 80) and
+// bytes an answer may have: drawing it is done on every paint.
+constexpr qreal maxExtent = 500 * layoutPixelSize;
+constexpr qsizetype maxShapes = 20'000;
+constexpr qsizetype maxElements = 400'000;
+constexpr quint32 maxAnswerBytes = 8 * 1024 * 1024;
+
+// The largest picture toImage() makes, in device pixels: a side, and both
+// together (64 MB of pixels).
 constexpr int maxImageSide = 16'384;
 constexpr qint64 maxImagePixels = 16 * 1024 * 1024;
+
+// Shapes in this colour are in the colour of the text around the formula;
+// MicroTeX draws in it unless the formula names a colour.
+constexpr QRgb textColorMark = 0xFF010203;
 
 // How long the worker may take to start (the first formula loads Qt, the
 // fonts and MicroTeX's tables), and to draw one formula; an ordinary formula
@@ -101,30 +118,293 @@ constexpr int workerWatchdogMs = 30'000;
 // The most memory the worker may have.
 constexpr quint64 workerMemoryBytes = quint64(2) * 1024 * 1024 * 1024;
 
-// First bytes of every answer of the worker ("VNM1").
-constexpr quint32 answerMagic = 0x564E4D31;
+// First bytes of every answer of the worker ("VNM3").
+constexpr quint32 answerMagic = 0x564E4D33;
 
-QImage renderSource(const QString &tex, const Style &style)
+// Where a picture keeps its baseline row (see baselineRow).
+constexpr QStringView baselineKey = u"vn-baseline";
+
+void setBaselineRow(QImage &image, qreal row)
+{
+    image.setText(baselineKey.toString(), QString::number(qBound(0, qRound(row), image.height())));
+}
+
+// --- Shapes -----------------------------------------------------------------
+
+// A paint engine that keeps what is painted as filled shapes: text as the
+// outlines of its glyphs (QPaintEngine's own drawTextItem() fills them as
+// paths), lines and outlines as the area their pen covers. Pictures are
+// dropped (formulas have none).
+class ShapeEngine : public QPaintEngine
+{
+public:
+    explicit ShapeEngine(Formula &out)
+        : QPaintEngine(QPaintEngine::AllFeatures)
+        , m_out(out)
+    {
+    }
+
+    bool begin(QPaintDevice *) override { return true; }
+    bool end() override { return true; }
+    Type type() const override { return QPaintEngine::User; }
+
+    void updateState(const QPaintEngineState &state) override
+    {
+        const DirtyFlags dirty = state.state();
+        if (dirty & DirtyTransform)
+            m_transform = state.transform();
+        if (dirty & DirtyPen)
+            m_pen = state.pen();
+        if (dirty & DirtyBrush)
+            m_brush = state.brush();
+    }
+
+    void drawPath(const QPainterPath &path) override
+    {
+        if (m_brush.style() != Qt::NoBrush)
+            add(m_transform.map(path), m_brush.color());
+        stroke(path);
+    }
+
+    void drawPolygon(const QPointF *points, int count, PolygonDrawMode mode) override
+    {
+        if (count < 1)
+            return;
+        QPainterPath path(points[0]);
+        for (int i = 1; i < count; ++i)
+            path.lineTo(points[i]);
+        if (mode != PolylineMode) {
+            path.closeSubpath();
+            path.setFillRule(mode == OddEvenMode ? Qt::OddEvenFill : Qt::WindingFill);
+            if (m_brush.style() != Qt::NoBrush)
+                add(m_transform.map(path), m_brush.color());
+        }
+        stroke(path);
+    }
+
+    void drawPixmap(const QRectF &, const QPixmap &, const QRectF &) override {}
+
+    bool full() const { return m_full; }
+
+private:
+    void stroke(const QPainterPath &path)
+    {
+        if (m_pen.style() == Qt::NoPen)
+            return;
+        QPainterPathStroker stroker(m_pen);
+        QPainterPath area;
+        if (m_pen.isCosmetic()) { // Its width is in pixels, after the transform.
+            stroker.setWidth(qMax<qreal>(1, m_pen.widthF()));
+            area = stroker.createStroke(m_transform.map(path));
+        } else {
+            area = m_transform.map(stroker.createStroke(path));
+        }
+        area.setFillRule(Qt::WindingFill);
+        add(area, m_pen.color());
+    }
+
+    void add(const QPainterPath &path, const QColor &color)
+    {
+        if (path.isEmpty() || m_full)
+            return;
+        m_elements += path.elementCount();
+        if (m_out.shapes.size() >= maxShapes || m_elements > maxElements) {
+            m_full = true;
+            return;
+        }
+        const QRgb rgba = color.rgba();
+        m_out.shapes.append({path, rgba, rgba == textColorMark});
+    }
+
+    Formula &m_out;
+    QTransform m_transform;
+    QPen m_pen;
+    QBrush m_brush;
+    qsizetype m_elements = 0;
+    bool m_full = false;
+};
+
+// What a painter paints on, at 72 DPI: a point is a pixel, as MicroTeX's
+// sizes are meant.
+class ShapeRecorder : public QPaintDevice
+{
+public:
+    explicit ShapeRecorder(Formula &out)
+        : m_engine(out)
+    {
+    }
+
+    QPaintEngine *paintEngine() const override { return &m_engine; }
+    bool full() const { return m_engine.full(); }
+
+protected:
+    int metric(PaintDeviceMetric metric) const override
+    {
+        constexpr int side = 1 << 20;
+        switch (metric) {
+        case PdmWidth:
+        case PdmHeight:
+            return side;
+        case PdmWidthMM:
+        case PdmHeightMM:
+            return int(side * 25.4 / 72);
+        case PdmNumColors:
+            return INT_MAX;
+        case PdmDepth:
+            return 32;
+        case PdmDpiX:
+        case PdmDpiY:
+        case PdmPhysicalDpiX:
+        case PdmPhysicalDpiY:
+            return 72;
+        case PdmDevicePixelRatio:
+            return 1;
+        default:
+            return QPaintDevice::metric(metric);
+        }
+    }
+
+private:
+    mutable ShapeEngine m_engine;
+};
+
+// Whether a formula's numbers are ones the app can lay out and draw. One
+// without shapes is shown as its source: MicroTeX makes one of a formula it
+// cannot read ("\frac{", while it is being typed) as of "\phantom{x}".
+bool plausible(const Formula &formula)
+{
+    const auto within = [](qreal v) { return std::isfinite(v) && v >= 0 && v <= maxExtent; };
+    return within(formula.width) && within(formula.ascent) && within(formula.depth) && formula.width > 0
+           && formula.height() > 0 && !formula.shapes.isEmpty() && formula.shapes.size() <= maxShapes
+           && formula.elements() <= maxElements;
+}
+
+// A formula as the worker sends it: its size, then each shape's colour and
+// path elements (type, x, y). QDataStream, single-precision numbers.
+QByteArray encode(const Formula &formula)
+{
+    QByteArray out;
+    QDataStream stream(&out, QIODevice::WriteOnly);
+    stream.setVersion(QDataStream::Qt_6_0);
+    stream.setFloatingPointPrecision(QDataStream::SinglePrecision);
+    stream << float(formula.width) << float(formula.ascent) << float(formula.depth) << quint32(formula.shapes.size());
+    for (const Formula::Shape &shape : formula.shapes) {
+        const QPainterPath &path = shape.path;
+        stream << quint32(shape.color) << quint8(shape.textColor) << quint8(path.fillRule() == Qt::OddEvenFill)
+               << quint32(path.elementCount());
+        for (int i = 0; i < path.elementCount(); ++i) {
+            const QPainterPath::Element e = path.elementAt(i);
+            stream << quint8(e.type) << float(e.x) << float(e.y);
+        }
+    }
+    return out;
+}
+
+// The formula in an answer, or false: the answer is not one encode() makes,
+// within the limits. Answers come from a process a formula may have taken
+// over, so every number is checked.
+bool decode(const QByteArray &answer, Formula &formula)
+{
+    QDataStream stream(answer);
+    stream.setVersion(QDataStream::Qt_6_0);
+    stream.setFloatingPointPrecision(QDataStream::SinglePrecision);
+    float width = 0, ascent = 0, depth = 0;
+    quint32 shapes = 0;
+    stream >> width >> ascent >> depth >> shapes;
+    if (stream.status() != QDataStream::Ok || shapes == 0 || shapes > quint32(maxShapes))
+        return false;
+    formula = Formula();
+    formula.width = width;
+    formula.ascent = ascent;
+    formula.depth = depth;
+    // Shapes reach past the formula's box (a slanted glyph), not far.
+    const qreal reach = 2 * maxExtent;
+    qsizetype total = 0;
+    for (quint32 s = 0; s < shapes; ++s) {
+        quint32 rgba = 0, count = 0;
+        quint8 textColor = 0, oddEven = 0;
+        stream >> rgba >> textColor >> oddEven >> count;
+        // Each element takes nine bytes: no more than there are.
+        if (stream.status() != QDataStream::Ok || textColor > 1 || oddEven > 1 || count == 0
+            || count > quint32(maxElements - total) || qint64(count) * 9 > stream.device()->bytesAvailable())
+            return false;
+        total += count;
+        QPainterPath path;
+        path.setFillRule(oddEven ? Qt::OddEvenFill : Qt::WindingFill);
+        QPointF curve[3];
+        int curveAt = -1; // Points of a curve read so far, or -1 outside one.
+        for (quint32 i = 0; i < count; ++i) {
+            quint8 type = 0;
+            float x = 0, y = 0;
+            stream >> type >> x >> y;
+            if (stream.status() != QDataStream::Ok || !std::isfinite(x) || !std::isfinite(y) || qAbs(x) > reach
+                || qAbs(y) > reach)
+                return false;
+            const QPointF p(x, y);
+            // A path starts with a move; a curve is its first control point
+            // and two data elements (the second control point, the end).
+            if (i == 0 && type != QPainterPath::MoveToElement)
+                return false;
+            if ((curveAt >= 0) != (type == QPainterPath::CurveToDataElement))
+                return false;
+            switch (type) {
+            case QPainterPath::MoveToElement:
+                path.moveTo(p);
+                break;
+            case QPainterPath::LineToElement:
+                path.lineTo(p);
+                break;
+            case QPainterPath::CurveToElement:
+                curve[0] = p;
+                curveAt = 1;
+                break;
+            case QPainterPath::CurveToDataElement:
+                curve[curveAt++] = p;
+                if (curveAt == 3) {
+                    path.cubicTo(curve[0], curve[1], curve[2]);
+                    curveAt = -1;
+                }
+                break;
+            default:
+                return false;
+            }
+        }
+        if (curveAt >= 0)
+            return false;
+        formula.shapes.append({path, rgba, textColor != 0});
+    }
+    return stream.atEnd() && plausible(formula);
+}
+
+// The formula's source, in an italic serif face: what is shown for one
+// MicroTeX cannot draw.
+Formula sourceFormula(const QString &tex)
 {
     QFont font(QStringLiteral("serif"));
     font.setStyleHint(QFont::Serif);
     font.setItalic(true);
-    font.setPixelSize(qRound(style.pixelSize));
+    font.setPixelSize(qRound(layoutPixelSize));
+    font.setHintingPreference(QFont::PreferNoHinting);
     const QFontMetricsF fm(font);
     // The start of a long one: its picture would be as wide as it is long.
     QString text = tex.left(4 * maxSourceChars).simplified();
     if (text.size() > maxSourceChars)
         text = text.left(maxSourceChars) + QChar(0x2026);
-    const QSizeF size(qMin<qreal>(fm.horizontalAdvance(text) + 4, maxImageSide / style.devicePixelRatio), fm.height());
-    QImage image((size * style.devicePixelRatio).toSize(), QImage::Format_ARGB32_Premultiplied);
-    image.setDevicePixelRatio(style.devicePixelRatio);
-    image.fill(Qt::transparent);
-    QPainter painter(&image);
-    painter.setRenderHint(QPainter::TextAntialiasing);
+    Formula formula;
+    formula.fellBack = true;
+    const qreal pad = layoutPixelSize / 8;
+    formula.width = qMin(fm.horizontalAdvance(text) + 2 * pad, maxExtent);
+    formula.ascent = fm.ascent();
+    formula.depth = fm.descent();
+    ShapeRecorder recorder(formula);
+    QPainter painter(&recorder);
     painter.setFont(font);
-    painter.setPen(style.color);
-    painter.drawText(QPointF(2, fm.ascent()), text);
-    return image;
+    painter.setPen(QColor::fromRgba(textColorMark));
+    painter.drawText(QPointF(pad, 0), text);
+    painter.end();
+    if (formula.shapes.isEmpty()) // Only spaces, or no font: a box keeps its place.
+        formula.shapes.append({QPainterPath(), textColorMark, true});
+    return formula;
 }
 
 // MicroTeX lays glyphs out in 1pt units and draws them through a painter that
@@ -144,6 +424,8 @@ public:
             return;
         QFont qfont = font->getQFont();
         qfont.setPointSizeF(qfont.pointSizeF() * scale);
+        // The outlines as drawn, to be scaled: not fitted to one size's pixels.
+        qfont.setHintingPreference(QFont::PreferNoHinting);
         QPainter *painter = getQPainter();
         painter->save();
         painter->scale(1 / scale, 1 / scale);
@@ -198,56 +480,64 @@ bool ensureInitialized()
     return state > 0;
 }
 
-QImage renderMicroTeX(const QString &tex, const Style &style)
+// The formula's shapes as MicroTeX draws it, or false: it is not TeX
+// MicroTeX reads, or too large.
+bool microTeXFormula(const QString &tex, bool display, Formula &out)
 {
-    constexpr qreal padding = 1;
-    constexpr int layoutWidth = 20000; // formulas never wrap
+    constexpr int layoutWidth = 20000; // formulas never wrap (wider: not drawn)
+    // MicroTeX takes a point (pt, and cm and the rest through it) to be a
+    // pixel at the size it lays a formula out at: laid out at the size most
+    // formulas are shown at, a "\rule{10pt}{1pt}" is as long beside the text
+    // as it was when each was laid out at its own size, at every zoom.
+    constexpr float unitSize = 18;
+    // The layout scales to any size; drawn at layoutPixelSize, and measured
+    // this many times larger (MicroTeX gives sizes in whole pixels).
+    constexpr float fine = 16;
     if (!ensureInitialized())
-        return {};
+        return false;
     try {
         tex::Formula formula(tex.toStdWString());
         tex::TeXRenderBuilder builder;
-        // Qt converts the point sizes MicroTeX gives its fonts using the
-        // paint device's DPI; the image below is set to 72 DPI so that
-        // one point is one logical pixel.
-        const auto fg = static_cast<tex::color>(style.color.rgba());
+        const auto size = static_cast<float>(layoutPixelSize);
         std::unique_ptr<tex::TeXRender> render(
-            builder.setStyle(style.display ? tex::TexStyle::display : tex::TexStyle::text)
-                .setTextSize(static_cast<float>(style.pixelSize))
+            builder.setStyle(display ? tex::TexStyle::display : tex::TexStyle::text)
+                .setTextSize(unitSize)
                 .setWidth(tex::UnitType::pixel, layoutWidth, tex::Alignment::left)
                 .setIsMaxWidth(true)
                 .setLineSpace(tex::UnitType::pixel, 0)
-                .setForeground(fg)
+                .setForeground(static_cast<tex::color>(textColorMark))
                 .build(formula));
-        const qreal width = render->getWidth();
-        const qreal height = render->getHeight() + render->getDepth();
-        if (!(width > 0) || !(height > 0)) // Not a number either.
-            return {};
+        render->setInsets(tex::Insets(), true); // No margin: the app adds its own.
+        // (Too large for an int at the finer size: not drawn.)
+        const qreal largest = maxExtent * unitSize / size;
+        if (!(render->getWidth() <= largest) || !(render->getHeight() <= largest))
+            return false;
+        render->setTextSize(size * fine);
+        Formula result;
+        result.width = render->getWidth() / fine;
+        // The depth below the baseline is part of the height.
+        result.depth = render->getDepth() / fine;
+        result.ascent = render->getHeight() / fine - result.depth;
+        render->setTextSize(size);
+        if (!(result.width > 0) || !(result.height() > 0)) // Not a number either.
+            return false;
 
-        const qreal dpr = style.devicePixelRatio;
-        const qreal pixelsWide = std::ceil((width + 2 * padding) * dpr);
-        const qreal pixelsHigh = std::ceil((height + 2 * padding) * dpr);
-        if (!(pixelsWide <= maxImageSide) || !(pixelsHigh <= maxImageSide)
-            || pixelsWide * pixelsHigh > qreal(maxImagePixels))
-            return {};
-        QImage image(QSize(int(pixelsWide), int(pixelsHigh)), QImage::Format_ARGB32_Premultiplied);
-        if (image.isNull())
-            return {};
-        image.setDevicePixelRatio(dpr);
-        image.setDotsPerMeterX(2835); // 72 DPI
-        image.setDotsPerMeterY(2835);
-        image.fill(Qt::transparent);
-        {
-            QPainter painter(&image);
-            painter.setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
-            Graphics2D g2(&painter);
-            render->draw(g2, qRound(padding), qRound(padding));
-        }
-        return image;
+        // draw() puts the baseline `ascent` below the top it is given;
+        // the shapes have it at 0.
+        ShapeRecorder recorder(result);
+        QPainter painter(&recorder);
+        painter.translate(0, -result.ascent);
+        Graphics2D g2(&painter);
+        render->draw(g2, 0, 0);
+        painter.end();
+        if (recorder.full() || !plausible(result))
+            return false;
+        out = std::move(result);
+        return true;
     } catch (const std::exception &e) {
         qWarning("MicroTeX failed on \"%s\": %s", qPrintable(tex.left(60)), e.what());
     }
-    return {};
+    return false;
 }
 
 // --- The worker's side -----------------------------------------------------
@@ -393,27 +683,29 @@ void confineWorker()
 }
 #endif
 
-bool writeAnswer(const QImage &image)
+// An answer: the magic, what became of the formula (answerShapes and the
+// size of encode()'s bytes, which follow; answerNotTeX; answerCrashed) and
+// the size. Written in one piece, once the formula is done.
+constexpr qint32 answerShapes = 1;
+constexpr qint32 answerNotTeX = 0;
+constexpr qint32 answerCrashed = -1;
+
+bool writeAnswer(qint32 status, const QByteArray &shapes = QByteArray())
 {
-    const bool drawn = !image.isNull() && image.format() == QImage::Format_ARGB32_Premultiplied;
-    const qint32 header[3] = {qint32(answerMagic), drawn ? image.width() : 0, drawn ? image.height() : 0};
-    if (!writeFully(reinterpret_cast<const char *>(header), sizeof header))
-        return false;
-    if (!drawn)
-        return true;
-    // Row by row: a row in memory may be longer than its pixels.
-    for (int y = 0; y < image.height(); ++y) {
-        if (!writeFully(reinterpret_cast<const char *>(image.constScanLine(y)), qint64(image.width()) * 4))
-            return false;
-    }
-    return true;
+    QByteArray answer(3 * sizeof(qint32), Qt::Uninitialized);
+    const qint32 header[3] = {qint32(answerMagic), status, qint32(shapes.size())};
+    std::memcpy(answer.data(), header, sizeof header);
+    answer += shapes;
+    return writeFully(answer.constData(), answer.size());
 }
 
-// The formula ended the process that drew it; the worker goes on.
-[[maybe_unused]] bool writeFailure()
+bool answer(const QString &tex, bool display)
 {
-    const qint32 header[3] = {qint32(answerMagic), -1, -1};
-    return writeFully(reinterpret_cast<const char *>(header), sizeof header);
+    Formula formula;
+    if (!microTeXFormula(tex, display, formula))
+        return writeAnswer(answerNotTeX);
+    const QByteArray shapes = encode(formula);
+    return shapes.size() <= qsizetype(maxAnswerBytes) ? writeAnswer(answerShapes, shapes) : writeAnswer(answerNotTeX);
 }
 
 // --- The app's side --------------------------------------------------------
@@ -462,38 +754,37 @@ public:
         return worker;
     }
 
-    // The picture of a formula, or a null image: it is not TeX MicroTeX
-    // reads, or the worker failed on it.
-    QImage render(const QString &tex, const Style &style)
+    // The shapes of a formula, or false: it is not TeX MicroTeX reads, or
+    // the worker failed on it.
+    bool layout(const QString &tex, bool display, Formula &formula)
     {
         if (m_unavailable || tex.size() > maxTexChars)
-            return {};
+            return false;
         QByteArray request;
         {
             QDataStream stream(&request, QIODevice::WriteOnly);
             stream.setVersion(QDataStream::Qt_6_0);
-            stream << tex.toUtf8() << double(style.pixelSize) << quint32(style.color.rgba())
-                   << double(style.devicePixelRatio) << style.display;
+            stream << tex.toUtf8() << display;
         }
         // A request the worker failed on is not sent again: it would fail
         // again, at the same price.
         const QByteArray key = QCryptographicHash::hash(request, QCryptographicHash::Sha1);
         if (m_refused.contains(key))
-            return {};
+            return false;
         if (m_failuresInARow >= maxFailuresInARow) {
             if (m_paused.isValid() && m_paused.elapsed() < pauseMs)
-                return {};
+                return false;
             m_failuresInARow = 0;
         }
         if (!start())
-            return {};
+            return false;
 
         const int allowed = qMax(leastFormulaMs, formulaMs >> qMin(m_timeouts, 16));
         const QDeadlineTimer deadline(allowed);
         QElapsedTimer spent;
         spent.start();
         const quint32 size = quint32(request.size());
-        QImage image;
+        bool drawn = false;
         bool answered = false;
         bool crashed = false;
         // Where formulas share one worker, one that may leave something
@@ -504,18 +795,16 @@ public:
         if (flush(deadline)) {
             qint32 header[3] = {};
             if (read(reinterpret_cast<char *>(header), sizeof header, deadline) && quint32(header[0]) == answerMagic) {
-                const qint64 width = header[1];
-                const qint64 height = header[2];
-                if (width == 0 && height == 0) {
-                    answered = true; // Not TeX it reads.
-                } else if (width == -1 && height == -1) {
+                const qint32 status = header[1];
+                const qint64 bytes = header[2];
+                if (status == answerNotTeX && bytes == 0) {
+                    answered = true;
+                } else if (status == answerCrashed && bytes == 0) {
                     crashed = true; // And the worker lives on.
-                } else if (width > 0 && height > 0 && width <= maxImageSide && height <= maxImageSide
-                           && width * height <= maxImagePixels) {
-                    image = QImage(int(width), int(height), QImage::Format_ARGB32_Premultiplied);
-                    answered = !image.isNull();
-                    for (int y = 0; answered && y < image.height(); ++y)
-                        answered = read(reinterpret_cast<char *>(image.scanLine(y)), width * 4, deadline);
+                } else if (status == answerShapes && bytes > 0 && bytes <= maxAnswerBytes) {
+                    QByteArray shapes(bytes, Qt::Uninitialized);
+                    answered = read(shapes.data(), bytes, deadline) && decode(shapes, formula);
+                    drawn = answered;
                 }
             }
         }
@@ -533,17 +822,12 @@ public:
                 m_refused.insert(key);
             if (++m_failuresInARow >= maxFailuresInARow)
                 m_paused.start();
-            return {};
+            return false;
         }
         m_failuresInARow = 0;
         if (usedUp)
             stop();
-        if (image.isNull())
-            return {};
-        image.setDevicePixelRatio(style.devicePixelRatio);
-        image.setDotsPerMeterX(2835); // 72 DPI, as the worker drew it.
-        image.setDotsPerMeterY(2835);
-        return image;
+        return drawn;
     }
 
     void stop()
@@ -666,11 +950,79 @@ QString withMacros(const QString &tex)
     return prefix + tex;
 }
 
+qsizetype Formula::elements() const
+{
+    qsizetype count = 0;
+    for (const Shape &shape : shapes)
+        count += shape.path.elementCount();
+    return count;
+}
+
+void Formula::draw(QPainter &painter, const QPointF &origin, qreal scale, const QColor &text) const
+{
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.translate(origin);
+    painter.scale(scale, scale);
+    for (const Shape &shape : shapes) {
+        if (!shape.path.isEmpty())
+            painter.fillPath(shape.path, shape.textColor ? text : QColor::fromRgba(shape.color));
+    }
+    painter.restore();
+}
+
+std::shared_ptr<const Formula> layout(const QString &tex, bool display)
+{
+    auto formula = std::make_shared<Formula>();
+    fellBack = !Worker::instance().layout(tex, display, *formula);
+    if (fellBack)
+        *formula = sourceFormula(tex);
+    return formula;
+}
+
+QImage toImage(const Formula &formula, const Style &style)
+{
+    constexpr qreal padding = 1;
+    qreal scale = style.pixelSize / layoutPixelSize;
+    const qreal dpr = style.devicePixelRatio;
+    // Smaller than asked rather than none at all.
+    const qreal wide = (formula.width * scale + 2 * padding) * dpr;
+    const qreal high = (formula.height() * scale + 2 * padding) * dpr;
+    const qreal fit = std::min({1.0, maxImageSide / wide, maxImageSide / high, std::sqrt(maxImagePixels / (wide * high))});
+    if (!(fit > 0))
+        return {};
+    scale *= fit;
+    const QSize size(qMax(1, qCeil((formula.width * scale + 2 * padding) * dpr)),
+                     qMax(1, qCeil((formula.height() * scale + 2 * padding) * dpr)));
+    QImage image(size, QImage::Format_ARGB32_Premultiplied);
+    if (image.isNull())
+        return {};
+    image.setDevicePixelRatio(dpr);
+    image.fill(Qt::transparent);
+    QPainter painter(&image);
+    formula.draw(painter, QPointF(padding, padding + formula.ascent * scale), scale, style.color);
+    painter.end();
+    setBaselineRow(image, (padding + formula.ascent * scale) * dpr);
+    return image;
+}
+
 QImage render(const QString &tex, const Style &style)
 {
-    QImage image = Worker::instance().render(tex, style);
-    fellBack = image.isNull();
-    return fellBack ? renderSource(tex, style) : image;
+    const auto formula = layout(tex, style.display);
+    const bool fell = fellBack;
+    QImage image = toImage(*formula, style);
+    if (image.isNull() && !fell)
+        image = toImage(sourceFormula(tex), style);
+    fellBack = fell || image.isNull();
+    return image;
+}
+
+int baselineRow(const QImage &picture)
+{
+    bool ok = false;
+    const int row = picture.text(baselineKey.toString()).toInt(&ok);
+    return ok && row >= 0 && row <= picture.height() ? row : picture.height();
 }
 
 void setWorkerProgram(const QString &program)
@@ -725,47 +1077,40 @@ void runWorker(int &argc, char **argv)
         if (!readFully(request.data(), size))
             endWorker(0);
         QByteArray utf8;
-        double pixelSize = 0;
-        quint32 rgba = 0;
-        double devicePixelRatio = 0;
         bool display = false;
         QDataStream stream(request);
         stream.setVersion(QDataStream::Qt_6_0);
-        stream >> utf8 >> pixelSize >> rgba >> devicePixelRatio >> display;
-        QImage image;
-        if (stream.status() == QDataStream::Ok && pixelSize > 0 && pixelSize <= 1000 && devicePixelRatio > 0
-            && devicePixelRatio <= 16) {
-            Style style;
-            style.pixelSize = pixelSize;
-            style.color = QColor::fromRgba(rgba);
-            style.devicePixelRatio = devicePixelRatio;
-            style.display = display;
-#ifdef VN_MATH_FORK
-            // A copy of this process draws the formula and ends: whatever
-            // the formula does to MicroTeX, or to the process, ends with it.
-            const pid_t copy = fork();
-            if (copy == 0) {
-                prctl(PR_SET_PDEATHSIG, SIGKILL);
-                alarm(workerWatchdogMs / 1000);
-                _exit(writeAnswer(renderMicroTeX(QString::fromUtf8(utf8), style)) ? 0 : 1);
-            }
-            int status = 0;
-            bool drawn = copy > 0;
-            while (drawn && waitpid(copy, &status, 0) < 0)
-                drawn = errno == EINTR;
-            if (drawn && WIFEXITED(status) && WEXITSTATUS(status) == 0)
-                continue; // It has answered.
-            if (!writeFailure())
+        stream >> utf8 >> display;
+        if (stream.status() != QDataStream::Ok || !stream.atEnd()) {
+            if (!writeAnswer(answerNotTeX))
                 endWorker(1);
             continue;
-#else
-            busySince.store(qMax<qint64>(1, clock.elapsed()));
-            image = renderMicroTeX(QString::fromUtf8(utf8), style);
-            busySince.store(0);
-#endif
         }
-        if (!writeAnswer(image))
+        const QString tex = QString::fromUtf8(utf8);
+#ifdef VN_MATH_FORK
+        // A copy of this process draws the formula and ends: whatever the
+        // formula does to MicroTeX, or to the process, ends with it.
+        const pid_t copy = fork();
+        if (copy == 0) {
+            prctl(PR_SET_PDEATHSIG, SIGKILL);
+            alarm(workerWatchdogMs / 1000);
+            _exit(answer(tex, display) ? 0 : 1);
+        }
+        int status = 0;
+        bool drawn = copy > 0;
+        while (drawn && waitpid(copy, &status, 0) < 0)
+            drawn = errno == EINTR;
+        if (drawn && WIFEXITED(status) && WEXITSTATUS(status) == 0)
+            continue; // It has answered.
+        if (!writeAnswer(answerCrashed))
             endWorker(1);
+#else
+        busySince.store(qMax<qint64>(1, clock.elapsed()));
+        const bool answered = answer(tex, display);
+        busySince.store(0);
+        if (!answered)
+            endWorker(1);
+#endif
     }
 }
 

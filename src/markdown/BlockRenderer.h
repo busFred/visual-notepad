@@ -25,6 +25,10 @@ class QPainter;
 class QTextList;
 class QTextTable;
 
+namespace vn::math {
+struct Formula;
+}
+
 namespace vn {
 
 struct RenderContext
@@ -224,12 +228,18 @@ private:
     static std::unique_ptr<RenderedBlock> codeBox(std::unique_ptr<RenderedBlock> result, const QString &source,
                                                   const RenderContext &context);
     QPointF contentOffset() const;
+    // Of a picture block (Kind::Image), in logical pixels.
+    QSizeF pictureSize() const;
     QTextTable *theTable() const;
     void collectLineAnchors(int sourceLines);
 
     Kind m_kind = Kind::Empty;
     std::unique_ptr<QTextDocument> m_doc;
     QImage m_image;
+    // A display formula (with m_image null), drawn m_formulaScale times its
+    // layout size.
+    std::shared_ptr<const math::Formula> m_formula;
+    qreal m_formulaScale = 1;
     QString m_error;
     qreal m_height = 0;
     qreal m_width = 0; // Of the column it was made for.

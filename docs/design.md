@@ -29,7 +29,7 @@ servers, completion, diagnostics and other IDE features.
 | Highlighting | KSyntaxHighlighting (KDE Frameworks 6) | Code blocks and text files |
 | Markdown parsing | comrak, in the Rust `vn-core` crate | GFM, math, front matter, source positions |
 | Mermaid | mermaid-rs-renderer (Rust, rasterized with resvg) | |
-| Math | MicroTeX, Qt backend, in a worker process (`visnotepad --math-worker`): it is not safe on formulas from strangers | User macros via `\newcommand` |
+| Math | MicroTeX, Qt backend, in a worker process (`visnotepad --math-worker`): it is not safe on formulas from strangers. The worker sends each formula back as shapes (glyph outlines, rules), checked by the app and drawn at any zoom on the text's baseline | User macros via `\newcommand` |
 | Formatter | comrak | Edit > Format Document |
 | C++/Rust glue | cxx, built by Corrosion | `src/` includes `vn_core_bridge/lib.h` |
 
