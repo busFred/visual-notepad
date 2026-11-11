@@ -4,6 +4,15 @@ set(VN_TEST_QPA offscreen CACHE STRING "QPA platform the tests run on")
 
 find_package(Qt6 REQUIRED COMPONENTS Test)
 
+# Formulas are drawn by the app run as a worker (see MathRenderer.h): every
+# program here names the app that was built with it.
+add_library(vn_test_worker OBJECT test_worker.cpp)
+target_link_libraries(vn_test_worker PRIVATE vn_app)
+target_compile_definitions(vn_test_worker PRIVATE VN_APP_PATH="$<TARGET_FILE:visnotepad>")
+set_target_properties(vn_test_worker PROPERTIES AUTOMOC OFF)
+add_dependencies(vn_test_worker visnotepad)
+link_libraries(vn_test_worker)
+
 qt_add_executable(test_mainwindow test_mainwindow.cpp)
 target_link_libraries(test_mainwindow PRIVATE vn_app Qt6::Test)
 target_compile_definitions(test_mainwindow PRIVATE VN_SOURCE_DIR="${PROJECT_SOURCE_DIR}")

@@ -29,7 +29,8 @@ root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Qt plugins to bundle, by folder; None for every plugin of the folder.
 PLUGINS = {
-    "platforms": ["libqcocoa.dylib"],
+    # The offscreen one is what the math worker runs on (src/markdown/MathRenderer.h).
+    "platforms": ["libqcocoa.dylib", "libqoffscreen.dylib"],
     "styles": None,
     "imageformats": None,
     "iconengines": None,

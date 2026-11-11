@@ -3,6 +3,7 @@
 #include "markdown/MathRenderer.h"
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QPainter>
 #include <QTemporaryDir>
 #include <QTest>
@@ -55,6 +56,12 @@ private Q_SLOTS:
     void devicePixelRatioScalesPixels();
     void invalidTexFallsBack();
     void macroFromSettings();
+    void formulasThatBreakMicroTeXAreShownAsSource_data();
+    void formulasThatBreakMicroTeXAreShownAsSource();
+    void aFormulaThatNeverEndsIsGivenUp();
+    void longSourceIsNotDrawnInFull();
+    void aFormulaLeavesNothingBehind_data();
+    void aFormulaLeavesNothingBehind();
     void saveScreenshots();
 };
 
@@ -116,6 +123,100 @@ void TestMath::invalidTexFallsBack()
     const QImage image = math::render(QStringLiteral("\\frac{"), inlineStyle());
     QVERIFY(!image.isNull());
     QVERIFY(hasInk(image));
+}
+
+// MicroTeX runs in a worker process (see MathRenderer.h): what would crash
+// the app, or fill its memory, ends a worker instead, and the next formula
+// is drawn by a new one.
+void TestMath::formulasThatBreakMicroTeXAreShownAsSource_data()
+{
+    QTest::addColumn<QString>("tex");
+    // Each of these crashed the app before, by the way named.
+    QTest::newRow("a table command outside a table (memory that is not its own)")
+        << QStringLiteral("\\multicolumn{2}{c}{x}");
+    QTest::newRow("a negative number of arguments (past the end of a list)")
+        << QStringLiteral("\\newcommand{\\zy}[-3]{#1}\\zy{a}{b}");
+    QTest::newRow("a command without its argument (no object)") << QStringLiteral("{\\mathtt\\begin{alignat}{2}\\end{alignat}}~0");
+    QTest::newRow("dollars in a formula (endless recursion)") << QStringLiteral("$$x$$ $ \\( \\[ \\] \\)");
+    QTest::newRow("a picture of 3.5 GB") << QStringLiteral("\\rule{30000pt}{30000pt}");
+    QTest::newRow("longer than any formula") << QStringLiteral("x+").repeated(20'000);
+}
+
+void TestMath::formulasThatBreakMicroTeXAreShownAsSource()
+{
+    QFETCH(QString, tex);
+    QVERIFY(!math::render(QStringLiteral("a+b"), inlineStyle()).isNull());
+    QVERIFY2(!math::lastRenderFellBack(), "the worker does not draw at all");
+
+    QElapsedTimer timer;
+    timer.start();
+    const QImage image = math::render(tex, displayStyle());
+    QVERIFY(math::lastRenderFellBack());
+    QVERIFY(!image.isNull());
+    QVERIFY(hasInk(image));
+    QVERIFY(image.width() <= 16'384);
+    QVERIFY2(timer.elapsed() < 2500, qPrintable(QString::number(timer.elapsed())));
+
+    // Asked again, it is not tried again.
+    const int starts = math::workerStarts();
+    math::render(tex, displayStyle());
+    QVERIFY(math::lastRenderFellBack());
+    QCOMPARE(math::workerStarts(), starts);
+
+    // Other formulas are drawn as before.
+    const QImage next = math::render(QStringLiteral("\\frac{a}{b}"), inlineStyle());
+    QVERIFY(!math::lastRenderFellBack());
+    QVERIFY(hasInk(next));
+}
+
+void TestMath::aFormulaThatNeverEndsIsGivenUp()
+{
+    // A command that stands for itself: MicroTeX replaces it for ever.
+    QElapsedTimer timer;
+    timer.start();
+    math::render(QStringLiteral("\\newcommand{\\zz}{\\zz}\\zz"), inlineStyle());
+    QVERIFY(math::lastRenderFellBack());
+    QVERIFY2(timer.elapsed() < 6000, qPrintable(QString::number(timer.elapsed())));
+    // The next one that never ends gets less time.
+    timer.restart();
+    math::render(QStringLiteral("\\newcommand{\\zw}{\\zw\\zw}\\zw"), inlineStyle());
+    QVERIFY(math::lastRenderFellBack());
+    QVERIFY2(timer.elapsed() < 3000, qPrintable(QString::number(timer.elapsed())));
+    math::render(QStringLiteral("x^2"), inlineStyle());
+    QVERIFY(!math::lastRenderFellBack());
+}
+
+void TestMath::longSourceIsNotDrawnInFull()
+{
+    // Source text is the fallback: of a formula of 400,000 characters it
+    // was a picture 2.7 million pixels wide.
+    const QImage image = math::render(QStringLiteral("\\frac{").repeated(100'000), inlineStyle());
+    QVERIFY(math::lastRenderFellBack());
+    QVERIFY(image.width() < 4000);
+}
+
+// What a formula defines or sets is not there for the next: a document
+// cannot change how the formulas of another are drawn.
+void TestMath::aFormulaLeavesNothingBehind_data()
+{
+    QTest::addColumn<QString>("tex");
+    QTest::newRow("a command redefined") << QStringLiteral("\\renewcommand{\\frac}[2]{x} \\frac{a}{b}");
+    QTest::newRow("a new command") << QStringLiteral("\\newcommand{\\alpha}{\\beta\\beta\\beta} \\alpha");
+    QTest::newRow("sizes") << QStringLiteral("\\DeclareMathSizes{30}{30}{30}{30} x");
+    QTest::newRow("magnification") << QStringLiteral("\\magnification{5} x");
+    QTest::newRow("refused, after setting") << QStringLiteral("\\grkaccent.\\magnification");
+}
+
+void TestMath::aFormulaLeavesNothingBehind()
+{
+    QFETCH(QString, tex);
+    const QString plain = QStringLiteral("\\frac{\\alpha}{b}+x^2");
+    const QImage before = math::render(plain, inlineStyle());
+    QVERIFY(!math::lastRenderFellBack());
+    math::render(tex, inlineStyle());
+    const QImage after = math::render(plain, inlineStyle());
+    QVERIFY(!math::lastRenderFellBack());
+    QVERIFY(after == before);
 }
 
 void TestMath::macroFromSettings()

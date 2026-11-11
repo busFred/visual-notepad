@@ -52,8 +52,10 @@ for dir in platforms platformthemes platforminputcontexts imageformats iconengin
     mkdir -p "$opt/plugins/$dir"
     cp "$qtplugins/$dir"/*.so "$opt/plugins/$dir/"
 done
-# Platforms other than X11 and Wayland would pull in extra libraries.
-find "$opt/plugins/platforms" -name '*.so' ! -name 'libqxcb.so' ! -name 'libqwayland*.so' -delete
+# Platforms other than X11 and Wayland would pull in extra libraries. The
+# offscreen one is what the math worker runs on (see src/markdown/MathRenderer.h).
+find "$opt/plugins/platforms" -name '*.so' ! -name 'libqxcb.so' ! -name 'libqwayland*.so' \
+    ! -name 'libqoffscreen.so' -delete
 cat >"$opt/bin/qt.conf" <<'EOF'
 [Paths]
 Prefix = ..

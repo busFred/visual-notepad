@@ -3,11 +3,14 @@
 #include "Session.h"
 #include "TextFile.h"
 #include "Theme.h"
+#include "markdown/MathRenderer.h"
 
 #include <QApplication>
 #include <QDir>
 #include <QIcon>
 #include <QCommandLineParser>
+
+#include <cstring>
 
 #ifdef Q_OS_MACOS
 #include <QFileOpenEvent>
@@ -78,6 +81,10 @@ int main(int argc, char *argv[])
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     SetDllDirectoryW(L"");
 #endif
+    // Started by the app itself to draw formulas (see MathRenderer.h): no
+    // window, no session, no settings.
+    if (argc == 2 && std::strcmp(argv[1], "--math-worker") == 0)
+        vn::math::runWorker(argc, argv);
 #ifdef Q_OS_LINUX
     // Our Qt is not the system's, so it has no desktop integration by
     // default. Use the desktop's file dialogs through the XDG portal, and
@@ -122,6 +129,7 @@ int main(int argc, char *argv[])
     parser.addPositionalArgument(QStringLiteral("files"), QStringLiteral("Files to open."), QStringLiteral("[files...]"));
     parser.process(app);
 
+    vn::math::setWorkerProgram(QCoreApplication::applicationFilePath());
     vn::theme::apply(app);
     vn::TextFile::setHighlightInSlices(true);
 #ifdef Q_OS_MACOS
