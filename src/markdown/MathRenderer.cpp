@@ -490,6 +490,8 @@ public:
 
         const int allowed = qMax(leastFormulaMs, formulaMs >> qMin(m_timeouts, 16));
         const QDeadlineTimer deadline(allowed);
+        QElapsedTimer spent;
+        spent.start();
         const quint32 size = quint32(request.size());
         QImage image;
         bool answered = false;
@@ -521,7 +523,9 @@ public:
             // Crashed, too slow, or not answering as agreed: whatever state
             // it is in, the next formula gets a new one.
             if (!crashed) {
-                if (deadline.hasExpired())
+                // Not deadline.hasExpired(): a wait can end a little before
+                // its deadline (Windows wakes waiting threads every 15.6 ms).
+                if (spent.elapsed() >= allowed - 50)
                     ++m_timeouts;
                 stop();
             }
