@@ -215,7 +215,19 @@ fn finish_row(rows: &mut Vec<Row>, row: &mut Option<Row>, end: Option<usize>) {
     }
 }
 
-fn parse(src: &str, open: Tag, close: Tag, tokens: &[Tag]) -> Table {
+/// The most columns or rows a cell may span, as the visual editor draws them
+/// (see `render::qt_html`).
+const MAX_COLSPAN: usize = 100;
+const MAX_ROWSPAN: usize = 1000;
+
+/// The most slots a table's grid may have (24 bytes each): a row of a
+/// thousand cells above a hundred thousand empty rows is 1 MB of text and
+/// would be 2.4 GB of grid.
+const MAX_GRID_SLOTS: usize = 2_000_000;
+
+/// The table between `open` and `close`, or `None` if its grid would be too
+/// large to hold.
+fn parse(src: &str, open: Tag, close: Tag, tokens: &[Tag]) -> Option<Table> {
     let mut rows = Vec::new();
     let mut row = None;
     let mut cell = None;
@@ -232,7 +244,6 @@ fn parse(src: &str, open: Tag, close: Tag, tokens: &[Tag]) -> Table {
                             .find(|a| a.name == key)
                             .and_then(|a| src[a.value.clone()].parse::<usize>().ok())
                             .unwrap_or(1)
-                            .clamp(1, 65534)
                     };
                     cell = Some(Cell {
                         tag: t.clone(),
@@ -240,8 +251,8 @@ fn parse(src: &str, open: Tag, close: Tag, tokens: &[Tag]) -> Table {
                         close: None,
                         end: t.range.end,
                         col: 0,
-                        colspan: span("colspan"),
-                        rowspan: span("rowspan"),
+                        colspan: span("colspan").clamp(1, MAX_COLSPAN),
+                        rowspan: span("rowspan").clamp(1, MAX_ROWSPAN),
                     });
                 }
             }
@@ -259,6 +270,22 @@ fn parse(src: &str, open: Tag, close: Tag, tokens: &[Tag]) -> Table {
         }
     }
     let count = rows.len();
+    // Every row is as wide as the widest: the cells of each row, and the
+    // columns that cells of rows above span into it.
+    let mut widest = 0usize;
+    let mut spanned = 0usize;
+    for (r, row) in rows.iter().enumerate() {
+        let own: usize = row.cells.iter().map(|c| c.colspan).sum();
+        widest = widest.max(own);
+        spanned += row
+            .cells
+            .iter()
+            .map(|c| c.colspan * (c.rowspan.min(count - r) - 1))
+            .sum::<usize>();
+    }
+    if count.saturating_mul(widest).saturating_add(spanned) > MAX_GRID_SLOTS {
+        return None;
+    }
     let mut grid = vec![Vec::new(); count];
     let mut merged = false;
     for (r, row) in rows.iter_mut().enumerate() {
@@ -279,10 +306,14 @@ fn parse(src: &str, open: Tag, close: Tag, tokens: &[Tag]) -> Table {
         }
     }
     let cols = grid.iter().map(Vec::len).max().unwrap_or(0);
+    // Cells spanning down from rows above widen a row beyond its own cells.
+    if count.saturating_mul(cols) > MAX_GRID_SLOTS {
+        return None;
+    }
     for r in &mut grid {
         r.resize(cols, None);
     }
-    Table {
+    Some(Table {
         first: position(src, open.range.start).0,
         last: position(src, close.range.end).0,
         open,
@@ -291,7 +322,7 @@ fn parse(src: &str, open: Tag, close: Tag, tokens: &[Tag]) -> Table {
         grid,
         cols,
         merged,
-    }
+    })
 }
 
 /// Find a complete, non-nested table beginning at a CommonMark HTML block.
@@ -340,8 +371,10 @@ fn find(src: &str, line: usize) -> Option<Table> {
                 depth == 0
             })?;
             blocked_until = tokens[end].range.end;
-            let table = parse(src, tokens[n].clone(), tokens[end].clone(), &tokens[n + 1..=end]);
-            if line <= table.last {
+            // A table too large for a grid is no table to edit.
+            if let Some(table) = parse(src, tokens[n].clone(), tokens[end].clone(), &tokens[n + 1..=end])
+                && line <= table.last
+            {
                 return (!nested).then_some(table);
             }
         }
@@ -1168,5 +1201,25 @@ mod tests {
         let src = "<table><tr><td>2</td></tr><tr><td>1</td></tr></table>";
         assert_eq!(value(&run(src, TableOp::SortAscending, 0, 0).replacement, 0, 0), "1");
         assert!(!run("<table><tr><td>a</td></tr></table>", TableOp::DeleteRow, 0, 0).ok);
+    }
+
+    #[test]
+    fn spans_are_clamped_and_huge_grids_refused() {
+        let src = "<table><tr><td colspan=\"4000000000\" rowspan=\"4000000000\">a</td></tr></table>";
+        let table = find(src, 0).unwrap();
+        assert_eq!((table.cols, table.grid.len()), (MAX_COLSPAN, 1));
+        // 1000 columns by 3000 rows: 3 million slots.
+        let wide = "<td>a</td>".repeat(1000);
+        let src = format!("<table><tr>{wide}</tr>{}</table>", "<tr></tr>".repeat(2999));
+        assert!(find(&src, 0).is_none());
+        // Widened only by a cell spanning down from the row above.
+        let src = format!(
+            "<table><tr>{}</tr><tr>{wide}</tr>{}</table>",
+            "<td colspan=\"100\" rowspan=\"2\">s</td>".repeat(20),
+            "<tr></tr>".repeat(700)
+        );
+        assert!(find(&src, 0).is_none());
+        let src = format!("<table><tr>{wide}</tr>{}</table>", "<tr></tr>".repeat(1000));
+        assert!(find(&src, 0).is_some());
     }
 }

@@ -14,6 +14,11 @@
 //! cannot be sure what Qt does it stays on the safe side: it keeps an upper
 //! bound of what Qt has open, so it may escape too much in odd HTML but never
 //! too little.
+//!
+//! Numbers in attributes are limited the same way (see `Sizes`): Qt lays out
+//! a cell that spans 100000 columns, or a table with a padding of 9999999,
+//! for seconds or minutes, or crashes on it. A tag that asks for more than
+//! any document needs is escaped too.
 
 use std::collections::HashMap;
 
@@ -26,12 +31,34 @@ pub(super) const MAX_TABLE_DEPTH: usize = 4;
 /// quadratically.
 pub(super) const MAX_ELEMENT_DEPTH: usize = 256;
 
-/// `html` with the `<` of opening tags that would nest too deep escaped, or
-/// `None` if it can be used as it is. Linear time.
+/// The most columns one cell may span, and the most that the cells of one
+/// block may span beyond their own column altogether. Qt takes about 0.14 ms
+/// for every column of a table, used or not.
+const MAX_COLSPAN: f64 = 100.0;
+const MAX_EXTRA_COLUMNS: f64 = 500.0;
+
+/// The same for rows, which cost Qt far less.
+const MAX_ROWSPAN: f64 = 1000.0;
+const MAX_EXTRA_ROWS: f64 = 20_000.0;
+
+/// The largest `cellpadding`, `cellspacing` or `border`, in pixels.
+const MAX_TABLE_SPACING: f64 = 1000.0;
+
+/// The largest `width` or `height` (pixels or percent) and font `size`.
+const MAX_LENGTH: f64 = 32_767.0;
+
+/// The longest run of digits in a `style` attribute: lengths of up to
+/// 99999 units.
+const MAX_STYLE_DIGITS: usize = 5;
+
+/// `html` with the `<` of opening tags that would nest too deep, or that ask
+/// for sizes no document needs, escaped; or `None` if it can be used as it
+/// is. Linear time.
 pub(super) fn limit_nesting(html: &str) -> Option<String> {
     let b = html.as_bytes();
     let n = b.len();
     let mut tree = Tree::default();
+    let mut sizes = Sizes::default();
     let mut escapes: Vec<usize> = Vec::new();
     let mut i = 0;
     // Qt starts a tag at every `<`, which may be followed by spaces.
@@ -55,15 +82,17 @@ pub(super) fn limit_nesting(html: &str) -> Option<String> {
             }
             _ => {
                 let (word, mut after) = qt_word(html, j);
-                if !tree.open(word) {
+                // Attributes are only read after a space.
+                let mut wanted = Sizes::default();
+                if html[after..].starts_with(char::is_whitespace) {
+                    after = qt_attributes(html, after, |key, value| wanted.add(key, value));
+                }
+                if !sizes.allows(&wanted) || !tree.open(word) {
                     // Qt reads the rest of the tag as text.
                     escapes.push(lt);
                     lt + 1
                 } else {
-                    // Attributes are only read after a space.
-                    if html[after..].starts_with(char::is_whitespace) {
-                        after = qt_attributes(html, after);
-                    }
+                    sizes.take(&wanted);
                     let close = find(b, after, b">");
                     // Any `/` between the attributes and the `>` closes the
                     // element at once.
@@ -147,8 +176,12 @@ fn qt_word(text: &str, from: usize) -> (Word<'_>, usize) {
 }
 
 /// Where QTextHtmlParser's parseAttributes stops, starting after a tag name
-/// that a space follows.
-fn qt_attributes(text: &str, mut pos: usize) -> usize {
+/// that a space follows. `each` is given every attribute and its value.
+fn qt_attributes<'a>(
+    text: &'a str,
+    mut pos: usize,
+    mut each: impl FnMut(Word<'a>, Option<Word<'a>>),
+) -> usize {
     let b = text.as_bytes();
     loop {
         pos = skip_space(text, pos);
@@ -161,11 +194,195 @@ fn qt_attributes(text: &str, mut pos: usize) -> usize {
             return pos;
         }
         pos = skip_space(text, pos);
+        let mut value = None;
         if b.get(pos) == Some(&b'=') {
             pos = skip_space(text, pos + 1);
-            pos = qt_word(text, pos).1;
+            let (word, after) = qt_word(text, pos);
+            value = Some(word);
+            pos = after;
+        }
+        each(key, value);
+    }
+}
+
+/// What the attributes of one tag, or of all the tags let through so far,
+/// ask Qt for.
+#[derive(Default)]
+struct Sizes {
+    /// Columns and rows that cells span beyond their own.
+    extra_columns: f64,
+    extra_rows: f64,
+    /// Some attribute asks for more than any tag may have.
+    too_much: bool,
+}
+
+impl Sizes {
+    /// Counts one attribute of a tag, read the way Qt reads it: character
+    /// references in the name and the value are decoded, and the name is
+    /// matched without regard to case, by Unicode's rules (a long s is an
+    /// "s", the Kelvin sign a "k").
+    fn add(&mut self, key: Word, value: Option<Word>) {
+        let (Word::Plain(key) | Word::Quoted(key)) = key;
+        let Some(Word::Plain(value) | Word::Quoted(value)) = value else {
+            return;
+        };
+        let key: String = decode_references(key)
+            .chars()
+            .map(|c| match c {
+                '\u{17f}' => 's',
+                '\u{212a}' => 'k',
+                c => c,
+            })
+            .flat_map(char::to_lowercase)
+            .collect();
+        let value = decode_references(value);
+        if key == "style" {
+            // Not the digits of a colour ("#123456").
+            let mut digits = 0;
+            let mut colour = false;
+            for c in css_unescaped(&value).chars() {
+                colour = c == '#' || (colour && c.is_ascii_hexdigit());
+                digits = if c.is_ascii_digit() && !colour { digits + 1 } else { 0 };
+                self.too_much |= digits > MAX_STYLE_DIGITS;
+            }
+            return;
+        }
+        let max = match key.as_str() {
+            "colspan" => MAX_COLSPAN,
+            "rowspan" => MAX_ROWSPAN,
+            "cellpadding" | "cellspacing" | "border" => MAX_TABLE_SPACING,
+            "width" | "height" | "size" => MAX_LENGTH,
+            _ => return,
+        };
+        let asked = number(&value);
+        self.too_much |= asked > max;
+        match key.as_str() {
+            "colspan" => self.extra_columns += (asked - 1.0).max(0.0),
+            "rowspan" => self.extra_rows += (asked - 1.0).max(0.0),
+            _ => {}
         }
     }
+
+    /// Whether a tag asking for `wanted` may follow the tags counted here.
+    fn allows(&self, wanted: &Sizes) -> bool {
+        !wanted.too_much
+            && self.extra_columns + wanted.extra_columns <= MAX_EXTRA_COLUMNS
+            && self.extra_rows + wanted.extra_rows <= MAX_EXTRA_ROWS
+    }
+
+    fn take(&mut self, wanted: &Sizes) {
+        self.extra_columns += wanted.extra_columns;
+        self.extra_rows += wanted.extra_rows;
+    }
+}
+
+/// `text` with its numeric character references ("&#49;", "&#x31;")
+/// replaced by their characters, as QTextHtmlParser's parseEntity does: up
+/// to eight characters and a semicolon. Named references are left: none is
+/// a digit or a letter of an attribute name.
+fn decode_references(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("&#") {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("&#") {
+        out.push_str(&rest[..at]);
+        let body = &rest[at + 2..];
+        let decoded = body
+            .char_indices()
+            .take(8)
+            .find(|&(_, c)| c == ';')
+            .and_then(|(end, _)| {
+                let digits = &body[..end];
+                let code = match digits.strip_prefix(['x', 'X']) {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                    None => digits.parse().ok()?,
+                };
+                Some((char::from_u32(code)?, end + 1))
+            });
+        match decoded {
+            Some((c, used)) => {
+                out.push(c);
+                rest = &body[used..];
+            }
+            None => {
+                out.push_str("&#");
+                rest = body;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.into()
+}
+
+/// `css` with its escapes replaced by the characters they stand for: a
+/// backslash and up to six hexadecimal digits (and a space that ends them),
+/// or a backslash and any other character.
+fn css_unescaped(css: &str) -> std::borrow::Cow<'_, str> {
+    if !css.contains('\\') {
+        return css.into();
+    }
+    let mut out = String::with_capacity(css.len());
+    let mut chars = css.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let mut code = 0u32;
+        let mut digits = 0;
+        while digits < 6
+            && let Some(d) = chars.peek().and_then(|c| c.to_digit(16))
+        {
+            code = code * 16 + d;
+            digits += 1;
+            chars.next();
+        }
+        if digits == 0 {
+            out.extend(chars.next());
+            continue;
+        }
+        out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+        if chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+    }
+    out.into()
+}
+
+/// An upper bound of the size Qt reads from an attribute value, whichever
+/// way it reads it (whole or with a fraction, with a sign, an exponent or a
+/// unit): the largest number its digits spell, or infinity if it has an
+/// exponent ("1e9") or too many digits to be a size.
+fn number(value: &str) -> f64 {
+    let b = value.as_bytes();
+    let mut largest: f64 = 0.0;
+    let mut run: f64 = 0.0;
+    let mut digits = 0;
+    for (i, &c) in b.iter().enumerate() {
+        if c.is_ascii_digit() {
+            digits += 1;
+            run = run * 10.0 + f64::from(c - b'0');
+            largest = largest.max(run);
+            if digits > 15 {
+                return f64::INFINITY;
+            }
+            continue;
+        }
+        if digits > 0 && matches!(c, b'e' | b'E') {
+            let next = match b.get(i + 1) {
+                Some(b'+' | b'-') => b.get(i + 2),
+                other => other,
+            };
+            if next.is_some_and(u8::is_ascii_digit) {
+                return f64::INFINITY;
+            }
+        }
+        run = 0.0;
+        digits = 0;
+    }
+    largest
 }
 
 /// An element name as Qt would see it.
@@ -660,5 +877,65 @@ mod tests {
             "{:?}",
             start.elapsed()
         );
+    }
+
+    #[test]
+    fn huge_spans_and_sizes_are_escaped() {
+        for html in [
+            "<table><tr><td colspan=\"100000\" rowspan=\"100000\">c</td></tr></table>",
+            "text <td colspan=100000>c</td>",
+            "<td COLSPAN='101'>c",
+            "<td rowspan=\"1001\">c",
+            "<td \"colspan\"=\"5000\">c",
+            "<td colspan=\"&#49;&#48;&#48;&#48;\">c",
+            "<td cols&#112;an=\"1000\">c",
+            "<td col\u{17f}pan=\"1000\">c",
+            "<td ROW&#x53;PAN=\"&#x39;999\">c",
+            "<span \u{17f}tyle=\"font-size:999999pt\">s</span>",
+            "<div style=\"margin: 9&#57;9999px\">s</div>",
+            "<div style=\"margin: 99\\39 999px\">s</div>",
+            "<td colspan=\"1e5\">c",
+            "<table cellpadding=\"9999999\"><tr><td>x</td></tr></table>",
+            "<table cellspacing=\"1001\" border=\"2\"><tr><td>x</td></tr></table>",
+            "<table border=99999>",
+            "<table width=\"99999999%\">",
+            "<font size=\"99999\">f</font>",
+            "<span style=\"font-size:999999pt\">s</span>",
+            "<div style=\"margin: 1&#48;0000000px\">s</div>",
+            "<div style=\"margin: \\31 00000px\">s</div>",
+        ] {
+            assert_eq!(escaped(html), 1, "{html}");
+        }
+    }
+
+    #[test]
+    fn ordinary_spans_and_sizes_pass() {
+        for html in [
+            "<table border=\"1\" cellpadding=\"8\" cellspacing=\"0\" width=\"100%\"><tr><td colspan=\"3\" rowspan=\"2\">c</td></tr></table>",
+            "<img src=\"photo_20240101123456.png\" width=\"1060\" height=\"2em\">",
+            "<a href=\"https://example.com/issues/1234567890\">x</a>",
+            "<span style=\"font-family:&quot;Segoe UI&quot;,\u{5fae}\u{8f6f}; font-size: 12.5pt; color:#123456\">s</span>",
+            "<span style=\"font-family:&#39;Segoe UI&#39;,\\5FAE\\8F6F; font-size: 12&#46;5pt; color:&#35;123456\">s</span>",
+            "<td colspan=\"&#50;\" rowspan=\"&#x32;\" title=\"&#49;&#48;&#48;&#48;&#48;&#48;\">c",
+            "<td data&#45;n=\"1000000\" \u{212a}ey=\"99999999\">c",
+            "<td title=\"since 1999999\" data-id=\"123456789\">c",
+            "<td colspan=\"100\" rowspan=\"1000\">c",
+            "<ol start=\"2147483647\"><li value=\"100000\">x</ol>",
+        ] {
+            assert_eq!(limit_nesting(html), None, "{html}");
+        }
+    }
+
+    #[test]
+    fn spans_of_a_block_have_a_budget() {
+        // Each cell is fine alone; together they would make Qt lay out
+        // thousands of columns.
+        let html = "<table><tr>".to_string() + &"<td colspan=\"100\">c</td>".repeat(50);
+        assert_eq!(escaped(&html), 50 - 5);
+        let html = "<table><tr>".to_string() + &"<td rowspan=\"1000\">c</td>".repeat(50);
+        assert_eq!(escaped(&html), 50 - 20);
+        // An escaped tag uses none of the budget.
+        let html = "<td colspan=\"100000\">c</td>".repeat(3) + "<td colspan=\"2\">c</td>";
+        assert_eq!(escaped(&html), 3);
     }
 }
