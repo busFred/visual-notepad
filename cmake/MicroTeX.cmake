@@ -13,7 +13,8 @@ FetchContent_Declare(
 FetchContent_Declare(
     tinyxml2_src
     GIT_REPOSITORY https://github.com/leethomason/tinyxml2.git
-    GIT_TAG 10.0.0
+    # 10.0.0, by commit: a tag can be moved to other code.
+    GIT_TAG 321ea883b7190d4e85cae5512a12e5eaa8f8731f
     SOURCE_SUBDIR no-cmake
 )
 FetchContent_MakeAvailable(microtex_src tinyxml2_src)
