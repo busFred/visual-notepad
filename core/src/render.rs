@@ -549,7 +549,8 @@ impl<'r> Html<'r> {
             NodeValue::Math(m) => {
                 let _ = write!(
                     self.out,
-                    "<img src=\"vn-math:{}\" style=\"vertical-align: middle\" />",
+                    // The app aligns it to the baseline (placeInlineMath).
+                    "<img src=\"vn-math:{}\" />",
                     self.inline_math.len()
                 );
                 self.inline_math

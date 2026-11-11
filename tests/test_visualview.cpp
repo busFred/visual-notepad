@@ -369,6 +369,10 @@ private Q_SLOTS:
     void svgBombsAreRefused();
     void hugeBlocksFallBackToTheirSource_data();
     void hugeBlocksFallBackToTheirSource();
+    void inlineMathSitsOnTheBaseline();
+    void mathFollowsTheTextSize();
+    void wideMathShrinksToTheColumn();
+    void mathIsSharpWhenZoomed();
     void ordinaryBlocksIgnoreTheLayoutLimits();
     void longRunsWrapTheSameWithTheLimits();
     void scrollingKeepsOnlyRecentRenders();
@@ -3642,6 +3646,109 @@ void TestVisualView::hugeBlocksFallBackToTheirSource()
 }
 
 // Everything an ordinary page holds, and then some, renders as before.
+void TestVisualView::inlineMathSitsOnTheBaseline()
+{
+    // A formula no taller than the text leaves its line as high as without.
+    QCOMPARE(renderFirstBlock(QStringLiteral("Some text $k = 32$ and more"))->height(),
+             renderFirstBlock(QStringLiteral("Some text k = 32 and more"))->height());
+    // The bottom of an "x" of the text and of the "x" a formula ends with
+    // are on one row: the formula is on the text's baseline. Also after a
+    // fraction, which reaches deeper than the text does.
+    for (const QString tex : {QStringLiteral("x"), QStringLiteral("\\frac{a}{b}x")}) {
+        const QImage image = paintBlock(*renderFirstBlock(QStringLiteral("x $%1$").arg(tex)));
+        // Formulas are filled outlines, not hinted to whole pixels as the
+        // text is: the edge of a thin stroke is lighter grey.
+        const auto ink = [&](int x, int y) { return qGray(image.pixel(x, y)) < 200; };
+        const auto columnHasInk = [&](int x) {
+            for (int y = 0; y < image.height(); ++y)
+                if (ink(x, y))
+                    return true;
+            return false;
+        };
+        const auto lowestInk = [&](int from, int to) {
+            for (int y = image.height() - 1; y >= 0; --y)
+                for (int x = from; x <= to; ++x)
+                    if (ink(x, y))
+                        return y;
+            return -1;
+        };
+        int textStart = 0;
+        while (textStart < image.width() && !columnHasInk(textStart))
+            ++textStart;
+        int textEnd = textStart;
+        while (textEnd + 1 < image.width() && columnHasInk(textEnd + 1))
+            ++textEnd;
+        int mathEnd = image.width() - 1;
+        while (mathEnd > textEnd && !columnHasInk(mathEnd))
+            --mathEnd;
+        QVERIFY2(mathEnd > textEnd + 3, qPrintable(tex));
+        const int text = lowestInk(textStart, textEnd);
+        const int math = lowestInk(mathEnd - 3, mathEnd);
+        QVERIFY2(qAbs(text - math) <= 1, qPrintable(QStringLiteral("%1: text %2, formula %3").arg(tex).arg(text).arg(math)));
+    }
+}
+
+// The rectangle of the pixels darker than the background.
+static QRect inkBounds(const QImage &image)
+{
+    QRect bounds;
+    for (int y = 0; y < image.height(); ++y)
+        for (int x = 0; x < image.width(); ++x)
+            if (qGray(image.pixel(x, y)) < 200)
+                bounds |= QRect(x, y, 1, 1);
+    return bounds;
+}
+
+void TestVisualView::mathFollowsTheTextSize()
+{
+    // A heading's formula is as large as the heading's text.
+    const QRect heading = inkBounds(paintBlock(*renderFirstBlock(QStringLiteral("# $x^2$"))));
+    const QRect paragraph = inkBounds(paintBlock(*renderFirstBlock(QStringLiteral("$x^2$"))));
+    QVERIFY(!heading.isEmpty() && !paragraph.isEmpty());
+    QVERIFY2(heading.height() > paragraph.height() * 1.3,
+             qPrintable(QStringLiteral("%1 %2").arg(heading.height()).arg(paragraph.height())));
+}
+
+void TestVisualView::wideMathShrinksToTheColumn()
+{
+    // Wider than the column: shrunk to it as a whole, not cut off.
+    const QString markdown = QStringLiteral("$%1y$").arg(repeated(QStringLiteral("x_{%1}+"), 30));
+    const QRect wide = inkBounds(paintBlock(*renderFirstBlock(markdown, 3000), 3000));
+    const QRect narrow = inkBounds(paintBlock(*renderFirstBlock(markdown, 300), 300));
+    QVERIFY2(wide.width() > 600, qPrintable(QString::number(wide.width())));
+    QVERIFY2(narrow.width() <= 300 && narrow.width() > 270, qPrintable(QString::number(narrow.width())));
+    const qreal shrink = qreal(narrow.width()) / wide.width();
+    QVERIFY2(qAbs(narrow.height() - wide.height() * shrink) <= 3,
+             qPrintable(QStringLiteral("%1 %2 %3").arg(narrow.height()).arg(wide.height()).arg(shrink)));
+}
+
+void TestVisualView::mathIsSharpWhenZoomed()
+{
+    // Painted four times as large (as a magnified view paints), formulas
+    // are drawn at that size: edges stay a pixel wide, where a magnified
+    // picture's blur over four.
+    for (const QString &markdown : {QStringLiteral("$$\\sum_{i=1}^n \\frac{a_i}{b}$$"),
+                                    QStringLiteral("Text $\\sum_{i=1}^n \\frac{a_i}{b}$ text")}) {
+        const auto block = renderFirstBlock(markdown);
+        QImage image(QSize(548, int(block->height()) + 1) * 4, QImage::Format_RGB32);
+        image.fill(Qt::white);
+        {
+            QPainter painter(&image);
+            painter.scale(4, 4);
+            block->paint(painter, QPointF(0, 0), 548);
+        }
+        int partial = 0, full = 0;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                const int gray = qGray(image.pixel(x, y));
+                full += gray < 60;
+                partial += gray >= 60 && gray < 230;
+            }
+        }
+        QVERIFY2(full > 0 && partial < full, qPrintable(QStringLiteral("%1: %2 partly, %3 fully").arg(markdown).arg(partial).arg(full)));
+    }
+}
+
 void TestVisualView::ordinaryBlocksIgnoreTheLayoutLimits()
 {
     const QStringList documents = {

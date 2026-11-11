@@ -2,6 +2,7 @@
 
 #include "../Theme.h"
 #include "MarkdownEditing.h"
+#include "MathObject.h"
 #include "MathRenderer.h"
 #include "RemoteImages.h"
 
@@ -17,6 +18,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QHash>
 #include <QImageReader>
 #include <QPainter>
@@ -53,23 +55,25 @@ qsizetype imageCost(const QImage &image)
     return qMax<qsizetype>(1, image.sizeInBytes() / 1024);
 }
 
-// Rendered math by TeX and style. Blocks are re-created after edits and
-// option changes, and MicroTeX is slow enough to notice; GUI thread only.
-QImage cachedMath(const QString &tex, const math::Style &style)
+// Formulas laid out, by TeX and style (inline or display); any size is drawn
+// from one. Blocks are re-created after edits, zooming and option changes,
+// and MicroTeX is slow enough to notice; GUI thread only.
+std::shared_ptr<const math::Formula> cachedFormula(const QString &tex, bool display)
 {
-    static QCache<QString, QImage> cache(32 * 1024); // KiB
-    const QString key = QStringLiteral("%1|%2|%3|%4|")
-                            .arg(style.pixelSize)
-                            .arg(style.color.rgba())
-                            .arg(style.devicePixelRatio)
-                            .arg(int(style.display))
-                        + tex;
-    if (const QImage *hit = cache.object(key))
+    using Kept = std::shared_ptr<const math::Formula>;
+    static QCache<QString, Kept> cache(32 * 1024); // KiB
+    const QString key = (display ? QStringLiteral("d|") : QStringLiteral("i|")) + tex;
+    if (const Kept *hit = cache.object(key))
         return *hit;
-    const QImage image = math::render(tex, style);
-    cache.insert(key, new QImage(image), imageCost(image));
-    return image;
+    Kept formula = math::layout(tex, display);
+    const qsizetype kib = 1 + formula->elements() * qsizetype(sizeof(QPainterPath::Element)) / 1024;
+    cache.insert(key, new Kept(formula), kib);
+    return formula;
 }
+
+// How much larger than the text around them formulas are drawn.
+constexpr qreal inlineMathScale = 1.1;
+constexpr qreal displayMathScale = 1.2;
 
 // Largest SVG, once unpacked, that is scanned and opened. Pictures that are
 // shown in a column are far smaller; a gzip bomb is not.
@@ -751,6 +755,8 @@ public:
     {
         for (const auto &tex : block.inline_math)
             m_math.append(QString::fromUtf8(tex.data(), tex.size()));
+        if (!m_math.isEmpty() && !m_listing)
+            m_mathObject = MathObject::install(this);
     }
 
     // Pictures wider than the column (an explicit width="1060" in the HTML)
@@ -775,6 +781,63 @@ public:
             }
         }
     }
+
+    // Formulas (the pictures "vn-math:N" inline, "vn-math-display:N" on a
+    // line of their own in a list or quote) become MathObject characters:
+    // drawn as shapes, sharp at any zoom, on the baseline of the text around
+    // them and as large as it (a heading's are a heading's size). One wider
+    // than the column shrinks to it, its baseline still on the text's. (The
+    // HTML cannot ask for the alignment. Centred instead, a formula pushed
+    // its line apart above and below.)
+    void placeMath()
+    {
+        if (!m_mathObject)
+            return;
+        // One change, and none to undo: a change of format for each formula,
+        // each recorded to be undone, took longer than the rest of the block.
+        const bool undo = isUndoRedoEnabled();
+        setUndoRedoEnabled(false);
+        QTextCursor cursor(this);
+        cursor.beginEditBlock();
+        for (QTextBlock block = begin(); block.isValid(); block = block.next()) {
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                const QTextFragment fragment = it.fragment();
+                const QTextCharFormat old = fragment.charFormat();
+                if (!old.isImageFormat())
+                    continue;
+                const QString name = old.toImageFormat().name();
+                const bool display = name.startsWith(QLatin1String("vn-math-display:"));
+                if (!display && !name.startsWith(QLatin1String("vn-math:")))
+                    continue;
+                const auto formula = cachedFormula(math::withMacros(m_math.value(name.section(u':', 1).toInt())), display);
+                // The font Qt measures the character with: the text's (as the
+                // document resolves it).
+                const QFont font = old.font();
+                qreal scale = QFontInfo(font).pixelSize() * (display ? displayMathScale : inlineMathScale)
+                              / math::layoutPixelSize;
+                if (formula->width * scale > m_context.width && m_context.width > 0)
+                    scale = m_context.width / formula->width;
+                QTextCharFormat format = old;
+                for (const int property : {int(QTextFormat::ImageName), int(QTextFormat::ImageWidth),
+                                           int(QTextFormat::ImageHeight), int(QTextFormat::ImageQuality)})
+                    format.clearProperty(property);
+                format.setObjectType(MathObject::type);
+                format.setVerticalAlignment(QTextCharFormat::AlignBaseline);
+                const QFontMetricsF metrics(font);
+                format.setProperty(MathObject::indexProperty, m_mathObject->add({formula, scale, metrics.ascent()}));
+                if (formula->depth * scale > metrics.descent())
+                    MathObject::deepen(format, font, formula->depth * scale);
+                cursor.setPosition(fragment.position());
+                cursor.setPosition(fragment.position() + fragment.length(), QTextCursor::KeepAnchor);
+                cursor.setCharFormat(format);
+            }
+        }
+        cursor.endEditBlock();
+        setUndoRedoEnabled(undo);
+    }
+
+    // Path elements of the formulas: what they cost to keep and draw.
+    qsizetype mathElements() const { return m_mathObject ? m_mathObject->elements() : 0; }
 
     // Pictures on other machines lose their source before layout: when
     // loadResource() declines one, Qt's image handler opens the source
@@ -841,17 +904,10 @@ protected:
             return remoteImage(type, url);
         if (m_listing)
             return standIn(type, url);
-        const QString name = url.toString();
-        if (name.startsWith(QLatin1String("vn-math"))) {
-            const bool display = name.startsWith(QLatin1String("vn-math-display:"));
-            const int index = name.section(u':', 1).toInt();
-            math::Style style;
-            style.pixelSize = QFontInfo(m_context.font).pixelSize() * (display ? 1.2 : 1.1);
-            style.color = theme::color(theme::Role::text);
-            style.devicePixelRatio = m_context.devicePixelRatio;
-            style.display = display;
-            return keep(type, url, cachedMath(math::withMacros(m_math.value(index)), style));
-        }
+        // Formulas are MathObjects (placeMath) by the time anything is
+        // drawn: a name left over is blank.
+        if (url.toString().startsWith(QLatin1String("vn-math")))
+            return standIn(type, url);
         const QString path = localPath(url);
         if (path.isEmpty())
             return QVariant();
@@ -950,6 +1006,7 @@ private:
     RenderContext m_context;
     bool m_listing = false;
     QStringList m_math;
+    MathObject *m_mathObject = nullptr; // Owned by the document; with formulas only.
     qsizetype m_pictureBytes = 0;
     QStringList m_remote;
     bool m_pending = false;
@@ -1404,15 +1461,14 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         r.m_height = 0;
         return result;
     case core::BlockKind::Math: {
-        math::Style style;
-        style.pixelSize = QFontInfo(context.font).pixelSize() * 1.2;
-        style.color = theme::color(theme::Role::text);
-        style.devicePixelRatio = context.devicePixelRatio;
-        style.display = true;
+        // Drawn as shapes (see paint()), shrunk to the column if wider.
         r.m_kind = Kind::Image;
-        r.m_image = cachedMath(math::withMacros(text), style);
+        r.m_formula = cachedFormula(math::withMacros(text), true);
+        r.m_formulaScale = QFontInfo(context.font).pixelSize() * displayMathScale / math::layoutPixelSize;
+        if (r.m_formula->width * r.m_formulaScale > context.width && context.width > 0)
+            r.m_formulaScale = context.width / r.m_formula->width;
         r.m_centered = true;
-        r.m_height = r.m_image.height() / r.m_image.devicePixelRatio() + 2 * codePadY + blockGap;
+        r.m_height = r.pictureSize().height() + 2 * codePadY + blockGap;
         return result;
     }
     case core::BlockKind::Code:
@@ -1451,6 +1507,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         const QString html = QString::fromUtf8(block.html.data(), block.html.size());
         doc->setHtml(html);
         doc->dropNetworkImages();
+        doc->placeMath();
         doc->fitImages(context.width);
         if (item && !doc->begin().textList() && doc->blockCount() == 1 && doc->begin().text().isEmpty()) {
             // An empty item, which Qt drops: an empty line of the list as one
@@ -1490,7 +1547,8 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         if (context.allowRemoteImages && mayLoadPictures(QByteArrayView(block.html.data(), qsizetype(block.html.size()))))
             doc->loadPaintedPictures();
         r.m_pending = doc->hasPendingDownload();
-        r.m_pictureBytes = doc->pictureBytes(); // Resolved by the layout (and the dry paint).
+        r.m_pictureBytes = doc->pictureBytes() // Resolved by the layout (and the dry paint).
+                           + doc->mathElements() * qsizetype(sizeof(QPainterPath::Element));
         r.m_doc = std::move(doc);
         r.collectLineAnchors(0);
         return result;
@@ -1561,6 +1619,13 @@ void RenderedBlock::collectLineAnchors(int sourceLines)
                      [](const LineAnchor &a, const LineAnchor &b) { return a.first < b.first; });
 }
 
+QSizeF RenderedBlock::pictureSize() const
+{
+    if (m_formula)
+        return QSizeF(m_formula->width, m_formula->height()) * m_formulaScale;
+    return m_image.size() / m_image.devicePixelRatio();
+}
+
 QPointF RenderedBlock::contentOffset() const
 {
     return m_kind == Kind::Code ? QPointF(codePadX, m_part.first ? codePadY : 0) : QPointF(0, 0);
@@ -1572,10 +1637,15 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
     case Kind::Empty:
         return;
     case Kind::Image: {
-        const QSizeF size = m_image.size() / m_image.devicePixelRatio();
+        const QSizeF size = pictureSize();
         const qreal x = m_centered ? topLeft.x() + qMax<qreal>(0, (width - size.width()) / 2) : topLeft.x();
         const QRectF imageRect(QPointF(x, topLeft.y() + codePadY), size);
-        painter.drawImage(imageRect, m_image);
+        if (m_formula) {
+            m_formula->draw(painter, imageRect.topLeft() + QPointF(0, m_formula->ascent * m_formulaScale),
+                            m_formulaScale, theme::color(theme::Role::text));
+        } else {
+            painter.drawImage(imageRect, m_image);
+        }
         if (selection.whole) {
             // A light tint and an outline keep the picture readable on
             // themes whose selection colour is dark.
@@ -1925,7 +1995,7 @@ QString RenderedBlock::anchorAt(const QPointF &point) const
 std::optional<RenderedBlock::Picture> RenderedBlock::pictureAt(const QPointF &point) const
 {
     if (m_kind == Kind::Image) {
-        const QSizeF size = m_image.size() / m_image.devicePixelRatio();
+        const QSizeF size = pictureSize();
         // paint() centres these in the column.
         const qreal x = m_centered ? qMax<qreal>(0, (m_width - size.width()) / 2) : 0;
         if (!QRectF(QPointF(x, codePadY), size).contains(point))
@@ -1964,6 +2034,13 @@ QImage RenderedBlock::pictureImage(const Picture &picture) const
                           QImage::Format_RGBA8888_Premultiplied).copy();
         } catch (const std::exception &) { // rust::Error
         }
+    }
+    if (m_formula) {
+        // Shapes: drawn larger rather than magnified, as diagrams are.
+        math::Style style;
+        style.pixelSize = 3 * m_formulaScale * math::layoutPixelSize;
+        style.color = theme::color(theme::Role::text);
+        return math::toImage(*m_formula, style);
     }
     QImage image = m_image;
     image.setDevicePixelRatio(1);
@@ -2020,6 +2097,8 @@ int RenderedBlock::cost() const
     int kib = 1;
     if (!m_image.isNull())
         kib += int(m_image.sizeInBytes() / 1024);
+    if (m_formula) // Shared with the formula cache, as pictures are.
+        kib += int(m_formula->elements() * qsizetype(sizeof(QPainterPath::Element)) / 1024);
     kib += int(m_pictureBytes / 1024);
     if (m_doc) {
         const int characters = m_doc->characterCount();
