@@ -133,6 +133,9 @@ jobs:
           done
           test -d "$dir/opt/visnotepad/licenses/conda" || { echo "no conda licenses"; fail=1; }
           test -f "$dir/opt/visnotepad/share/visnotepad/microtex/res/fonts/fonts.json" || ls "$dir/opt/visnotepad/share/visnotepad/microtex/res"
+          # Formulas are drawn by the app run as a worker, on the offscreen
+          # platform: with nothing from the build machine in the environment.
+          env -i HOME="$HOME" "$(command -v python3)" scripts/check_math_worker.py "$dir/opt/visnotepad/bin/visnotepad" || fail=1
           exit $fail
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -271,6 +274,17 @@ jobs:
           start "" /wait "%GITHUB_WORKSPACE%\dist\visnotepad\visnotepad.exe" --version
           echo exit code %ERRORLEVEL%
           if not "%ERRORLEVEL%"=="0" exit /b 1
+
+      - name: Math worker of the deployed app (only System32 on PATH)
+        shell: pwsh
+        run: |
+          # Formulas are drawn by the app run as a worker, on the real
+          # platform plugin as on a user's machine.
+          $python = (Get-Command python).Source
+          $env:PATH = 'C:\Windows\System32'
+          Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue
+          & $python scripts\check_math_worker.py "$env:GITHUB_WORKSPACE\dist\visnotepad\visnotepad.exe"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Portable zip
         shell: pwsh
@@ -424,6 +438,8 @@ jobs:
           test -f "$app/Contents/Resources/microtex/res/.clatexmath-res_root" || { echo "no MicroTeX resources"; fail=1; }
           # Starts with nothing from the build machine in the environment.
           env -i HOME="$HOME" "$app/Contents/MacOS/visnotepad" --version || fail=1
+          # Formulas are drawn by the app run as a worker, on the offscreen platform.
+          env -i HOME="$HOME" "$(command -v python3)" scripts/check_math_worker.py "$app/Contents/MacOS/visnotepad" || fail=1
           exit $fail
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
