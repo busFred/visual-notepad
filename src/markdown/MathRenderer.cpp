@@ -34,10 +34,7 @@
 #include <string>
 #include <thread>
 
-#ifdef Q_OS_WIN
-// Not <windows.h>: its min and max macros break MicroTeX's headers.
-#include <qt_windows.h>
-#else
+#ifndef Q_OS_WIN
 #include <cerrno>
 #include <csignal>
 #include <sys/resource.h>
@@ -53,6 +50,12 @@
 #include "latex.h"
 #include "platform/qt/graphic_qt.h"
 #include "render.h"
+
+#ifdef Q_OS_WIN
+// After MicroTeX's headers: the names Windows' headers define as macros
+// ("small", and "min" and "max" in <windows.h> itself) are names in them.
+#include <qt_windows.h>
+#endif
 
 // A process of its own for every formula, where a running process can be
 // copied (see formulasAreApart). VN_MATH_SHARED_WORKER builds the other way
