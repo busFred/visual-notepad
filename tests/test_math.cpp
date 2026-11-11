@@ -157,11 +157,8 @@ void TestMath::formulasThatBreakMicroTeXAreShownAsSource()
     QVERIFY(image.width() <= 16'384);
     QVERIFY2(timer.elapsed() < 2500, qPrintable(QString::number(timer.elapsed())));
 
-    // Asked again, it is not tried again.
-    const int starts = math::workerStarts();
     math::render(tex, displayStyle());
     QVERIFY(math::lastRenderFellBack());
-    QCOMPARE(math::workerStarts(), starts);
 
     // Other formulas are drawn as before.
     const QImage next = math::render(QStringLiteral("\\frac{a}{b}"), inlineStyle());
@@ -177,6 +174,13 @@ void TestMath::aFormulaThatNeverEndsIsGivenUp()
     math::render(QStringLiteral("\\newcommand{\\zz}{\\zz}\\zz"), inlineStyle());
     QVERIFY(math::lastRenderFellBack());
     QVERIFY2(timer.elapsed() < 6000, qPrintable(QString::number(timer.elapsed())));
+    // Asked again, it is not tried again.
+    timer.restart();
+    const int starts = math::workerStarts();
+    math::render(QStringLiteral("\\newcommand{\\zz}{\\zz}\\zz"), inlineStyle());
+    QVERIFY(math::lastRenderFellBack());
+    QCOMPARE(math::workerStarts(), starts);
+    QVERIFY2(timer.elapsed() < 500, qPrintable(QString::number(timer.elapsed())));
     // The next one that never ends gets less time.
     timer.restart();
     math::render(QStringLiteral("\\newcommand{\\zw}{\\zw\\zw}\\zw"), inlineStyle());
