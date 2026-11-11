@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -223,7 +224,18 @@ def main():
     dmg = os.path.join(args.out, f"visnotepad-{version}-macos-{arch}.dmg")
     if os.path.exists(dmg):
         os.unlink(dmg)
-    run("hdiutil", "create", "-volname", "Visual Notepad", "-srcfolder", stage, "-ov", "-format", "UDZO", dmg)
+    # hdiutil fails now and then with "Resource busy" on GitHub's macOS
+    # machines (something else has the new image open for a moment): try
+    # again a few times before giving up.
+    for attempt in range(1, 6):
+        try:
+            run("hdiutil", "create", "-volname", "Visual Notepad", "-srcfolder", stage, "-ov", "-format", "UDZO", dmg)
+            break
+        except subprocess.CalledProcessError:
+            if attempt == 5:
+                raise
+            print(f"hdiutil failed (attempt {attempt}); trying again", file=sys.stderr)
+            time.sleep(10 * attempt)
     print(dmg)
 
 
