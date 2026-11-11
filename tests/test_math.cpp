@@ -155,7 +155,10 @@ void TestMath::formulasThatBreakMicroTeXAreShownAsSource()
     QVERIFY(!image.isNull());
     QVERIFY(hasInk(image));
     QVERIFY(image.width() <= 16'384);
-    QVERIFY2(timer.elapsed() < 2500, qPrintable(QString::number(timer.elapsed())));
+    // Most of these crash MicroTeX at once; with another standard library
+    // some run on instead (what they do is undefined), until the worker's
+    // time limit of 3 s ends them.
+    QVERIFY2(timer.elapsed() < 5000, qPrintable(QString::number(timer.elapsed())));
 
     math::render(tex, displayStyle());
     QVERIFY(math::lastRenderFellBack());
