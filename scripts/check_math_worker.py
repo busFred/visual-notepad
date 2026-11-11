@@ -4,7 +4,7 @@
 The app draws formulas in a second process of itself, "visnotepad
 --math-worker" (see src/markdown/MathRenderer.h). This starts that worker the
 way the app does, asks it for one formula and then for one that crashes
-MicroTeX, and fails unless the first comes back as a picture and the second
+MicroTeX, and fails unless the first comes back as shapes and the second
 does no worse than end the worker. A package that lacks what the worker needs
 (the offscreen platform plugin, MicroTeX's fonts) fails here, not on a user's
 machine with every formula shown as source text.
@@ -18,16 +18,33 @@ import subprocess
 import sys
 import threading
 
-MAGIC = 0x564E4D31  # "VNM1", the first bytes of every answer.
+MAGIC = 0x564E4D33  # "VNM3", the first bytes of every answer.
 
 
-def request(tex, pixel_size=16.0, rgba=0xFF000000, ratio=1.0, display=False):
-    """One request, as Worker::render() in MathRenderer.cpp writes it."""
+def request(tex, display=False):
+    """One request, as Worker::layout() in MathRenderer.cpp writes it."""
     utf8 = tex.encode("utf-8")
     # QDataStream: big-endian; a QByteArray is its length and its bytes.
-    body = struct.pack(">I", len(utf8)) + utf8
-    body += struct.pack(">dIdB", pixel_size, rgba, ratio, 1 if display else 0)
+    body = struct.pack(">I", len(utf8)) + utf8 + struct.pack(">B", 1 if display else 0)
     return struct.pack("=I", len(body)) + body  # The size as the machine has it.
+
+
+def read_answer(pipe):
+    """(status, shapes bytes), or None when the worker ended first."""
+    header = read_exactly(pipe, 12)
+    if header is None:
+        return None
+    magic, status, size = struct.unpack("=Iii", header)
+    if magic != MAGIC:
+        sys.exit("not an answer: %r" % (header,))
+    if status != 1:
+        return status, b""
+    if not 0 < size <= 8 * 1024 * 1024:
+        sys.exit("an answer of %d bytes" % size)
+    shapes = read_exactly(pipe, size)
+    if shapes is None:
+        sys.exit("the answer of %d bytes is cut short" % size)
+    return status, shapes
 
 
 def read_exactly(pipe, size):
@@ -70,31 +87,31 @@ def main():
 
         worker.stdin.write(request(r"x^2+\frac{a}{b}"))
         worker.stdin.flush()
-        header = read_exactly(worker.stdout, 12)
-        if header is None:
+        answer = read_answer(worker.stdout)
+        if answer is None:
             sys.exit("the worker ended on an ordinary formula (exit code %s)" % worker.wait())
-        magic, width, height = struct.unpack("=Iii", header)
-        if magic != MAGIC or not (0 < width <= 16384 and 0 < height <= 16384):
-            sys.exit("no picture for an ordinary formula: %r" % (header,))
-        pixels = read_exactly(worker.stdout, width * height * 4)
-        if pixels is None:
-            sys.exit("the picture of %dx%d is cut short" % (width, height))
-        if not any(pixels[3::4]):
-            sys.exit("the picture of %dx%d is empty: no fonts?" % (width, height))
-        print("formula drawn: %dx%d pixels" % (width, height))
+        status, shapes = answer
+        if status != 1 or len(shapes) < 16:
+            sys.exit("no shapes for an ordinary formula (answer %d)" % status)
+        # Its size (QDataStream: big-endian, single precision), then shapes.
+        width, ascent, depth, count = struct.unpack(">fffI", shapes[:16])
+        if not (0 < width < 50000 and 0 < ascent < 50000 and 0 <= depth < 50000):
+            sys.exit("a formula of %r x %r + %r" % (width, ascent, depth))
+        # Five glyphs (x, 2, +, a, b) and the fraction's bar; without fonts,
+        # only the bar.
+        if count < 6:
+            sys.exit("the formula has %d shapes: no fonts?" % count)
+        print("formula drawn: %d shapes, %.0f wide at 100 pixels" % (count, width))
 
         # MicroTeX writes to memory that is not its own for this one. The
         # worker says so (Linux: a copy of it drew the formula) or ends.
         worker.stdin.write(request(r"\multicolumn{2}{c}{x}"))
         worker.stdin.flush()
-        header = read_exactly(worker.stdout, 12)
-        if header is None:
+        answer = read_answer(worker.stdout)
+        if answer is None:
             print("the formula that breaks MicroTeX ended the worker (exit code %s)" % worker.wait())
         else:
-            magic, width, height = struct.unpack("=Iii", header)
-            if magic != MAGIC:
-                sys.exit("nonsense after the formula that breaks MicroTeX: %r" % (header,))
-            print("the formula that breaks MicroTeX was answered with %d, %d" % (width, height))
+            print("the formula that breaks MicroTeX was answered with %d" % answer[0])
         worker.stdin.close()
         worker.wait()
     finally:

@@ -6,6 +6,11 @@ find_package(Qt6 REQUIRED COMPONENTS Test)
 
 # Formulas are drawn by the app run as a worker (see MathRenderer.h): every
 # program here names the app that was built with it.
+# Stands in for the worker in test_math_answers (made before every program
+# here gets the real one).
+add_executable(fake_math_worker fake_math_worker.cpp)
+target_link_libraries(fake_math_worker PRIVATE Qt6::Core)
+
 add_library(vn_test_worker OBJECT test_worker.cpp)
 target_link_libraries(vn_test_worker PRIVATE vn_app)
 target_compile_definitions(vn_test_worker PRIVATE VN_APP_PATH="$<TARGET_FILE:visnotepad>")
@@ -55,6 +60,13 @@ qt_add_executable(test_math test_math.cpp)
 target_link_libraries(test_math PRIVATE vn_app Qt6::Test)
 add_test(NAME math COMMAND test_math)
 set_tests_properties(math PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
+
+qt_add_executable(test_math_answers test_math_answers.cpp)
+target_link_libraries(test_math_answers PRIVATE vn_app Qt6::Test)
+target_compile_definitions(test_math_answers PRIVATE FAKE_MATH_WORKER="$<TARGET_FILE:fake_math_worker>")
+add_dependencies(test_math_answers fake_math_worker)
+add_test(NAME math_answers COMMAND test_math_answers)
+set_tests_properties(math_answers PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
 
 qt_add_executable(test_files test_files.cpp)
 target_link_libraries(test_files PRIVATE vn_app Qt6::Test)
