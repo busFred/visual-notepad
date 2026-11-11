@@ -788,7 +788,9 @@ public:
     // them and as large as it (a heading's are a heading's size). One wider
     // than the column shrinks to it, its baseline still on the text's. (The
     // HTML cannot ask for the alignment. Centred instead, a formula pushed
-    // its line apart above and below.)
+    // its line apart above and below.) The paragraphs they are in space
+    // their lines as a web page does: the space the line spacing adds is the
+    // text's, not a tall formula's multiplied.
     void placeMath()
     {
         if (!m_mathObject)
@@ -799,6 +801,7 @@ public:
         setUndoRedoEnabled(false);
         QTextCursor cursor(this);
         cursor.beginEditBlock();
+        QList<QTextBlock> withMath;
         for (QTextBlock block = begin(); block.isValid(); block = block.next()) {
             for (auto it = block.begin(); !it.atEnd(); ++it) {
                 const QTextFragment fragment = it.fragment();
@@ -830,7 +833,24 @@ public:
                 cursor.setPosition(fragment.position());
                 cursor.setPosition(fragment.position() + fragment.length(), QTextCursor::KeepAnchor);
                 cursor.setCharFormat(format);
+                if (withMath.isEmpty() || withMath.last() != block)
+                    withMath.append(block);
             }
+        }
+        // A line height of N% makes a line N% as high as its tallest part
+        // (QTextBlockFormat::lineHeight): a line with a fraction got the
+        // spacing of a fraction. Instead, every line gets the spacing the
+        // text's height gives, added: the same for a line of text.
+        for (const QTextBlock &block : std::as_const(withMath)) {
+            QTextBlockFormat format = block.blockFormat();
+            if (format.lineHeightType() != QTextBlockFormat::ProportionalHeight)
+                continue;
+            const QFontMetricsF metrics(block.charFormat().font());
+            // As Qt measures a line's height for the proportion.
+            const qreal text = qCeil(metrics.ascent() + metrics.descent() + qMax<qreal>(0, metrics.leading()));
+            format.setLineHeight(text * (format.lineHeight() / 100 - 1), QTextBlockFormat::LineDistanceHeight);
+            cursor.setPosition(block.position());
+            cursor.setBlockFormat(format);
         }
         cursor.endEditBlock();
         setUndoRedoEnabled(undo);

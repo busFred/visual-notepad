@@ -373,6 +373,7 @@ private Q_SLOTS:
     void mathFollowsTheTextSize();
     void wideMathShrinksToTheColumn();
     void mathIsSharpWhenZoomed();
+    void lineSpacingIsTheTextsBesideFormulas();
     void ordinaryBlocksIgnoreTheLayoutLimits();
     void longRunsWrapTheSameWithTheLimits();
     void scrollingKeepsOnlyRecentRenders();
@@ -3747,6 +3748,31 @@ void TestVisualView::mathIsSharpWhenZoomed()
         }
         QVERIFY2(full > 0 && partial < full, qPrintable(QStringLiteral("%1: %2 partly, %3 fully").arg(markdown).arg(partial).arg(full)));
     }
+}
+
+void TestVisualView::lineSpacingIsTheTextsBesideFormulas()
+{
+    // More line spacing adds as much to a paragraph with a tall formula as
+    // to one without: the space added is the text's, not the formula's
+    // multiplied (a fraction's line once got the spacing of a fraction).
+    const auto height = [](const QString &markdown, qreal lineHeight) {
+        const QByteArray utf8 = markdown.toUtf8();
+        const rust::Vec<core::Block> blocks = core::blocks(rust::Str(utf8.constData(), utf8.size()),
+                                                           core::RenderOptions{false, true, true, true, 1});
+        RenderContext ctx;
+        ctx.font = theme::textFont();
+        ctx.codeFont = theme::editorFont();
+        ctx.width = 300;
+        ctx.lineHeight = lineHeight;
+        return RenderedBlock::create(blocks.at(0), markdown, ctx)->height();
+    };
+    const QString words = QStringLiteral("Words that wrap onto a second line and then a third line of this paragraph ");
+    const QString tall = words + QStringLiteral("$\\frac{\\sum_k e^{s_{ik}}}{\\sqrt{d}}$");
+    const QString plain = words + QStringLiteral("x");
+    const qreal tallAdded = height(tall, 2.0) - height(tall, 1.0);
+    const qreal plainAdded = height(plain, 2.0) - height(plain, 1.0);
+    QVERIFY2(height(tall, 1.0) > height(plain, 1.0) + 5, "the formula is not taller than the text");
+    QVERIFY2(qAbs(tallAdded - plainAdded) <= 2, qPrintable(QStringLiteral("%1 %2").arg(tallAdded).arg(plainAdded)));
 }
 
 void TestVisualView::ordinaryBlocksIgnoreTheLayoutLimits()
