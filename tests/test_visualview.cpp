@@ -21,6 +21,7 @@
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
 #include <QPainterPath>
+#include <QRawFont>
 #include <QScrollBar>
 #include <QSet>
 #include <QElapsedTimer>
@@ -3836,10 +3837,11 @@ void TestVisualView::smallFormulasKeepTheLineInEveryFont()
             QFont probe(family);
             if (QFontInfo(probe).family() != family || QFontDatabase::isPrivateFamily(family))
                 continue; // Not this family, or not one to offer.
-            // A font without the letters of the line (a symbol font): the
-            // plain line would be in another font.
-            const QFontMetricsF probeMetrics(probe);
-            if (!std::all_of(u"Textandxy", u"Textandxy" + 9, [&](char16_t c) { return probeMetrics.inFont(QChar(c)); }))
+            // A font without the letters of the line itself (a symbol font,
+            // the app's Visual Notepad Depth): the plain line would be in
+            // another font. (QFontMetrics::inFont counts fallback fonts.)
+            const QRawFont raw = QRawFont::fromFont(probe);
+            if (!std::all_of(u"Textandxy", u"Textandxy" + 9, [&](char16_t c) { return raw.supportsCharacter(QChar(c)); }))
                 continue;
             fonts += !isDeep;
             for (int points = 9; points <= 14; ++points) {
