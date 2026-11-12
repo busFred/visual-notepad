@@ -788,9 +788,19 @@ public:
     // them and as large as it (a heading's are a heading's size). One wider
     // than the column shrinks to it, its baseline still on the text's. (The
     // HTML cannot ask for the alignment. Centred instead, a formula pushed
-    // its line apart above and below.) The paragraphs they are in space
-    // their lines as a web page does: the space the line spacing adds is the
-    // text's, not a tall formula's multiplied.
+    // its line apart above and below.)
+    //
+    // Line spacing follows TeX's rule (\baselineskip, \lineskiplimit): a
+    // formula that fits in the room its line has anyway (the font's ascent
+    // above the baseline, its descent and leading below, and half the space
+    // the line spacing adds on either side) changes nothing, as a superscript,
+    // a subscript or a pair of brackets does not; a taller one moves the
+    // lines apart by what it needs beyond that. The room is the font's own
+    // measure, however a font divides it (Calibri's small sizes have no
+    // descent and all their room below as leading), and a formula within it
+    // is drawn on the baseline the line was laid out with. The paragraphs
+    // space their lines as a web page does: the space the line spacing adds
+    // is the text's, not a tall formula's multiplied.
     void placeMath()
     {
         if (!m_mathObject)
@@ -803,6 +813,12 @@ public:
         cursor.beginEditBlock();
         QList<QTextBlock> withMath;
         for (QTextBlock block = begin(); block.isValid(); block = block.next()) {
+            // Half the space the line spacing adds between lines, and a
+            // pixel more (TeX's \lineskiplimit: lines may come that close).
+            // Without it, a formula a fraction of a pixel too deep would get
+            // a deeper font, and a font's descent may grow by pixels from
+            // one size to the next (Calibri: none at 13 px, 4 at 14 px).
+            const qreal slack = std::max<qreal>(0, lineGap(block) / 2) + 1;
             for (auto it = block.begin(); !it.atEnd(); ++it) {
                 const QTextFragment fragment = it.fragment();
                 const QTextCharFormat old = fragment.charFormat();
@@ -825,11 +841,25 @@ public:
                                            int(QTextFormat::ImageHeight), int(QTextFormat::ImageQuality)})
                     format.clearProperty(property);
                 format.setObjectType(MathObject::type);
-                format.setVerticalAlignment(QTextCharFormat::AlignBaseline);
                 const QFontMetricsF metrics(font);
-                format.setProperty(MathObject::indexProperty, m_mathObject->add({formula, scale, metrics.ascent()}));
-                if (formula->depth * scale > metrics.descent())
-                    MathObject::deepen(format, font, formula->depth * scale);
+                const qreal leading = std::max<qreal>(0, metrics.leading());
+                const qreal up = formula->ascent * scale;
+                const qreal down = formula->depth * scale;
+                MathObject::Placed placed{formula, scale};
+                if (up <= metrics.ascent() + slack && down <= metrics.descent() + leading + slack) {
+                    format.setVerticalAlignment(QTextCharFormat::AlignTop);
+                    placed.box = metrics.ascent() + metrics.descent();
+                    placed.above = metrics.ascent();
+                } else {
+                    // The line grows by what the formula needs beyond the room.
+                    placed.withinLine = false;
+                    placed.above = std::max(metrics.ascent(), up - slack);
+                    format.setVerticalAlignment(QTextCharFormat::AlignBaseline);
+                    const qreal deeper = down - leading - slack;
+                    if (deeper > metrics.descent())
+                        MathObject::deepen(format, font, deeper);
+                }
+                format.setProperty(MathObject::indexProperty, m_mathObject->add(placed));
                 cursor.setPosition(fragment.position());
                 cursor.setPosition(fragment.position() + fragment.length(), QTextCursor::KeepAnchor);
                 cursor.setCharFormat(format);
@@ -845,15 +875,25 @@ public:
             QTextBlockFormat format = block.blockFormat();
             if (format.lineHeightType() != QTextBlockFormat::ProportionalHeight)
                 continue;
-            const QFontMetricsF metrics(block.charFormat().font());
-            // As Qt measures a line's height for the proportion.
-            const qreal text = qCeil(metrics.ascent() + metrics.descent() + qMax<qreal>(0, metrics.leading()));
-            format.setLineHeight(text * (format.lineHeight() / 100 - 1), QTextBlockFormat::LineDistanceHeight);
+            format.setLineHeight(lineGap(block), QTextBlockFormat::LineDistanceHeight);
             cursor.setPosition(block.position());
             cursor.setBlockFormat(format);
         }
         cursor.endEditBlock();
         setUndoRedoEnabled(undo);
+    }
+
+    // The space a block's line height of N% adds between lines of its text
+    // (none for other line heights).
+    static qreal lineGap(const QTextBlock &block)
+    {
+        const QTextBlockFormat format = block.blockFormat();
+        if (format.lineHeightType() != QTextBlockFormat::ProportionalHeight)
+            return 0;
+        const QFontMetricsF metrics(block.charFormat().font());
+        // As Qt measures a line's height for the proportion.
+        const qreal text = qCeil(metrics.ascent() + metrics.descent() + qMax<qreal>(0, metrics.leading()));
+        return text * (format.lineHeight() / 100 - 1);
     }
 
     // Path elements of the formulas: what they cost to keep and draw.

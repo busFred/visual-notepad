@@ -6,8 +6,12 @@
 #include <QFontInfo>
 #include <QFontMetricsF>
 #include <QPainter>
+#include <QTextBlock>
 #include <QTextDocument>
+#include <QTextLayout>
 #include <QtMath>
+
+#include <algorithm>
 
 namespace vn {
 
@@ -46,12 +50,16 @@ QSizeF MathObject::intrinsicSize(QTextDocument *, int, const QTextFormat &format
     const Placed *p = placed(format);
     if (!p)
         return {};
+    const qreal width = p->formula->width * p->scale;
+    if (p->withinLine)
+        return QSizeF(width, p->box);
     // The font Qt measures the descent with (resizeInlineObject).
     const qreal descent = QFontMetricsF(format.toCharFormat().font()).descent();
-    return QSizeF(p->formula->width * p->scale, above(*p) + descent);
+    return QSizeF(width, p->above + descent);
 }
 
-void MathObject::drawObject(QPainter *painter, const QRectF &rect, QTextDocument *, int, const QTextFormat &format)
+void MathObject::drawObject(QPainter *painter, const QRectF &rect, QTextDocument *document, int position,
+                            const QTextFormat &format)
 {
     const Placed *p = placed(format);
     if (!p)
@@ -59,28 +67,32 @@ void MathObject::drawObject(QPainter *painter, const QRectF &rect, QTextDocument
     // The colour of the text around it (a link's, a footnote's).
     const QBrush brush = format.toCharFormat().foreground();
     const QColor text = brush.style() == Qt::SolidPattern ? brush.color() : theme::color(theme::Role::text);
-    p->formula->draw(*painter, QPointF(rect.left(), rect.top() + above(*p)), p->scale, text);
-}
-
-qreal MathObject::above(const Placed &placed)
-{
-    return qMax(placed.formula->ascent * placed.scale, placed.minAscent);
+    qreal baseline = rect.top() + p->above;
+    if (p->withinLine) {
+        // The box's top is the line's (QTextLine::draw), its baseline the
+        // line's ascent below.
+        const QTextBlock block = document->findBlock(position);
+        const QTextLayout *layout = block.isValid() ? block.layout() : nullptr;
+        const QTextLine line = layout ? layout->lineForTextPosition(position - block.position()) : QTextLine();
+        baseline = rect.top() + std::max(line.isValid() ? line.ascent() : 0, p->above);
+    }
+    p->formula->draw(*painter, QPointF(rect.left(), baseline), p->scale, text);
 }
 
 bool MathObject::deepen(QTextCharFormat &format, const QFont &font, qreal depth)
 {
-    qreal descent = QFontMetricsF(font).descent();
     QFont deeper = font;
-    int pixels = QFontInfo(font).pixelSize();
-    for (int tries = 0; tries < 8 && descent < depth; ++tries) {
-        pixels = qMax(pixels + 1, qCeil(pixels * depth / qMax<qreal>(1, descent)));
-        if (pixels > 4096)
+    const int size = QFontInfo(font).pixelSize();
+    int pixels = size;
+    qreal descent = QFontMetricsF(font).descent();
+    while (descent < depth) {
+        if (++pixels > qMin(4 * size, 4096))
             return false;
         deeper.setPixelSize(pixels);
         descent = QFontMetricsF(deeper).descent();
     }
-    if (descent < depth)
-        return false;
+    if (pixels == size)
+        return true;
     // Every size the format had, so that the pixel size is the one used.
     format.clearProperty(QTextFormat::FontPointSize);
     format.clearProperty(QTextFormat::FontPixelSize);

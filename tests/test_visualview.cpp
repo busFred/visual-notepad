@@ -4,6 +4,7 @@
 #include "MainWindow.h"
 #include "PlainText.h"
 #include "Settings.h"
+#include "markdown/MathRenderer.h"
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
 #include "markdown/BlockRenderer.h"
@@ -34,6 +35,9 @@
 #include <QSlider>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QFontDatabase>
+#include <QFontMetricsF>
+#include <QFontInfo>
 #include <QTest>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -374,6 +378,8 @@ private Q_SLOTS:
     void wideMathShrinksToTheColumn();
     void mathIsSharpWhenZoomed();
     void lineSpacingIsTheTextsBesideFormulas();
+    void smallFormulasKeepTheLineInEveryFont();
+    void aCellOfAFormulaAloneSitsOnTheTextsBaseline();
     void ordinaryBlocksIgnoreTheLayoutLimits();
     void longRunsWrapTheSameWithTheLimits();
     void scrollingKeepsOnlyRecentRenders();
@@ -3752,9 +3758,11 @@ void TestVisualView::mathIsSharpWhenZoomed()
 
 void TestVisualView::lineSpacingIsTheTextsBesideFormulas()
 {
-    // More line spacing adds as much to a paragraph with a tall formula as
+    // More line spacing adds no more to a paragraph with a tall formula than
     // to one without: the space added is the text's, not the formula's
-    // multiplied (a fraction's line once got the spacing of a fraction).
+    // multiplied (a fraction's line once got the spacing of a fraction). It
+    // may add less: the formula takes some of the new space between lines
+    // before it moves them apart (TeX's rule; see placeMath).
     const auto height = [](const QString &markdown, qreal lineHeight) {
         const QByteArray utf8 = markdown.toUtf8();
         const rust::Vec<core::Block> blocks = core::blocks(rust::Str(utf8.constData(), utf8.size()),
@@ -3767,12 +3775,115 @@ void TestVisualView::lineSpacingIsTheTextsBesideFormulas()
         return RenderedBlock::create(blocks.at(0), markdown, ctx)->height();
     };
     const QString words = QStringLiteral("Words that wrap onto a second line and then a third line of this paragraph ");
-    const QString tall = words + QStringLiteral("$\\frac{\\sum_k e^{s_{ik}}}{\\sqrt{d}}$");
+    const QString tall = words + QStringLiteral("$\\left(\\frac{\\frac{\\sum_k e^{s_{ik}}}{\\sqrt{d}}}{\\frac{c}{d}}\\right)$");
     const QString plain = words + QStringLiteral("x");
     const qreal tallAdded = height(tall, 2.0) - height(tall, 1.0);
     const qreal plainAdded = height(plain, 2.0) - height(plain, 1.0);
     QVERIFY2(height(tall, 1.0) > height(plain, 1.0) + 5, "the formula is not taller than the text");
-    QVERIFY2(qAbs(tallAdded - plainAdded) <= 2, qPrintable(QStringLiteral("%1 %2").arg(tallAdded).arg(plainAdded)));
+    QVERIFY2(tallAdded <= plainAdded + 2 && tallAdded >= plainAdded / 2,
+             qPrintable(QStringLiteral("%1 %2").arg(tallAdded).arg(plainAdded)));
+}
+
+void TestVisualView::smallFormulasKeepTheLineInEveryFont()
+{
+    // TeX's rule (BlockRenderer's placeMath): a formula moves its line away
+    // from the others only by what it needs beyond the room the line has
+    // anyway, the font's ascent above and descent and leading below, plus
+    // half the space the line spacing adds. Every font reports that room
+    // its own way (Calibri's small sizes, from bitmaps, as no descent and all
+    // of it as leading); none may make a line grow by more, and a
+    // superscript, a subscript, a unit or a pair of brackets fits in the
+    // room of an ordinary font.
+    const QStringList texs = {QStringLiteral("\\sigma^2"), QStringLiteral("2.5\\,\\mathrm{m}"),
+                              QStringLiteral("\\lambda_{\\text{train}}"), QStringLiteral("(x)"), QStringLiteral("[0, 1]")};
+    qreal up = 0, down = 0; // At the layout size.
+    for (const QString &tex : texs) {
+        const auto formula = math::layout(math::withMacros(tex), false);
+        QVERIFY(!formula->fellBack);
+        up = std::max(up, formula->ascent);
+        down = std::max(down, formula->depth);
+    }
+    QString markdown = QStringLiteral("Text");
+    QString plain = QStringLiteral("Text");
+    for (const QString &tex : texs) {
+        markdown += QStringLiteral(" $%1$ and").arg(tex);
+        plain += QStringLiteral(" xy and");
+    }
+    const auto height = [](const QString &text, const QFont &font) {
+        const QByteArray utf8 = text.toUtf8();
+        const rust::Vec<core::Block> blocks = core::blocks(rust::Str(utf8.constData(), utf8.size()),
+                                                           core::RenderOptions{false, true, true, true, 1});
+        RenderContext ctx;
+        ctx.font = font;
+        ctx.codeFont = theme::editorFont();
+        ctx.width = 4000; // One line.
+        ctx.lineHeight = 1.2;
+        return RenderedBlock::create(blocks.at(0), text, ctx)->height();
+    };
+    int fonts = 0, grew = 0;
+    QStringList report;
+    for (const QString &family : QFontDatabase::families(QFontDatabase::Latin)) {
+        QFont probe(family);
+        if (QFontInfo(probe).family() != family || QFontDatabase::isPrivateFamily(family))
+            continue; // Not this family, or not one to offer.
+        ++fonts;
+        for (int points = 9; points <= 14; ++points) {
+            QFont font(family, points);
+            const int pixels = QFontInfo(font).pixelSize();
+            const QFontMetricsF metrics(font);
+            const qreal scale = pixels * 1.1 / math::layoutPixelSize;
+            const qreal leading = std::max<qreal>(0, metrics.leading());
+            const qreal slack = qCeil(metrics.ascent() + metrics.descent() + leading) * 0.2 / 2 + 1;
+            const qreal needed = std::max<qreal>(0, up * scale - metrics.ascent() - slack)
+                                 + std::max<qreal>(0, down * scale - metrics.descent() - leading - slack);
+            const qreal growth = height(markdown, font) - height(plain, font);
+            if (growth > 0.5)
+                ++grew;
+            // A pixel for rounding, two when the font had to be made deeper
+            // (a pixel size at a time).
+            if (growth > needed + (needed > 0 ? 2 : 1) || growth < -1)
+                report << QStringLiteral("%1 %2pt: grew %3, needed %4").arg(family).arg(points).arg(growth).arg(needed);
+        }
+    }
+    qInfo("%d fonts, %d sizes with a taller line", fonts, grew);
+    QVERIFY2(report.isEmpty(), qPrintable(report.join(QStringLiteral("; "))));
+}
+
+void TestVisualView::aCellOfAFormulaAloneSitsOnTheTextsBaseline()
+{
+    // A line of formulas alone (a table heading "$k = 4$") has its baseline
+    // where a line of text does: the bottom of "k = 4" is the bottom of
+    // "Method" in the next cell. (Qt makes such a line as high as the
+    // formulas' boxes, its baseline half way.)
+    const QImage image = paintBlock(*renderFirstBlock(QStringLiteral("| Method | $k = 4$ |\n|---|---|\n| a | b |")));
+    const auto dark = [&](int x, int y) { return qGray(image.pixel(x, y)) < 160; };
+    // The heading row's ink, split where the gap between its two cells is.
+    int top = -1, left = image.width(), right = -1;
+    for (int y = 0; y < image.height() && top < 0; ++y)
+        for (int x = 0; x < image.width(); ++x)
+            if (dark(x, y)) { top = y; break; }
+    QVERIFY(top >= 0);
+    const int rowEnd = std::min(image.height(), top + 30);
+    QList<bool> inked(image.width(), false);
+    for (int y = top; y < rowEnd; ++y)
+        for (int x = 0; x < image.width(); ++x)
+            if (dark(x, y)) { inked[x] = true; left = std::min(left, x); right = std::max(right, x); }
+    // The widest run of columns without ink between the two words.
+    int gapStart = -1, gapEnd = -1, run = 0;
+    for (int x = left; x <= right; ++x) {
+        run = inked[x] ? 0 : run + 1;
+        if (run > gapEnd - gapStart) { gapEnd = x; gapStart = x - run; }
+    }
+    const auto lowest = [&](int from, int to) {
+        for (int y = rowEnd - 1; y >= top; --y)
+            for (int x = from; x <= to; ++x)
+                if (dark(x, y))
+                    return y;
+        return -1;
+    };
+    const int method = lowest(left, gapStart);
+    const int formula = lowest(gapEnd, right);
+    QVERIFY2(std::abs(method - formula) <= 1, qPrintable(QStringLiteral("Method %1, k = 4 %2").arg(method).arg(formula)));
 }
 
 void TestVisualView::ordinaryBlocksIgnoreTheLayoutLimits()

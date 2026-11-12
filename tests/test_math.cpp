@@ -56,6 +56,8 @@ private Q_SLOTS:
     void baselineIsReported_data();
     void baselineIsReported();
     void shapesScaleToAnySize();
+    void lonelySymbolsAreDrawn();
+    void slantedLettersStayInTheirBox();
     void colourIsApplied();
     void devicePixelRatioScalesPixels();
     void invalidTexFallsBack();
@@ -161,6 +163,32 @@ void TestMath::shapesScaleToAnySize()
         }
     }
     QVERIFY2(full > 0 && partial < full / 2, qPrintable(QStringLiteral("%1 partly, %2 fully").arg(partial).arg(full)));
+}
+
+void TestMath::lonelySymbolsAreDrawn()
+{
+    // A symbol that is all above the baseline has a depth below none in
+    // MicroTeX's measure: drawn, not taken for a formula it cannot read.
+    for (const QString tex : {QStringLiteral("\\to"), QStringLiteral("\\rightarrow"), QStringLiteral("\\cdot")}) {
+        const auto formula = math::layout(tex, false);
+        QVERIFY2(!formula->fellBack, qPrintable(tex));
+        QVERIFY(formula->ascent > 0 && formula->depth >= 0 && formula->width > 0);
+    }
+}
+
+void TestMath::slantedLettersStayInTheirBox()
+{
+    // An italic "T" or "V" reaches past its advance; the box takes it in (TeX's
+    // italic correction), so "$T$ paid" does not run into the word after.
+    for (const QString tex : {QStringLiteral("T"), QStringLiteral("V"), QStringLiteral("f"), QStringLiteral("x_i + y")}) {
+        const auto formula = math::layout(tex, false);
+        QVERIFY(!formula->fellBack);
+        QRectF ink;
+        for (const auto &shape : formula->shapes)
+            ink |= shape.path.boundingRect();
+        QVERIFY2(ink.left() >= -0.01 && ink.right() <= formula->width + 0.01,
+                 qPrintable(QStringLiteral("%1: ink %2..%3, box 0..%4").arg(tex).arg(ink.left()).arg(ink.right()).arg(formula->width)));
+    }
 }
 
 void TestMath::colourIsApplied()
