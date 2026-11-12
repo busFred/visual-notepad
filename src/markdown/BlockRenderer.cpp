@@ -797,10 +797,12 @@ public:
     // a subscript or a pair of brackets does not; a taller one moves the
     // lines apart by what it needs beyond that. The room is the font's own
     // measure, however a font divides it (Calibri's small sizes have no
-    // descent and all their room below as leading), and a formula within it
-    // is drawn on the baseline the line was laid out with. The paragraphs
-    // space their lines as a web page does: the space the line spacing adds
-    // is the text's, not a tall formula's multiplied.
+    // descent and all their room below as leading; Cambria's, no descent and
+    // a negative leading), and a formula within it is drawn on the baseline
+    // the line was laid out with; a deeper one gets its depth from a font
+    // made for that (MathObject::reach), not from a larger text font. The
+    // paragraphs space their lines as a web page does: the space the line
+    // spacing adds is the text's, not a tall formula's multiplied.
     void placeMath()
     {
         if (!m_mathObject)
@@ -814,10 +816,9 @@ public:
         QList<QTextBlock> withMath;
         for (QTextBlock block = begin(); block.isValid(); block = block.next()) {
             // Half the space the line spacing adds between lines, and a
-            // pixel more (TeX's \lineskiplimit: lines may come that close).
-            // Without it, a formula a fraction of a pixel too deep would get
-            // a deeper font, and a font's descent may grow by pixels from
-            // one size to the next (Calibri: none at 13 px, 4 at 14 px).
+            // pixel more (TeX's \lineskiplimit: lines may come that close),
+            // so that a formula a fraction of a pixel too deep does not
+            // move them apart by a whole pixel.
             const qreal slack = std::max<qreal>(0, lineGap(block) / 2) + 1;
             for (auto it = block.begin(); !it.atEnd(); ++it) {
                 const QTextFragment fragment = it.fragment();
@@ -841,23 +842,32 @@ public:
                                            int(QTextFormat::ImageHeight), int(QTextFormat::ImageQuality)})
                     format.clearProperty(property);
                 format.setObjectType(MathObject::type);
+                // Qt's line reaches as far above and below the baseline as the
+                // farthest of its parts, and its text's leading (which may be
+                // negative) is drawn under the descent (QTextLine's layout).
                 const QFontMetricsF metrics(font);
-                const qreal leading = std::max<qreal>(0, metrics.leading());
+                const qreal ascent = metrics.ascent();
+                const qreal descent = metrics.descent();
+                const qreal leading = metrics.leading();
                 const qreal up = formula->ascent * scale;
                 const qreal down = formula->depth * scale;
                 MathObject::Placed placed{formula, scale};
-                if (up <= metrics.ascent() + slack && down <= metrics.descent() + leading + slack) {
+                if (up <= ascent + slack && down <= descent + leading + slack) {
                     format.setVerticalAlignment(QTextCharFormat::AlignTop);
-                    placed.box = metrics.ascent() + metrics.descent();
-                    placed.above = metrics.ascent();
+                    placed.box = ascent + descent;
+                    placed.above = ascent;
                 } else {
                     // The line grows by what the formula needs beyond the room.
                     placed.withinLine = false;
-                    placed.above = std::max(metrics.ascent(), up - slack);
+                    placed.above = std::max(ascent, up - slack);
                     format.setVerticalAlignment(QTextCharFormat::AlignBaseline);
-                    const qreal deeper = down - leading - slack;
-                    if (deeper > metrics.descent())
-                        MathObject::deepen(format, font, deeper);
+                    // The line keeps its text's leading (an object adds an
+                    // ascent and a descent only): the formula's character
+                    // reaches as far below the baseline as the leading
+                    // leaves to reach.
+                    const qreal depth = down - slack - leading;
+                    if (depth > descent)
+                        MathObject::reach(format, depth);
                 }
                 format.setProperty(MathObject::indexProperty, m_mathObject->add(placed));
                 cursor.setPosition(fragment.position());
@@ -891,8 +901,9 @@ public:
         if (format.lineHeightType() != QTextBlockFormat::ProportionalHeight)
             return 0;
         const QFontMetricsF metrics(block.charFormat().font());
-        // As Qt measures a line's height for the proportion.
-        const qreal text = qCeil(metrics.ascent() + metrics.descent() + qMax<qreal>(0, metrics.leading()));
+        // As Qt measures a line's height for the proportion (its leading may
+        // be negative).
+        const qreal text = qCeil(metrics.ascent() + metrics.descent() + metrics.leading());
         return text * (format.lineHeight() / 100 - 1);
     }
 
