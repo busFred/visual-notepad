@@ -518,6 +518,11 @@ bool microTeXFormula(const QString &tex, bool display, Formula &out)
         // The depth below the baseline is part of the height.
         result.depth = render->getDepth() / fine;
         result.ascent = render->getHeight() / fine - result.depth;
+        // A symbol above the baseline only ("\to", "\cdot") has a depth
+        // below none; one under it, an ascent below none. The shapes keep
+        // their places; the box reaches the baseline.
+        result.ascent = std::max<qreal>(0, result.ascent);
+        result.depth = std::max<qreal>(0, result.depth);
         render->setTextSize(size);
         if (!(result.width > 0) || !(result.height() > 0)) // Not a number either.
             return false;

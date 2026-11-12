@@ -56,6 +56,7 @@ private Q_SLOTS:
     void baselineIsReported_data();
     void baselineIsReported();
     void shapesScaleToAnySize();
+    void lonelySymbolsAreDrawn();
     void colourIsApplied();
     void devicePixelRatioScalesPixels();
     void invalidTexFallsBack();
@@ -161,6 +162,17 @@ void TestMath::shapesScaleToAnySize()
         }
     }
     QVERIFY2(full > 0 && partial < full / 2, qPrintable(QStringLiteral("%1 partly, %2 fully").arg(partial).arg(full)));
+}
+
+void TestMath::lonelySymbolsAreDrawn()
+{
+    // A symbol that is all above the baseline has a depth below none in
+    // MicroTeX's measure: drawn, not taken for a formula it cannot read.
+    for (const QString tex : {QStringLiteral("\\to"), QStringLiteral("\\rightarrow"), QStringLiteral("\\cdot")}) {
+        const auto formula = math::layout(tex, false);
+        QVERIFY2(!formula->fellBack, qPrintable(tex));
+        QVERIFY(formula->ascent > 0 && formula->depth >= 0 && formula->width > 0);
+    }
 }
 
 void TestMath::colourIsApplied()
