@@ -535,7 +535,25 @@ bool microTeXFormula(const QString &tex, bool display, Formula &out)
         Graphics2D g2(&painter);
         render->draw(g2, 0, 0);
         painter.end();
-        if (recorder.full() || !plausible(result))
+        if (recorder.full())
+            return false;
+        // The box reaches the ink at both ends: a slanted letter there ("T",
+        // "V", "f") reaches past its advance, and TeX adds that, the italic
+        // correction (TeXbook, appendix G, rule 17), so the next word does
+        // not start under it. MicroTeX leaves it out.
+        QRectF ink;
+        for (const Formula::Shape &shape : std::as_const(result.shapes))
+            ink |= shape.path.boundingRect();
+        if (ink.isValid()) {
+            if (ink.left() < 0) {
+                for (Formula::Shape &shape : result.shapes)
+                    shape.path.translate(-ink.left(), 0);
+                result.width -= ink.left();
+                ink.translate(-ink.left(), 0);
+            }
+            result.width = std::max(result.width, ink.right());
+        }
+        if (!plausible(result))
             return false;
         out = std::move(result);
         return true;
