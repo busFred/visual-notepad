@@ -61,18 +61,20 @@ public:
     // top. Any other is aligned to the baseline: Qt puts the bottom of its
     // box the descent of its character's font below the baseline
     // (QTextDocumentLayout::resizeInlineObject), so the box reaches that far
-    // down and Placed::above up; a formula deeper than that needs a larger
-    // font on its character (deepen()).
+    // down and Placed::above up; a formula deeper than its text's font
+    // reaches gets a font for its character that reaches as deep (reach()).
     QSizeF intrinsicSize(QTextDocument *document, int position, const QTextFormat &format) override;
     void drawObject(QPainter *painter, const QRectF &rect, QTextDocument *document, int position,
                     const QTextFormat &format) override;
 
-    // Gives a character's format (whose font is `font`) the smallest larger
-    // pixel size whose descent is at least `depth`, up to four times the
-    // size; false, and the format unchanged, when none is. (Pixel by pixel:
-    // a font's descent need not grow with its size. Calibri's small sizes
-    // come from bitmaps, measured as no descent at all.)
-    static bool deepen(QTextCharFormat &format, const QFont &font, qreal depth);
+    // Gives a character's format the font Visual Notepad Depth (bundled; see
+    // scripts/make_depth_font.py) at the whole pixel size at or above
+    // `depth`: no ascent, a descent of its size, no leading, on every system.
+    // (A text font is no measure: Calibri and Cambria at most small sizes
+    // come from bitmaps measured as no descent and a leading of their own,
+    // even a negative one, and a larger size jumps by pixels.) False, and the
+    // format unchanged, when the font is missing.
+    static bool reach(QTextCharFormat &format, qreal depth);
 
 private:
     QList<Placed> m_placed;

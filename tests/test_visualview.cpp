@@ -3791,24 +3791,30 @@ void TestVisualView::smallFormulasKeepTheLineInEveryFont()
     // anyway, the font's ascent above and descent and leading below, plus
     // half the space the line spacing adds. Every font reports that room
     // its own way (Calibri's small sizes, from bitmaps, as no descent and all
-    // of it as leading); none may make a line grow by more, and a
+    // of it as leading; Cambria's as no descent and a negative leading);
+    // none may make a line grow by more than that, or by less. A
     // superscript, a subscript, a unit or a pair of brackets fits in the
-    // room of an ordinary font.
-    const QStringList texs = {QStringLiteral("\\sigma^2"), QStringLiteral("2.5\\,\\mathrm{m}"),
-                              QStringLiteral("\\lambda_{\\text{train}}"), QStringLiteral("(x)"), QStringLiteral("[0, 1]")};
-    qreal up = 0, down = 0; // At the layout size.
-    for (const QString &tex : texs) {
-        const auto formula = math::layout(math::withMacros(tex), false);
-        QVERIFY(!formula->fellBack);
-        up = std::max(up, formula->ascent);
-        down = std::max(down, formula->depth);
-    }
-    QString markdown = QStringLiteral("Text");
-    QString plain = QStringLiteral("Text");
-    for (const QString &tex : texs) {
-        markdown += QStringLiteral(" $%1$ and").arg(tex);
-        plain += QStringLiteral(" xy and");
-    }
+    // room of an ordinary font; a fraction in brackets reaches deeper.
+    const auto reach = [](const QStringList &texs) {
+        qreal up = 0, down = 0; // At the layout size.
+        for (const QString &tex : texs) {
+            const auto formula = math::layout(math::withMacros(tex), false);
+            if (formula->fellBack)
+                return std::pair<qreal, qreal>(-1, -1);
+            up = std::max(up, formula->ascent);
+            down = std::max(down, formula->depth);
+        }
+        return std::pair(up, down);
+    };
+    const QStringList small = {QStringLiteral("\\sigma^2"), QStringLiteral("2.5\\,\\mathrm{m}"),
+                               QStringLiteral("\\lambda_{\\text{train}}"), QStringLiteral("(x)"), QStringLiteral("[0, 1]")};
+    const QStringList deep = {QStringLiteral("\\left(\\frac{a}{b}\\right)")};
+    const auto line = [](const QStringList &texs, bool formulas) {
+        QString text = QStringLiteral("Text");
+        for (const QString &tex : texs)
+            text += formulas ? QStringLiteral(" $%1$ and").arg(tex) : QStringLiteral(" xy and");
+        return text;
+    };
     const auto height = [](const QString &text, const QFont &font) {
         const QByteArray utf8 = text.toUtf8();
         const rust::Vec<core::Block> blocks = core::blocks(rust::Str(utf8.constData(), utf8.size()),
@@ -3822,27 +3828,42 @@ void TestVisualView::smallFormulasKeepTheLineInEveryFont()
     };
     int fonts = 0, grew = 0;
     QStringList report;
-    for (const QString &family : QFontDatabase::families(QFontDatabase::Latin)) {
-        QFont probe(family);
-        if (QFontInfo(probe).family() != family || QFontDatabase::isPrivateFamily(family))
-            continue; // Not this family, or not one to offer.
-        ++fonts;
-        for (int points = 9; points <= 14; ++points) {
-            QFont font(family, points);
-            const int pixels = QFontInfo(font).pixelSize();
-            const QFontMetricsF metrics(font);
-            const qreal scale = pixels * 1.1 / math::layoutPixelSize;
-            const qreal leading = std::max<qreal>(0, metrics.leading());
-            const qreal slack = qCeil(metrics.ascent() + metrics.descent() + leading) * 0.2 / 2 + 1;
-            const qreal needed = std::max<qreal>(0, up * scale - metrics.ascent() - slack)
-                                 + std::max<qreal>(0, down * scale - metrics.descent() - leading - slack);
-            const qreal growth = height(markdown, font) - height(plain, font);
-            if (growth > 0.5)
-                ++grew;
-            // A pixel for rounding, two when the font had to be made deeper
-            // (a pixel size at a time).
-            if (growth > needed + (needed > 0 ? 2 : 1) || growth < -1)
-                report << QStringLiteral("%1 %2pt: grew %3, needed %4").arg(family).arg(points).arg(growth).arg(needed);
+    for (const bool isDeep : {false, true}) {
+        const QStringList &texs = isDeep ? deep : small;
+        const auto [up, down] = reach(texs);
+        QVERIFY(up > 0);
+        for (const QString &family : QFontDatabase::families(QFontDatabase::Latin)) {
+            QFont probe(family);
+            if (QFontInfo(probe).family() != family || QFontDatabase::isPrivateFamily(family))
+                continue; // Not this family, or not one to offer.
+            // A font without the letters of the line (a symbol font): the
+            // plain line would be in another font.
+            const QFontMetricsF probeMetrics(probe);
+            if (!std::all_of(u"Textandxy", u"Textandxy" + 9, [&](char16_t c) { return probeMetrics.inFont(QChar(c)); }))
+                continue;
+            fonts += !isDeep;
+            for (int points = 9; points <= 14; ++points) {
+                QFont font(family, points);
+                const int pixels = QFontInfo(font).pixelSize();
+                const QFontMetricsF metrics(font);
+                const qreal scale = pixels * 1.1 / math::layoutPixelSize;
+                const qreal leading = metrics.leading();
+                const qreal slack = qCeil(metrics.ascent() + metrics.descent() + leading) * 0.2 / 2 + 1;
+                const qreal needed = std::max<qreal>(0, up * scale - metrics.ascent() - slack)
+                                     + std::max<qreal>(0, down * scale - metrics.descent() - leading - slack);
+                const qreal growth = height(line(texs, true), font) - height(line(texs, false), font);
+                if (growth > 0.5)
+                    ++grew;
+                // A pixel for rounding each way, two up when a depth is
+                // reserved (in whole pixels).
+                if (growth > needed + (needed > 0 ? 2 : 1) || growth < needed - 1)
+                    report << QStringLiteral("%1 %2pt%3: grew %4, needed %5")
+                                  .arg(family)
+                                  .arg(points)
+                                  .arg(isDeep ? QStringLiteral(" (deep)") : QString())
+                                  .arg(growth)
+                                  .arg(needed);
+            }
         }
     }
     qInfo("%d fonts, %d sizes with a taller line", fonts, grew);

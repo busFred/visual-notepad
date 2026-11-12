@@ -4,6 +4,7 @@
 
 #include <QAbstractTextDocumentLayout>
 #include <QFontInfo>
+#include <QFontDatabase>
 #include <QFontMetricsF>
 #include <QPainter>
 #include <QTextBlock>
@@ -79,25 +80,21 @@ void MathObject::drawObject(QPainter *painter, const QRectF &rect, QTextDocument
     p->formula->draw(*painter, QPointF(rect.left(), baseline), p->scale, text);
 }
 
-bool MathObject::deepen(QTextCharFormat &format, const QFont &font, qreal depth)
+bool MathObject::reach(QTextCharFormat &format, qreal depth)
 {
-    QFont deeper = font;
-    const int size = QFontInfo(font).pixelSize();
-    int pixels = size;
-    qreal descent = QFontMetricsF(font).descent();
-    while (descent < depth) {
-        if (++pixels > qMin(4 * size, 4096))
-            return false;
-        deeper.setPixelSize(pixels);
-        descent = QFontMetricsF(deeper).descent();
-    }
-    if (pixels == size)
-        return true;
+    static const QString family = [] {
+        const int id = QFontDatabase::addApplicationFont(QStringLiteral(":/vn/fonts/VisualNotepadDepth.ttf"));
+        return QFontDatabase::applicationFontFamilies(id).value(0);
+    }();
+    if (family.isEmpty())
+        return false;
+    QFont font(family);
+    font.setPixelSize(std::clamp(qCeil(depth), 1, 4096));
     // Every size the format had, so that the pixel size is the one used.
     format.clearProperty(QTextFormat::FontPointSize);
     format.clearProperty(QTextFormat::FontPixelSize);
     format.clearProperty(QTextFormat::FontSizeAdjustment);
-    format.setFont(deeper);
+    format.setFont(font);
     return true;
 }
 
