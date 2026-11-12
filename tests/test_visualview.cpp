@@ -3857,8 +3857,10 @@ void TestVisualView::smallFormulasKeepTheLineInEveryFont()
                 if (growth > 0.5)
                     ++grew;
                 // A pixel for rounding each way, two up when a depth is
-                // reserved (in whole pixels).
-                if (growth > needed + (needed > 0 ? 2 : 1) || growth < needed - 1)
+                // reserved (in whole pixels), two down where the layout rounds
+                // a line's ascent and descent up to whole pixels (macOS), so
+                // the line has room the font's measure does not show.
+                if (growth > needed + (needed > 0 ? 2 : 1) || growth < needed - 2)
                     report << QStringLiteral("%1 %2pt%3: grew %4, needed %5")
                                   .arg(family)
                                   .arg(points)
