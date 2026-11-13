@@ -5,6 +5,7 @@
 #include "vn_core_bridge/lib.h"
 
 #include <QFont>
+#include <QHash>
 #include <QImage>
 #include <QList>
 #include <QObject>
@@ -43,6 +44,15 @@ struct RenderContext
     // The user agreed to download the pictures this block names with http(s)
     // addresses; otherwise they show as missing and nothing is requested.
     bool allowRemoteImages = false;
+    // The box a picture or diagram fits (formulas are not figures): no wider
+    // than figureWidth (0: no limit but the column) and no higher than
+    // figureHeight (0: no limit), and never enlarged past its own size.
+    qreal figureWidth = 0;
+    qreal figureHeight = 0;
+    // What the user made of figures, by RenderedBlock::figureId() of the
+    // block's source: for each figure of the block, in order, how large it
+    // is relative to its fitted size (1: fitted; missing: 1).
+    QHash<QString, QList<qreal>> figureScales;
 };
 
 // What to highlight in a block: ranges of rendered-text characters (for code,
@@ -200,6 +210,28 @@ public:
     // It at full size; null if it cannot be read.
     QImage pictureImage(const Picture &picture) const;
 
+    // The pictures and diagrams of the block (not formulas), each in the box
+    // of RenderContext::figureWidth and figureHeight, scaled by what the user
+    // made of it (RenderContext::figureScales).
+    struct Figure
+    {
+        QRectF rect;           // Relative to the block's top-left.
+        int index = 0;         // Among the block's figures, in order.
+        qreal percent = 100;   // Its width as a part of the picture's own, in per cent.
+        qreal factor = 1;      // Relative to the fitted size.
+        qreal maxFactor = 1;   // The most that keeps it within the column.
+        qreal fittedWidth = 0; // What it measures when fitted.
+    };
+    std::vector<Figure> figures() const;
+    // How the figures of the blocks made of `source` are named in
+    // RenderContext::figureScales.
+    static QString figureId(const QString &source);
+    // False if the Markdown source is sure to have no picture or diagram.
+    static bool mayHaveFigure(const QString &source);
+    // The least factor of a figure, and the step the − and + of its bar take.
+    static constexpr qreal minFigureFactor = 0.1;
+    static constexpr qreal figureStep = 0.1;
+
     // For tests: picture files read (and decoded) from disk so far.
     static int pictureFileReads();
     // How many KiB of decoded picture files are kept for later widths (and
@@ -248,6 +280,7 @@ private:
     QString m_diagramTheme;
     bool m_centered = false;
     bool m_pending = false;
+    Figure m_diagramFigure; // Of a diagram (m_diagramCode not null), without its rectangle.
     Part m_part; // Of a code box; the whole box by default.
     // Of an item made by createItem: its list (in m_doc), whose marker style
     // was taken off for paintItemMarker, and its outer margins.

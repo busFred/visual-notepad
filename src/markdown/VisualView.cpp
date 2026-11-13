@@ -3,6 +3,7 @@
 #include "../PlainText.h"
 #include "../Settings.h"
 #include "../Theme.h"
+#include "FigureBar.h"
 #include "ImageViewer.h"
 #include "MarkdownModel.h"
 #include "RemoteImages.h"
@@ -11,6 +12,7 @@
 #include <QApplication>
 #include <QContextMenuEvent>
 #include <QCursor>
+#include <QFontMetricsF>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -66,6 +68,16 @@ constexpr int liveEditLines = 40;
 constexpr int itemRowsMinItems = 16;
 constexpr int itemRowsMinHtml = 2048;
 bool itemRowsEnabled = true; // For tests.
+
+// A figure is no wider than this many characters of body text (and the
+// column), and no higher than this part of what the view shows. The bar over
+// it shows when it is wider than minFigureBarWidth fitted, and keeps clear of
+// the figure's corner by figureBarInset.
+constexpr int figureColumns = 70;
+constexpr qreal figureHeightPart = 0.75;
+constexpr int figureHeightStep = 16;
+constexpr qreal minFigureBarWidth = 120;
+constexpr int figureBarInset = 6;
 
 // Pointing at a table's edge: how far the band above (and left of) the table
 // reaches out of it and into it, how near a border the quick-insert mark
@@ -618,6 +630,7 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
     connect(this, &TextView::scrolled, this, &VisualView::scheduleToolbarUpdate);
     // (The mark of the quick insert is kept in viewport coordinates.)
     connect(this, &TextView::scrolled, this, &VisualView::clearTableHover);
+    connect(this, &TextView::scrolled, this, &VisualView::hideFigureBar);
     connect(model, &MarkdownModel::optionsChanged, this, [this] {
         clearRenderCache();
         relayout();
@@ -949,6 +962,9 @@ void VisualView::resizeEvent(QResizeEvent *event)
     TextView::resizeEvent(event);
     layoutBanner();
     scheduleToolbarUpdate();
+    // Figures fit the height shown: only blocks with them render again.
+    if (m_figuresRendered && figureBoxHeight() != m_rendersFigureHeight)
+        relayout();
 }
 
 // ---------------------------------------------------------------------------
@@ -1517,10 +1533,19 @@ int VisualView::spanForRow(const Row &r) const
 const RenderContext &VisualView::renderContext()
 {
     const qreal width = textWidth();
+    const qreal figureHeight = figureBoxHeight();
     if (!m_contextValid || m_contextFrame != m_frame || m_contextRevision != m_model->revision()
-        || m_contextWidth != width || m_context.devicePixelRatio != devicePixelRatioF()) {
+        || m_contextWidth != width || m_context.devicePixelRatio != devicePixelRatioF()
+        || m_contextFigureHeight != figureHeight || m_contextFigureRevision != m_figureRevision) {
         m_context = context();
-        m_contextKey = renderKey(m_context, core::BlockKind::Html, QString());
+        // (The figures' box and sizes are the key's part for every block: see renderKey.)
+        m_contextKey = renderKey(m_context, core::BlockKind::Html, QString())
+                       + QStringLiteral("|fig:%1:%2:%3")
+                             .arg(int(m_context.figureWidth))
+                             .arg(int(m_context.figureHeight))
+                             .arg(m_figureRevision);
+        m_contextFigureHeight = figureHeight;
+        m_contextFigureRevision = m_figureRevision;
         m_contextFrame = m_frame;
         m_contextRevision = m_model->revision();
         m_contextWidth = width;
@@ -1543,6 +1568,9 @@ RenderContext VisualView::context() const
     ctx.devicePixelRatio = devicePixelRatioF();
     ctx.mermaidTheme = Settings::instance().text(key::mermaidTheme);
     ctx.allowRemoteImages = remoteImagesAllowed();
+    ctx.figureWidth = qMin(ctx.width, figureColumns * QFontMetricsF(ctx.font).averageCharWidth());
+    ctx.figureHeight = figureBoxHeight();
+    ctx.figureScales = m_figureScales;
     return ctx;
 }
 
@@ -1857,6 +1885,11 @@ const VisualView::Render *VisualView::rendered(const Row &r)
         m_rendersWidth = width;
         m_rendersDpr = dpr;
     }
+    if (m_rendersFigureHeight != figureBoxHeight() || m_rendersFigureRevision != m_figureRevision) {
+        dropFigureRenders();
+        m_rendersFigureHeight = figureBoxHeight();
+        m_rendersFigureRevision = m_figureRevision;
+    }
     if (const auto it = m_renders.find(r.firstLine); it != m_renders.end()) {
         it->second.used = m_frame;
         return &it->second;
@@ -1943,6 +1976,8 @@ const VisualView::Render *VisualView::rendered(const Row &r)
     }
     memo.used = m_frame;
     Render &kept = m_renders[r.firstLine] = std::move(memo);
+    if (!m_figuresRendered && RenderedBlock::mayHaveFigure(kept.source))
+        m_figuresRendered = true;
     // Keep the memos of the latest renders only: the cache holds the rest
     // within its budget, while memos on every block seen would keep them all
     // alive, however far the view has scrolled on. Those the paint in
@@ -1970,16 +2005,24 @@ QString VisualView::renderKey(const RenderContext &ctx, core::BlockKind kind, co
 {
     // Identical blocks render identically, so the source (by hash, checked
     // on a hit) is the key.
-    return QStringLiteral("%1|%2|%3|%4|%5|%6|%7|%8|%9")
-        .arg(int(ctx.width))
-        .arg(ctx.font.pointSizeF())
-        .arg(ctx.font.family())
-        .arg(ctx.lineHeight)
-        .arg(int(kind))
-        .arg(ctx.codeFont.family())
-        .arg(ctx.devicePixelRatio)
-        .arg(source.size())
-        .arg(qHash(source));
+    QString key = QStringLiteral("%1|%2|%3|%4|%5|%6|%7|%8|%9")
+                      .arg(int(ctx.width))
+                      .arg(ctx.font.pointSizeF())
+                      .arg(ctx.font.family())
+                      .arg(ctx.lineHeight)
+                      .arg(int(kind))
+                      .arg(ctx.codeFont.family())
+                      .arg(ctx.devicePixelRatio)
+                      .arg(source.size())
+                      .arg(qHash(source));
+    // Only blocks with figures depend on the box they fit (the height of the
+    // view) and on what the user made of them.
+    if (RenderedBlock::mayHaveFigure(source)) {
+        key += QStringLiteral("|fig:%1:%2").arg(int(ctx.figureWidth)).arg(int(ctx.figureHeight));
+        for (const qreal scale : ctx.figureScales.value(RenderedBlock::figureId(source)))
+            key += u':' + QString::number(scale);
+    }
+    return key;
 }
 
 bool VisualView::liveLines(int *first, int *last) const
@@ -2052,6 +2095,13 @@ QString VisualView::renderedTextAt(int line)
     return block ? block->renderedText() : QString();
 }
 
+std::vector<RenderedBlock::Figure> VisualView::figuresAtLine(int line)
+{
+    const Row r = row(rowOfLine(line));
+    const RenderedBlock *block = r.rendered ? renderedForRow(r) : nullptr;
+    return block ? block->figures() : std::vector<RenderedBlock::Figure>();
+}
+
 const RenderedBlock *VisualView::renderedForRow(const Row &r)
 {
     const Render *render = rendered(r);
@@ -2061,7 +2111,8 @@ const RenderedBlock *VisualView::renderedForRow(const Row &r)
 const VisualView::Render *VisualView::memoized(const Row &r) const
 {
     if (m_rendersRevision != m_model->revision() || m_rendersWidth != textWidth()
-        || m_rendersDpr != devicePixelRatioF())
+        || m_rendersDpr != devicePixelRatioF() || m_rendersFigureHeight != figureBoxHeight()
+        || m_rendersFigureRevision != m_figureRevision)
         return nullptr;
     const auto it = m_renders.find(r.firstLine);
     return it != m_renders.end() ? &it->second : nullptr;
@@ -2457,6 +2508,7 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
         }
     }
     if (event->buttons() == Qt::NoButton) {
+        updateFigureBar(event->position().toPoint());
         // The edges of a table: arrows to select a column or a row, and the
         // marks to insert one.
         const TableSpot spot = tableSpotAt(event->position());
@@ -2499,9 +2551,134 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
 
 bool VisualView::viewportEvent(QEvent *event)
 {
-    if (event->type() == QEvent::Leave)
+    if (event->type() == QEvent::Leave) {
         clearTableHover();
+        // (Not left when the pointer went on to the bar.)
+        updateFigureBar(viewport()->mapFromGlobal(QCursor::pos()));
+    }
     return TextView::viewportEvent(event);
+}
+
+// ---------------------------------------------------------------------------
+// Figures
+
+qreal VisualView::figureBoxHeight() const
+{
+    const int steps = int(viewport()->height() * figureHeightPart) / figureHeightStep;
+    return qMax(1, steps) * qreal(figureHeightStep);
+}
+
+bool VisualView::dropFigureRenders()
+{
+    bool dropped = false;
+    std::erase_if(m_renderOrder, [&](int line) {
+        const auto it = m_renders.find(line);
+        if (it == m_renders.end() || !RenderedBlock::mayHaveFigure(it->second.source))
+            return false;
+        m_renderKiB -= it->second.cost;
+        m_renders.erase(it);
+        dropped = true;
+        return true;
+    });
+    // (The items' memos are keyed by the context, which has changed.)
+    return dropped;
+}
+
+void VisualView::hideFigureBar()
+{
+    m_figureHover = {};
+    if (m_figureBar)
+        m_figureBar->hide();
+}
+
+void VisualView::updateFigureBar(const QPoint &point)
+{
+    // The pointer is on the bar: the figure under it is the one it is over.
+    if (m_figureBar && m_figureBar->isVisible() && m_figureBar->geometry().contains(point))
+        return;
+    qreal top = 0;
+    const int index = rowAt(point.y(), &top);
+    if (index < 0 || !row(index).rendered)
+        return hideFigureBar();
+    const Row r = row(index);
+    const Render *render = memoized(r);
+    if (!render || !render->block)
+        return hideFigureBar();
+    const QPointF local(point.x() - textLeft(), point.y() - top);
+    for (const RenderedBlock::Figure &figure : render->block->figures()) {
+        if (figure.rect.contains(local) && figure.fittedWidth >= minFigureBarWidth)
+            return placeFigureBar(r.firstLine, figure, top);
+    }
+    hideFigureBar();
+}
+
+void VisualView::placeFigureBar(int line, const RenderedBlock::Figure &figure, qreal rowTop)
+{
+    if (!m_figureBar) {
+        m_figureBar = new FigureBar(viewport());
+        connect(m_figureBar, &FigureBar::action, this, [this](FigureBar::Action action) { figureAction(int(action)); });
+        // Off the bar and not on the figure either: it goes.
+        connect(m_figureBar, &FigureBar::pointerLeft, this,
+                [this] { updateFigureBar(viewport()->mapFromGlobal(QCursor::pos())); });
+    }
+    m_figureHover = {line, figure.index};
+    const qreal eps = 1e-6;
+    m_figureBar->setFigure(int(figure.percent), figure.factor > RenderedBlock::minFigureFactor + eps,
+                           figure.factor < figure.maxFactor - eps, qAbs(figure.factor - 1) < eps);
+    m_figureBar->adjustSize();
+    const QSize size = m_figureBar->size();
+    // At the figure's top right corner, within the view.
+    const int x = int(textLeft() + figure.rect.right()) - size.width() - figureBarInset;
+    const int y = int(rowTop + figure.rect.top()) + figureBarInset;
+    m_figureBar->move(qBound(0, x, qMax(0, viewport()->width() - size.width())),
+                      qBound(2, y, qMax(2, viewport()->height() - size.height() - 2)));
+    m_figureBar->show();
+    m_figureBar->raise();
+}
+
+void VisualView::figureAction(int action)
+{
+    if (m_figureHover.line < 0)
+        return;
+    const int line = m_figureHover.line;
+    const int number = m_figureHover.index;
+    const Row r = row(rowOfLine(line));
+    const Render *render = memoized(r);
+    if (!render || !render->block)
+        return;
+    const auto figures = render->block->figures();
+    const auto found = std::find_if(figures.begin(), figures.end(),
+                                    [&](const RenderedBlock::Figure &f) { return f.index == number; });
+    if (found == figures.end())
+        return;
+    // Whole hundredths, so that − and + undo each other.
+    const auto hundredths = [](qreal factor) { return qRound(factor * 100) / 100.0; };
+    qreal factor = 1;
+    if (action == int(FigureBar::Action::Smaller))
+        factor = qMax(RenderedBlock::minFigureFactor, hundredths(found->factor - RenderedBlock::figureStep));
+    else if (action == int(FigureBar::Action::Larger))
+        factor = qMin(found->maxFactor, hundredths(found->factor + RenderedBlock::figureStep));
+    const QString id = RenderedBlock::figureId(render->source);
+    QList<qreal> &scales = m_figureScales[id];
+    while (scales.size() <= number)
+        scales.append(1);
+    scales[number] = factor;
+    if (std::all_of(scales.begin(), scales.end(), [](qreal scale) { return scale == 1; }))
+        m_figureScales.remove(id);
+    ++m_figureRevision;
+    relayout();
+    // The figure changed size; the bar follows its corner.
+    qreal top = 0;
+    qreal bottom = 0;
+    const Row again = row(rowOfLine(line));
+    const RenderedBlock *block = renderedForRow(again);
+    if (!block || !lineBounds(line, &top, &bottom))
+        return hideFigureBar();
+    for (const RenderedBlock::Figure &figure : block->figures()) {
+        if (figure.index == number)
+            return placeFigureBar(line, figure, top);
+    }
+    hideFigureBar();
 }
 
 // ---------------------------------------------------------------------------

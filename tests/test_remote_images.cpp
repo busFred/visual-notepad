@@ -229,6 +229,7 @@ private Q_SLOTS:
     void nothingIsRequestedWithoutConsent();
     void downloadsAfterConsent();
     void wideDownloadsShrinkAndZoom();
+    void downloadsFitTheFigureBox();
     void downloadLimits_data();
     void downloadLimits();
     void failuresAreNotRetried();
@@ -475,6 +476,33 @@ void TestRemoteImages::wideDownloadsShrinkAndZoom()
     const auto picture = rendered->pictureAt(QPointF(200, 50));
     QVERIFY(picture);
     QCOMPARE(rendered->pictureImage(*picture).size(), QSize(2000, 500));
+}
+
+void TestRemoteImages::downloadsFitTheFigureBox()
+{
+    const QUrl url = m_stub->url(QStringLiteral("/wide.png"));
+    RenderContext ctx = context(true, 800);
+    ctx.figureWidth = 300;
+    renderHtml(imageTag(url), ctx);
+    QTRY_COMPARE(RemoteImages::instance().state(url), RemoteImages::State::Loaded);
+    // 2000x500: 300 wide, though the column has room, in its shape.
+    auto rendered = renderHtml(imageTag(url), ctx);
+    auto figures = rendered->figures();
+    QCOMPARE(int(figures.size()), 1);
+    QVERIFY2(qAbs(figures[0].rect.width() - 300) < 1.5, qPrintable(QString::number(figures[0].rect.width())));
+    QVERIFY(qAbs(figures[0].rect.height() - 75) < 1.5);
+    // The user's size, and the box's height.
+    ctx.figureScales.insert(RenderedBlock::figureId(imageTag(url)), {0.5});
+    figures = renderHtml(imageTag(url), ctx)->figures();
+    QVERIFY(qAbs(figures[0].rect.width() - 150) < 1.5);
+    ctx.figureScales.clear();
+    ctx.figureHeight = 40;
+    figures = renderHtml(imageTag(url), ctx)->figures();
+    QVERIFY(qAbs(figures[0].rect.height() - 40) < 1.5);
+    // Still the picture to zoom.
+    const auto picture = renderHtml(imageTag(url), ctx)->pictureAt(figures[0].rect.center());
+    QVERIFY(picture);
+    QCOMPARE(renderHtml(imageTag(url), ctx)->pictureImage(*picture).size(), QSize(2000, 500));
 }
 
 void TestRemoteImages::downloadLimits_data()
