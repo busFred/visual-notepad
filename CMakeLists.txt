@@ -86,6 +86,8 @@ add_library(vn_app STATIC
     src/markdown/MathObject.h
     src/markdown/MathRenderer.cpp
     src/markdown/MathRenderer.h
+    src/markdown/ReadFlow.cpp
+    src/markdown/ReadFlow.h
     src/markdown/RemoteImages.cpp
     src/markdown/RemoteImages.h
     src/markdown/TableCellEditor.cpp
