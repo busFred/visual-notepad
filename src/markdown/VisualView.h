@@ -31,6 +31,7 @@ namespace vn {
 
 class MarkdownModel;
 class TableCellEditor;
+class FigureBar;
 class TableToolbar;
 
 // Map between a Rich block's rendered text and its Markdown source by
@@ -72,6 +73,8 @@ public:
     // For tests: the rendered text of the row showing a line (null for
     // source rows).
     QString renderedTextAt(int line);
+    // For tests: the figures of the row showing a line, relative to the row's top-left.
+    std::vector<RenderedBlock::Figure> figuresAtLine(int line);
     // For tests: off, long lists render whole as short ones do (see itemRows).
     static void setItemRowsEnabled(bool on);
     // For tests: the marker drawn for the long list's item that starts on
@@ -243,6 +246,22 @@ private:
     void scheduleToolbarUpdate();
     void updateTableToolbar();
     void toolbarOperation(md::TableOp op);
+
+    // Pictures and diagrams fit a box (RenderContext::figureWidth and
+    // figureHeight); pointing at one shows a bar to make it smaller or
+    // larger, kept in memory for this view (m_figureScales).
+    //
+    // The most a picture's height may be: three quarters of what the view
+    // shows, in steps, so that a window being resized does not render the
+    // blocks with figures at every pixel.
+    qreal figureBoxHeight() const;
+    // Forgets the renders of blocks that may have figures; false if none was kept.
+    bool dropFigureRenders();
+    // Shows the bar over the figure under the point (viewport coordinates), or hides it.
+    void updateFigureBar(const QPoint &point);
+    void placeFigureBar(int line, const RenderedBlock::Figure &figure, qreal rowTop);
+    void hideFigureBar();
+    void figureAction(int action); // A FigureBar::Action.
 
     // Cell editing in rendered tables: a click on a cell of a rendered
     // table (editable view) opens a text box over it instead of the table's
@@ -442,6 +461,18 @@ private:
     QHash<int, QCursor> m_edgeCursors; // The arrows at a table's edges, by pixel ratio.
 
     TableToolbar *m_tableToolbar = nullptr;
+    FigureBar *m_figureBar = nullptr;
+    // The figure the bar is over: the first line of its block's row, and its
+    // number in the block.
+    struct FigureHover
+    {
+        int line = -1;
+        int index = -1;
+    } m_figureHover;
+    // How large the user made figures, by RenderedBlock::figureId(); not saved.
+    QHash<QString, QList<qreal>> m_figureScales;
+    int m_figureRevision = 0; // Bumped when m_figureScales changes.
+    bool m_figuresRendered = false; // A block that may have figures was rendered.
     bool m_toolbarUpdatePending = false;
     bool m_hasFocus = false; // Not counting the toolbar's menu taking it.
 
@@ -498,6 +529,8 @@ private:
     quint64 m_contextFrame = 0;
     int m_contextRevision = -1;
     qreal m_contextWidth = -1;
+    qreal m_contextFigureHeight = -1;
+    int m_contextFigureRevision = -1;
     bool m_contextValid = false;
     QString m_contextKey; // renderKey() of it.
     // Up and Down in rendered text keep the x they started from.
@@ -534,6 +567,8 @@ private:
     int m_rendersRevision = -1;
     qreal m_rendersWidth = -1;
     qreal m_rendersDpr = -1;
+    qreal m_rendersFigureHeight = -1;
+    int m_rendersFigureRevision = -1;
     // Bumped by every paint: what a paint shows is kept until the next one.
     quint64 m_frame = 0;
     int m_renderCount = 0;

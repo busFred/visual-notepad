@@ -552,11 +552,77 @@ QImage fitToColumn(QImage image, qreal width, qreal dpr)
     return image;
 }
 
+// Where a figure of the given own size lands: fitted to the box (never
+// enlarged), then scaled by what the user made of it, within the column.
+struct FigureFit
+{
+    QSizeF size;
+    qreal factor = 1;
+    qreal maxFactor = 1;
+    qreal fittedWidth = 0;
+};
+
+FigureFit fitFigure(const QSizeF &natural, const RenderContext &context, qreal factor)
+{
+    FigureFit fit;
+    if (natural.width() <= 0 || natural.height() <= 0) {
+        fit.size = natural;
+        return fit;
+    }
+    const qreal column = qMax<qreal>(1, context.width);
+    const qreal box = context.figureWidth > 0 ? qMin(column, context.figureWidth) : column;
+    qreal scale = qMin<qreal>(1, box / natural.width());
+    if (context.figureHeight > 0)
+        scale = qMin(scale, context.figureHeight / natural.height());
+    fit.fittedWidth = natural.width() * scale;
+    fit.maxFactor = qMax<qreal>(1, column / fit.fittedWidth);
+    fit.factor = qBound(RenderedBlock::minFigureFactor, factor, fit.maxFactor);
+    fit.size = natural * (scale * fit.factor);
+    return fit;
+}
+
+// The key of a file's current version, for caches.
+QString fileVersion(const QString &path)
+{
+    const QFileInfo info(path);
+    return QStringLiteral("%1|%2|").arg(info.lastModified().toMSecsSinceEpoch()).arg(info.size()) + path;
+}
+
+// A local picture at its own size, read once (see above); null if unreadable.
+QImage decodedLocalImage(const QString &path)
+{
+    const QString version = fileVersion(path);
+    QImage image = decodedPictures().find(version);
+    if (image.isNull()) {
+        image = readImage(path);
+        if (!image.isNull())
+            decodedPictures().insert(version, image);
+    }
+    return image;
+}
+
+// The size a local picture has (null if unreadable), without keeping or
+// asking for the decoded picture when it is known: a figure's size depends
+// on it. `decoded` gets the picture if it had to be read, for the caller to
+// scale (read once, even if the cache does not keep it).
+QSize localPictureSize(const QString &path, QImage *decoded)
+{
+    static QCache<QString, QSize> sizes(4096);
+    const QString version = fileVersion(path);
+    if (const QSize *known = sizes.object(version))
+        return *known;
+    *decoded = decodedLocalImage(path);
+    if (decoded->isNull())
+        return {};
+    sizes.insert(version, new QSize(decoded->size()));
+    return decoded->size();
+}
+
 // Local pictures, read and scaled to the column, by file version and size.
 // The decoded files are kept too (see above). SVGs are kept as decoded as
 // well: they are read at their own size, never at the column's, so a bigger
 // or smaller column scales the same pixels either way.
-QImage cachedLocalImage(const QString &path, qreal width, qreal dpr)
+QImage cachedLocalImage(const QString &path, qreal width, qreal dpr, QImage decoded = {})
 {
     static QCache<QString, QImage> cache(64 * 1024); // KiB
     const QFileInfo info(path);
@@ -564,13 +630,9 @@ QImage cachedLocalImage(const QString &path, qreal width, qreal dpr)
     const QString key = QStringLiteral("%1|%2|").arg(width).arg(dpr) + version;
     if (const QImage *hit = cache.object(key))
         return *hit;
-    QImage image = decodedPictures().find(version);
-    if (image.isNull()) {
-        image = readImage(path);
-        if (image.isNull())
-            return image; // Not cached: the file may appear later.
-        decodedPictures().insert(version, image);
-    }
+    QImage image = decoded.isNull() ? decodedLocalImage(path) : decoded;
+    if (image.isNull())
+        return image; // Not cached: the file may appear later.
     image = fitToColumn(image, width, dpr);
     cache.insert(key, new QImage(image), imageCost(image));
     return image;
@@ -758,6 +820,98 @@ public:
         if (!m_math.isEmpty() && !m_listing)
             m_mathObject = MathObject::install(this);
     }
+
+    // The figures (pictures read from files or downloaded; not formulas)
+    // take the size the box and the user give them (fitFigure), and the
+    // picture shown is made for that size, so that it is sharp. An HTML
+    // width or height counts as the picture's own size. A picture not
+    // loaded yet (a download in progress, a file not read) is left for
+    // loadResource().
+    void sizeFigures(const QList<qreal> &factors)
+    {
+        struct Spot
+        {
+            int position;
+            int length;
+            QTextImageFormat format;
+        };
+        std::vector<Spot> spots;
+        for (QTextBlock block = begin(); block.isValid(); block = block.next()) {
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                const QTextFragment fragment = it.fragment();
+                if (!fragment.charFormat().isImageFormat())
+                    continue;
+                const QTextImageFormat format = fragment.charFormat().toImageFormat();
+                if (!format.name().startsWith(QLatin1String("vn-")) && allowedPictureName(format.name()))
+                    spots.push_back({fragment.position(), fragment.length(), format});
+            }
+        }
+        const qreal dpr = m_context.devicePixelRatio;
+        for (size_t index = 0; index < spots.size(); ++index) {
+            QTextImageFormat format = spots[index].format;
+            const QString name = format.name();
+            const QUrl url(name);
+            QSizeF own;
+            QString path;
+            QImage decoded; // If reading it was needed to know its size.
+            if (RemoteImages::isWebUrl(url)) {
+                RemoteImages &remote = RemoteImages::instance();
+                if (!m_context.allowRemoteImages || remote.state(url) != RemoteImages::State::Loaded)
+                    continue;
+                own = remote.fullImage(url).size();
+                if (const QString address = url.toString();
+                    !m_remote.contains(address) && RemoteImages::redirectAllowed(QUrl(), url))
+                    m_remote.append(address);
+            } else {
+                path = localPath(url);
+                if (path.isEmpty())
+                    continue;
+                own = localPictureSize(path, &decoded);
+            }
+            if (own.isEmpty())
+                continue;
+            const qreal aspect = own.height() / own.width();
+            if (format.width() > 0 && format.height() > 0)
+                own = QSizeF(format.width(), format.height());
+            else if (format.width() > 0)
+                own = QSizeF(format.width(), format.width() * aspect);
+            else if (format.height() > 0)
+                own = QSizeF(format.height() / aspect, format.height());
+            const FigureFit fit = fitFigure(own, m_context, int(index) < factors.size() ? factors[int(index)] : 1);
+            const qreal width = qMax<qreal>(1, fit.size.width());
+            const QImage image = path.isEmpty() ? cachedRemoteImage(url, width, dpr)
+                                                : cachedLocalImage(path, width, dpr, decoded);
+            if (image.isNull())
+                continue;
+            // The picture's own pixels, unless it is made for another size
+            // (a picture smaller than the figure is drawn enlarged).
+            QSizeF shown = image.size() / image.devicePixelRatio();
+            if (qAbs(shown.width() - fit.size.width()) > 1.5)
+                shown = fit.size;
+            const QString fresh = QStringLiteral("vn-figure:%1").arg(m_figureNames.size());
+            m_figureNames.insert(fresh, name);
+            m_pictureBytes += image.sizeInBytes();
+            addResource(QTextDocument::ImageResource, QUrl(fresh), image);
+            format.setName(fresh);
+            format.setWidth(shown.width());
+            format.setHeight(shown.height());
+            QTextCursor cursor(this);
+            cursor.setPosition(spots[index].position);
+            cursor.setPosition(spots[index].position + spots[index].length, QTextCursor::KeepAnchor);
+            cursor.mergeCharFormat(format);
+            RenderedBlock::Figure figure;
+            figure.index = int(index);
+            figure.rect.setSize(shown);
+            figure.percent = qRound(100 * shown.width() / own.width());
+            figure.factor = fit.factor;
+            figure.maxFactor = fit.maxFactor;
+            figure.fittedWidth = fit.fittedWidth;
+            m_figures.push_back({spots[index].position, figure});
+        }
+    }
+
+    // The figures sizeFigures() sized, with where each is in the text.
+    const std::vector<std::pair<int, RenderedBlock::Figure>> &figures() const { return m_figures; }
 
     // Pictures wider than the column (an explicit width="1060" in the HTML)
     // shrink to it, keeping their proportions.
@@ -952,13 +1106,14 @@ public:
     // The file a picture's source names, or empty (math, remote pictures).
     QString pathOf(const QString &source) const
     {
-        return source.startsWith(QLatin1String("vn-math")) ? QString() : localPath(QUrl(source));
+        const QString name = m_figureNames.value(source, source);
+        return name.startsWith(QLatin1String("vn-math")) ? QString() : localPath(QUrl(name));
     }
 
     // The address of a picture that was downloaded for this block, or empty.
     QUrl downloadedUrlOf(const QString &source) const
     {
-        const QUrl url(source);
+        const QUrl url(m_figureNames.value(source, source));
         const bool loaded = m_context.allowRemoteImages && RemoteImages::isWebUrl(url)
                             && RemoteImages::instance().state(url) == RemoteImages::State::Loaded;
         return loaded ? url : QUrl();
@@ -1081,6 +1236,9 @@ private:
     qsizetype m_pictureBytes = 0;
     QStringList m_remote;
     bool m_pending = false;
+    // The names sizeFigures() gave pictures, with the names they had.
+    QHash<QString, QString> m_figureNames;
+    std::vector<std::pair<int, RenderedBlock::Figure>> m_figures;
 };
 
 QString hex(theme::Role role)
@@ -1553,9 +1711,17 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
                 r.m_centered = true;
                 r.m_diagramCode = text;
                 r.m_diagramTheme = context.mermaidTheme;
-                const qreal w = r.m_image.width() / r.m_image.devicePixelRatio();
-                if (w > context.width) // Shrink wide diagrams to fit.
-                    r.m_image.setDevicePixelRatio(r.m_image.devicePixelRatio() * w / context.width);
+                // Fit the figure box (and what the user made of it), by
+                // changing the ratio the pixels are drawn at.
+                const QSizeF own = QSizeF(r.m_image.size()) / r.m_image.devicePixelRatio();
+                const QList<qreal> factors = context.figureScales.value(figureId(source));
+                const FigureFit fit = fitFigure(own, context, factors.isEmpty() ? 1 : factors.first());
+                if (fit.size.width() > 0 && qAbs(fit.size.width() - own.width()) > 0.01)
+                    r.m_image.setDevicePixelRatio(r.m_image.devicePixelRatio() * own.width() / fit.size.width());
+                r.m_diagramFigure.percent = qRound(100 * fit.size.width() / own.width());
+                r.m_diagramFigure.factor = fit.factor;
+                r.m_diagramFigure.maxFactor = fit.maxFactor;
+                r.m_diagramFigure.fittedWidth = fit.fittedWidth;
                 r.m_height = r.m_image.height() / r.m_image.devicePixelRatio() + 2 * codePadY + blockGap;
                 return result;
             }
@@ -1579,6 +1745,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, c
         doc->setHtml(html);
         doc->dropNetworkImages();
         doc->placeMath();
+        doc->sizeFigures(context.figureScales.value(figureId(source)));
         doc->fitImages(context.width);
         if (item && !doc->begin().textList() && doc->blockCount() == 1 && doc->begin().text().isEmpty()) {
             // An empty item, which Qt drops: an empty line of the list as one
@@ -2086,6 +2253,49 @@ std::optional<RenderedBlock::Picture> RenderedBlock::pictureAt(const QPointF &po
         return std::nullopt;
     const QString name = QFileInfo(url.path()).fileName();
     return Picture{name.isEmpty() ? url.host() : name, {}, url.toString(QUrl::FullyEncoded)};
+}
+
+QString RenderedBlock::figureId(const QString &source)
+{
+    return QStringLiteral("%1:%2").arg(source.size()).arg(qHash(source));
+}
+
+bool RenderedBlock::mayHaveFigure(const QString &source)
+{
+    return source.contains(QLatin1String("!["))
+           || source.contains(QLatin1String("<img"), Qt::CaseInsensitive)
+           || source.contains(QLatin1String("mermaid"), Qt::CaseInsensitive);
+}
+
+std::vector<RenderedBlock::Figure> RenderedBlock::figures() const
+{
+    std::vector<Figure> result;
+    if (m_kind == Kind::Image && !m_diagramCode.isNull()) {
+        // Centred in the column, as paint() draws it.
+        const QSizeF size = pictureSize();
+        const qreal x = m_centered ? qMax<qreal>(0, (m_width - size.width()) / 2) : 0;
+        Figure figure = m_diagramFigure;
+        figure.rect = QRectF(QPointF(x, codePadY), size);
+        result.push_back(figure);
+    } else if (m_kind == Kind::Rich) {
+        const auto *doc = static_cast<const ResourceDocument *>(m_doc.get());
+        for (const auto &[position, found] : doc->figures()) {
+            // The picture stands on its line's baseline.
+            const QTextBlock block = m_doc->findBlock(position);
+            const QTextLayout *layout = block.isValid() ? block.layout() : nullptr;
+            const QTextLine line = layout ? layout->lineForTextPosition(position - block.position()) : QTextLine();
+            if (!line.isValid())
+                continue;
+            const QPointF origin = m_doc->documentLayout()->blockBoundingRect(block).topLeft() + contentOffset();
+            Figure figure = found;
+            const QSizeF size = found.rect.size();
+            figure.rect = QRectF(QPointF(origin.x() + line.cursorToX(position - block.position()),
+                                         origin.y() + line.y() + line.ascent() - size.height()),
+                                 size);
+            result.push_back(figure);
+        }
+    }
+    return result;
 }
 
 QImage RenderedBlock::pictureImage(const Picture &picture) const

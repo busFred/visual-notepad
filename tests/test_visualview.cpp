@@ -28,6 +28,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QLabel>
 #include <QMenu>
 #include <QPainter>
 #include <QPlainTextEdit>
@@ -194,6 +195,7 @@ public:
     // The viewport y range of the row holding a line, or false.
     bool boundsOfLine(int line, qreal *top, qreal *bottom) { return lineBounds(line, top, bottom); }
     qreal textStart() const { return textLeft(); }
+    qreal columnWidth() const { return textWidth(); }
     using VisualView::hasTableSelection;
     using VisualView::populateSelectionMenu;
 
@@ -364,6 +366,12 @@ private Q_SLOTS:
     void codeBlocksArePaintedAsTheStockHighlighterDoes();
     void renderCostCountsPicturesAndText();
     void clickEnlargesPicture();
+    void figuresFitTheirBox();
+    void figureBoxFollowsTheViewHeight();
+    void formulasAreNotFigures();
+    void diagramsFitTheBox();
+    void figureBarSizesOneFigure();
+    void figureBarKeepsClicksAndPictureClickStillZooms();
     void networkPaths();
     void plainToolTipText();
     void linkToolTipsArePlainText();
@@ -3038,6 +3046,310 @@ void TestVisualView::clickEnlargesPicture()
     m_view->setReadOnly(false);
     QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(m_view->viewport()->width() / 2, y));
     QVERIFY(m_view->window()->findChildren<ImageViewer *>().isEmpty());
+}
+
+namespace {
+
+// A flat picture file of the given size in a folder.
+void savePicture(const QTemporaryDir &dir, const QString &name, int width, int height)
+{
+    QImage picture(width, height, QImage::Format_RGB32);
+    picture.fill(Qt::darkGreen);
+    QVERIFY(picture.save(dir.filePath(name)));
+}
+
+// The width of 70 characters of the body text the views make (at zoom 100%).
+qreal seventyCharacters()
+{
+    return 70 * QFontMetricsF(theme::textFont()).averageCharWidth();
+}
+
+} // namespace
+
+void TestVisualView::figuresFitTheirBox()
+{
+    QTemporaryDir dir;
+    savePicture(dir, QStringLiteral("wide.png"), 2000, 500);
+    savePicture(dir, QStringLiteral("tall.png"), 300, 2000);
+    savePicture(dir, QStringLiteral("small.png"), 100, 80);
+    m_view->resize(1200, 700);
+    m_view->setBaseDirectory(dir.path());
+    setDocument(QStringLiteral("![wide](wide.png)\n\n![tall](tall.png)\n\n![small](small.png)\n"), 0);
+    m_view->setReadOnly(true);
+    m_view->grab();
+    auto *view = static_cast<ProbeView *>(m_view);
+    const qreal column = view->columnWidth();
+    const qreal chars = seventyCharacters();
+    QVERIFY(chars < column); // The window is wide: the characters are the limit.
+
+    // Wide: no wider than 70 characters, though the column has room; the
+    // shape is kept.
+    const auto wide = view->figuresAtLine(0);
+    QCOMPARE(int(wide.size()), 1);
+    QVERIFY2(qAbs(wide[0].rect.width() - chars) < 1.5, qPrintable(QString::number(wide[0].rect.width())));
+    QVERIFY(qAbs(wide[0].rect.height() * 4 - wide[0].rect.width()) < 4);
+    QCOMPARE(wide[0].percent, qRound(100 * wide[0].rect.width() / 2000));
+    // Tall: no higher than three quarters of what the view shows.
+    const auto tall = view->figuresAtLine(2);
+    QCOMPARE(int(tall.size()), 1);
+    const qreal shown = view->viewport()->height();
+    QVERIFY2(tall[0].rect.height() <= shown * 0.75, qPrintable(QString::number(tall[0].rect.height())));
+    QVERIFY(tall[0].rect.height() > shown * 0.75 - 20); // (Up to the step the box moves in.)
+    QVERIFY(qAbs(tall[0].rect.width() / tall[0].rect.height() - 300.0 / 2000) < 0.01);
+    // Small: never enlarged.
+    const auto small = view->figuresAtLine(4);
+    QCOMPARE(int(small.size()), 1);
+    QCOMPARE(small[0].rect.size(), QSizeF(100, 80));
+    QCOMPARE(small[0].percent, 100.0);
+    // A narrow window: the column is the limit.
+    m_view->resize(300, 700);
+    setDocument(QStringLiteral("![wide](wide.png)\n"), 0);
+    m_view->grab();
+    const auto narrow = view->figuresAtLine(0);
+    QCOMPARE(int(narrow.size()), 1);
+    QVERIFY(narrow[0].rect.width() <= view->columnWidth() + 0.5);
+    QVERIFY(narrow[0].rect.width() < chars);
+}
+
+void TestVisualView::figureBoxFollowsTheViewHeight()
+{
+    QTemporaryDir dir;
+    savePicture(dir, QStringLiteral("tall.png"), 300, 2000);
+    m_view->resize(900, 800);
+    m_view->setBaseDirectory(dir.path());
+    setDocument(QStringLiteral("Text\n\n![tall](tall.png)\n\nMore text\n"), 0);
+    m_view->setReadOnly(true);
+    m_view->grab();
+    auto *view = static_cast<ProbeView *>(m_view);
+    const qreal before = view->figuresAtLine(2).at(0).rect.height();
+    QVERIFY(before <= view->viewport()->height() * 0.75);
+    const int renders = view->renderCount();
+
+    m_view->resize(900, 400);
+    QTRY_VERIFY(view->viewport()->height() < 450);
+    m_view->grab();
+    const qreal after = view->figuresAtLine(2).at(0).rect.height();
+    QVERIFY2(after <= view->viewport()->height() * 0.75, qPrintable(QString::number(after)));
+    QVERIFY(after < before);
+    // The row is as high as the picture is now (and the line spacing around it).
+    qreal top = 0;
+    qreal bottom = 0;
+    QVERIFY(view->boundsOfLine(2, &top, &bottom));
+    QVERIFY(bottom - top >= after);
+    QVERIFY2(bottom - top < after * 1.8, qPrintable(QStringLiteral("%1 %2").arg(bottom - top).arg(after)));
+    QVERIFY(view->renderCount() > renders);
+
+    // A taller window grows it again, up to what the picture is.
+    m_view->resize(900, 1200);
+    QTRY_VERIFY(view->viewport()->height() > 1000);
+    m_view->grab();
+    const qreal grown = view->figuresAtLine(2).at(0).rect.height();
+    QVERIFY(grown > before);
+    QVERIFY(grown <= 2000);
+    QVERIFY(grown <= view->viewport()->height() * 0.75);
+
+    // Only blocks with figures render again when the height changes.
+    const int plain = view->renderCount();
+    m_view->resize(900, 1000);
+    QTRY_VERIFY(view->viewport()->height() < 1100);
+    m_view->grab();
+    QVERIFY(view->renderCount() - plain <= 1); // The picture's block.
+}
+
+void TestVisualView::formulasAreNotFigures()
+{
+    setDocument(QStringLiteral("$$\n\\frac{a}{b} + c^{2} + d_{i}\n$$\n"), 0);
+    const auto &blocks = m_model->blocks();
+    QCOMPARE(int(blocks.size()), 1);
+    QCOMPARE(blocks[0].kind, core::BlockKind::Math);
+    const QString source = m_model->sourceText(0, 2);
+    RenderContext plain;
+    plain.font = theme::textFont();
+    plain.codeFont = theme::editorFont();
+    plain.width = 800;
+    RenderContext boxed = plain;
+    boxed.figureWidth = 40;
+    boxed.figureHeight = 16;
+    const auto a = RenderedBlock::create(blocks[0], source, plain);
+    const auto b = RenderedBlock::create(blocks[0], source, boxed);
+    QCOMPARE(a->kind(), RenderedBlock::Kind::Image);
+    QCOMPARE(b->height(), a->height());
+    QVERIFY(a->figures().empty());
+    QVERIFY(b->figures().empty());
+    QVERIFY(!RenderedBlock::mayHaveFigure(source));
+}
+
+void TestVisualView::diagramsFitTheBox()
+{
+    const QString source = QStringLiteral("```mermaid\ngraph LR\n  A[Start] --> B[A fairly long label] --> C[End]\n```\n");
+    setDocument(source, 0);
+    const auto &blocks = m_model->blocks();
+    QCOMPARE(int(blocks.size()), 1);
+    const QString text = m_model->sourceText(0, 3);
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.width = 2000;
+    ctx.mermaidTheme = Settings::instance().text(key::mermaidTheme);
+    const auto made = [&] { return RenderedBlock::create(blocks[0], text, ctx); };
+    QTRY_VERIFY(!made()->isPending());
+    const auto own = made()->figures();
+    QCOMPARE(int(own.size()), 1);
+    const qreal natural = own[0].rect.width();
+    QVERIFY(natural > 100); // Not enlarged, nor narrowed by the column.
+    QCOMPARE(own[0].percent, 100.0);
+    // A box narrower than the diagram.
+    ctx.figureWidth = natural / 2;
+    auto half = made()->figures();
+    QVERIFY(qAbs(half[0].rect.width() - natural / 2) < 1);
+    QVERIFY(qAbs(half[0].percent - 50) < 1);
+    // A box higher than the diagram changes nothing; a lower one fits the height.
+    ctx.figureWidth = 0;
+    ctx.figureHeight = own[0].rect.height() * 3;
+    QVERIFY(qAbs(made()->figures()[0].rect.width() - natural) < 1);
+    ctx.figureHeight = own[0].rect.height() / 4;
+    QVERIFY(qAbs(made()->figures()[0].rect.height() - own[0].rect.height() / 4) < 1);
+    // The user's size, within the column.
+    ctx.figureHeight = 0;
+    ctx.figureWidth = natural / 2;
+    ctx.figureScales.insert(RenderedBlock::figureId(text), {1.5});
+    QVERIFY(qAbs(made()->figures()[0].rect.width() - natural * 0.75) < 1);
+    // The picture to zoom is the diagram, wherever it is.
+    const auto block = made();
+    const QRectF rect = block->figures()[0].rect;
+    QVERIFY(block->pictureAt(rect.center()));
+}
+
+void TestVisualView::figureBarSizesOneFigure()
+{
+    QTemporaryDir dir;
+    savePicture(dir, QStringLiteral("a.png"), 2000, 500);
+    savePicture(dir, QStringLiteral("b.png"), 2000, 600);
+    m_view->resize(1200, 900);
+    m_view->setBaseDirectory(dir.path());
+    setDocument(QStringLiteral("![a](a.png)\n\n![b](b.png)\n"), 0);
+    m_view->setReadOnly(true);
+    m_view->grab();
+    auto *view = static_cast<ProbeView *>(m_view);
+    const auto pointOn = [&](int line) {
+        qreal top = 0;
+        qreal bottom = 0;
+        view->boundsOfLine(line, &top, &bottom);
+        const QRectF rect = view->figuresAtLine(line).at(0).rect;
+        return QPoint(int(view->textStart() + rect.center().x()), int(top + rect.center().y()));
+    };
+    const auto barOf = [&]() { return view->viewport()->findChild<QWidget *>(QStringLiteral("FigureBar")); };
+    const auto buttonOf = [&](const QString &text) {
+        for (QToolButton *button : barOf()->findChildren<QToolButton *>()) {
+            if (button->text() == text)
+                return button;
+        }
+        return static_cast<QToolButton *>(nullptr);
+    };
+    QVERIFY(!barOf() || !barOf()->isVisible());
+
+    const qreal fitted = view->figuresAtLine(0).at(0).rect.width();
+    const qreal other = view->figuresAtLine(2).at(0).rect.width();
+    // The bar shows while the pointer is on the figure, at its top right.
+    QTest::mouseMove(view->viewport(), pointOn(0));
+    QVERIFY(barOf() && barOf()->isVisible());
+    qreal top = 0;
+    qreal bottom = 0;
+    view->boundsOfLine(0, &top, &bottom);
+    const QRectF rect = view->figuresAtLine(0).at(0).rect;
+    const QRect where = barOf()->geometry();
+    QVERIFY(where.right() <= view->textStart() + rect.right());
+    QVERIFY(where.right() > view->textStart() + rect.right() - 20);
+    QVERIFY(where.top() >= top + rect.top() && where.top() < top + rect.top() + 20);
+    auto *label = barOf()->findChild<QLabel *>();
+    QVERIFY(label);
+    QCOMPARE(label->text(), QStringLiteral("%1%").arg(qRound(100 * fitted / 2000)));
+    QVERIFY(buttonOf(QStringLiteral("Fit")) && !buttonOf(QStringLiteral("Fit"))->isEnabled()); // Fitted already.
+    QVERIFY(buttonOf(QStringLiteral("−")) && buttonOf(QStringLiteral("+")));
+
+    // − takes a tenth off the fitted size; + gives it back and adds one.
+    QTest::mouseClick(buttonOf(QStringLiteral("−")), Qt::LeftButton);
+    QVERIFY2(qAbs(view->figuresAtLine(0).at(0).rect.width() - fitted * 0.9) < 1.5,
+             qPrintable(QString::number(view->figuresAtLine(0).at(0).rect.width())));
+    QVERIFY(barOf()->isVisible());
+    QVERIFY(buttonOf(QStringLiteral("Fit"))->isEnabled());
+    QCOMPARE(label->text(), QStringLiteral("%1%").arg(qRound(100 * view->figuresAtLine(0).at(0).rect.width() / 2000)));
+    QTest::mouseClick(buttonOf(QStringLiteral("+")), Qt::LeftButton);
+    QTest::mouseClick(buttonOf(QStringLiteral("+")), Qt::LeftButton);
+    QVERIFY2(qAbs(view->figuresAtLine(0).at(0).rect.width() - fitted * 1.1) < 1.5,
+             qPrintable(QString::number(view->figuresAtLine(0).at(0).rect.width())));
+    // Only this figure changed.
+    QCOMPARE(view->figuresAtLine(2).at(0).rect.width(), other);
+    // Fit goes back to the fitted size.
+    QTest::mouseClick(buttonOf(QStringLiteral("Fit")), Qt::LeftButton);
+    QVERIFY(qAbs(view->figuresAtLine(0).at(0).rect.width() - fitted) < 1.5);
+    QVERIFY(!buttonOf(QStringLiteral("Fit"))->isEnabled());
+
+    // + stops at the column, − at a tenth of the fitted size.
+    for (int i = 0; i < 100 && buttonOf(QStringLiteral("+"))->isEnabled(); ++i)
+        QTest::mouseClick(buttonOf(QStringLiteral("+")), Qt::LeftButton);
+    QVERIFY(!buttonOf(QStringLiteral("+"))->isEnabled());
+    const qreal widest = view->figuresAtLine(0).at(0).rect.width();
+    QVERIFY(widest <= view->columnWidth() + 0.5);
+    QVERIFY(widest > view->columnWidth() - 2);
+    for (int i = 0; i < 100 && buttonOf(QStringLiteral("−"))->isEnabled(); ++i)
+        QTest::mouseClick(buttonOf(QStringLiteral("−")), Qt::LeftButton);
+    QVERIFY(!buttonOf(QStringLiteral("−"))->isEnabled());
+    QVERIFY(qAbs(view->figuresAtLine(0).at(0).rect.width() - fitted * 0.1) < 1.5);
+    QTest::mouseClick(buttonOf(QStringLiteral("Fit")), Qt::LeftButton);
+
+    // The second figure has a bar of its own, and keeps its size meanwhile.
+    QTest::mouseMove(view->viewport(), pointOn(2));
+    QVERIFY(barOf()->isVisible());
+    QTest::mouseClick(buttonOf(QStringLiteral("−")), Qt::LeftButton);
+    QVERIFY(view->figuresAtLine(2).at(0).rect.width() < other - 10);
+    QVERIFY(qAbs(view->figuresAtLine(0).at(0).rect.width() - fitted) < 1.5);
+    // The size is kept while the view re-renders (a new width, the same figure).
+    view->resize(1190, 900);
+    QTest::qWait(50);
+    view->grab();
+    QVERIFY(view->figuresAtLine(2).at(0).factor < 1);
+
+    // Off the figures, the bar goes.
+    QTest::mouseMove(view->viewport(), QPoint(3, 3));
+    QVERIFY(!barOf()->isVisible());
+}
+
+void TestVisualView::figureBarKeepsClicksAndPictureClickStillZooms()
+{
+    QTemporaryDir dir;
+    savePicture(dir, QStringLiteral("a.png"), 2000, 500);
+    m_view->resize(1200, 900);
+    m_view->setBaseDirectory(dir.path());
+    setDocument(QStringLiteral("![a](a.png)\n"), 0);
+    m_view->setReadOnly(true);
+    m_view->grab();
+    auto *view = static_cast<ProbeView *>(m_view);
+    qreal top = 0;
+    qreal bottom = 0;
+    QVERIFY(view->boundsOfLine(0, &top, &bottom));
+    const QRectF rect = view->figuresAtLine(0).at(0).rect;
+    const QPoint center(int(view->textStart() + rect.center().x()), int(top + rect.center().y()));
+    QTest::mouseMove(view->viewport(), center);
+    auto *bar = view->viewport()->findChild<QWidget *>(QStringLiteral("FigureBar"));
+    QVERIFY(bar && bar->isVisible());
+    QVERIFY(view->window()->findChildren<ImageViewer *>().isEmpty());
+    // The bar's buttons and the bar between them do not open the picture.
+    for (QToolButton *button : bar->findChildren<QToolButton *>())
+        QTest::mouseClick(button, Qt::LeftButton);
+    QTest::mouseClick(bar, Qt::LeftButton, {}, QPoint(1, 1));
+    QVERIFY(view->window()->findChildren<ImageViewer *>().isEmpty());
+    // The picture itself does (the figure moved: ask again).
+    QTest::mouseMove(view->viewport(), QPoint(3, 3));
+    const QRectF now = view->figuresAtLine(0).at(0).rect;
+    QVERIFY(view->boundsOfLine(0, &top, &bottom));
+    QTest::mouseClick(view->viewport(), Qt::LeftButton, {},
+                      QPoint(int(view->textStart() + now.center().x()), int(top + now.center().y())));
+    const auto viewers = view->window()->findChildren<ImageViewer *>();
+    QCOMPARE(viewers.size(), 1);
+    QCOMPARE(viewers.first()->size().isEmpty(), false);
+    viewers.first()->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 }
 
 void TestVisualView::networkPaths()
