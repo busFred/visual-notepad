@@ -134,3 +134,8 @@ qt_add_executable(test_links test_links.cpp)
 target_link_libraries(test_links PRIVATE vn_app Qt6::Test)
 add_test(NAME links COMMAND test_links)
 set_tests_properties(links PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
+
+qt_add_executable(test_folding test_folding.cpp)
+target_link_libraries(test_folding PRIVATE vn_app Qt6::Test)
+add_test(NAME folding COMMAND test_folding)
+set_tests_properties(folding PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
