@@ -76,6 +76,8 @@ add_library(vn_app STATIC
     src/editor/TextView.h
     src/markdown/BlockRenderer.cpp
     src/markdown/BlockRenderer.h
+    src/markdown/Folding.cpp
+    src/markdown/Folding.h
     src/markdown/ImageViewer.cpp
     src/markdown/ImageViewer.h
     src/markdown/MarkdownEditing.cpp
