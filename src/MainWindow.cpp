@@ -28,6 +28,9 @@
 #include <QDialogButtonBox>
 #include <QDockWidget>
 #include <QFormLayout>
+#include <QFrame>
+#include <QPointer>
+#include <QSlider>
 #include <QSpinBox>
 #include <QGuiApplication>
 #include <QJsonArray>
@@ -59,6 +62,7 @@
 #include <KSyntaxHighlighting/Repository>
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 
 #ifdef Q_OS_WIN
@@ -79,7 +83,6 @@ const MainWindow *outlineToggleOrigin = nullptr;
 // (a few ms) it runs off the GUI thread, so that a pause in typing does not
 // freeze the window.
 constexpr qsizetype outlineThreadChars = 256 * 1024;
-constexpr int zoomStepPercent = 10;
 
 // The headings of a Markdown text. Plain Rust and Qt value types only, so it
 // also runs on a worker thread.
@@ -176,6 +179,93 @@ private:
     std::function<void()> m_handler;
 };
 
+// What the zoom cell opens: the half's name (in a split), − / slider / +
+// and the value. The slider is logarithmic, like the image viewer's, so every
+// step is the same relative change, and snaps to whole zoom steps.
+class ZoomPopup : public QFrame
+{
+public:
+    // `half` names the half being zoomed; empty when there is only one.
+    ZoomPopup(DocumentTab *tab, const QString &half, QWidget *parent)
+        : QFrame(parent, Qt::Popup)
+        , m_tab(tab)
+    {
+        setObjectName(QStringLiteral("ZoomPopup"));
+        setAttribute(Qt::WA_DeleteOnClose);
+        setAttribute(Qt::WA_StyledBackground);
+        auto *layout = new QHBoxLayout(this);
+        layout->setContentsMargins(12, 8, 12, 8);
+        layout->setSpacing(8);
+        if (!half.isEmpty()) {
+            auto *name = new QLabel(half, this);
+            name->setObjectName(QStringLiteral("ZoomHalf"));
+            layout->addWidget(name);
+            layout->addSpacing(4);
+        }
+        const auto button = [&](const QString &text, int steps) {
+            auto *b = new QToolButton(this);
+            b->setObjectName(QStringLiteral("ZoomStep"));
+            b->setText(text);
+            b->setAutoRaise(true);
+            b->setFocusPolicy(Qt::NoFocus);
+            layout->addWidget(b);
+            connect(b, &QToolButton::clicked, this, [this, steps] { m_tab->zoomBy(steps); });
+        };
+        button(QStringLiteral("\u2212"), -1);
+        m_slider = new QSlider(Qt::Horizontal, this);
+        m_slider->setRange(0, sliderSteps);
+        m_slider->setFixedWidth(120);
+        m_slider->setFocusPolicy(Qt::NoFocus);
+        layout->addWidget(m_slider);
+        connect(m_slider, &QSlider::valueChanged, this, [this](int position) {
+            m_tab->setZoom(percentAt(position));
+            // Snap the handle even when the zoom stayed where it was.
+            refresh();
+        });
+        button(QStringLiteral("+"), 1);
+        m_value = new QLabel(this);
+        m_value->setObjectName(QStringLiteral("ZoomValue"));
+        m_value->setMinimumWidth(m_value->fontMetrics().horizontalAdvance(QStringLiteral("500%")));
+        m_value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        layout->addWidget(m_value);
+        connect(tab, &DocumentTab::zoomChanged, this, [this] { refresh(); });
+        refresh();
+        adjustSize();
+    }
+
+    // Slider position of a zoom, and the zoom (a whole step) of a position.
+    static int positionOf(int percent)
+    {
+        return qRound(std::log(double(percent) / DocumentTab::minZoom)
+                      / std::log(double(DocumentTab::maxZoom) / DocumentTab::minZoom) * sliderSteps);
+    }
+
+    static int percentAt(int position)
+    {
+        const double percent = DocumentTab::minZoom
+                               * std::pow(double(DocumentTab::maxZoom) / DocumentTab::minZoom,
+                                          double(position) / sliderSteps);
+        return qBound(DocumentTab::minZoom, qRound(percent / DocumentTab::zoomStep) * DocumentTab::zoomStep,
+                      DocumentTab::maxZoom);
+    }
+
+private:
+    static constexpr int sliderSteps = 1000;
+
+    void refresh()
+    {
+        // Follow the zoom without echoing it back through the slider; the
+        // handle lands on the step it snapped to.
+        const QSignalBlocker block(m_slider);
+        m_slider->setValue(positionOf(m_tab->zoom()));
+        m_value->setText(QStringLiteral("%1%").arg(m_tab->zoom()));
+    }
+
+    QPointer<DocumentTab> m_tab;
+    QSlider *m_slider;
+    QLabel *m_value;
+};
+
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent)
@@ -204,7 +294,6 @@ MainWindow::MainWindow(QWidget *parent)
         }
     });
 
-    m_zoomPercent = Settings::instance().number(key::zoom);
     m_autoSaveMode = Settings::instance().text(key::autoSave);
     m_outlineTimer->setSingleShot(true);
     m_outlineTimer->setInterval(250);
@@ -704,7 +793,8 @@ void MainWindow::createStatusBar()
     };
     m_indentation->setObjectName(QStringLiteral("IndentationStatus"));
     clickable(m_indentation, [this] { showIndentationMenu(); });
-    clickable(m_zoom, [this] { zoom(0); });
+    m_zoom->setObjectName(QStringLiteral("ZoomStatus"));
+    clickable(m_zoom, [this] { showZoomPopup(); });
     clickable(m_lineEnding, [this] { showLineEndingMenu(); });
     clickable(m_encoding, [this] { showEncodingMenu(); });
     clickable(m_language, [this] { showLanguageMenu(); });
@@ -1377,7 +1467,10 @@ void MainWindow::addTab(DocumentTab *tab, EditorGroup *group, int index)
     const int at = group->addTab(tab, tab->displayName(), index);
     updateTabTitle(tab);
     group->setCurrentIndex(at);
-    applyZoom();
+    connect(tab, &DocumentTab::zoomChanged, this, [this, tab] {
+        if (tab == currentTab())
+            updateStatus();
+    });
     tab->editor()->setFocus();
 }
 
@@ -2168,15 +2261,26 @@ void MainWindow::setViewMode(DocumentTab::ViewMode mode)
 
 void MainWindow::zoom(int steps)
 {
-    m_zoomPercent = steps == 0 ? 100 : qBound(30, m_zoomPercent + steps * zoomStepPercent, 500);
-    applyZoom();
+    // Only the half in use (see DocumentTab::zoom); 0 is back to the default.
+    if (auto *tab = currentTab()) {
+        if (steps == 0)
+            tab->resetZoom();
+        else
+            tab->zoomBy(steps);
+    }
 }
 
-void MainWindow::applyZoom()
+void MainWindow::showZoomPopup()
 {
-    for (DocumentTab *tab : tabs())
-        tab->setZoom(m_zoomPercent);
-    updateStatus();
+    DocumentTab *tab = currentTab();
+    if (!tab)
+        return;
+    const QString half = !tab->showsBothHalves() ? QString()
+                         : tab->zoomsVisual() ? tr("Visual")
+                                                              : tr("Source");
+    auto *popup = new ZoomPopup(tab, half, this);
+    popup->move(m_zoom->mapToGlobal(QPoint(m_zoom->width(), 0)) - QPoint(popup->width(), popup->height()));
+    popup->show();
 }
 
 void MainWindow::goToLine()
@@ -2283,7 +2387,9 @@ void MainWindow::updateStatus()
     m_position->setText(position);
     m_indentation->setText(tab->indentation().insertSpaces ? tr("Spaces: %1").arg(tab->indentation().tabSize)
                                                            : tr("Tab Size: %1").arg(tab->indentation().tabSize));
-    m_zoom->setText(QStringLiteral("%1%").arg(m_zoomPercent));
+    m_zoom->setText(QStringLiteral("%1%").arg(tab->zoom()));
+    m_zoom->setToolTip(!tab->showsBothHalves() ? tr("Zoom") : tab->zoomsVisual() ? tr("Visual zoom")
+                                                                                                 : tr("Source zoom"));
     m_lineEnding->setText(tab->lineEnding() == DocumentTab::LineEnding::CRLF ? tr("Windows (CRLF)")
                                                                              : tr("Unix (LF)"));
     m_encoding->setText(tab->encodingName());

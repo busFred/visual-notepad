@@ -1794,7 +1794,15 @@ void TextView::mouseReleaseEvent(QMouseEvent *event)
 void TextView::wheelEvent(QWheelEvent *event)
 {
     if (event->modifiers() & Qt::ControlModifier) {
-        event->ignore(); // Zoom is handled by the window.
+        // Zoom, in whole notches: smooth wheels and touchpads send small
+        // deltas that add up. Which half zooms is the tab's call, not the
+        // one under the pointer.
+        m_zoomDelta += event->angleDelta().y();
+        const int notches = m_zoomDelta / 120;
+        m_zoomDelta -= notches * 120;
+        if (notches != 0)
+            Q_EMIT zoomRequested(notches);
+        event->accept();
         return;
     }
     if (event->angleDelta().x() != 0 && !m_wordWrap) {

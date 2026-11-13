@@ -224,7 +224,7 @@ private:
     bool reopenWithEncoding(DocumentTab *tab, const DocumentTab::Encoding &encoding);
     void setViewMode(DocumentTab::ViewMode mode);
     void zoom(int steps);
-    void applyZoom();
+    void showZoomPopup();
     void goToLine();
     void showPreferences(const QString &page);
     void onSettingChanged(const QString &key);
@@ -342,7 +342,6 @@ private:
     QLabel *m_lineEnding;
     QLabel *m_encoding;
     QLabel *m_language;
-    int m_zoomPercent = 100;
 };
 
 } // namespace vn

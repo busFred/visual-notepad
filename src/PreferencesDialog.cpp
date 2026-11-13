@@ -931,8 +931,8 @@ void PreferencesDialog::buildViewPage()
     addHeading(tr("Layout"));
     addSwitch(tr("Show status bar"), key::statusBar);
     addSwitch(tr("Show Outline panel for Markdown files"), key::outline);
-    addCombo(tr("Zoom level"), key::zoom, {{QStringLiteral("90%"), 90}, {QStringLiteral("100%"), 100},
-                                           {QStringLiteral("110%"), 110}, {QStringLiteral("125%"), 125}});
+    addCombo(tr("Default zoom level"), key::zoom, {{QStringLiteral("90%"), 90}, {QStringLiteral("100%"), 100},
+                                                   {QStringLiteral("110%"), 110}, {QStringLiteral("125%"), 125}});
     endPage(tr("View"), QStringLiteral("view"));
 }
 

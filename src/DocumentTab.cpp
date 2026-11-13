@@ -100,6 +100,43 @@ private:
     QToolButton *m_pen;
 };
 
+namespace {
+
+// The 2 px line along the bottom of the half in use. It is a child of the
+// half, so it follows it however the splitter moves.
+class AccentLine : public QWidget
+{
+public:
+    explicit AccentLine(QWidget *half)
+        : QWidget(half)
+    {
+        setObjectName(QStringLiteral("ZoomAccent"));
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setFixedHeight(2);
+        hide();
+        half->installEventFilter(this);
+        place();
+    }
+
+    void place()
+    {
+        setGeometry(0, parentWidget()->height() - height(), parentWidget()->width(), height());
+        raise();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override { QPainter(this).fillRect(rect(), theme::color(theme::Role::accent)); }
+
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::Resize)
+            place();
+        return QWidget::eventFilter(watched, event);
+    }
+};
+
+} // namespace
+
 DocumentTab::DocumentTab(QWidget *parent)
     : DocumentTab(TextFile::create(), parent)
 {
@@ -117,6 +154,7 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
     m_editor = new TextView(m_doc, m_splitter);
     m_splitter->addWidget(m_editor);
     m_active = m_editor;
+    m_sourceAccent = new AccentLine(m_editor);
     m_pill = new EditorPill(this);
     // The find bar and the go-to-line field are built on first use: most
     // tabs never show them, and a restored session creates many tabs.
@@ -125,6 +163,7 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
     m_viewMode = defaultMode == QLatin1String("source")  ? ViewMode::Source
                  : defaultMode == QLatin1String("split") ? ViewMode::SourceVisual
                                                          : ViewMode::Visual;
+    m_sourceZoom = m_visualZoom = Settings::instance().number(key::zoom);
     applySettings();
     connect(&Settings::instance(), &Settings::changed, this, &DocumentTab::onSettingChanged);
 
@@ -146,6 +185,7 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
     });
     connect(m_editor, &TextView::linkRequested, this, &DocumentTab::linkActivated);
     connect(m_editor, &TextView::filesDropped, this, &DocumentTab::filesDropped);
+    connect(m_editor, &TextView::zoomRequested, this, &DocumentTab::zoomBy);
 
     // What the file shares with every tab showing it.
     TextFile *f = m_file.get();
@@ -196,7 +236,10 @@ DocumentTab *DocumentTab::openAnotherView(QWidget *parent) const
     tab->m_splitLocked = m_splitLocked;
     tab->m_visualLocked = m_visualLocked;
     tab->setViewMode(m_viewMode);
-    tab->setZoom(m_zoom);
+    tab->m_sourceZoom = m_sourceZoom;
+    tab->m_visualZoom = m_visualZoom;
+    // The views take their fonts when the tab is shown, as after setZoom.
+    tab->m_settingsStale = true;
     tab->editor()->setTextCursor(editor()->textCursor());
     return tab;
 }
@@ -275,6 +318,8 @@ void DocumentTab::ensureVisualView()
     m_visual->setTextCursor(QTextCursor(m_doc));
     applyViewSettings(m_visual);
     m_visual->installEventFilter(this);
+    m_visualAccent = new AccentLine(m_visual);
+    connect(m_visual, &TextView::zoomRequested, this, &DocumentTab::zoomBy);
     connect(m_visual, &VisualView::linkActivated, this, &DocumentTab::linkActivated);
     connect(m_visual, &TextView::linkRequested, this, &DocumentTab::linkActivated);
     connect(m_visual, &TextView::filesDropped, this, &DocumentTab::filesDropped);
@@ -325,7 +370,9 @@ void DocumentTab::setActiveView(TextView *view)
     m_active = view;
     if (m_findBar)
         m_findBar->setView(view);
+    updateAccent();
     Q_EMIT cursorPositionChanged();
+    Q_EMIT zoomChanged();
 }
 
 void DocumentTab::updateViews()
@@ -341,6 +388,7 @@ void DocumentTab::updateViews()
         }
         delete m_visual;
         m_visual = nullptr;
+        m_visualAccent = nullptr;
     }
     if (mode != ViewMode::Source) {
         ensureVisualView();
@@ -366,6 +414,8 @@ void DocumentTab::updateViews()
     if (mode == ViewMode::SourceVisual)
         mirrorSelection(active, active == m_editor ? static_cast<TextView *>(m_visual) : m_editor);
     updatePill();
+    updateAccent();
+    Q_EMIT zoomChanged();
 }
 
 void DocumentTab::applyMarkdownState()
@@ -505,7 +555,7 @@ void DocumentTab::placeOverlays()
 void DocumentTab::applySettings()
 {
     m_settingsStale = false;
-    m_appliedFont = zoomedEditorFont();
+    m_appliedFont = zoomedEditorFont(m_editor);
     applyViewSettings(m_editor);
     if (m_visual)
         applyViewSettings(m_visual);
@@ -532,10 +582,10 @@ void DocumentTab::onSettingChanged(const QString &changedKey)
     if (changedKey == QLatin1String(key::fontFamily) || changedKey == QLatin1String(key::fontSize)) {
         // Family and size are written together: the first notice applies the
         // new font, the second finds nothing left to lay out.
-        const QFont font = zoomedEditorFont();
+        const QFont font = zoomedEditorFont(m_editor);
         if (font != m_appliedFont) {
             m_appliedFont = font;
-            forEachView([&](TextView *view) { view->setFont(font); });
+            forEachView([&](TextView *view) { view->setFont(zoomedEditorFont(view)); });
         }
     } else if (changedKey == QLatin1String(key::drawWhitespace)) {
         forEachView([&](TextView *view) { view->setShowWhitespace(s.flag(key::drawWhitespace)); });
@@ -564,17 +614,31 @@ void DocumentTab::onSettingChanged(const QString &changedKey)
     }
 }
 
-QFont DocumentTab::zoomedEditorFont() const
+QFont DocumentTab::zoomedEditorFont(const TextView *view) const
 {
     QFont font = theme::editorFont();
-    font.setPointSizeF(font.pointSizeF() * m_zoom / 100.0);
+    font.setPointSizeF(font.pointSizeF() * zoom(view) / 100.0);
     return font;
+}
+
+int &DocumentTab::zoomOf(const TextView *view)
+{
+    return view == m_visual ? m_visualZoom : m_sourceZoom;
+}
+
+void DocumentTab::updateAccent()
+{
+    // Only a split has two halves to tell apart.
+    const bool split = showsBothHalves();
+    m_sourceAccent->setVisible(split && m_active == m_editor);
+    if (m_visualAccent)
+        m_visualAccent->setVisible(split && m_active == m_visual);
 }
 
 void DocumentTab::applyViewSettings(TextView *view)
 {
     Settings &s = Settings::instance();
-    view->setFont(zoomedEditorFont());
+    view->setFont(zoomedEditorFont(view));
     view->setShowWhitespace(s.flag(key::drawWhitespace));
     view->setTabWidth(indentation().tabSize);
     view->setInsertSpaces(indentation().insertSpaces);
@@ -592,18 +656,56 @@ void DocumentTab::applyViewSettings(TextView *view)
     }
 }
 
+int DocumentTab::zoom() const
+{
+    return zoom(editor());
+}
+
+int DocumentTab::zoom(const TextView *view) const
+{
+    return view == m_visual ? m_visualZoom : m_sourceZoom;
+}
+
 void DocumentTab::setZoom(int percent)
 {
-    if (m_zoom == percent)
+    TextView *view = editor();
+    percent = qBound(minZoom, percent, maxZoom);
+    if (zoomOf(view) == percent)
         return;
-    m_zoom = percent;
+    zoomOf(view) = percent;
     if (!isVisible()) {
         m_settingsStale = true;
-        return;
+    } else {
+        if (view == m_editor)
+            m_appliedFont = zoomedEditorFont(view);
+        view->setFont(zoomedEditorFont(view));
     }
-    const QFont font = zoomedEditorFont();
-    m_appliedFont = font;
-    forEachView([&](TextView *view) { view->setFont(font); });
+    Q_EMIT zoomChanged();
+}
+
+void DocumentTab::zoomBy(int steps)
+{
+    if (steps == 0)
+        return;
+    // Whole steps from the nearest one, so a value that is off the grid (a
+    // preference of 110%) lands on it.
+    const int stepped = qRound(zoom() / double(zoomStep)) * zoomStep;
+    setZoom(stepped + steps * zoomStep);
+}
+
+void DocumentTab::resetZoom()
+{
+    setZoom(Settings::instance().number(key::zoom));
+}
+
+bool DocumentTab::zoomsVisual() const
+{
+    return m_visual && editor() == m_visual;
+}
+
+bool DocumentTab::showsBothHalves() const
+{
+    return isMarkdown() && m_viewMode == ViewMode::SourceVisual && m_visual;
 }
 
 QWidget *DocumentTab::createGoToLine()

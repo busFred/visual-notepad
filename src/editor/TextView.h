@@ -227,6 +227,8 @@ Q_SIGNALS:
     void filesDropped(const QStringList &files);
     // Ctrl+Click (Alt+Click when Ctrl adds carets) on a link in Markdown text.
     void linkRequested(const QString &url);
+    // Ctrl+wheel: this many notches up (positive) or down.
+    void zoomRequested(int notches);
 
 protected:
     struct Row
@@ -602,6 +604,8 @@ private:
     // Scrolling: the first visible row and how far it is scrolled up.
     int m_topRow = 0;
     qreal m_topOffset = 0;
+    // Ctrl+wheel movement not yet worth a whole notch.
+    int m_zoomDelta = 0;
     qreal m_maxLineWidth = 0;
     bool m_updatingScrollBars = false;
 
