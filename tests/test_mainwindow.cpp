@@ -13,8 +13,13 @@
 #include "editor/FindBar.h"
 #include "editor/TextView.h"
 
+#include "markdown/VisualView.h"
+
+#include <QLabel>
 #include <QLineEdit>
 #include <QMimeData>
+#include <QSlider>
+#include <QWheelEvent>
 
 #include <QTextDocument>
 #include <QStatusBar>
@@ -118,11 +123,25 @@ private Q_SLOTS:
     void fileDropOnTextTabOpensIt();
     void vscodeEditorShortcuts();
     void menuMnemonics();
+    void zoomIsPerHalf();
+    void accentFollowsTheHalfInUse();
+    void zoomStepsAndDefault();
+    void ctrlWheelZoomsTheHalfInUse();
+    void zoomCellAndPopup();
+    void zoomPopupInSingleView();
+    void newTabStartsAtDefaultZoom();
+    void adoptedTabKeepsItsZoom();
 
 private:
+    // A Markdown tab in `mode`, in a shown window; the half given has focus.
+    vn::DocumentTab *zoomTab(vn::MainWindow &window, vn::DocumentTab::ViewMode mode);
+    static void focusView(vn::TextView *view);
+    static QWidget *accentOf(vn::TextView *view);
+    static void wheel(vn::TextView *over, int delta);
     QString write(const QString &name, const QByteArray &content);
 
     QTemporaryDir m_dir;
+    int m_zoomFiles = 0;
 };
 
 void TestMainWindow::initTestCase()
@@ -621,6 +640,367 @@ void TestMainWindow::menuMnemonics()
 #endif
     QVERIFY(vn::menuForMnemonic(QKeySequence(QStringLiteral("Alt+C"))).isEmpty());
     QVERIFY(vn::menuForMnemonic(QKeySequence(QStringLiteral("Shift+Alt+F"))).isEmpty());
+}
+
+// The window's action for a command, as the menus and shortcuts see it.
+static QAction *actionFor(const vn::MainWindow &window, const QString &id)
+{
+    const QString text = vn::command(id)->menuText;
+    for (QAction *action : window.actions()) {
+        if (action->text() == text)
+            return action;
+    }
+    return nullptr;
+}
+
+vn::DocumentTab *TestMainWindow::zoomTab(vn::MainWindow &window, vn::DocumentTab::ViewMode mode)
+{
+    vn::Settings::instance().reset(vn::key::zoom);
+    const QString path = write(QStringLiteral("zoom%1.md").arg(m_zoomFiles++), "# Title\n\nSome text.\n");
+    window.resize(900, 500);
+    if (!window.openFile(path))
+        return nullptr;
+    vn::DocumentTab *tab = window.currentTab();
+    tab->setViewMode(mode);
+    window.show();
+    if (!QTest::qWaitForWindowExposed(&window))
+        return nullptr;
+    window.activateWindow();
+    return tab;
+}
+
+void TestMainWindow::focusView(vn::TextView *view)
+{
+    view->setFocus();
+    QTRY_VERIFY(view->hasFocus());
+}
+
+QWidget *TestMainWindow::accentOf(vn::TextView *view)
+{
+    return view->findChild<QWidget *>(QStringLiteral("ZoomAccent"));
+}
+
+// Ctrl+wheel over `over`, `delta` eighths of a degree (120 is one notch).
+void TestMainWindow::wheel(vn::TextView *over, int delta)
+{
+    QWidget *target = over->viewport();
+    const QPointF pos = target->rect().center();
+    QWheelEvent event(pos, target->mapToGlobal(pos), {}, QPoint(0, delta), Qt::NoButton, Qt::ControlModifier,
+                      Qt::NoScrollPhase, false);
+    QApplication::sendEvent(target, &event);
+}
+
+// Source and Visual each have their own zoom, and the keys and the status
+// cell act on the one last focused.
+void TestMainWindow::zoomIsPerHalf()
+{
+    vn::MainWindow window;
+    vn::DocumentTab *tab = zoomTab(window, vn::DocumentTab::ViewMode::SourceVisual);
+    QVERIFY(tab);
+    vn::TextView *source = tab->sourceView();
+    vn::TextView *visual = tab->visualView();
+    QVERIFY(visual);
+    auto *cell = window.findChild<QLabel *>(QStringLiteral("ZoomStatus"));
+    QVERIFY(cell);
+    const qreal base = vn::theme::editorFont().pointSizeF();
+
+    focusView(visual);
+    QCOMPARE(tab->editor(), visual);
+    actionFor(window, QStringLiteral("view.zoomIn"))->trigger();
+    QCOMPARE(tab->zoom(visual), 105);
+    QCOMPARE(tab->zoom(source), 100);
+    QCOMPARE(cell->text(), QStringLiteral("105%"));
+    QCOMPARE(cell->toolTip(), QStringLiteral("Visual zoom"));
+    QCOMPARE(visual->font().pointSizeF(), base * 1.05);
+    QCOMPARE(source->font().pointSizeF(), base);
+
+    focusView(source);
+    QCOMPARE(tab->editor(), source);
+    QCOMPARE(cell->text(), QStringLiteral("100%"));
+    QCOMPARE(cell->toolTip(), QStringLiteral("Source zoom"));
+    actionFor(window, QStringLiteral("view.zoomOut"))->trigger();
+    actionFor(window, QStringLiteral("view.zoomOut"))->trigger();
+    QCOMPARE(tab->zoom(source), 90);
+    QCOMPARE(tab->zoom(visual), 105);
+    QCOMPARE(cell->text(), QStringLiteral("90%"));
+    QCOMPARE(source->font().pointSizeF(), base * 0.9);
+    QCOMPARE(visual->font().pointSizeF(), base * 1.05);
+
+    // Back on the visual half, its own value is what the cell shows again.
+    focusView(visual);
+    QCOMPARE(cell->text(), QStringLiteral("105%"));
+}
+
+// The 2 px accent line sits along the bottom of the half last focused, in a
+// split only.
+void TestMainWindow::accentFollowsTheHalfInUse()
+{
+    vn::MainWindow window;
+    vn::DocumentTab *tab = zoomTab(window, vn::DocumentTab::ViewMode::SourceVisual);
+    QVERIFY(tab);
+    vn::TextView *source = tab->sourceView();
+    vn::TextView *visual = tab->visualView();
+    QWidget *sourceLine = accentOf(source);
+    QWidget *visualLine = accentOf(visual);
+    QVERIFY(sourceLine && visualLine);
+
+    focusView(source);
+    QVERIFY(sourceLine->isVisible());
+    QVERIFY(!visualLine->isVisible());
+    QCOMPARE(sourceLine->height(), 2);
+    QCOMPARE(sourceLine->geometry(), QRect(0, source->height() - 2, source->width(), 2));
+    // It is drawn in the theme's accent colour, over the bottom edge.
+    const QImage image = source->grab().toImage();
+    const qreal ratio = image.devicePixelRatio();
+    QCOMPARE(image.pixelColor(int(source->width() / 2 * ratio), int((source->height() - 1) * ratio)),
+             vn::theme::color(vn::theme::Role::accent));
+
+    focusView(visual);
+    QVERIFY(!sourceLine->isVisible());
+    QVERIFY(visualLine->isVisible());
+    QCOMPARE(visualLine->geometry(), QRect(0, visual->height() - 2, visual->width(), 2));
+
+    // One view alone has nothing to tell apart.
+    tab->setViewMode(vn::DocumentTab::ViewMode::Visual);
+    QVERIFY(!sourceLine->isVisible());
+    QVERIFY(!visualLine->isVisible());
+    tab->setViewMode(vn::DocumentTab::ViewMode::Source);
+    QVERIFY(!sourceLine->isVisible());
+    QVERIFY(!visualLine->isVisible());
+}
+
+// Steps of 5% between 30% and 500%; Ctrl+0 goes to the "default zoom"
+// preference rather than 100%.
+void TestMainWindow::zoomStepsAndDefault()
+{
+    vn::MainWindow window;
+    vn::DocumentTab *tab = zoomTab(window, vn::DocumentTab::ViewMode::SourceVisual);
+    QVERIFY(tab);
+    vn::TextView *source = tab->sourceView();
+    vn::TextView *visual = tab->visualView();
+    focusView(source);
+
+    QAction *in = actionFor(window, QStringLiteral("view.zoomIn"));
+    QAction *out = actionFor(window, QStringLiteral("view.zoomOut"));
+    in->trigger();
+    QCOMPARE(tab->zoom(), 105);
+    in->trigger();
+    QCOMPARE(tab->zoom(), 110);
+    out->trigger();
+    out->trigger();
+    out->trigger();
+    QCOMPARE(tab->zoom(), 95);
+    for (int i = 0; i < 100; ++i)
+        out->trigger();
+    QCOMPARE(tab->zoom(), 30);
+    for (int i = 0; i < 200; ++i)
+        in->trigger();
+    QCOMPARE(tab->zoom(), 500);
+
+    focusView(visual);
+    in->trigger();
+    QCOMPARE(tab->zoom(visual), 105);
+    vn::Settings::instance().setValue(vn::key::zoom, 125);
+    // Ctrl+0 resets the half in use only.
+    QTest::keyClick(visual, Qt::Key_0, Qt::ControlModifier);
+    QCOMPARE(tab->zoom(visual), 125);
+    QCOMPARE(tab->zoom(source), 500);
+    focusView(source);
+    QTest::keyClick(source, Qt::Key_0, Qt::ControlModifier);
+    QCOMPARE(tab->zoom(source), 125);
+    // Changing the preference leaves open tabs alone.
+    vn::Settings::instance().setValue(vn::key::zoom, 90);
+    QCOMPARE(tab->zoom(source), 125);
+    QCOMPARE(tab->zoom(visual), 125);
+    vn::Settings::instance().reset(vn::key::zoom);
+}
+
+// Ctrl+wheel moves the half in use by 5% a notch, wherever the pointer is.
+void TestMainWindow::ctrlWheelZoomsTheHalfInUse()
+{
+    vn::MainWindow window;
+    vn::DocumentTab *tab = zoomTab(window, vn::DocumentTab::ViewMode::SourceVisual);
+    QVERIFY(tab);
+    vn::TextView *source = tab->sourceView();
+    vn::TextView *visual = tab->visualView();
+    focusView(source);
+
+    // The pointer is over the visual half, but the source one has the line.
+    wheel(visual, 120);
+    QCOMPARE(tab->zoom(source), 105);
+    QCOMPARE(tab->zoom(visual), 100);
+    wheel(visual, -120);
+    wheel(visual, -120);
+    QCOMPARE(tab->zoom(source), 95);
+    // Finer wheels add up to whole notches.
+    wheel(source, 60);
+    QCOMPARE(tab->zoom(source), 95);
+    wheel(source, 60);
+    QCOMPARE(tab->zoom(source), 100);
+    QCOMPARE(tab->zoom(visual), 100);
+
+    focusView(visual);
+    wheel(source, 120);
+    QCOMPARE(tab->zoom(visual), 105);
+    QCOMPARE(tab->zoom(source), 100);
+
+    // Without Ctrl the wheel still scrolls and does not zoom.
+    QWheelEvent plain(QPointF(10, 10), QPointF(10, 10), {}, QPoint(0, -120), Qt::NoButton, Qt::NoModifier,
+                      Qt::NoScrollPhase, false);
+    QApplication::sendEvent(visual->viewport(), &plain);
+    QCOMPARE(tab->zoom(visual), 105);
+}
+
+// The cell shows the number of the half in use; clicking it opens the popup.
+void TestMainWindow::zoomCellAndPopup()
+{
+    vn::MainWindow window;
+    vn::DocumentTab *tab = zoomTab(window, vn::DocumentTab::ViewMode::SourceVisual);
+    QVERIFY(tab);
+    vn::TextView *source = tab->sourceView();
+    vn::TextView *visual = tab->visualView();
+    auto *cell = window.findChild<QLabel *>(QStringLiteral("ZoomStatus"));
+    QVERIFY(cell);
+    focusView(visual);
+    tab->setZoom(125);
+    QCOMPARE(cell->text(), QStringLiteral("125%"));
+
+    QTest::mouseClick(cell, Qt::LeftButton);
+    auto *popup = window.findChild<QFrame *>(QStringLiteral("ZoomPopup"));
+    QVERIFY(popup && popup->isVisible());
+    // The half's name, then − / slider / + and the value; no reset button.
+    auto *name = popup->findChild<QLabel *>(QStringLiteral("ZoomHalf"));
+    QVERIFY(name);
+    QCOMPARE(name->text(), QStringLiteral("Visual"));
+    QCOMPARE(popup->findChild<QLabel *>(QStringLiteral("ZoomValue"))->text(), QStringLiteral("125%"));
+    const QList<QToolButton *> buttons = popup->findChildren<QToolButton *>();
+    QCOMPARE(buttons.size(), 2);
+    QToolButton *minus = buttons.at(0);
+    QToolButton *plus = buttons.at(1);
+    QCOMPARE(minus->text(), QString(QChar(0x2212)));
+    QCOMPARE(plus->text(), QStringLiteral("+"));
+    plus->click();
+    QCOMPARE(tab->zoom(visual), 130);
+    minus->click();
+    minus->click();
+    QCOMPARE(tab->zoom(visual), 120);
+    QCOMPARE(cell->text(), QStringLiteral("120%"));
+    QCOMPARE(popup->findChild<QLabel *>(QStringLiteral("ZoomValue"))->text(), QStringLiteral("120%"));
+
+    // Log scale from 30% to 500%: the middle is the geometric mean (122%),
+    // and the zoom snaps to a whole step.
+    auto *slider = popup->findChild<QSlider *>();
+    QVERIFY(slider);
+    slider->setValue(slider->minimum());
+    QCOMPARE(tab->zoom(visual), 30);
+    slider->setValue(slider->maximum());
+    QCOMPARE(tab->zoom(visual), 500);
+    slider->setValue((slider->minimum() + slider->maximum()) / 2);
+    QCOMPARE(tab->zoom(visual), 120);
+    QCOMPARE(tab->zoom(source), 100);
+    // The handle sits on the step it snapped to.
+    const int snapped = slider->value();
+    slider->setValue(snapped + 1);
+    QCOMPARE(tab->zoom(visual), 120);
+    QVERIFY(slider->value() == snapped);
+    // Moving the zoom elsewhere moves the slider.
+    tab->setZoom(300);
+    QVERIFY(slider->value() > snapped);
+    QCOMPARE(popup->findChild<QLabel *>(QStringLiteral("ZoomValue"))->text(), QStringLiteral("300%"));
+
+    popup->close();
+    QTRY_VERIFY(!window.findChild<QFrame *>(QStringLiteral("ZoomPopup")));
+
+    // Opened with the source half in use, it is about that one.
+    window.activateWindow();
+    focusView(source);
+    QCOMPARE(cell->text(), QStringLiteral("100%"));
+    QTest::mouseClick(cell, Qt::LeftButton);
+    popup = window.findChild<QFrame *>(QStringLiteral("ZoomPopup"));
+    QVERIFY(popup);
+    QCOMPARE(popup->findChild<QLabel *>(QStringLiteral("ZoomHalf"))->text(), QStringLiteral("Source"));
+    popup->close();
+}
+
+// With one view the cell says "Zoom" and the popup has no half's name.
+void TestMainWindow::zoomPopupInSingleView()
+{
+    for (const auto mode : {vn::DocumentTab::ViewMode::Source, vn::DocumentTab::ViewMode::Visual}) {
+        vn::MainWindow window;
+        vn::DocumentTab *tab = zoomTab(window, mode);
+        QVERIFY(tab);
+        auto *cell = window.findChild<QLabel *>(QStringLiteral("ZoomStatus"));
+        QVERIFY(cell);
+        QCOMPARE(cell->toolTip(), QStringLiteral("Zoom"));
+        actionFor(window, QStringLiteral("view.zoomIn"))->trigger();
+        QCOMPARE(tab->zoom(), 105);
+        QCOMPARE(cell->text(), QStringLiteral("105%"));
+        QTest::mouseClick(cell, Qt::LeftButton);
+        auto *popup = window.findChild<QFrame *>(QStringLiteral("ZoomPopup"));
+        QVERIFY(popup);
+        QVERIFY(!popup->findChild<QLabel *>(QStringLiteral("ZoomHalf")));
+        QCOMPARE(popup->findChild<QLabel *>(QStringLiteral("ZoomValue"))->text(), QStringLiteral("105%"));
+        popup->close();
+    }
+    // A file that is not Markdown has the one view too.
+    vn::MainWindow window;
+    QVERIFY(window.openFile(write(QStringLiteral("zoom.txt"), "plain\n")));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QCOMPARE(window.findChild<QLabel *>(QStringLiteral("ZoomStatus"))->toolTip(), QStringLiteral("Zoom"));
+}
+
+// A tab starts at the "default zoom level" preference, whichever window.
+void TestMainWindow::newTabStartsAtDefaultZoom()
+{
+    vn::Settings::instance().setValue(vn::key::zoom, 125);
+    vn::MainWindow window;
+    const QString first = write(QStringLiteral("d1.md"), "# One\n");
+    const QString second = write(QStringLiteral("d2.md"), "# Two\n");
+    QVERIFY(window.openFile(first));
+    vn::DocumentTab *a = window.currentTab();
+    QCOMPARE(a->zoom(a->sourceView()), 125);
+    QCOMPARE(a->zoom(a->visualView() ? static_cast<vn::TextView *>(a->visualView()) : a->sourceView()), 125);
+    a->setZoom(150);
+    // Opening another tab does not move this one.
+    QVERIFY(window.openFile(second));
+    vn::DocumentTab *b = window.currentTab();
+    QCOMPARE(b->zoom(), 125);
+    QCOMPARE(a->zoom(), 150);
+    vn::Settings::instance().reset(vn::key::zoom);
+}
+
+// A tab moved or copied to another window keeps its zoom, and does not
+// change the zoom of the tabs already there.
+void TestMainWindow::adoptedTabKeepsItsZoom()
+{
+    vn::MainWindow one;
+    vn::DocumentTab *tab = zoomTab(one, vn::DocumentTab::ViewMode::SourceVisual);
+    QVERIFY(tab);
+    focusView(tab->sourceView());
+    tab->setZoom(150);
+    focusView(tab->visualView());
+    tab->setZoom(75);
+
+    vn::MainWindow two;
+    two.resize(900, 500);
+    QVERIFY(two.openFile(write(QStringLiteral("zoomother.txt"), "other\n")));
+    vn::DocumentTab *resident = two.currentTab();
+    resident->setZoom(110);
+
+    vn::DocumentTab *copy = tab->openAnotherView();
+    QCOMPARE(copy->zoom(copy->sourceView()), 150);
+    QCOMPARE(copy->zoom(copy->visualView()), 75);
+    two.adoptTab(copy);
+    QCOMPARE(copy->zoom(copy->sourceView()), 150);
+    QCOMPARE(copy->zoom(copy->visualView()), 75);
+    QCOMPARE(resident->zoom(), 110);
+    two.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&two));
+    // The fonts follow once it is shown.
+    QCOMPARE(copy->sourceView()->font().pointSizeF(), vn::theme::editorFont().pointSizeF() * 1.5);
+    QCOMPARE(copy->visualView()->font().pointSizeF(), vn::theme::editorFont().pointSizeF() * 0.75);
+    QCOMPARE(tab->zoom(tab->sourceView()), 150);
 }
 
 QTEST_MAIN(TestMainWindow)

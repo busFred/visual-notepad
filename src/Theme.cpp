@@ -305,6 +305,15 @@ QMenu::indicator:checked { image: url(:/vn/icons/check.svg); }
 QMenu::indicator:unchecked { image: none; }
 QMenu::right-arrow { image: url(:/vn/icons/chevron-right.svg); width: 8px; height: 8px; right: 8px; }
 
+/* The zoom cell's popup: a menu-coloured panel with a slider. */
+#ZoomPopup { background: @menu; border: 1px solid @divider; border-radius: 3px; }
+#ZoomPopup QLabel { color: @text; }
+#ZoomPopup QToolButton#ZoomStep { border: none; border-radius: 3px; padding: 0 5px; color: @text; }
+#ZoomPopup QToolButton#ZoomStep:hover { background: @panelTitle; }
+#ZoomPopup QSlider::groove:horizontal { height: 4px; border-radius: 2px; background: @divider; }
+#ZoomPopup QSlider::sub-page:horizontal { height: 4px; border-radius: 2px; background: @switchOn; }
+#ZoomPopup QSlider::handle:horizontal { width: 10px; margin: -6px 0; border-radius: 3px; background: @button; border: 1px solid @divider; }
+
 #TabStrip { background: @tabStrip; }
 QTabBar { background: transparent; }
 QTabBar::tab { background: @inactiveTab; color: @inactiveTabText; border: none; border-right: 1px solid @divider;

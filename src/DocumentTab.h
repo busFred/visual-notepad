@@ -53,7 +53,7 @@ public:
     // The shared file this tab shows.
     TextFile *file() const { return m_file.get(); }
     std::shared_ptr<TextFile> sharedFile() const { return m_file; }
-    // A second tab on the same file, with this tab's view mode and zoom; the
+    // A second tab on the same file, with this tab's view mode and zooms; the
     // caller places it (MainWindow::adoptTab / receiveTab).
     DocumentTab *openAnotherView(QWidget *parent = nullptr) const;
     // The tab is going away (its deletion is pending): it no longer counts
@@ -123,8 +123,23 @@ public:
     FindBar *findBar() const;
     void showFind(bool replace);
     void showGoToLine();
-    int zoom() const { return m_zoom; }
+    // Zoom is per tab and per half: the source and the visual view each have
+    // their own. In a split the half last clicked or focused (editor()) is
+    // the one these act on, and wears an accent line; with one view shown it
+    // is that view. A new tab starts at the "default zoom" setting.
+    static constexpr int minZoom = 30;
+    static constexpr int maxZoom = 500;
+    static constexpr int zoomStep = 5;
+    int zoom() const;
+    int zoom(const TextView *view) const;
     void setZoom(int percent);
+    // Moves the half in use by whole steps, or back to the default for 0.
+    void zoomBy(int steps);
+    void resetZoom();
+    // Both the source and the visual view are on screen.
+    bool showsBothHalves() const;
+    // The visual half is the one in use.
+    bool zoomsVisual() const;
     // Rewrites a Markdown document in canonical form as one undoable edit.
     void formatDocument();
 
@@ -132,6 +147,8 @@ Q_SIGNALS:
     void linkActivated(const QString &url);
     void filesDropped(const QStringList &files);
     void viewModeChanged();
+    // The zoom of the half in use changed, or another half came into use.
+    void zoomChanged();
     void modificationChanged(bool modified);
     void cursorPositionChanged();
     void textChanged();
@@ -157,7 +174,9 @@ private:
     void applyViewSettings(TextView *view);
     void onSettingChanged(const QString &changedKey);
     void forEachView(const std::function<void(TextView *)> &apply);
-    QFont zoomedEditorFont() const;
+    QFont zoomedEditorFont(const TextView *view) const;
+    int &zoomOf(const TextView *view);
+    void updateAccent();
     QWidget *createGoToLine();
     void ensureVisualView();
     void updateViews();
@@ -179,9 +198,15 @@ private:
     FindBar *m_findBar = nullptr;
     QWidget *m_goToLine = nullptr;
     QLineEdit *m_goToLineEdit = nullptr;
-    int m_zoom = 100;
+    int m_sourceZoom = 100;
+    int m_visualZoom = 100;
+    // The 2 px lines along the bottom of each half; the one of the half in
+    // use shows in a split.
+    QWidget *m_sourceAccent;
+    QWidget *m_visualAccent = nullptr;
     // Font, zoom and view settings changed while hidden; applied on show.
     bool m_settingsStale = false;
+    // The source half's font, to skip a font change that is already applied.
     QFont m_appliedFont;
     ViewMode m_viewMode = ViewMode::Source;
     // Whether the visual view is read-only, per mode: beside the source it is

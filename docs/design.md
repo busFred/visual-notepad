@@ -79,7 +79,9 @@ no bevels. Values live in `src/Theme.h`.
 - Tabs can be dragged out into a new window; also a tab menu item
   "Move to New Window" (Ctrl+K O).
 - Status bar, Notepad-style right-aligned columns: position, selections,
-  zoom, line ending, encoding, language (clickable), sizing grip.
+  zoom, line ending, encoding, language (clickable), sizing grip. Zoom is
+  per tab and, in Source / Visual, per half: the half last clicked has a 2 px
+  accent line, and the keys, Ctrl+wheel and the cell's popup act on it.
 - Web links always prompt: Open, Copy, Cancel.
 - Remote images (http/https) never load unasked. A bar above the visual view
   lists the hosts and the number of images and offers Load images / Don't
@@ -288,8 +290,9 @@ switches. Buttons: Help and Close; changes apply immediately. No search box.
 ## Shortcuts
 
 Follow VS Code's Windows/Linux defaults, with Notepad touches: Ctrl+Q quits,
-Ctrl+0 resets zoom. On Linux, Format Document is Ctrl+Shift+I, Add Cursor
-Above/Below is Shift+Alt+Up/Down, Copy Line is Ctrl+Shift+Alt+Up/Down.
+Ctrl+0 returns zoom to the default zoom level. On Linux, Format Document is
+Ctrl+Shift+I, Add Cursor Above/Below is Shift+Alt+Up/Down, Copy Line is
+Ctrl+Shift+Alt+Up/Down.
 
 ## Open questions
 
