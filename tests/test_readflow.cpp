@@ -432,8 +432,21 @@ void TestReadFlow::pageForwardKeepsLines()
     QCOMPARE(flow.startLine(), 8);
     QCOMPARE(flow.historySize(), 1);
 
+    // Filled again in place (a render finished, the caret moved): still the
+    // screen of the page turn. Filled from another revision: not.
+    QVERIFY(flow.reflow().hasKept);
+    QCOMPARE(flow.screen().columns[0].segments[1].keptTo, 10);
+    QCOMPARE(flow.screen().start.row, 8);
+    flow.setGeometry(geo(2, 50, 100, 1));
+    QCOMPARE(flow.screen().start.row, 8);
+    QVERIFY(!flow.screen().hasKept);
+    QVERIFY(!flow.reflow().hasKept);
+
     // Any other move shows them normally.
+    flow.pageBack();
+    QVERIFY(flow.pageForward().hasKept);
     QVERIFY(!flow.nudge(1).hasKept);
+    QVERIFY(!flow.reflow().hasKept);
 }
 
 void TestReadFlow::keptLinesSetting()
