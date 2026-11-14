@@ -169,6 +169,39 @@ Position ReadFlow::back(Position position, int lines) const
     return position;
 }
 
+// Whether the line at position (a line top) may be kept for the next page: a
+// line of text, as high as a line (not one of a figure, equation, chip or
+// short table, which are one "line" tall as themselves, nor a line more than
+// a quarter of the column high).
+bool ReadFlow::keepable(Position position) const
+{
+    const RowKind kind = m_source->kind(position.row);
+    if (kind == RowKind::Unbreakable || kind == RowKind::Gap)
+        return false;
+    const QList<int> t = tops(position.row);
+    const auto next = std::upper_bound(t.begin(), t.end(), position.y);
+    const int bottom = next != t.end() ? *next : m_source->height(position.row);
+    return (bottom - position.y) * 4 <= qMax(1, m_geometry.height);
+}
+
+// Where the lines kept from a page that ends at end start: at most `lines`
+// lines back, and not back over a line that is not keepable (so none, if the
+// last one is not). `count` is how many lines that is.
+Position ReadFlow::keptStart(Position end, int lines, int *count) const
+{
+    Position start = end;
+    int kept = 0;
+    for (; kept < lines; ++kept) {
+        const auto previous = prevLine(start);
+        if (!previous || !keepable(*previous))
+            break;
+        start = *previous;
+    }
+    if (count)
+        *count = kept;
+    return start;
+}
+
 int ReadFlow::drawnHeight(const Segment &segment) const
 {
     return segment.yTo - segment.yFrom + (segment.repeatHeader ? m_source->headerHeight(segment.row) : 0);
@@ -577,11 +610,14 @@ const Screen &ReadFlow::pageForward()
     // started: a page always moves on). With fewer lines kept if the page
     // would end where this one did: a heading and what it heads can push the
     // kept lines and the heading back to the same place.
+    // Only lines of text are kept (see keepable): after a figure, none of it.
     const Position oldEnd = m_screen.end;
     Position start = oldEnd;
     Screen next;
-    for (int kept = m_keptLines; kept >= 0; --kept) {
-        start = back(oldEnd, kept);
+    int available = 0;
+    keptStart(oldEnd, m_keptLines, &available);
+    for (int kept = available; kept >= 0; --kept) {
+        start = keptStart(oldEnd, kept);
         if (kept > 0 && start <= m_screen.start)
             continue;
         next = fill(start);
@@ -614,9 +650,20 @@ const Screen &ReadFlow::pageBack()
         return show(fill(from));
     }
     m_history.clear();
-    // A forward page turn from the screen before this one starts N lines
-    // before it ends, so it ends N lines past this one's start.
-    const Position end = forward(m_screen.start, m_keptLines);
+    // A forward page turn from the screen before this one starts the lines
+    // it keeps before it ends, so it ends that many lines past this one's
+    // start: the most (up to N) that are keepable lines and that it would
+    // keep from just there.
+    Position end = m_screen.start;
+    for (int kept = m_keptLines; kept > 0; --kept) {
+        const Position candidate = forward(m_screen.start, kept);
+        int count = 0;
+        const Position start = keptStart(candidate, m_keptLines, &count);
+        if (count == kept && start == m_screen.start) {
+            end = candidate;
+            break;
+        }
+    }
     return show(fill(startingBefore(end, m_screen.start)));
 }
 

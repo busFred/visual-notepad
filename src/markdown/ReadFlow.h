@@ -173,7 +173,10 @@ public:
     const Screen &reflow();
     // The moves. Each returns the screen it shows; one that cannot move (page
     // forward at the end) shows the same screen again.
-    const Screen &pageForward(); // Keeps the last N lines, marked kept.
+    // Keeps the last N lines, marked kept: lines of text only, so none of a
+    // figure, equation, chip or other block that cannot be cut, or of a line
+    // taller than a quarter of the column.
+    const Screen &pageForward();
     const Screen &pageBack();
     const Screen &nudge(int lines); // Negative: up. Clears the kept lines.
     const Screen &toStart();
@@ -207,6 +210,8 @@ private:
     std::optional<Position> prevLine(Position position) const;
     Position forward(Position position, int lines) const;
     Position back(Position position, int lines) const;
+    bool keepable(Position position) const;
+    Position keptStart(Position end, int lines, int *count = nullptr) const;
 
     Position fillColumn(Position position, Column &column) const;
     void trimColumn(Column &column, int &row, int &y) const;

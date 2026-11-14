@@ -69,6 +69,8 @@ public:
     int heading() { return plain(RowKind::Heading, 2 * lineHeight, 1); }
     int gap(int height = 5) { return plain(RowKind::Gap, height, 1); }
     int figure(int height, QList<int> tops = {0}) { return plain(RowKind::Unbreakable, height, 1, tops); }
+    // A block of ordinary rows that is one line of the flow, whatever its height.
+    int block(int height) { return plain(RowKind::Normal, height, 1); }
     // A table: a header row of headerHeight and body rows of one line.
     int table(int body, int headerHeight = 2 * lineHeight)
     {
@@ -159,6 +161,7 @@ private slots:
     void tableCutsKeepTwoRowsEachSide();
     void pageForwardKeepsLines();
     void keptLinesSetting();
+    void keptLinesSkipFiguresAndTallBlocks();
     void pageForwardStopsAtEnd();
     void pageBackThroughHistory();
     void pageBackAfterLayoutChange();
@@ -485,6 +488,108 @@ void TestReadFlow::keptLinesSetting()
     QCOMPARE(page.start.y, 80);
     QCOMPARE(page.columns[0].segments[0].keptTo, 100);
     QCOMPARE(page.columns[0].segments[0].yFrom, 80);
+}
+
+// Lines of text only come back at the top of the next page: not those of a
+// figure (or equation, chip, short table), nor of a block taller than a
+// quarter of the column.
+void TestReadFlow::keptLinesSkipFiguresAndTallBlocks()
+{
+    const auto keptRows = [](const Screen &screen) {
+        QList<int> rows;
+        for (const Column &column : screen.columns) {
+            for (const Segment &s : column.segments) {
+                if (s.keptTo > s.yFrom)
+                    rows.push_back(s.row);
+            }
+        }
+        return rows;
+    };
+
+    // The page ends with a figure: nothing is kept.
+    {
+        FakeSource source;
+        source.singles(8);
+        source.figure(20); // Row 8: the page ends after it.
+        source.singles(12);
+        ReadFlow flow(&source);
+        flow.setGeometry(geo(1, 100));
+        QCOMPARE(flow.screen().end.row, 9);
+        const Screen &next = flow.pageForward();
+        QCOMPARE(next.start.row, 9);
+        QVERIFY(!next.hasKept);
+        QVERIFY(keptRows(next).isEmpty());
+        // ... and back where it came from.
+        QCOMPARE(flow.pageBack().start.row, 0);
+    }
+    // Text after the figure is kept, up to the figure: one line, then two.
+    for (int after = 1; after <= 3; ++after) {
+        FakeSource source;
+        source.singles(7 - after + 1);
+        source.figure(20);
+        source.singles(after);
+        source.singles(12);
+        ReadFlow flow(&source);
+        flow.setGeometry(geo(1, 100));
+        const int figureRow = 8 - after;
+        QCOMPARE(flow.screen().end.row, figureRow + 1 + after);
+        const Screen &next = flow.pageForward();
+        const int expected = qMin(after, 2);
+        QCOMPARE(next.start.row, figureRow + 1 + after - expected);
+        QCOMPARE(int(keptRows(next).size()), expected);
+        QVERIFY(next.start.row > figureRow);
+    }
+    // The same for a block that is one line and taller than a quarter of the
+    // column (25 of 100), but not for one that is as high as a quarter.
+    {
+        FakeSource source;
+        source.singles(7);
+        source.block(30);
+        source.singles(12);
+        ReadFlow flow(&source);
+        flow.setGeometry(geo(1, 100));
+        QCOMPARE(flow.screen().end.row, 8);
+        const Screen &next = flow.pageForward();
+        QCOMPARE(next.start.row, 8);
+        QVERIFY(!next.hasKept);
+    }
+    {
+        FakeSource source;
+        source.singles(7);
+        source.block(25);
+        source.singles(12);
+        ReadFlow flow(&source);
+        flow.setGeometry(geo(1, 100));
+        QCOMPARE(flow.screen().end.row, 8);
+        const Screen &next = flow.pageForward();
+        QVERIFY(next.hasKept);
+        QCOMPARE(next.start.row, 6); // The block and the line before it.
+    }
+    // A paragraph's lines are lines whatever the paragraph's height.
+    {
+        FakeSource source;
+        source.para(10);
+        source.singles(12);
+        ReadFlow flow(&source);
+        flow.setGeometry(geo(1, 100));
+        const Screen &next = flow.pageForward();
+        QVERIFY(next.hasKept);
+        QCOMPARE(next.start.row, 0); // The paragraph's last two lines.
+        QCOMPARE(next.start.y, 80);
+    }
+    // Several columns: the last column's end is what counts.
+    {
+        FakeSource source;
+        source.singles(18);
+        source.figure(20); // Ends the second column.
+        source.singles(30);
+        ReadFlow flow(&source);
+        flow.setGeometry(geo(2, 100));
+        QCOMPARE(flow.screen().end.row, 19);
+        const Screen &next = flow.pageForward();
+        QCOMPARE(next.start.row, 19);
+        QVERIFY(!next.hasKept);
+    }
 }
 
 void TestReadFlow::pageForwardStopsAtEnd()
