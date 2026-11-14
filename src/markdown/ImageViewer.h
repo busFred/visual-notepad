@@ -1,16 +1,16 @@
-// A floating window to look at one picture up close: wheel to zoom around
+// A window of its own to look at one picture up close: wheel to zoom around
 // the pointer, drag to pan, double-click to switch between fitting the window
-// and actual size.
+// and actual size. It does not block the window it came from: it can be moved
+// aside, and several can be open.
 #pragma once
 
 #include <QDialog>
 #include <QImage>
 #include <QPointF>
 
-class QLabel;
-class QSlider;
-
 namespace vn {
+
+class ZoomBar;
 
 class ImageViewer : public QDialog
 {
@@ -44,9 +44,7 @@ private:
     void refresh(); // Repaint, and bring the controls up to date.
     void clampOffset();
 
-    QWidget *m_bar;
-    QSlider *m_slider;
-    QLabel *m_percent;
+    ZoomBar *m_bar;
     QImage m_image;
     qreal m_scale = 1;
     QPointF m_offset; // Where the image's top-left is, in widget coordinates.

@@ -2661,24 +2661,14 @@ void RenderedBlock::paintScrollBar(QPainter &painter, const QRectF &track, qreal
     painter.restore();
 }
 
-QImage RenderedBlock::contentImage(qreal devicePixelRatio) const
+QSizeF RenderedBlock::contentSize() const
 {
-    if (m_scrollRoom <= 0)
-        return {};
-    const QSizeF size(m_contentWidth, m_height - m_strip - m_scrollRoom - blockGap);
-    // (A table of thousands of columns would take gigabytes at full size.)
-    constexpr qreal maxSide = 30000;
-    constexpr qreal maxPixels = 120e6;
-    qreal ratio = qMax<qreal>(devicePixelRatio, 1);
-    ratio = std::min({ratio, maxSide / qMax(size.width(), size.height()), std::sqrt(maxPixels / (size.width() * size.height()))});
-    QImage image(QSize(qMax(1, qCeil(size.width() * ratio)), qMax(1, qCeil(size.height() * ratio))),
-                 QImage::Format_ARGB32_Premultiplied);
-    image.fill(theme::color(theme::Role::editor));
-    QPainter painter(&image);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.scale(ratio, ratio);
-    paint(painter, QPointF(0, -m_strip), m_contentWidth);
-    return image;
+    return QSizeF(contentWidth(), qMax<qreal>(0, m_height - m_strip - m_scrollRoom - blockGap));
+}
+
+void RenderedBlock::paintContent(QPainter &painter, const QPointF &topLeft, const RenderedSelection &selection) const
+{
+    paint(painter, topLeft - QPointF(0, m_strip), contentWidth(), selection);
 }
 
 bool RenderedBlock::textAt(const QPointF &point) const
