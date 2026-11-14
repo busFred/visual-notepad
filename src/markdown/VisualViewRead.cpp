@@ -177,13 +177,13 @@ private:
 // ---------------------------------------------------------------------------
 // Mode and layout
 
-void VisualView::setReadMode(bool on)
+void VisualView::setReadMode(bool on, int startLine)
 {
     if (m_readMode == on)
         return;
     const bool wasActive = readActive();
     // The place, as a line position, at the width it was found at.
-    const qreal position = wasActive ? m_readLinePosition : topLinePosition();
+    const qreal position = wasActive ? m_readLinePosition : startLine >= 0 ? startLine : topLinePosition();
     m_readMode = on;
     m_readWheel = 0;
     m_readOffsets.clear();

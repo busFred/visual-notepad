@@ -144,12 +144,23 @@ public:
     // Rewrites a Markdown document in canonical form as one undoable edit.
     void formatDocument();
 
-    // Read mode: a Markdown document in Visual mode, locked, shows in
-    // columns a screen at a time (VisualView::setReadMode), with a bar left
-    // of the pill for the number of columns and their width. Those are this
-    // tab's, not saved; Preferences give where a new tab starts.
+    // Columns: the view switch (Scroll | Columns) of the status bar. A tab
+    // chooses for itself: it opens in Scroll and nothing is saved. They show
+    // in Source (TextView::setColumnsShown) and, locked, in the Visual Editor:
+    // read mode (VisualView::setReadMode). Where they cannot (the Visual
+    // Editor unlocked, Source / Visual) the tab shows Scroll, keeping the same
+    // line at the top and the caret at its start, and keeps the wish: columns
+    // come back, from the caret's line, where they can again. A bar at the top
+    // right sets the number of columns and their width; those are this tab's,
+    // not saved; Preferences give where a new tab starts.
+    bool canShowColumns() const;
+    bool wantsColumns() const { return m_wantsColumns; }
+    void setColumns(bool on);
+    // Columns show (in Source, or read mode).
+    bool showsColumns() const { return m_columnsView != nullptr; }
+    // Read mode: columns in the Visual Editor, locked.
     bool isReadMode() const;
-    // The source lines on screen in read mode (0-based, both included), or
+    // The source lines on screen in columns (0-based, both included), or
     // (-1, -1) (also before a large document's first parse).
     std::pair<int, int> readLineRange() const;
     // 0: as many as fit.
@@ -171,7 +182,7 @@ Q_SIGNALS:
     void formatChanged();
     // Tab size or spaces/tabs changed.
     void indentationChanged();
-    // Read mode came or went, or its screen changed.
+    // Columns came or went (or could be shown or not), or their screen changed.
     void readStateChanged();
     // The file's name or its deleted / changed-on-disk state changed.
     void titleChanged();
@@ -202,9 +213,12 @@ private:
     void mirrorSelection(TextView *from, TextView *to);
     void setActiveView(TextView *view);
     void applyMarkdownState();
-    // Read mode follows the mode and the lock.
-    void updateReadMode();
+    // Columns follow the wish, the mode and the lock; switched: the user
+    // asked for them (or for Scroll) just now.
+    void updateColumns(bool switched = false);
     void updateReadBar();
+    int columnsShownCount() const;
+    int columnsFit() const;
 
     std::shared_ptr<TextFile> m_file;
     QTextDocument *m_doc;
@@ -233,10 +247,14 @@ private:
     // a preview, on its own an editor.
     bool m_splitLocked = true;
     bool m_visualLocked = false;
-    ReadBar *m_readBar = nullptr; // Made when read mode first shows.
+    ReadBar *m_readBar = nullptr; // Made when columns first show.
     int m_readColumns = 0;
     int m_readChars = 70;
-    bool m_readMode = false;
+    bool m_wantsColumns = false;
+    // The view showing columns, if any.
+    TextView *m_columnsView = nullptr;
+    // Whether columns could show, as the status bar last heard.
+    bool m_couldShowColumns = true;
 };
 
 } // namespace vn

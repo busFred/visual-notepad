@@ -331,11 +331,17 @@ private:
     QAction *m_outlineAction;
     QAction *m_splitAction;
     QAction *m_wrapAction;
+    QAction *m_columnsAction;
     QAction *m_statusBarAction;
     QHash<QString, QAction *> m_actions;
     QMenu *m_recentMenu = nullptr;
     QMenu *m_insertTableMenu = nullptr;
 
+    // Scroll | Columns: the first cell of the status bar's row.
+    QWidget *m_viewSwitch;
+    QToolButton *m_scrollButton;
+    QToolButton *m_columnsButton;
+    QLabel *m_range; // The lines on screen, in columns.
     QLabel *m_position;
     QLabel *m_indentation;
     QLabel *m_zoom;

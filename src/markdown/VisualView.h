@@ -132,16 +132,20 @@ public:
     // viewport coordinates; null if it is not shown as a table.
     QRect tableCellViewRect(int line, int row, int col);
 
-    // Read mode: what a locked Visual mode shows (DocumentTab turns it on).
-    // The document flows through columns of `chars` characters of body text
+    // Read mode: what a locked Visual mode shows in Columns (DocumentTab
+    // turns it on). The document flows through columns of `chars` characters of body text
     // (at the font and zoom of the moment), as many as fit or the number
     // asked for if fewer, centred, a screen at a time (md::ReadFlow): page
     // turns, nudges of a line, no scroll bar. Where the view is, is a source
     // line, which every change of layout keeps, and so does leaving read mode.
     // Before a large document's first parse (its source shows line by line)
-    // the view scrolls as usual until the parse arrives.
-    void setReadMode(bool on);
+    // the view scrolls as usual until the parse arrives. Turned on, the first
+    // screen starts at startLine (-1: where the view is scrolled to).
+    void setReadMode(bool on, int startLine = -1);
     bool isReadMode() const { return m_readMode; }
+    // The source line the screen starts on in read mode (where leaving it
+    // scrolls to).
+    int readTopLine() const { return int(m_readLinePosition); }
     // 0: as many columns as fit.
     void setReadColumns(int columns);
     int readColumns() const { return m_readColumns; }

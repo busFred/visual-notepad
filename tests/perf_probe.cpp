@@ -10,9 +10,11 @@
 // Enter then "a" (a new list item, timed per pair). In the visual
 // editor the keystrokes go into rendered text; VN_PROBE_OPEN=1 opens the
 // line's block as source first. VN_PROBE_PAINT=1 paints after each one.
-// VN_PROBE_READ=1 times read mode on a Markdown file (Visual mode, locked):
-// turning it on, 50 page turns, 50 pages back, 50 nudges of a line and a
-// resize, each painted.
+// VN_PROBE_READ=1 times read mode on a Markdown file (Visual mode, locked,
+// Columns): turning it on, 50 page turns, 50 pages back, 50 nudges of a line
+// and a resize, each painted. VN_PROBE_COLUMNS=1 does the same for the
+// source view's columns on any file (Source mode), with Word Wrap on and off,
+// from the middle of the file.
 #include "DocumentTab.h"
 #include "TextFile.h"
 #include "editor/TextView.h"
@@ -173,6 +175,7 @@ int main(int argc, char **argv)
                 if (button->toolTip() == QLatin1String("Read-only"))
                     button->click();
             }
+            tab.setColumns(true);
             visual->grab();
             // (A large document shows its columns once its parse is in.)
             QElapsedTimer waited;
@@ -212,6 +215,58 @@ int main(int argc, char **argv)
             qInfo().noquote() << argv[i] << "to the end+paint ms" << lap.take();
             const auto [first, last] = visual->readLineRange();
             qInfo().noquote() << argv[i] << "last screen: lines" << first + 1 << "to" << last + 1;
+        }
+        if (qEnvironmentVariableIntValue("VN_PROBE_COLUMNS") != 0) {
+            tab.setViewMode(vn::DocumentTab::ViewMode::Source);
+            vn::TextView *source = tab.sourceView();
+            const int middle = tab.document()->blockCount() / 2;
+            for (const bool wrap : {true, false}) {
+                tab.setColumns(false);
+                source->setWordWrap(wrap);
+                source->scrollToLine(middle);
+                source->grab();
+                const QString name = QString::fromLocal8Bit(argv[i]) + (wrap ? QStringLiteral(" (wrap)") : QStringLiteral(" (no wrap)"));
+                lap.restart();
+                tab.setColumns(true);
+                source->grab();
+                qInfo().noquote() << name << "columns on+paint ms" << lap.take() << source->shownColumnCount() << "columns";
+                for (int k = 0; k < 50; ++k) {
+                    source->columnsPageForward();
+                    source->grab();
+                }
+                qInfo().noquote() << name << "page turn+paint ms" << lap.take(50);
+                for (int k = 0; k < 50; ++k) {
+                    source->columnsPageBack();
+                    source->grab();
+                }
+                qInfo().noquote() << name << "page back+paint ms" << lap.take(50);
+                for (int k = 0; k < 50; ++k) {
+                    source->columnsNudge(1);
+                    source->grab();
+                }
+                qInfo().noquote() << name << "nudge+paint ms" << lap.take(50);
+                for (int k = 0; k < 10; ++k) {
+                    source->columnsPageBack();
+                    source->grab();
+                }
+                qInfo().noquote() << name << "page back (worked out)+paint ms" << lap.take(10);
+                for (int k = 0; k < 20; ++k) {
+                    QTest::keyClick(source, Qt::Key_Down);
+                    source->grab();
+                }
+                qInfo().noquote() << name << "caret down+paint ms" << lap.take(20);
+                tab.resize(1400, 900);
+                source->grab();
+                qInfo().noquote() << name << "resize+paint ms" << lap.take() << source->shownColumnCount() << "columns";
+                source->columnsToEnd();
+                source->grab();
+                qInfo().noquote() << name << "to the end+paint ms" << lap.take();
+                tab.resize(900, 700);
+                tab.setColumns(false);
+                source->grab();
+                qInfo().noquote() << name << "columns off+paint ms" << lap.take();
+            }
+            source->setWordWrap(true);
         }
         view->scrollToLine(90000);
         view->grab();
