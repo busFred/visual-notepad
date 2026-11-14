@@ -3,6 +3,7 @@
 #include "../PlainText.h"
 #include "../Settings.h"
 #include "../Theme.h"
+#include "BlockViewer.h"
 #include "FigureBar.h"
 #include "ImageViewer.h"
 #include "MarkdownModel.h"
@@ -2059,18 +2060,27 @@ QString VisualView::headingBefore(int line)
 
 bool VisualView::openWideBlock(const Row &r)
 {
-    const RenderedBlock *block = readActive() && r.rendered ? renderedForRow(r) : nullptr;
-    if (!block || block->contentWidth() <= textWidth())
+    const RenderedBlock *shown = readActive() && r.rendered ? renderedForRow(r) : nullptr;
+    if (!shown || shown->contentWidth() <= textWidth())
         return false;
-    QApplication::setOverrideCursor(Qt::WaitCursor);
-    const QImage image = block->contentImage(devicePixelRatioF());
-    QApplication::restoreOverrideCursor();
-    if (image.isNull())
+    // The block again, at its natural width, for a window of its own (which
+    // outlives this render, and the view's cache of them).
+    const int index = spanForRow(r);
+    const auto &spans = m_model->spans();
+    if (index < 0 || index >= int(spans.size()) || spans[index].block < 0)
         return false;
-    const QString what = block->kind() == RenderedBlock::Kind::Image ? tr("equation") : tr("table");
+    const MarkdownModel::Span &span = spans[index];
+    RenderContext ctx = renderContext();
+    ctx.overflow = true;
+    ctx.width = std::ceil(shown->contentWidth());
+    std::unique_ptr<RenderedBlock> own =
+        RenderedBlock::create(m_model->parsedBlock(span.block), m_model->sourceText(span.first, span.last), ctx);
+    if (own->contentSize().isEmpty())
+        return false;
+    const QString what = shown->kind() == RenderedBlock::Kind::Image ? tr("equation") : tr("table");
     const QString heading = headingBefore(r.firstLine);
     // Closes itself; the window is the parent so it stays on top of this tab.
-    (new ImageViewer(image, heading.isEmpty() ? what : tr("%1 \u2014 %2").arg(heading, what), window()))->show();
+    (new BlockViewer(std::move(own), heading.isEmpty() ? what : tr("%1 \u2014 %2").arg(heading, what), window()))->show();
     return true;
 }
 

@@ -76,6 +76,8 @@ add_library(vn_app STATIC
     src/editor/TextView.h
     src/markdown/BlockRenderer.cpp
     src/markdown/BlockRenderer.h
+    src/markdown/BlockViewer.cpp
+    src/markdown/BlockViewer.h
     src/markdown/FigureBar.cpp
     src/markdown/FigureBar.h
     src/markdown/Folding.cpp
@@ -98,6 +100,8 @@ add_library(vn_app STATIC
     src/markdown/TableCellEditor.h
     src/markdown/TableToolbar.cpp
     src/markdown/TableToolbar.h
+    src/markdown/ZoomBar.cpp
+    src/markdown/ZoomBar.h
     src/markdown/VisualView.cpp
     src/markdown/VisualViewRead.cpp
     src/markdown/VisualView.h

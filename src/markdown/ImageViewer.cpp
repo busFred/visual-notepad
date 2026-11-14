@@ -1,12 +1,10 @@
 #include "ImageViewer.h"
 
-#include <QHBoxLayout>
+#include "ZoomBar.h"
+
 #include <QKeyEvent>
-#include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QSlider>
-#include <QToolButton>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -18,7 +16,6 @@ namespace {
 
 constexpr qreal maxScale = 32;
 constexpr qreal margin = 12; // Around a fitted picture.
-constexpr int sliderSteps = 1000;
 
 } // namespace
 
@@ -28,7 +25,6 @@ ImageViewer::ImageViewer(const QImage &image, const QString &title, QWidget *par
 {
     setWindowTitle(title);
     setAttribute(Qt::WA_DeleteOnClose);
-    setWindowModality(Qt::WindowModal);
     setCursor(Qt::OpenHandCursor);
     QSize size(900, 650);
     if (parent) {
@@ -39,43 +35,16 @@ ImageViewer::ImageViewer(const QImage &image, const QString &title, QWidget *par
     setMinimumSize(320, 180);
 
     // The controls float over the bottom of the picture.
-    m_bar = new QWidget(this);
-    m_bar->setAutoFillBackground(true);
-    m_bar->setAttribute(Qt::WA_NoMousePropagation);
-    m_bar->setCursor(Qt::ArrowCursor);
-    auto *layout = new QHBoxLayout(m_bar);
-    layout->setContentsMargins(8, 4, 8, 4);
-    auto button = [&](const QString &text, const QString &tip) {
-        auto *b = new QToolButton(m_bar);
-        b->setText(text);
-        b->setToolTip(tip);
-        b->setAutoRaise(true);
-        b->setFocusPolicy(Qt::NoFocus);
-        layout->addWidget(b);
-        return b;
-    };
-    connect(button(QStringLiteral("Fit"), tr("Fit to window (0)")), &QToolButton::clicked, this, [this] { fit(); });
-    connect(button(QStringLiteral("\u2212"), tr("Zoom out (-)")), &QToolButton::clicked, this,
-            [this] { zoomAt(windowCentre(), 1 / 1.25); });
-    m_slider = new QSlider(Qt::Horizontal, m_bar);
-    m_slider->setRange(0, sliderSteps);
-    m_slider->setFixedWidth(200);
-    m_slider->setFocusPolicy(Qt::NoFocus);
-    layout->addWidget(m_slider);
-    connect(m_slider, &QSlider::valueChanged, this, [this](int value) {
+    m_bar = new ZoomBar(this);
+    connect(m_bar, &ZoomBar::fitRequested, this, [this] { fit(); });
+    connect(m_bar, &ZoomBar::zoomOutRequested, this, [this] { zoomAt(windowCentre(), 1 / 1.25); });
+    connect(m_bar, &ZoomBar::zoomInRequested, this, [this] { zoomAt(windowCentre(), 1.25); });
+    connect(m_bar, &ZoomBar::actualSizeRequested, this, [this] { actualSize(windowCentre()); });
+    connect(m_bar, &ZoomBar::sliderMoved, this, [this](qreal fraction) {
         // Exponential: every step is the same relative change.
         const qreal low = lowestScale();
-        setScale(low * std::pow(maxScale / low, qreal(value) / sliderSteps), windowCentre());
+        setScale(low * std::pow(maxScale / low, fraction), windowCentre());
     });
-    connect(button(QStringLiteral("+"), tr("Zoom in (+)")), &QToolButton::clicked, this,
-            [this] { zoomAt(windowCentre(), 1.25); });
-    connect(button(QStringLiteral("1:1"), tr("Actual size (1)")), &QToolButton::clicked, this,
-            [this] { actualSize(windowCentre()); });
-    m_percent = new QLabel(m_bar);
-    m_percent->setMinimumWidth(m_percent->fontMetrics().horizontalAdvance(QStringLiteral("3200%")));
-    m_percent->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    layout->addWidget(m_percent);
-    m_bar->adjustSize();
 }
 
 QPointF ImageViewer::windowCentre() const
@@ -90,11 +59,8 @@ qreal ImageViewer::lowestScale() const
 
 void ImageViewer::refresh()
 {
-    // Follow the zoom without echoing it back through the slider.
-    const QSignalBlocker block(m_slider);
     const qreal low = lowestScale();
-    m_slider->setValue(qRound(std::log(m_scale / low) / std::log(maxScale / low) * sliderSteps));
-    m_percent->setText(QStringLiteral("%1%").arg(qRound(m_scale * devicePixelRatioF() * 100)));
+    m_bar->setZoom(std::log(m_scale / low) / std::log(maxScale / low), qRound(m_scale * devicePixelRatioF() * 100));
     m_bar->move((width() - m_bar->width()) / 2, height() - m_bar->height() - int(margin));
     update();
 }

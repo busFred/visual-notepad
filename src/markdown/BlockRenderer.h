@@ -53,9 +53,12 @@ struct RenderContext
     // block's source: for each figure of the block, in order, how large it
     // is relative to its fitted size (1: fitted; missing: 1).
     QHash<QString, QList<qreal>> figureScales;
-    // Read mode: a display formula keeps its size, and a block that is one
-    // table lays out at its natural width, when either is wider than the
-    // column (see RenderedBlock::contentWidth); the view scrolls it sideways.
+    // Read mode: a display formula keeps its size when it is wider than the
+    // column, and a block that is one table fits the column as a browser
+    // fits one (long text wraps, words and formulas stay whole, short columns
+    // keep their width) and keeps its natural width only when even its
+    // narrowest layout is wider than the column (see
+    // RenderedBlock::contentWidth); the view scrolls those sideways.
     // Everywhere else they are fitted to the width.
     bool overflow = false;
 };
@@ -152,9 +155,10 @@ public:
     qreal stripHeight() const { return m_strip; }
     static qreal stripHeight(const RenderContext &context);
     // How wide the block is when it is wider than the column it was made for
-    // (a formula or a table, with RenderContext::overflow); else the column's
+    // (a formula, or a table that cannot be narrower, with
+    // RenderContext::overflow); else the column's
     // width. A wide block has room for a thin scrollbar under it (see
-    // scrollTrack), and contentImage() shows all of it.
+    // scrollTrack); a viewer shows all of it (see contentSize).
     qreal contentWidth() const { return m_contentWidth > 0 ? m_contentWidth : m_width; }
     // The track of that scrollbar for a column `width` wide, relative to the
     // block's top-left; null for a block that is not wider.
@@ -163,10 +167,14 @@ public:
     static QRectF scrollThumb(const QRectF &track, qreal content, qreal offset);
     // The scrollbar as the style's own: `hot` while it is dragged.
     static void paintScrollBar(QPainter &painter, const QRectF &track, qreal content, qreal offset, bool hot);
-    // The whole of a wide block at its natural width (the strip and the
-    // scrollbar left out) on the editor's colour, `devicePixelRatio` pixels
-    // to a logical one; null for a block that is not wider than its column.
-    QImage contentImage(qreal devicePixelRatio) const;
+    // The block without the strip over it, the room under it for a scrollbar
+    // and the gap after it: its width (contentWidth) and height, as a window
+    // that shows the whole of it needs. Painted by paintContent.
+    QSizeF contentSize() const;
+    // paint() with the content's top-left (the strip left out) at `topLeft`,
+    // and the block as wide as contentWidth(); points for hitTest() are
+    // relative to that top-left, plus the strip's height down.
+    void paintContent(QPainter &painter, const QPointF &topLeft, const RenderedSelection &selection = {}) const;
     // Whether the text of a table or rich text is under a point relative to
     // the block's top-left (not its padding, borders or the space around).
     bool textAt(const QPointF &point) const;

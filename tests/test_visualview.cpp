@@ -8,6 +8,7 @@
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
 #include "markdown/BlockRenderer.h"
+#include "markdown/BlockViewer.h"
 #include "markdown/ImageViewer.h"
 #include "markdown/MarkdownModel.h"
 #include "markdown/VisualView.h"
@@ -21,6 +22,7 @@
 #include <QAbstractButton>
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
+#include <QClipboard>
 #include <QPainterPath>
 #include <QRawFont>
 #include <QScrollBar>
@@ -171,13 +173,33 @@ QString wideDocument(int rows = 8)
     text += QStringLiteral("| Run | Branch | Commit | Runner | Cache | Checkout | Configure | Compile | Test | Package |\n"
                            "|---|---|---|---|---|---|---|---|---|---|\n");
     for (int i = 1; i <= rows; ++i)
-        text += QStringLiteral("| #48%1 | feature/cache-%1-and-its-long-name | a41c9e%1 | runner-0%1 | partly | %1 s | 11 s | 138 s | 94 s | 22 s |\n")
+        text += QStringLiteral("| #48%1 | feature_cache_%1_and_its_long_name | a41c9e%1 | runner-0%1 | partly | %1 s | 11 s | 138 s | 94 s | 22 s |\n")
                     .arg(i);
     QStringList terms;
     for (int i = 1; i <= 40; ++i)
         terms << QStringLiteral("x_{%1}").arg(i);
     text += QStringLiteral("\n$$\n") + terms.join(QStringLiteral(" + ")) + QStringLiteral("\n$$\n\n");
     text += QStringLiteral("## Stage timings\n\n| Stage | Median |\n|---|---|\n| Checkout | 4 s |\n\nThe end.\n");
+    for (int i = 1; i <= 40; ++i)
+        text += QStringLiteral("\nFiller paragraph %1, so that the document goes on below the screen.\n").arg(i);
+    return text;
+}
+
+// Read mode's tables that squeeze into the column (long text in one column,
+// short words in the others), and one that cannot (ten columns of long words
+// that cannot wrap), each under a heading.
+QString squeezeDocument()
+{
+    QString text = QStringLiteral("# Notes\n\n| Id | Description | Owner |\n|---|---|---|\n");
+    const QString words =
+        QStringLiteral("the quick brown fox jumps over the lazy dog and keeps running through the fields until night "
+                       "falls and everybody goes home ");
+    for (int i = 1; i <= 4; ++i)
+        text += QStringLiteral("| %1 | %2 | ana |\n").arg(i).arg(words + words);
+    text += QStringLiteral("\n## Hashes\n\n| a | b | c | d | e | f | g | h | i | j |\n|---|---|---|---|---|---|---|---|---|---|\n");
+    const QString word = QStringLiteral("abcdefghijklmnop");
+    text += QStringLiteral("| %1 |\n").arg(QStringList(10, word).join(QStringLiteral(" | ")));
+    text += QStringLiteral("\nThe end.\n");
     for (int i = 1; i <= 40; ++i)
         text += QStringLiteral("\nFiller paragraph %1, so that the document goes on below the screen.\n").arg(i);
     return text;
@@ -461,6 +483,11 @@ private Q_SLOTS:
     void wideBlocksScrollSideways();
     void repeatedHeaderFollowsTheOffset();
     void openShowsAWideBlockInTheViewer();
+    void tablesSqueezeBeforeTheyScroll();
+    void tablesScrollWhenTheirLongestWordsDoNotFit();
+    void viewersLeaveTheWindowUsable();
+    void tableViewerIsTheRealTable();
+    void equationViewerIsDrawnAsShapes();
     void readModeWaitsForTheFirstParse();
     void figureBarKeepsClicksAndPictureClickStillZooms();
     void networkPaths();
@@ -3127,6 +3154,10 @@ void TestVisualView::clickEnlargesPicture()
     const auto viewers = m_view->window()->findChildren<ImageViewer *>();
     QCOMPARE(viewers.size(), 1);
     ImageViewer *viewer = viewers.first();
+    // A window of its own, not a block on the one it came from.
+    QCOMPARE(viewer->windowModality(), Qt::NonModal);
+    QVERIFY(!viewer->isModal());
+    QVERIFY(QApplication::activeModalWidget() == nullptr);
     const qreal fitted = viewer->scale();
     if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
         viewer->grab().save(dir + QStringLiteral("/image-viewer.png"));
@@ -5722,10 +5753,8 @@ void TestVisualView::overflowIsOnlyForReadMode()
     const qreal bar = view->blockOfLine(table)->scrollTrack(wide).height();
     QVERIFY(bar > 0);
     QVERIFY(view->blockOfLine(narrow)->scrollTrack(wide).isNull());
-    // The whole of the table, at natural width (and the pixel ratio), for the viewer.
-    const QImage image = view->blockOfLine(table)->contentImage(1);
-    QCOMPARE(image.width(), qCeil(view->contentWidthOfLine(table)));
-    QVERIFY(view->blockOfLine(narrow)->contentImage(1).isNull());
+    // The whole of the table, at natural width, for the viewer.
+    QCOMPARE(view->blockOfLine(table)->contentSize().width(), view->contentWidthOfLine(table));
     // Out of read mode, as before.
     m_view->setReadMode(false);
     QVERIFY(!view->rendersOverflow());
@@ -5903,9 +5932,9 @@ void TestVisualView::openShowsAWideBlockInTheViewer()
     const int formula = lineHolding(text, QStringLiteral("$$"));
     const int narrow = lineHolding(text, QStringLiteral("| Stage"));
     startReading(text, 1000, 1000);
-    const auto viewers = [this] { return m_view->window()->findChildren<ImageViewer *>(); };
+    const auto viewers = [this] { return m_view->window()->findChildren<BlockViewer *>(); };
     const auto close = [&] {
-        for (ImageViewer *v : viewers())
+        for (BlockViewer *v : viewers())
             v->close();
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         QVERIFY(viewers().isEmpty());
@@ -5976,6 +6005,308 @@ void TestVisualView::openShowsAWideBlockInTheViewer()
     QCOMPARE(viewers().size(), 1);
     QCOMPARE(viewers().first()->windowTitle(), QStringLiteral("table"));
     close();
+}
+
+namespace {
+
+// How much of the colour changes along rows of a picture is gradual: the share
+// of the pixels where the colour changes from the one before that lie in a run
+// of more than `run` such pixels. Shapes drawn at a large size change colour
+// within a pixel or two; a small picture enlarged smooths its edges over as
+// many pixels as it is enlarged.
+qreal gradualShare(const QImage &image, int run = 8)
+{
+    qsizetype changing = 0;
+    qsizetype inLongRuns = 0;
+    for (int y = 0; y < image.height(); ++y) {
+        int length = 0;
+        for (int x = 1; x <= image.width(); ++x) {
+            const bool changes = x < image.width() && image.pixel(x, y) != image.pixel(x - 1, y);
+            if (changes) {
+                ++length;
+                continue;
+            }
+            changing += length;
+            if (length > run)
+                inLongRuns += length;
+            length = 0;
+        }
+    }
+    return changing > 0 ? qreal(inLongRuns) / changing : 0;
+}
+
+// A table's column, as wide as the grid draws it.
+qreal gridColumn(const RenderedBlock::TableGrid &grid, int col)
+{
+    return grid.xs[col + 1] - grid.xs[col];
+}
+
+} // namespace
+
+// A table whose columns cannot all be as wide as their text asks fits the
+// column by wrapping the long text (CSS 2.2 17.5.2.2: each column is as narrow
+// as its longest word, and shares what is left in proportion to how much wider
+// it would like to be): no scrolling, so no Open and no scrollbar.
+void TestVisualView::tablesSqueezeBeforeTheyScroll()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const QString text = squeezeDocument();
+    const int squeezed = lineHolding(text, QStringLiteral("| Id"));
+    startReading(text, 1000, 1000);
+    const qreal column = view->columnWidth();
+
+    // The same table with all the room it asks for.
+    RenderContext wide;
+    wide.font = theme::textFont();
+    wide.codeFont = theme::editorFont();
+    wide.width = 100000;
+    wide.overflow = true;
+    std::unique_ptr<RenderedBlock> natural;
+    for (const core::Block &block : m_model->blocks()) {
+        if (int(block.first_line) == squeezed) {
+            const QString source = text.split(u'\n').mid(squeezed, int(block.last_line - block.first_line) + 1).join(u'\n');
+            natural = RenderedBlock::create(block, source, wide);
+        }
+    }
+    QVERIFY(natural);
+    const RenderedBlock::TableGrid *plain = natural->tableGrid();
+    QVERIFY(plain);
+    QCOMPARE(plain->cols(), 3);
+    QVERIFY(plain->xs.back() > column + 300); // Far too wide for the column as it stands.
+
+    // In the view it takes the column (no wider, and none of it spare), with no scrolling.
+    const RenderedBlock *block = view->blockOfLine(squeezed);
+    const RenderedBlock::TableGrid *grid = block->tableGrid();
+    QVERIFY(grid);
+    QCOMPARE(grid->cols(), 3);
+    QVERIFY(view->contentWidthOfLine(squeezed) <= column + 0.5);
+    QVERIFY(view->tableRightOfLine(squeezed) <= column + 1);
+    QVERIFY(view->tableRightOfLine(squeezed) > column - 4);
+    QVERIFY(block->scrollTrack(column).isNull());
+    QVERIFY(m_view->readOpenRect(squeezed).isNull());
+    // The columns of short words are as wide as they were, the long text's
+    // column gave up the room, and wrapped (the table is taller).
+    QVERIFY(qAbs(gridColumn(*grid, 0) - gridColumn(*plain, 0)) < 1.5);
+    QVERIFY(qAbs(gridColumn(*grid, 2) - gridColumn(*plain, 2)) < 1.5);
+    QVERIFY(gridColumn(*grid, 1) < gridColumn(*plain, 1) - 300);
+    QVERIFY(grid->ys.back() > 2 * plain->ys.back());
+    // Words are not broken: the column is as wide as its longest word.
+    const QFontMetricsF metrics(theme::textFont());
+    QVERIFY(gridColumn(*grid, 1) >= metrics.horizontalAdvance(QStringLiteral("everybody")));
+    if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
+        m_view->grab().save(dir + QStringLiteral("/read-table-squeezed.png"));
+    // Out of read mode nothing changed: Qt squeezes the table as it did.
+    m_view->setReadMode(false);
+    QVERIFY(view->contentWidthOfLine(squeezed) <= view->columnWidth() + 0.5);
+}
+
+// ... and only when even the least widths are too wide does it scroll, at the
+// width its text asks for (the table in the same document that does fit does not).
+void TestVisualView::tablesScrollWhenTheirLongestWordsDoNotFit()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const QString text = squeezeDocument();
+    const int squeezed = lineHolding(text, QStringLiteral("| Id"));
+    const int stuck = lineHolding(text, QStringLiteral("| a | b"));
+    startReading(text, 1000, 1000);
+    const qreal column = view->columnWidth();
+    QVERIFY(view->contentWidthOfLine(stuck) > column + 20);
+    QVERIFY(qAbs(view->contentWidthOfLine(stuck) - view->tableRightOfLine(stuck)) < 2);
+    QVERIFY(!view->blockOfLine(stuck)->scrollTrack(column).isNull());
+    // Only that one has the Open button.
+    QVERIFY(!m_view->readOpenRect(stuck).isNull());
+    QVERIFY(m_view->readOpenRect(squeezed).isNull());
+    // The words are not broken: the table is as wide as ten of them side by side.
+    const QFontMetricsF metrics(theme::textFont());
+    QVERIFY(view->contentWidthOfLine(stuck) > 10 * metrics.horizontalAdvance(QStringLiteral("abcdefghijklmnop")));
+}
+
+namespace {
+
+// Opens the viewer of the wide block at `line`, with the button.
+BlockViewer *openViewer(VisualView *view, const QRect &open)
+{
+    const auto before = view->window()->findChildren<BlockViewer *>();
+    QTest::mouseClick(view->viewport(), Qt::LeftButton, {}, open.center());
+    for (BlockViewer *viewer : view->window()->findChildren<BlockViewer *>()) {
+        if (!before.contains(viewer))
+            return viewer;
+    }
+    return nullptr;
+}
+
+void closeViewers(QWidget *window)
+{
+    for (BlockViewer *viewer : window->findChildren<BlockViewer *>())
+        viewer->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+
+} // namespace
+
+void TestVisualView::viewersLeaveTheWindowUsable()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const QString text = wideDocument();
+    const int table = lineHolding(text, QStringLiteral("| Run"));
+    const int formula = lineHolding(text, QStringLiteral("$$"));
+    startReading(text, 1000, 1000);
+    const auto viewers = [this] { return m_view->window()->findChildren<BlockViewer *>(); };
+    const QRect tableRect = segmentOfLine(table);
+    const QRectF header = *view->blockOfLine(table)->tableCellRect(0, 0);
+
+    BlockViewer *first = openViewer(m_view, m_view->readOpenRect(table));
+    QVERIFY(first);
+    QVERIFY(first->isVisible());
+    // A window of its own: not modal, so the one under it takes input.
+    QCOMPARE(first->windowModality(), Qt::NonModal);
+    QVERIFY(!first->isModal());
+    QVERIFY(QApplication::activeModalWidget() == nullptr);
+    QVERIFY(m_view->window()->isEnabled());
+    QCOMPARE(m_view->textCursor().blockNumber(), 0);
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {},
+                      tableRect.topLeft() + QPoint(int(header.left()) + 12, int(header.center().y())));
+    QCOMPARE(m_view->textCursor().blockNumber(), table); // The click reached the table.
+    const md::Position before = m_view->readScreen().start;
+    QWheelEvent wheel(tableRect.center(), m_view->viewport()->mapToGlobal(tableRect.center()), {}, QPoint(0, -120),
+                      Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(m_view->viewport(), &wheel);
+    QVERIFY(!(m_view->readScreen().start == before)); // ... and reading goes on while it is open.
+    QVERIFY(first->isVisible());
+
+    // Several at once, each closing by itself.
+    m_view->readToStart();
+    BlockViewer *second = openViewer(m_view, m_view->readOpenRect(formula));
+    QVERIFY(second && second != first);
+    QCOMPARE(viewers().size(), 2);
+    second->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QCOMPARE(viewers().size(), 1);
+    QVERIFY(first->isVisible());
+    // Escape closes the one it is pressed in.
+    QTest::keyClick(first, Qt::Key_Escape);
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QVERIFY(viewers().isEmpty());
+}
+
+void TestVisualView::tableViewerIsTheRealTable()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const QString text = wideDocument();
+    const int table = lineHolding(text, QStringLiteral("| Run"));
+    startReading(text, 1000, 1000);
+    const qreal natural = view->contentWidthOfLine(table);
+    BlockViewer *viewer = openViewer(m_view, m_view->readOpenRect(table));
+    QVERIFY(viewer);
+    QCOMPARE(viewer->windowTitle(), QStringLiteral("Run log \u2014 table"));
+    // The table itself, as laid out at its natural width, at its own size.
+    const RenderedBlock &block = viewer->block();
+    QCOMPARE(block.tableCells(), QSize(10, 9));
+    QCOMPARE(viewer->scale(), 1.0);
+    QCOMPARE(viewer->scaledSize().width(), natural);
+    viewer->resize(520, 480); // Narrower than the table.
+    auto *area = qobject_cast<QAbstractScrollArea *>(viewer->viewport()->parentWidget());
+    QVERIFY(area);
+    QVERIFY(area->horizontalScrollBar()->maximum() > 0); // Wider than the window: it scrolls.
+    if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
+        viewer->grab().save(dir + QStringLiteral("/table-viewer.png"));
+    QCOMPARE(area->horizontalScrollBar()->maximum(), int(std::ceil(natural)) - viewer->viewport()->width());
+    QVERIFY(viewer->selectedText().isEmpty());
+
+    // Drag over text to select it.
+    const QPointF from = viewer->toViewport(block.tableCellRect(1, 1)->center());
+    const QPointF to = viewer->toViewport(block.tableCellRect(3, 1)->center());
+    QTest::mousePress(viewer->viewport(), Qt::LeftButton, {}, from.toPoint());
+    QTest::mouseMove(viewer->viewport(), to.toPoint());
+    QTest::mouseRelease(viewer->viewport(), Qt::LeftButton, {}, to.toPoint());
+    QVERIFY2(viewer->selectedText().contains(QStringLiteral("feature_cache_2_and_its_long_name")),
+             qPrintable(viewer->selectedText()));
+    // ... and select all, and copy.
+    viewer->selectAll();
+    QApplication::clipboard()->setText(QString());
+    QTest::keyClick(viewer, Qt::Key_C, Qt::ControlModifier);
+    const QString copied = QApplication::clipboard()->text();
+    QVERIFY(copied.contains(QStringLiteral("#481")));
+    QVERIFY(copied.contains(QStringLiteral("feature_cache_8_and_its_long_name")));
+    QVERIFY(copied.contains(QStringLiteral("Package")));
+
+    // Zooming lays the table out at the new size (the scrolling follows it),
+    // with the same bar as the picture viewer's.
+    const QPointF centre(viewer->viewport()->width() / 2.0, viewer->viewport()->height() / 2.0);
+    viewer->zoomAt(centre, 2);
+    QCOMPARE(viewer->scale(), 2.0);
+    QCOMPARE(viewer->scaledSize().width(), 2 * natural);
+    QCOMPARE(area->horizontalScrollBar()->maximum(), int(std::ceil(2 * natural)) - viewer->viewport()->width());
+    auto *slider = viewer->findChild<QSlider *>();
+    QVERIFY(slider && slider->value() > 0);
+    QToolButton *fitButton = nullptr;
+    QToolButton *actualButton = nullptr;
+    for (QToolButton *button : viewer->findChildren<QToolButton *>()) {
+        if (button->text() == QLatin1String("Fit"))
+            fitButton = button;
+        else if (button->text() == QLatin1String("1:1"))
+            actualButton = button;
+    }
+    QVERIFY(fitButton && actualButton);
+    fitButton->click();
+    QVERIFY(viewer->scale() < 1);
+    QVERIFY(qAbs(viewer->scale() - viewer->fitScale()) < 1e-9);
+    QCOMPARE(area->horizontalScrollBar()->maximum(), 0); // All of it shows.
+    actualButton->click();
+    QCOMPARE(viewer->scale(), 1.0);
+
+    // Painted at the size it is shown, not enlarged: at 8 times the edges of
+    // letters and borders are as sharp as at 1 (no softness over many pixels).
+    viewer->zoomAt(centre, 8);
+    const QImage zoomed = viewer->viewport()->grab().toImage();
+    QVERIFY(zoomed.size() == viewer->viewport()->size() * zoomed.devicePixelRatio());
+    int ink = 0;
+    const QColor editor = theme::color(theme::Role::editor);
+    const QImage upper = zoomed.copy(0, 0, zoomed.width(), zoomed.height() - 80);
+    for (int y = 0; y < upper.height(); y += 3)
+        for (int x = 0; x < upper.width(); x += 3)
+            ink += QColor(upper.pixel(x, y)) != editor;
+    QVERIFY(ink > 200);
+    QVERIFY2(gradualShare(upper) < 0.2, qPrintable(QString::number(gradualShare(upper))));
+    closeViewers(m_view->window());
+}
+
+void TestVisualView::equationViewerIsDrawnAsShapes()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const QString text = wideDocument();
+    const int formula = lineHolding(text, QStringLiteral("$$"));
+    startReading(text, 1000, 1000);
+    BlockViewer *viewer = openViewer(m_view, m_view->readOpenRect(formula));
+    QVERIFY(viewer);
+    QCOMPARE(viewer->windowTitle(), QStringLiteral("Run log \u2014 equation"));
+    QCOMPARE(viewer->block().kind(), RenderedBlock::Kind::Image);
+    QCOMPARE(viewer->block().contentSize().width(), std::ceil(view->contentWidthOfLine(formula)));
+    const QPointF centre(viewer->viewport()->width() / 2.0, viewer->viewport()->height() / 2.0);
+    const QColor editor = theme::color(theme::Role::editor);
+    const auto sharp = [&](qreal zoom, qreal *share) {
+        viewer->fit();
+        viewer->zoomAt(centre, zoom / viewer->scale());
+        QCOMPARE(viewer->scale(), zoom);
+        QCOMPARE(viewer->scaledSize().width(), zoom * viewer->block().contentSize().width());
+        const QImage image = viewer->viewport()->grab().toImage();
+        const QImage upper = image.copy(0, 0, image.width(), image.height() - 80);
+        int ink = 0;
+        for (int y = 0; y < upper.height(); y += 2)
+            for (int x = 0; x < upper.width(); x += 2)
+                ink += QColor(upper.pixel(x, y)) != editor;
+        QVERIFY(ink > 100);
+        *share = gradualShare(upper);
+    };
+    // At 1, 4 and 16 times its size the shapes have the same sharp edges.
+    qreal one = 0;
+    qreal four = 0;
+    qreal sixteen = 0;
+    sharp(1, &one);
+    sharp(4, &four);
+    sharp(16, &sixteen);
+    QVERIFY2(four < 0.2 && sixteen < 0.2, qPrintable(QStringLiteral("%1 %2 %3").arg(one).arg(four).arg(sixteen)));
+    closeViewers(m_view->window());
 }
 
 void TestVisualView::readModeWaitsForTheFirstParse()
