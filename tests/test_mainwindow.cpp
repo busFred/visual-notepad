@@ -145,7 +145,7 @@ private Q_SLOTS:
     void columnsArePerTabAndNotSaved();
     void lockNoLongerForcesColumns();
     void sourceColumnsLeaveForTheSplitAndComeBack();
-    void sourceColumnsStatusBarAndReadOnly();
+    void sourceColumnsStatusBarAndEditing();
 
 private:
     // A Markdown tab in `mode`, in a shown window; the half given has focus.
@@ -1518,7 +1518,7 @@ void TestMainWindow::sourceColumnsLeaveForTheSplitAndComeBack()
     source->columnsPageForward();
     const int top = tab->readLineRange().first;
     QVERIFY(top > 0);
-    QVERIFY(tab->isReadOnly()); // (Step 1: no edits in columns yet.)
+    QVERIFY(!tab->isReadOnly()); // (It edits in columns.)
 
     tab->setViewMode(vn::DocumentTab::ViewMode::SourceVisual);
     QVERIFY(!tab->showsColumns());
@@ -1552,7 +1552,7 @@ void TestMainWindow::sourceColumnsLeaveForTheSplitAndComeBack()
 // A code file in columns: the status bar has the switch, the zoom, the lines
 // on screen, then the caret and the file's cells; the bar at the top right
 // (no pill: code has none). Typing waits until editing in columns is built.
-void TestMainWindow::sourceColumnsStatusBarAndReadOnly()
+void TestMainWindow::sourceColumnsStatusBarAndEditing()
 {
     vn::MainWindow window;
     window.resize(1200, 600);
@@ -1591,14 +1591,22 @@ void TestMainWindow::sourceColumnsStatusBarAndReadOnly()
                                     .arg(tab->readLineRange().first + 1)
                                     .arg(tab->readLineRange().second + 1));
     QVERIFY(tab->readLineRange().first > 0);
-    // Read-only: typing, the edit commands and Replace do nothing.
+    // It edits: typing, the edit commands and undo; the caret's place follows.
     const QString before = tab->text();
-    QVERIFY(tab->isReadOnly());
+    QVERIFY(!tab->isReadOnly());
+    QVERIFY(actionFor(window, QStringLiteral("edit.paste"))->isEnabled());
+    const int line = source->textCursor().blockNumber();
+    QVERIFY(line > 0);
     QTest::keyClicks(source, QStringLiteral("abc"));
-    actionFor(window, QStringLiteral("selection.deleteLine"))->trigger();
+    QTRY_COMPARE(window.findChild<QLabel *>(QStringLiteral("PositionStatus"))->text(),
+                 QStringLiteral("Ln %1, Col 4").arg(line + 1));
     actionFor(window, QStringLiteral("edit.toggleComment"))->trigger();
+    QVERIFY(tab->document()->findBlockByNumber(line).text().startsWith(QStringLiteral("# abc")));
+    for (int i = 0; i < 10 && tab->text() != before; ++i)
+        actionFor(window, QStringLiteral("edit.undo"))->trigger();
     QCOMPARE(tab->text(), before);
-    // Scroll: editable again.
+    QVERIFY(tab->showsColumns());
+    // Scroll: editable as well.
     viewButton(window, false)->click();
     QVERIFY(!tab->isReadOnly());
     QVERIFY(!bar->isVisible());

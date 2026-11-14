@@ -498,8 +498,8 @@ TextView *DocumentTab::editor() const
 
 bool DocumentTab::isReadOnly() const
 {
-    // Only Visual mode can be locked; the source view is editable but in
-    // columns, until editing there is built (TextView::isReadOnly says).
+    // Only Visual mode can be locked; the source view is editable (in
+    // columns too).
     if (isMarkdown() && m_viewMode == ViewMode::Visual)
         return m_visualLocked;
     if (isMarkdown() && m_viewMode == ViewMode::SourceVisual)

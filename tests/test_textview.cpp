@@ -6,6 +6,7 @@
 #include "editor/TextView.h"
 
 #include <QApplication>
+#include <QLabel>
 #include <QLineEdit>
 #include <QVBoxLayout>
 #include <QClipboard>
@@ -49,6 +50,12 @@ private Q_SLOTS:
     void columnsScrollSidewaysOneByOne();
     void columnsTurnPagesAndNudge();
     void columnsCaretBringsItsLine();
+    void columnsDownGoesToTheNextColumnWithANote();
+    void columnsMoveOnOneColumnAtTheLastColumn();
+    void columnsTypingReflowsOverTheBreaks();
+    void columnsMouseSelectsAcrossColumns();
+    void columnsOffsetsTravelWithTheText();
+    void columnsEditAtSeveralCarets();
     void columnsStayFastOnABigFile();
 
     void typingAtSeveralCarets();
@@ -122,6 +129,14 @@ private:
     int lineAtPoint(const QPointF &point);
     // Whether anything is drawn in a rectangle of the viewport.
     bool inked(const QImage &image, const QRect &rect);
+    // Lines a column holds (none wrapped), and a point on a column's row
+    // (-1: its last), a few characters into the text.
+    int perColumn();
+    QPointF columnPoint(int column, int row);
+    int caretLine() const { return m_view->textCursor().blockNumber(); }
+    // A key held down: a press the keyboard repeats.
+    void repeatKey(Qt::Key key);
+    void dragTo(const QPointF &point);
 
     QTextDocument *m_doc = nullptr;
     TextView *m_view = nullptr;
@@ -1280,6 +1295,35 @@ int TestTextView::lineAtPoint(const QPointF &point)
     return cursor.blockNumber();
 }
 
+int TestTextView::perColumn()
+{
+    return m_view->columnRect(0).height() / static_cast<ProbeView *>(m_view)->rowHeight();
+}
+
+QPointF TestTextView::columnPoint(int column, int row)
+{
+    auto *probe = static_cast<ProbeView *>(m_view);
+    const QRect rect = m_view->columnRect(column);
+    const int h = probe->rowHeight();
+    if (row < 0)
+        row = perColumn() - 1;
+    return QPointF(rect.left() + probe->left() + 12, rect.top() + (row + 0.5) * h);
+}
+
+void TestTextView::repeatKey(Qt::Key key)
+{
+    QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier, QString(), true);
+    QApplication::sendEvent(m_view, &press);
+}
+
+void TestTextView::dragTo(const QPointF &point)
+{
+    QWidget *viewport = m_view->viewport();
+    QMouseEvent move(QEvent::MouseMove, point, viewport->mapToGlobal(point), Qt::NoButton, Qt::LeftButton,
+                     Qt::NoModifier);
+    QApplication::sendEvent(viewport, &move);
+}
+
 bool TestTextView::inked(const QImage &image, const QRect &rect)
 {
     const QRgb background = image.pixel(rect.topLeft());
@@ -1293,8 +1337,8 @@ bool TestTextView::inked(const QImage &image, const QRect &rect)
 }
 
 // The lines run down the first column and on at the top of the next; the
-// view is read-only for now (Step 1) but the caret moves, selects and copies;
-// turned off, the first column's first line is at the top.
+// caret moves, selects, copies and edits there; turned off, the first
+// column's first line is at the top.
 void TestTextView::columnsShowLinesInColumns()
 {
     auto *probe = static_cast<ProbeView *>(m_view);
@@ -1328,17 +1372,20 @@ void TestTextView::columnsShowLinesInColumns()
     QTest::keyClick(m_view, Qt::Key_Down);
     QCOMPARE(m_view->textCursor().blockNumber(), perColumn + 4);
     QCOMPARE(m_view->columnLineRange().first, 0); // (On screen: nothing moved.)
-    // Read-only for now: typing, deleting and pasting do nothing.
-    QVERIFY(m_view->isReadOnly());
+    // It edits: typing, deleting, pasting and undo.
+    QVERIFY(!m_view->isReadOnly());
     const QString before = text();
-    type(QStringLiteral("x"));
+    QTest::keyClick(m_view, Qt::Key_End);
+    type(QStringLiteral("xy"));
     QTest::keyClick(m_view, Qt::Key_Backspace);
-    QTest::keyClick(m_view, Qt::Key_Return);
+    QCOMPARE(m_doc->findBlockByNumber(perColumn + 4).text(), QStringLiteral("line %1x").arg(perColumn + 5));
     QApplication::clipboard()->setText(QStringLiteral("pasted"));
     m_view->paste();
-    m_view->undo();
+    QCOMPARE(m_doc->findBlockByNumber(perColumn + 4).text(), QStringLiteral("line %1xpasted").arg(perColumn + 5));
+    while (m_doc->isUndoAvailable())
+        m_view->undo();
     QCOMPARE(text(), before);
-    // ...but a selection copies.
+    // A selection copies.
     place(perColumn + 4, 0);
     QTest::keyClick(m_view, Qt::Key_End, Qt::ShiftModifier);
     m_view->copy();
@@ -1352,8 +1399,6 @@ void TestTextView::columnsShowLinesInColumns()
     QCOMPARE(m_view->columnLineRange(), std::make_pair(-1, -1));
     QCOMPARE(m_view->topLine(), 5);
     QVERIFY(!m_view->isReadOnly());
-    type(QStringLiteral("x"));
-    QVERIFY(text() != before);
     // On again from a line asked for.
     m_view->setColumnsShown(true, 40);
     m_view->grab();
@@ -1552,25 +1597,26 @@ void TestTextView::columnsTurnPagesAndNudge()
     QVERIFY(!down->isVisible() && !forward->isVisible());
 }
 
-// The caret's line is kept on screen: up from the first line a line comes
-// back, down from the last line a line goes on; a caret far away (go to
-// line, find) brings the screen that starts with its line.
+// The caret's line is kept on screen: up from the first line the view goes
+// back a column, down from the last line on a column; a caret far away (go
+// to line, find) brings the screen that starts with its line.
 void TestTextView::columnsCaretBringsItsLine()
 {
     showColumns(300);
-    m_view->columnsNudge(10);
+    const int per = perColumn();
+    m_view->columnsNudge(per + 10);
     const auto [top, bottom] = m_view->columnLineRange();
-    QCOMPARE(top, 10);
+    QCOMPARE(top, per + 10);
     place(top, 0);
     QTest::keyClick(m_view, Qt::Key_Up);
-    QCOMPARE(m_view->columnLineRange().first, 9);
-    place(bottom - 1, 0);
-    QCOMPARE(m_view->columnLineRange().first, 9);
-    QTest::keyClick(m_view, Qt::Key_Down); // To `bottom`, the line after the screen (Up took a line).
     QCOMPARE(m_view->columnLineRange().first, 10);
+    QCOMPARE(lineAtPoint(columnPoint(0, -1)), top - 1); // The caret's line, at the first column's bottom.
+    place(bottom - per, 0);
+    QTest::keyClick(m_view, Qt::Key_Down); // To the line after the screen.
+    QCOMPARE(m_view->columnLineRange().first, top);
     QTest::keyClick(m_view, Qt::Key_Down);
-    QCOMPARE(m_view->columnLineRange().first, 11);
-    QCOMPARE(m_view->columnLineRange().second, bottom + 1);
+    QCOMPARE(m_view->columnLineRange().first, top);
+    QCOMPARE(caretLine(), bottom - per + 2);
     place(200, 0);
     m_view->centerCursor();
     QCOMPARE(m_view->columnLineRange().first, 200);
@@ -1582,6 +1628,273 @@ void TestTextView::columnsCaretBringsItsLine()
     m_view->scrollToLine(150);
     m_view->grab();
     QCOMPARE(m_view->columnLineRange().first, 150);
+}
+
+// Down at the bottom of a column: the caret goes to the top of the next and
+// nothing moves; a note under the column it left says so, once while the key
+// is held down, never after a click, and goes by itself.
+void TestTextView::columnsDownGoesToTheNextColumnWithANote()
+{
+    showColumns(300);
+    m_view->setColumnChars(30);
+    m_view->grab();
+    QVERIFY(m_view->shownColumnCount() >= 3);
+    const int per = perColumn();
+    const QString next = QStringLiteral("Caret moved to the next column →");
+    const auto noteIn = [this](QLabel *note, int column) {
+        const QRect rect = m_view->columnRect(column);
+        return note->isVisible() && note->x() >= rect.left() && note->x() < rect.right()
+               && note->y() >= rect.bottom();
+    };
+    place(per - 2, 0);
+    // Held down: the first press stays in column 1, a repeat crosses over.
+    QTest::keyPress(m_view, Qt::Key_Down);
+    QCOMPARE(caretLine(), per - 1);
+    auto *note = m_view->findChild<QLabel *>(QStringLiteral("ColumnsCaretNote"));
+    QVERIFY(!note || !note->isVisible());
+    repeatKey(Qt::Key_Down);
+    QCOMPARE(caretLine(), per);
+    QCOMPARE(lineAtPoint(columnPoint(1, 0)), per); // At the top of column 2...
+    QCOMPARE(m_view->columnLineRange().first, 0);  // ...and nothing moved.
+    note = m_view->findChild<QLabel *>(QStringLiteral("ColumnsCaretNote"));
+    QVERIFY(note);
+    QVERIFY(noteIn(note, 0));
+    QCOMPARE(note->text(), next);
+    // Still held: on into column 3, and no new note (it stays under column 1).
+    for (int i = 0; i < per; ++i)
+        repeatKey(Qt::Key_Down);
+    QTest::keyRelease(m_view, Qt::Key_Down);
+    QCOMPARE(caretLine(), 2 * per);
+    QVERIFY(noteIn(note, 0));
+    // A new press back up to column 2: a note under column 3, pointing back.
+    QTest::keyClick(m_view, Qt::Key_Up);
+    QCOMPARE(caretLine(), 2 * per - 1);
+    QCOMPARE(m_view->columnLineRange().first, 0);
+    QVERIFY(noteIn(note, 2));
+    QCOMPARE(note->text(), QStringLiteral("← Caret moved to the previous column"));
+    // It goes by itself.
+    QTRY_VERIFY_WITH_TIMEOUT(!note->isVisible(), 5000);
+    // A click into another column shows none.
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, columnPoint(0, 3).toPoint());
+    QCOMPARE(caretLine(), 3);
+    QVERIFY(!note->isVisible());
+    // Nor a key that moves within a column.
+    QTest::keyClick(m_view, Qt::Key_Down);
+    QVERIFY(!note->isVisible());
+}
+
+// Down or Enter at the bottom of the last column moves the view on by one
+// column (column 2's lines into column 1), the caret at the top of the last;
+// Up at the top of the first column (or Backspace there) goes back by one;
+// Up at the top of another column goes to the bottom of the one before.
+void TestTextView::columnsMoveOnOneColumnAtTheLastColumn()
+{
+    showColumns(300);
+    const int per = perColumn();
+    const int count = m_view->shownColumnCount();
+    const int bottom = m_view->columnLineRange().second;
+    QCOMPARE(bottom, per * count - 1);
+    place(bottom, 2);
+    QTest::keyClick(m_view, Qt::Key_Down);
+    QCOMPARE(m_view->columnLineRange().first, per);
+    QCOMPARE(m_view->columnLineRange().second, bottom + per);
+    QCOMPARE(caretLine(), bottom + 1);
+    QCOMPARE(lineAtPoint(columnPoint(count - 1, 0)), bottom + 1);
+    QCOMPARE(lineAtPoint(columnPoint(0, 0)), per); // What column 2 showed.
+    // Enter at the end of the last line on screen: the same, the caret on the
+    // new line at the top of the last column.
+    const int last = m_view->columnLineRange().second;
+    place(last, 0);
+    QTest::keyClick(m_view, Qt::Key_End);
+    QTest::keyClick(m_view, Qt::Key_Return);
+    QCOMPARE(m_doc->blockCount(), 301);
+    QCOMPARE(m_view->columnLineRange().first, 2 * per);
+    QCOMPARE(caretLine(), last + 1);
+    QVERIFY(m_doc->findBlockByNumber(last + 1).text().isEmpty());
+    QCOMPARE(lineAtPoint(columnPoint(count - 1, 0)), last + 1);
+    // Undo: the line goes, the caret is back at the end of the line before.
+    m_view->undo();
+    QCOMPARE(m_doc->blockCount(), 300);
+    QCOMPARE(caretLine(), last);
+    QVERIFY(m_view->isLineShown(last));
+    // Up at the top of column 2: the bottom of column 1, nothing moves.
+    const int first = m_view->columnLineRange().first;
+    place(first + per, 0);
+    QTest::keyClick(m_view, Qt::Key_Up);
+    QCOMPARE(caretLine(), first + per - 1);
+    QCOMPARE(m_view->columnLineRange().first, first);
+    // Up at the top of column 1: back by one column, the caret at its bottom.
+    place(first, 0);
+    QTest::keyClick(m_view, Qt::Key_Up);
+    QCOMPARE(m_view->columnLineRange().first, first - per);
+    QCOMPARE(caretLine(), first - 1);
+    QCOMPARE(lineAtPoint(columnPoint(0, -1)), first - 1);
+    // Backspace at the start of the first line on screen joins it to the line
+    // before: back by one column too.
+    const int start = m_view->columnLineRange().first;
+    QCOMPARE(start, per);
+    place(start, 0);
+    QTest::keyClick(m_view, Qt::Key_Backspace);
+    QCOMPARE(m_doc->findBlockByNumber(start - 1).text(), QStringLiteral("line %1line %2").arg(start).arg(start + 1));
+    QCOMPARE(m_view->columnLineRange().first, 0);
+    QCOMPARE(lineAtPoint(columnPoint(0, -1)), start - 1);
+    // Page Down still turns a full page.
+    m_view->undo();
+    vn::Settings::instance().reset(vn::key::readKeptLines);
+    const int to = m_view->columnLineRange().second;
+    QTest::keyClick(m_view, Qt::Key_PageDown);
+    QCOMPARE(m_view->columnLineRange().first, to + 1 - 2);
+}
+
+// A new or deleted line moves text over the column breaks: the last line of
+// column 1 to the top of column 2 and back, the last on screen off it.
+void TestTextView::columnsTypingReflowsOverTheBreaks()
+{
+    showColumns(300);
+    const int per = perColumn();
+    const auto [top, bottom] = m_view->columnLineRange();
+    place(3, 6); // The end of "line 4".
+    QTest::keyClick(m_view, Qt::Key_Return);
+    type(QStringLiteral("new"));
+    QCOMPARE(m_view->columnLineRange(), std::make_pair(top, bottom));
+    QCOMPARE(lineAtPoint(columnPoint(1, 0)), per);
+    QCOMPARE(m_doc->findBlockByNumber(per).text(), QStringLiteral("line %1").arg(per)); // Was column 1's last.
+    QCOMPARE(m_doc->findBlockByNumber(bottom).text(), QStringLiteral("line %1").arg(bottom)); // Was one up.
+    QCOMPARE(caretLine(), 4);
+    // Deleted again: back over the break.
+    for (int i = 0; i < 4; ++i)
+        QTest::keyClick(m_view, Qt::Key_Backspace);
+    QCOMPARE(m_doc->findBlockByNumber(per).text(), QStringLiteral("line %1").arg(per + 1));
+    QCOMPARE(lineAtPoint(columnPoint(1, 0)), per);
+    QCOMPARE(m_view->columnLineRange(), std::make_pair(top, bottom));
+
+    // Column 2 starts part-way into a wrapped line, and the view moves on to
+    // it: typing keeps the first column starting there.
+    auto *probe = static_cast<ProbeView *>(m_view);
+    m_view->setColumnsShown(false);
+    QTextCursor edit(m_doc->findBlockByNumber(per - 1));
+    edit.movePosition(QTextCursor::EndOfBlock);
+    edit.insertText(QStringLiteral(" abcd").repeated(24)); // Three rows of 50 characters.
+    m_view->setColumnsShown(true, 0);
+    m_view->grab();
+    place(m_view->columnLineRange().second, 0);
+    QTest::keyClick(m_view, Qt::Key_Down);
+    const QTextBlock wrapped = m_doc->findBlockByNumber(per - 1);
+    QCOMPARE(lineAtPoint(columnPoint(0, 0)), per - 1);
+    const int into = probe->positionAtPoint(columnPoint(0, 0)) - wrapped.position();
+    QVERIFY(into >= 40);
+    const int caret = caretLine();
+    type(QStringLiteral("typed"));
+    QCOMPARE(probe->positionAtPoint(columnPoint(0, 0)) - wrapped.position(), into);
+    QCOMPARE(lineAtPoint(columnPoint(m_view->shownColumnCount() - 1, 0)), caret);
+}
+
+// The mouse selects in text order across columns; below the last column the
+// view moves on a column at a time while the selection grows, above the first
+// back again.
+void TestTextView::columnsMouseSelectsAcrossColumns()
+{
+    auto *probe = static_cast<ProbeView *>(m_view);
+    showColumns(300);
+    const int per = perColumn();
+    const int count = m_view->shownColumnCount();
+    QWidget *viewport = m_view->viewport();
+    const QPointF from = columnPoint(0, 1);
+    const int anchor = probe->positionAtPoint(from);
+    QTest::mousePress(viewport, Qt::LeftButton, {}, from.toPoint());
+    dragTo(columnPoint(1, 3));
+    QCOMPARE(m_view->textCursor().anchor(), anchor);
+    QCOMPARE(caretLine(), per + 3);
+    QVERIFY(m_view->selectedText().contains(QStringLiteral("line %1").arg(per))); // Column 1's end.
+    // Back into column 1: it shrinks.
+    dragTo(columnPoint(0, 4));
+    QCOMPARE(caretLine(), 4);
+    QCOMPARE(m_view->textCursor().anchor(), anchor);
+    // Below the last column, inside the window.
+    const QRect lastColumn = m_view->columnRect(count - 1);
+    dragTo(QPointF(lastColumn.center().x(), lastColumn.bottom() + 8));
+    QTRY_COMPARE(m_view->columnLineRange().first, per);
+    QCOMPARE(m_view->textCursor().anchor(), anchor); // (Off screen now.)
+    QTRY_COMPARE(m_view->columnLineRange().first, 2 * per);
+    QTRY_COMPARE(caretLine(), m_view->columnLineRange().second);
+    // Above the first column: back.
+    const QRect firstColumn = m_view->columnRect(0);
+    const QPointF above(firstColumn.center().x(), firstColumn.top() - 8);
+    dragTo(above);
+    QTRY_COMPARE(m_view->columnLineRange().first, per);
+    QTRY_COMPARE(caretLine(), per);
+    QTest::mouseRelease(viewport, Qt::LeftButton, {}, above.toPoint());
+    QTest::qWait(600);
+    QCOMPARE(m_view->columnLineRange().first, per); // (Released: it stays.)
+    QCOMPARE(m_view->textCursor().anchor(), anchor);
+    QCOMPARE(caretLine(), per);
+}
+
+// Word Wrap off: a column's sideways offset goes with its lines when the view
+// moves on (or back) by a column; the column that comes in starts at the
+// lines' start.
+void TestTextView::columnsOffsetsTravelWithTheText()
+{
+    m_view->setWordWrap(false);
+    showColumns(300);
+    m_view->setColumnChars(30);
+    m_view->grab();
+    const int count = m_view->shownColumnCount();
+    QVERIFY(count >= 3);
+    const int per = perColumn();
+    // A long line at the top of column 2.
+    m_view->setColumnsShown(false);
+    QTextCursor edit(m_doc->findBlockByNumber(per));
+    edit.movePosition(QTextCursor::EndOfBlock);
+    edit.insertText(QStringLiteral(" ") + QString(200, u'w') + QStringLiteral(" end"));
+    m_view->setColumnsShown(true, 0);
+    m_view->grab();
+    place(per, 0);
+    QTest::keyClick(m_view, Qt::Key_End);
+    const qreal offset = m_view->columnOffset(1);
+    QVERIFY(offset > 0);
+    // On by a column from the last line on screen: column 2 is column 1 now.
+    place(m_view->columnLineRange().second, 0);
+    QCOMPARE(m_view->columnOffset(1), offset); // (The caret left it.)
+    QTest::keyClick(m_view, Qt::Key_Down);
+    QCOMPARE(m_view->columnLineRange().first, per);
+    QCOMPARE(m_view->columnOffset(0), offset);
+    QCOMPARE(m_view->columnOffset(count - 1), 0.0);
+    // Back by a column from the long line's end (now at the top): it goes back
+    // to column 2, column 1 starts at the lines' start.
+    place(per, m_doc->findBlockByNumber(per).length() - 1);
+    QCOMPARE(m_view->columnOffset(0), offset);
+    QTest::keyClick(m_view, Qt::Key_Up);
+    QCOMPARE(m_view->columnLineRange().first, 0);
+    QCOMPARE(caretLine(), per - 1);
+    QCOMPARE(m_view->columnOffset(1), offset);
+    QCOMPARE(m_view->columnOffset(0), 0.0);
+}
+
+// Several carets in different columns type, take Enter and undo together.
+void TestTextView::columnsEditAtSeveralCarets()
+{
+    showColumns(300);
+    const int per = perColumn();
+    const QString before = text();
+    QTextCursor a(m_doc->findBlockByNumber(2));
+    a.movePosition(QTextCursor::EndOfBlock);
+    QTextCursor b(m_doc->findBlockByNumber(per + 2));
+    b.movePosition(QTextCursor::EndOfBlock);
+    m_view->setCursors({a, b}, 1);
+    type(QStringLiteral("!"));
+    QCOMPARE(m_doc->findBlockByNumber(2).text(), QStringLiteral("line 3!"));
+    QCOMPARE(m_doc->findBlockByNumber(per + 2).text(), QStringLiteral("line %1!").arg(per + 3));
+    QTest::keyClick(m_view, Qt::Key_Return);
+    QCOMPARE(m_doc->blockCount(), 302);
+    QCOMPARE(m_view->cursorCount(), 2);
+    QCOMPARE(m_view->columnLineRange().first, 0);
+    // (The second caret's line moved down by the first's new line.)
+    QCOMPARE(m_doc->findBlockByNumber(per + 3).text(), QStringLiteral("line %1!").arg(per + 3));
+    m_view->undo();
+    m_view->undo();
+    QCOMPARE(text(), before);
+    QCOMPARE(m_view->cursorCount(), 2);
 }
 
 // Columns read about a screen of lines however long the file: turning them
@@ -1604,10 +1917,21 @@ void TestTextView::columnsStayFastOnABigFile()
         m_view->columnsPageForward();
         m_view->grab();
     }
+    // Typing and Enter at the bottom of the last column (a column on each).
+    place(m_view->columnLineRange().second, 0);
+    const int first = m_view->columnLineRange().first;
+    for (int i = 0; i < 20; ++i) {
+        QTest::keyClick(m_view, Qt::Key_End);
+        type(QStringLiteral("ab"));
+        QTest::keyClick(m_view, Qt::Key_Return);
+        m_view->grab();
+    }
+    QVERIFY(m_view->columnLineRange().first > first);
+    QVERIFY(m_view->isLineShown(m_view->textCursor().blockNumber()));
     m_view->columnsNudge(1);
     m_view->columnsToEnd();
     m_view->grab();
-    QCOMPARE(m_view->columnLineRange().second, 199999);
+    QCOMPARE(m_view->columnLineRange().second, 200019);
     m_view->columnsToStart();
     m_view->grab();
     QCOMPARE(m_view->columnLineRange().first, 0);

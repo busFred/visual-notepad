@@ -14,7 +14,10 @@
 // Columns): turning it on, 50 page turns, 50 pages back, 50 nudges of a line
 // and a resize, each painted. VN_PROBE_COLUMNS=1 does the same for the
 // source view's columns on any file (Source mode), with Word Wrap on and off,
-// from the middle of the file.
+// from the middle of the file, and times keys there: typing in the last
+// column, Enter at the bottom of the last column (the view moves on a column
+// each time) and Down from the first line on screen to past the last (into
+// each next column, then a column on), with the slowest key of those.
 #include "DocumentTab.h"
 #include "TextFile.h"
 #include "editor/TextView.h"
@@ -258,6 +261,54 @@ int main(int argc, char **argv)
                 tab.resize(1400, 900);
                 source->grab();
                 qInfo().noquote() << name << "resize+paint ms" << lap.take() << source->shownColumnCount() << "columns";
+                const auto toLine = [source](int line, bool end) {
+                    QTextCursor cursor(source->document()->findBlockByNumber(line));
+                    if (end)
+                        cursor.movePosition(QTextCursor::EndOfBlock);
+                    source->setTextCursor(cursor);
+                    source->grab();
+                };
+                toLine(source->columnLineRange().second, true);
+                lap.restart();
+                for (int k = 0; k < 50; ++k) {
+                    QTest::keyClick(source, Qt::Key_A);
+                    source->grab();
+                }
+                qInfo().noquote() << name << "typing in the last column+paint ms" << lap.take(50);
+                // (Placing the caret is not timed.)
+                double wall = 0;
+                double cpu = 0;
+                double slowest = 0;
+                for (int k = 0; k < 20; ++k) {
+                    toLine(source->columnLineRange().second, true);
+                    QElapsedTimer one;
+                    one.start();
+                    const double cpuBefore = cpuMs();
+                    QTest::keyClick(source, Qt::Key_Return);
+                    source->grab();
+                    const double ms = one.nsecsElapsed() / 1e6;
+                    wall += ms;
+                    cpu += cpuMs() - cpuBefore;
+                    slowest = qMax(slowest, ms);
+                }
+                qInfo().noquote() << name << "Enter at the bottom (a column on)+paint ms"
+                                  << QStringLiteral("%1 (%2 cpu)").arg(wall / 20, 0, 'f', 2).arg(cpu / 20, 0, 'f', 2)
+                                  << "slowest" << slowest;
+                toLine(source->columnLineRange().first, false);
+                const auto [onFirst, onLast] = source->columnLineRange();
+                const int downs = onLast - onFirst + 1 + 10;
+                slowest = 0;
+                lap.restart();
+                for (int k = 0; k < downs; ++k) {
+                    QElapsedTimer one;
+                    one.start();
+                    QTest::keyClick(source, Qt::Key_Down);
+                    source->grab();
+                    slowest = qMax(slowest, one.nsecsElapsed() / 1e6);
+                }
+                qInfo().noquote() << name << "Down across columns+paint ms" << lap.take(downs) << "slowest" << slowest
+                                  << "over" << downs << "keys";
+                lap.restart();
                 source->columnsToEnd();
                 source->grab();
                 qInfo().noquote() << name << "to the end+paint ms" << lap.take();

@@ -3,11 +3,12 @@
 // in read mode; here are the rows it reads, where the columns go, the
 // painting, and the keys, wheel, buttons and scroll bars that move them.
 //
-// Editing in columns is not built yet: columnsBlockEditing() keeps the view
-// read-only while they show. What it needs is here already: an edit renumbers
-// the rows (columnsRowsChanged), which fills the screen again from the same
-// line, and each column keeps its own sideways offset (Columns::offsets) to
-// carry along when the view moves on by a column.
+// The text edits in columns as anywhere: an edit renumbers the rows
+// (columnsRowsChanged), which fills the screen again from the same place, so
+// a new or deleted line moves text over the column breaks. The caret going
+// past the last column moves the view on by one column (columnsShift), not a
+// page: the lines just above stay in sight. Each column keeps its own
+// sideways offset (Columns::offsets), which goes along with its text.
 #include "TextViewColumns.h"
 
 #include "../Settings.h"
@@ -18,6 +19,7 @@
 #include <QFontInfo>
 #include <QFontMetricsF>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QPainter>
 #include <QScrollBar>
 #include <QTextBlock>
@@ -26,6 +28,7 @@
 #include <QtMath>
 
 #include <algorithm>
+#include <optional>
 
 namespace vn {
 
@@ -36,6 +39,27 @@ namespace {
 constexpr int scrollBarHeight = 12;
 constexpr int scrollBarRoom = scrollBarHeight + 4;
 constexpr int gutterRightPad = 14; // As TextView.cpp's.
+// A drag past the last column moves the view a column at a time, slowly
+// enough to read what comes in.
+constexpr int dragShiftInterval = 500;
+// How long the note under a column the caret left stays.
+constexpr int noteTime = 3000;
+
+// The line top before a place (a wrapped row of the same line, or the last
+// row of the line before), if there is one.
+std::optional<md::Position> lineBefore(md::RowSource &rows, md::Position position)
+{
+    if (position.y > 0 && position.row < rows.count()) {
+        const QList<int> tops = rows.lineTops(position.row);
+        const auto it = std::lower_bound(tops.begin(), tops.end(), position.y);
+        return md::Position{position.row, it != tops.begin() ? *(it - 1) : 0};
+    }
+    if (position.row <= 0)
+        return std::nullopt;
+    const int row = qMin(position.row, rows.count()) - 1;
+    const QList<int> tops = rows.lineTops(row);
+    return md::Position{row, tops.isEmpty() ? 0 : tops.last()};
+}
 
 } // namespace
 
@@ -119,6 +143,8 @@ void TextView::setColumnsShown(bool on, int startLine)
     }
     m_columnsOn = on;
     m_columns->offsets.clear();
+    m_columns->key = {};
+    hideColumnsNote();
     m_columns->barDrag = {};
     m_columns->wheel = 0;
     m_dragging = false;
@@ -239,9 +265,17 @@ const md::Screen &TextView::columnsScreen()
         c.offsets.clear();
     } else if (!(was.key() == geometry.key())) {
         c.dirty = false;
+        const md::Position start = c.flow.screen().start;
         c.flow.setGeometry(geometry);
-        if (layoutChanged)
+        if (layoutChanged) {
             c.offsets.clear();
+        } else if (start.y > 0 && c.flow.screen().start == md::Position{start.row, 0}
+                   && start.y < c.rows.height(start.row)) {
+            // An edit, and the first column starts part-way into a wrapped
+            // line (the view moved on by a column): it still does there, or
+            // the caret's line could drop off the end.
+            c.flow.goTo(start);
+        }
     } else if (c.dirty) {
         c.dirty = false;
         c.flow.reflow();
@@ -256,6 +290,7 @@ void TextView::columnsMoved(bool keepOffsets)
 {
     if (!keepOffsets)
         m_columns->offsets.clear();
+    hideColumnsNote(); // (Its column shows other lines now.)
     noteColumns();
     viewport()->update();
     Q_EMIT scrolled();
@@ -380,10 +415,13 @@ void TextView::columnsToEnd()
     columnsMoved(false);
 }
 
-// The caret's line on screen: if neither it is on this screen, the screen
-// that starts with it (a line on, if it is the line after the screen; the
-// last screen, if that one ends the text). Then, with Word Wrap off, its
-// column scrolls sideways to it.
+// The caret's line on screen. The line after the screen moves the view on by
+// one column (column 2's lines go into column 1, the caret's line is at the top
+// of the last column), the line before it back by one: the lines around the
+// caret stay in sight, as they would in a scrolling view. A caret farther
+// away brings the screen that starts with its line (the last screen, if that
+// one ends the text). Then, with Word Wrap off, its column scrolls sideways
+// to it.
 void TextView::columnsEnsureCursorVisible()
 {
     if (columnsScreen().empty()) {
@@ -396,10 +434,13 @@ void TextView::columnsEnsureCursorVisible()
         QTextLayout *layout = layoutForLine(caret.blockNumber());
         const QTextLine line = layout ? layout->lineForTextPosition(caret.positionInBlock()) : QTextLine();
         const md::Position place{caret.blockNumber(), line.isValid() ? line.lineNumber() * m_lineHeight : 0};
-        if (place == c.flow.screen().end) {
-            c.flow.nudge(1);
-            columnsMoved(true);
-        } else {
+        const md::Screen &screen = c.flow.screen();
+        bool shifted = false;
+        if (place == screen.end)
+            shifted = columnsShift(1);
+        else if (place == lineBefore(c.rows, screen.start))
+            shifted = columnsShift(-1);
+        if (!shifted || columnsCaretRect(caret).isNull()) {
             c.flow.goTo(place);
             if (c.flow.screen().atEnd) // (Not a screen with its end empty.)
                 c.flow.toEnd();
@@ -420,6 +461,154 @@ void TextView::columnsEnsureCursorVisible()
         }
     }
     viewport()->update();
+}
+
+// Column 2's lines go into column 1 (forward), or column 1's into column 2,
+// and each column's sideways offset goes along with its lines; a column that
+// comes in starts at the lines' start. With one column, a line: a column
+// would be a page, and the page turn is what this is not.
+bool TextView::columnsShift(int direction)
+{
+    if (!m_columnsOn || direction == 0 || columnsScreen().empty())
+        return false;
+    Columns &c = *m_columns;
+    const md::Screen &screen = c.flow.screen();
+    const int count = int(screen.columns.size());
+    if (direction > 0 ? screen.atEnd : screen.atStart)
+        return false;
+    std::vector<qreal> &offsets = c.offsets;
+    if (count < 2) {
+        const md::Position before = screen.start;
+        if (c.flow.nudge(direction).start == before)
+            return false;
+    } else if (direction > 0) {
+        const std::vector<md::Segment> &next = screen.columns[1].segments;
+        if (next.empty())
+            return false;
+        c.flow.goTo({next.front().row, next.front().yFrom});
+        if (!offsets.empty())
+            offsets.erase(offsets.begin());
+    } else {
+        // A column back is as many line tops as a column holds (every row is
+        // whole lines tall, and code can be cut after any of them).
+        const int lines = qMax(1, columnLayout().height / qMax(1, m_lineHeight));
+        md::Position start = screen.start;
+        int back = 0;
+        for (; back < lines; ++back) {
+            const std::optional<md::Position> before = lineBefore(c.rows, start);
+            if (!before)
+                break;
+            start = *before;
+        }
+        c.flow.goTo(start);
+        // Near the top, less than a column: the lines mostly stay in their
+        // columns, and so do the offsets.
+        if (back == lines && !offsets.empty()) {
+            offsets.insert(offsets.begin(), 0);
+            if (int(offsets.size()) > count)
+                offsets.resize(count);
+        }
+    }
+    columnsMoved(true);
+    return true;
+}
+
+int TextView::columnsDragDirection(const QPointF &point)
+{
+    if (!m_columnsOn)
+        return 0;
+    const ColumnLayout &l = columnLayout();
+    const int column = columnAtX(point.x());
+    if (point.y() >= l.top + l.height && column == l.count - 1)
+        return 1;
+    if (point.y() < l.top && column == 0)
+        return -1;
+    return 0;
+}
+
+// The autoscroll timer's tick while selecting in columns: under the last
+// column (or past the viewport's bottom there) the view moves on by a column,
+// above the first back by one, and the selection grows with the lines that
+// come in. One column moves a line a tick, as a scrolling view does.
+void TextView::columnsDragTick()
+{
+    const int direction = columnsDragDirection(m_lastMousePos);
+    if (direction == 0)
+        return;
+    Columns &c = *m_columns;
+    const int interval = columnLayout().count > 1 ? dragShiftInterval : 0;
+    if (c.dragShift.isValid() && c.dragShift.elapsed() < interval)
+        return;
+    if (columnsShift(direction))
+        c.dragShift.start();
+}
+
+// The note shows once a key held down (its auto-repeat) has moved the caret
+// to another column while the view stayed: the caret is then far from where
+// the eye was. Never for a click, which puts the caret where the eye is.
+void TextView::columnsKeyStarting(QKeyEvent *event)
+{
+    Columns &c = *m_columns;
+    if (!event->isAutoRepeat())
+        c.key.noted = false;
+    int column = -1;
+    c.key.column = columnsCaretRect(textCursor(), &column).isNull() ? -1 : column;
+    c.key.start = c.flow.screen().start;
+}
+
+void TextView::columnsKeyDone()
+{
+    if (!m_columnsOn)
+        return;
+    Columns &c = *m_columns;
+    const int before = c.key.column;
+    c.key.column = -1;
+    if (before < 0 || c.key.noted)
+        return;
+    int column = -1;
+    if (columnsCaretRect(textCursor(), &column).isNull() || column == before || !(c.flow.screen().start == c.key.start))
+        return;
+    c.key.noted = true;
+    showColumnsNote(before, column > before);
+}
+
+// Under the column's lines (and its scroll bar), at its text's left, in the
+// colours of a tooltip; gone by itself after a few seconds.
+void TextView::showColumnsNote(int column, bool forward)
+{
+    Columns &c = *m_columns;
+    if (!c.note) {
+        auto *note = new QLabel(viewport());
+        note->setObjectName(QStringLiteral("ColumnsCaretNote"));
+        note->setAttribute(Qt::WA_TransparentForMouseEvents);
+        auto *timer = new QTimer(note);
+        timer->setSingleShot(true);
+        timer->setInterval(noteTime);
+        connect(timer, &QTimer::timeout, note, &QWidget::hide);
+        c.note = note;
+        c.noteTimer = timer;
+    }
+    QLabel *note = c.note;
+    note->setText(forward ? tr("Caret moved to the next column →") : tr("← Caret moved to the previous column"));
+    // (Set each time: the theme may have changed since.)
+    note->setStyleSheet(QStringLiteral("QLabel { background: %1; color: %2; border: 1px solid %3; border-radius: 3px;"
+                                       " padding: 1px 6px; }")
+                            .arg(palette().color(QPalette::ToolTipBase).name(),
+                                 palette().color(QPalette::ToolTipText).name(),
+                                 theme::color(theme::Role::divider).name()));
+    note->adjustSize();
+    const ColumnLayout &l = columnLayout();
+    const int top = l.top + l.height + (m_wordWrap ? 0 : scrollBarRoom) + 2;
+    note->move(l.columnLeft(column) + l.textLeft, qMax(0, qMin(top, viewport()->height() - note->height())));
+    note->show();
+    note->raise();
+    c.noteTimer->start();
+}
+
+void TextView::hideColumnsNote()
+{
+    if (m_columns && m_columns->note)
+        m_columns->note->hide();
 }
 
 // ---------------------------------------------------------------------------

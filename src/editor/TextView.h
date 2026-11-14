@@ -58,9 +58,7 @@ public:
     void setInsertSpaces(bool on);
     void setLineSpacing(qreal factor);
     void setCommentMarker(const QString &marker);
-    // Locked (setReadOnly), or showing columns while editing in them is not
-    // built yet (see columnsBlockEditing).
-    bool isReadOnly() const { return m_readOnly || columnsBlockEditing(); }
+    bool isReadOnly() const { return m_readOnly; }
     void setReadOnly(bool on);
     // Modifier that adds a caret on click: Alt (default) or Ctrl.
     void setMultiCursorModifier(Qt::KeyboardModifier modifier) { m_multiCursorModifier = modifier; }
@@ -156,7 +154,9 @@ public:
     // places the lines in both). Only for a view whose rows are source lines,
     // not the visual view (it has read mode). Turned on, the first column
     // starts at startLine (-1: the line at the top); turned off, the view
-    // scrolls so the first column's first line is at the top.
+    // scrolls so the first column's first line is at the top. The text edits
+    // in columns as anywhere; the caret going past the last column (or before
+    // the first) moves the view on (back) by one column, not a page.
     void setColumnsShown(bool on, int startLine = -1);
     bool columnsShown() const { return m_columnsOn; }
     // 0: as many as fit.
@@ -411,9 +411,6 @@ private:
         int columnWidth() const { return textLeft + width; }
         int columnLeft(int column) const { return left + column * (columnWidth() + gap); }
     };
-    // STEP 1 of columns for text: no edits while columns show. The one place
-    // that says so; editing in columns lifts it.
-    bool columnsBlockEditing() const { return m_columnsOn; }
     // Made on first use.
     Columns &columnState();
     const ColumnLayout &columnLayout();
@@ -442,6 +439,17 @@ private:
     bool columnBarPressed(QMouseEvent *event);
     bool columnBarMoved(QMouseEvent *event);
     void columnsPage(bool forward, bool moveCarets, bool select);
+    // Moves the view on (1) or back (-1) by one column; false if it cannot.
+    bool columnsShift(int direction);
+    // A drag past the last column (1) or before the first (-1) moves the view
+    // under it; 0 elsewhere.
+    int columnsDragDirection(const QPointF &point);
+    void columnsDragTick();
+    // Around a key press: the note under a column the caret left.
+    void columnsKeyStarting(QKeyEvent *event);
+    void columnsKeyDone();
+    void showColumnsNote(int column, bool forward);
+    void hideColumnsNote();
 
     struct DiagnosticRange
     {

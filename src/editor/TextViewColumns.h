@@ -4,12 +4,15 @@
 #include "../markdown/ReadFlow.h"
 #include "TextView.h"
 
+#include <QElapsedTimer>
 #include <QPointer>
 
 #include <memory>
 #include <vector>
 
 class QAbstractButton;
+class QLabel;
+class QTimer;
 
 namespace vn {
 
@@ -93,6 +96,19 @@ struct TextView::Columns
         bool operator==(const News &) const = default;
     } news;
     bool newsPending = false;
+    // A key press: the caret's column and the screen's start before it, and
+    // whether the key held down has shown the note already (once a hold).
+    struct Key
+    {
+        int column = -1;
+        md::Position start;
+        bool noted = false;
+    } key;
+    // "Caret moved to the next column", under the column it left.
+    QPointer<QLabel> note;
+    QPointer<QTimer> noteTimer;
+    // When a drag past the last column last moved the view.
+    QElapsedTimer dragShift;
     QPointer<QAbstractButton> back;
     QPointer<QAbstractButton> forward;
     QPointer<QAbstractButton> up;
