@@ -14,6 +14,9 @@
 #   VN_BUILD_TESTING  ON/OFF for that build directory (default OFF)
 #   VN_NO_DEV_ENV=1   do not source scripts/dev-env.sh; use the current environment
 set -euo pipefail
+# Packaged folders and files get 755/644 whatever the builder's umask: a
+# group-writable /opt/visnotepad would let other users change the program.
+umask 022
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
