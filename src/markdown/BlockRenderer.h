@@ -53,6 +53,11 @@ struct RenderContext
     // block's source: for each figure of the block, in order, how large it
     // is relative to its fitted size (1: fitted; missing: 1).
     QHash<QString, QList<qreal>> figureScales;
+    // Read mode: a display formula keeps its size, and a block that is one
+    // table lays out at its natural width, when either is wider than the
+    // column (see RenderedBlock::contentWidth); the view scrolls it sideways.
+    // Everywhere else they are fitted to the width.
+    bool overflow = false;
 };
 
 // What to highlight in a block: ranges of rendered-text characters (for code,
@@ -146,6 +151,25 @@ public:
     // moves when the strip shows. 0 for other blocks.
     qreal stripHeight() const { return m_strip; }
     static qreal stripHeight(const RenderContext &context);
+    // How wide the block is when it is wider than the column it was made for
+    // (a formula or a table, with RenderContext::overflow); else the column's
+    // width. A wide block has room for a thin scrollbar under it (see
+    // scrollTrack), and contentImage() shows all of it.
+    qreal contentWidth() const { return m_contentWidth > 0 ? m_contentWidth : m_width; }
+    // The track of that scrollbar for a column `width` wide, relative to the
+    // block's top-left; null for a block that is not wider.
+    QRectF scrollTrack(qreal width) const;
+    // Its thumb on a track, for a block `content` wide shown from `offset`.
+    static QRectF scrollThumb(const QRectF &track, qreal content, qreal offset);
+    // The scrollbar as the style's own: `hot` while it is dragged.
+    static void paintScrollBar(QPainter &painter, const QRectF &track, qreal content, qreal offset, bool hot);
+    // The whole of a wide block at its natural width (the strip and the
+    // scrollbar left out) on the editor's colour, `devicePixelRatio` pixels
+    // to a logical one; null for a block that is not wider than its column.
+    QImage contentImage(qreal devicePixelRatio) const;
+    // Whether the text of a table or rich text is under a point relative to
+    // the block's top-left (not its padding, borders or the space around).
+    bool textAt(const QPointF &point) const;
     // The chevron of chips, strips and headings, pointing right (collapsed)
     // or down, centred on `center`.
     static void paintChevron(QPainter &painter, const QPointF &center, bool open, const QColor &color);
@@ -324,6 +348,8 @@ private:
     QString m_error;
     qreal m_height = 0;
     qreal m_width = 0; // Of the column it was made for.
+    qreal m_contentWidth = 0; // See contentWidth(); 0: the column's.
+    qreal m_scrollRoom = 0;   // Under a wide block, for its scrollbar.
     qsizetype m_pictureBytes = 0; // Of the pictures in the rich text.
     QString m_diagramCode; // Mermaid source; null for other blocks.
     QString m_diagramTheme;

@@ -162,6 +162,27 @@ QString readDocument()
     return text;
 }
 
+// Read mode's wide blocks: a table of 10 columns, a formula and a short table,
+// under headings; the table and formula are wider than a column of 70
+// characters, the short one is not.
+QString wideDocument(int rows = 8)
+{
+    QString text = QStringLiteral("# Run log\n\nThe last runs, one row each.\n\n");
+    text += QStringLiteral("| Run | Branch | Commit | Runner | Cache | Checkout | Configure | Compile | Test | Package |\n"
+                           "|---|---|---|---|---|---|---|---|---|---|\n");
+    for (int i = 1; i <= rows; ++i)
+        text += QStringLiteral("| #48%1 | feature/cache-%1-and-its-long-name | a41c9e%1 | runner-0%1 | partly | %1 s | 11 s | 138 s | 94 s | 22 s |\n")
+                    .arg(i);
+    QStringList terms;
+    for (int i = 1; i <= 40; ++i)
+        terms << QStringLiteral("x_{%1}").arg(i);
+    text += QStringLiteral("\n$$\n") + terms.join(QStringLiteral(" + ")) + QStringLiteral("\n$$\n\n");
+    text += QStringLiteral("## Stage timings\n\n| Stage | Median |\n|---|---|\n| Checkout | 4 s |\n\nThe end.\n");
+    for (int i = 1; i <= 40; ++i)
+        text += QStringLiteral("\nFiller paragraph %1, so that the document goes on below the screen.\n").arg(i);
+    return text;
+}
+
 // The first line of `text` that holds `needle`.
 int lineHolding(const QString &text, const QString &needle)
 {
@@ -260,6 +281,20 @@ public:
     }
 
     bool lineIsRendered(int line) const { return row(rowOfLine(line)).rendered; }
+
+    // The rendered block of the row holding a line (for the wide-block tests).
+    const RenderedBlock *blockOfLine(int line) { return renderedBlockOfLine(line); }
+    qreal contentWidthOfLine(int line)
+    {
+        const RenderedBlock *block = blockOfLine(line);
+        return block ? block->contentWidth() : -1;
+    }
+    qreal tableRightOfLine(int line)
+    {
+        const RenderedBlock *block = blockOfLine(line);
+        const RenderedBlock::TableGrid *grid = block ? block->tableGrid() : nullptr;
+        return grid ? grid->xs.back() : -1;
+    }
 
     // The rendered rows that show some line of [first, last].
     int renderedRowsOver(int first, int last) const
@@ -422,6 +457,10 @@ private Q_SLOTS:
     void findAndGoToLineShowTheirScreen();
     void readLineRangeIsTheScreens();
     void readModeClicks();
+    void overflowIsOnlyForReadMode();
+    void wideBlocksScrollSideways();
+    void repeatedHeaderFollowsTheOffset();
+    void openShowsAWideBlockInTheViewer();
     void readModeWaitsForTheFirstParse();
     void figureBarKeepsClicksAndPictureClickStillZooms();
     void networkPaths();
@@ -5649,6 +5688,294 @@ void TestVisualView::readModeClicks()
     QVERIFY(bar->geometry().right() <= picture.left() + figure.rect.right() + 1);
     QVERIFY(bar->geometry().left() >= picture.left());
     QCOMPARE(m_doc->toPlainText(), text);
+}
+
+void TestVisualView::overflowIsOnlyForReadMode()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const QString text = wideDocument();
+    const int table = lineHolding(text, QStringLiteral("| Run"));
+    const int formula = lineHolding(text, QStringLiteral("$$"));
+    const int narrow = lineHolding(text, QStringLiteral("| Stage"));
+    // The scrolling view fits both to the column, as it always did.
+    m_view->resize(1000, 1000);
+    setDocument(text, 0);
+    m_view->grab();
+    QVERIFY(!view->rendersOverflow());
+    const qreal column = view->columnWidth();
+    QVERIFY(view->contentWidthOfLine(table) <= column + 0.5);
+    QVERIFY(view->tableRightOfLine(table) <= column + 1);
+    QVERIFY(view->contentWidthOfLine(formula) <= column + 0.5);
+    QVERIFY(view->readOpenRect(table).isNull());
+    // Read mode keeps the formula's size and the table's natural width.
+    startReading(text, 1000, 1000);
+    QVERIFY(view->rendersOverflow());
+    const qreal wide = view->columnWidth();
+    QVERIFY(view->contentWidthOfLine(table) > wide + 20);
+    QVERIFY(qAbs(view->contentWidthOfLine(table) - view->tableRightOfLine(table)) < 2);
+    QVERIFY(view->contentWidthOfLine(formula) > wide + 20);
+    // A table that fits is as before: no scrolling, no room for a scrollbar.
+    QVERIFY(view->contentWidthOfLine(narrow) <= wide + 0.5);
+    QVERIFY(view->tableRightOfLine(narrow) <= wide + 1);
+    // The room for the scrollbar is the block's own: the height of the
+    // wide table is more than the squeezed one's would be.
+    const qreal bar = view->blockOfLine(table)->scrollTrack(wide).height();
+    QVERIFY(bar > 0);
+    QVERIFY(view->blockOfLine(narrow)->scrollTrack(wide).isNull());
+    // The whole of the table, at natural width (and the pixel ratio), for the viewer.
+    const QImage image = view->blockOfLine(table)->contentImage(1);
+    QCOMPARE(image.width(), qCeil(view->contentWidthOfLine(table)));
+    QVERIFY(view->blockOfLine(narrow)->contentImage(1).isNull());
+    // Out of read mode, as before.
+    m_view->setReadMode(false);
+    QVERIFY(!view->rendersOverflow());
+    QVERIFY(view->contentWidthOfLine(table) <= view->columnWidth() + 0.5);
+    QVERIFY(view->contentWidthOfLine(formula) <= view->columnWidth() + 0.5);
+}
+
+void TestVisualView::wideBlocksScrollSideways()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const QString text = wideDocument();
+    const int table = lineHolding(text, QStringLiteral("| Run"));
+    const int formula = lineHolding(text, QStringLiteral("$$"));
+    startReading(text, 1000, 1000);
+    const auto start = [this] { return m_view->readScreen().start; };
+    const auto wheel = [this](const QPoint &at, QPoint pixels, QPoint angle, Qt::KeyboardModifiers mods) {
+        QWheelEvent event(at, m_view->viewport()->mapToGlobal(at), pixels, angle, Qt::NoButton, mods,
+                          pixels.isNull() ? Qt::NoScrollPhase : Qt::ScrollUpdate, false);
+        QApplication::sendEvent(m_view->viewport(), &event);
+    };
+    int tableColumn = 0;
+    int tableIndex = 0;
+    const QRect tableRect = segmentOfLine(table, &tableColumn, &tableIndex);
+    const QRect formulaRect = segmentOfLine(formula);
+    QVERIFY(!tableRect.isNull() && !formulaRect.isNull());
+    const QPoint overTable = tableRect.center();
+    const QPoint overFormula = formulaRect.center();
+    const qreal range = view->contentWidthOfLine(table) - view->columnWidth();
+    QCOMPARE(view->readOffsetOfLine(table), 0.0);
+
+    // Shift+wheel scrolls the block under the pointer, not the page.
+    const md::Position first = start();
+    wheel(overTable, {}, QPoint(0, -120), Qt::ShiftModifier);
+    const qreal one = view->readOffsetOfLine(table);
+    QVERIFY(one > 20);
+    QCOMPARE(view->readOffsetOfLine(formula), 0.0);
+    QCOMPARE(start(), first);
+    wheel(overTable, {}, QPoint(0, 120), Qt::ShiftModifier);
+    QCOMPARE(view->readOffsetOfLine(table), 0.0);
+    // A horizontal wheel or touchpad swipe does too, each block by itself.
+    wheel(overFormula, {}, QPoint(-120, 0), Qt::NoModifier);
+    QCOMPARE(view->readOffsetOfLine(table), 0.0);
+    QCOMPARE(view->readOffsetOfLine(formula), one);
+    wheel(overTable, QPoint(-40, 0), QPoint(-320, 0), Qt::NoModifier);
+    QCOMPARE(view->readOffsetOfLine(table), 40.0);
+    QCOMPARE(view->readOffsetOfLine(formula), one);
+    QCOMPARE(start(), first);
+    // A swipe that is mostly vertical is only a nudge.
+    wheel(overTable, QPoint(-3, -40), QPoint(-24, -320), Qt::NoModifier);
+    QCOMPARE(view->readOffsetOfLine(table), 40.0);
+    QVERIFY(!(start() == first));
+    m_view->readToStart();
+    QCOMPARE(start(), first);
+    // A plain vertical wheel still nudges lines (and leaves the offsets).
+    const md::Position before = start();
+    wheel(overTable, {}, QPoint(0, -120), Qt::NoModifier);
+    QVERIFY(!(start() == before));
+    QCOMPARE(view->readOffsetOfLine(table), 40.0);
+    wheel(overTable, {}, QPoint(0, 120), Qt::NoModifier);
+    QCOMPARE(start(), before);
+    // Over the text around them, sideways does nothing.
+    wheel(QPoint(tableRect.left() + 5, tableRect.top() - 4), {}, QPoint(0, -120), Qt::ShiftModifier);
+    QCOMPARE(view->readOffsetOfLine(table), 40.0);
+    // To the end and no further, and back.
+    for (int i = 0; i < 100; ++i)
+        wheel(overTable, {}, QPoint(0, -120), Qt::ShiftModifier);
+    QCOMPARE(view->readOffsetOfLine(table), range);
+    for (int i = 0; i < 100; ++i)
+        wheel(overTable, {}, QPoint(0, 120), Qt::ShiftModifier);
+    QCOMPARE(view->readOffsetOfLine(table), 0.0);
+
+    // The thin scrollbar under the table: drawn, and its thumb dragged.
+    const QRect bar = m_view->readBarRect(tableColumn, tableIndex);
+    QVERIFY(!bar.isNull());
+    QVERIFY(bar.height() <= 14);
+    QCOMPARE(bar.width(), int(view->columnWidth()));
+    QVERIFY(view->readBarRect(tableColumn, tableIndex + 1).isNull());
+    const auto pixel = [this](const QPoint &p) { return QColor(m_view->viewport()->grab().toImage().pixel(p)); };
+    const QPoint inThumb(bar.left() + 4, bar.top() + 6);
+    QCOMPARE(pixel(inThumb), theme::color(theme::Role::panelTitle));
+    QCOMPARE(pixel(QPoint(bar.right() - 2, bar.top() + 6)), theme::color(theme::Role::editor));
+    QTest::mousePress(m_view->viewport(), Qt::LeftButton, {}, inThumb);
+    QTest::mouseMove(m_view->viewport(), QPoint(bar.right() - 1, inThumb.y()));
+    QCOMPARE(view->readOffsetOfLine(table), range);
+    // (Half the way along, the pointer off the bar: the drag goes on.)
+    const qreal thumbWidth = RenderedBlock::scrollThumb(bar, view->contentWidthOfLine(table), 0).width();
+    const int half = bar.left() + 4 + int((bar.width() - thumbWidth) / 2);
+    QTest::mouseMove(m_view->viewport(), QPoint(half, inThumb.y() + 40));
+    QVERIFY(qAbs(view->readOffsetOfLine(table) - range / 2) < 2);
+    QTest::mouseRelease(m_view->viewport(), Qt::LeftButton, {}, QPoint(half, inThumb.y() + 40));
+    QCOMPARE(m_view->textCursor().blockNumber(), 0); // (No caret was put under the press.)
+    const qreal dragged = view->readOffsetOfLine(table);
+    QTest::mouseMove(m_view->viewport(), QPoint(bar.left() + 10, inThumb.y())); // (Released: it does not follow.)
+    QCOMPARE(view->readOffsetOfLine(table), dragged);
+    // A press on the track beside the thumb brings the thumb to it.
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(bar.left() + 2, bar.top() + 6));
+    QCOMPARE(view->readOffsetOfLine(table), 0.0);
+
+    // The painted table slides: the first column leaves the column's edge.
+    QCOMPARE(view->readOffsetOfLine(table), 0.0);
+    wheel(overTable, QPoint(-60, 0), QPoint(-480, 0), Qt::NoModifier);
+    const QImage slid = m_view->viewport()->grab().toImage();
+    // (Cut at the column: nothing of it in the margin left of it.)
+    for (int y = tableRect.top() + 12; y < tableRect.bottom() - 16; ++y) {
+        for (int x = tableRect.left() - 20; x < tableRect.left(); ++x)
+            QCOMPARE(QColor(slid.pixel(x, y)), theme::color(theme::Role::editor));
+    }
+
+    // The offsets go with the layout: a new column width starts them again.
+    m_view->setReadChars(60);
+    m_view->grab();
+    QCOMPARE(view->readOffsetOfLine(table), 0.0);
+    wheel(segmentOfLine(table).center(), {}, QPoint(0, -120), Qt::ShiftModifier);
+    QVERIFY(view->readOffsetOfLine(table) > 0);
+    m_view->setReadMode(false);
+    m_view->setReadMode(true);
+    m_view->grab();
+    QCOMPARE(view->readOffsetOfLine(table), 0.0);
+}
+
+void TestVisualView::repeatedHeaderFollowsTheOffset()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const QString text = wideDocument(60);
+    const int table = lineHolding(text, QStringLiteral("| Run"));
+    startReading(text, 760, 500);
+    const int tableRow = view->rowIndexOf(table);
+    // Page on to the part that goes on with the header repeated.
+    int column = -1;
+    int index = -1;
+    for (int page = 0; page < 8 && column < 0; ++page) {
+        const md::Screen &screen = m_view->readScreen();
+        for (int c = 0; c < int(screen.columns.size()) && column < 0; ++c) {
+            for (int i = 0; i < int(screen.columns[c].segments.size()); ++i) {
+                const md::Segment &s = screen.columns[c].segments[i];
+                if (s.row == tableRow && s.repeatHeader) {
+                    column = c;
+                    index = i;
+                    break;
+                }
+            }
+        }
+        if (column < 0)
+            m_view->readPageForward();
+    }
+    QVERIFY(column >= 0);
+    const QRect body = m_view->readSegmentRect(column, index);
+    const int width = int(view->columnWidth());
+    const auto header = [&] {
+        return m_view->viewport()->grab().toImage().copy(body.left(), body.top() - 18, width, 14);
+    };
+    const QImage still = header();
+    QWheelEvent event(body.center(), m_view->viewport()->mapToGlobal(body.center()), QPoint(-40, 0), QPoint(-320, 0),
+                      Qt::NoButton, Qt::NoModifier, Qt::ScrollUpdate, false);
+    QApplication::sendEvent(m_view->viewport(), &event);
+    QCOMPARE(view->readOffsetOfLine(table), 40.0);
+    const QImage moved = header();
+    // The header is the same, 40 pixels along (and not the same where it was).
+    int ink = 0;
+    for (int y = 0; y < still.height(); ++y) {
+        for (int x = 0; x < width - 40; ++x) {
+            QCOMPARE(moved.pixel(x, y), still.pixel(x + 40, y));
+            ink += QColor(still.pixel(x + 40, y)) != theme::color(theme::Role::editor);
+        }
+    }
+    QVERIFY(ink > 100);
+    QVERIFY(moved != still);
+}
+
+void TestVisualView::openShowsAWideBlockInTheViewer()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const QString text = wideDocument();
+    const int table = lineHolding(text, QStringLiteral("| Run"));
+    const int formula = lineHolding(text, QStringLiteral("$$"));
+    const int narrow = lineHolding(text, QStringLiteral("| Stage"));
+    startReading(text, 1000, 1000);
+    const auto viewers = [this] { return m_view->window()->findChildren<ImageViewer *>(); };
+    const auto close = [&] {
+        for (ImageViewer *v : viewers())
+            v->close();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QVERIFY(viewers().isEmpty());
+    };
+    // Only wide blocks have the button (and it shows with the strip, when pointed at).
+    const QRect tableOpen = m_view->readOpenRect(table);
+    const QRect formulaOpen = m_view->readOpenRect(formula);
+    QVERIFY(!tableOpen.isNull() && !formulaOpen.isNull());
+    QVERIFY(m_view->readOpenRect(narrow).isNull());
+    QVERIFY(m_view->readOpenRect(0).isNull()); // (A heading.)
+    const QRect tableRect = segmentOfLine(table);
+    QVERIFY(tableOpen.right() <= tableRect.right() + 1 && tableOpen.right() > tableRect.right() - 4);
+    QVERIFY(tableOpen.bottom() < tableRect.top() + int(view->stripHeightAt(table)));
+    const auto inkIn = [&](const QRect &r) {
+        const QImage image = m_view->viewport()->grab().toImage();
+        int ink = 0;
+        for (int y = r.top(); y <= r.bottom(); ++y)
+            for (int x = r.left(); x <= r.right(); ++x)
+                ink += QColor(image.pixel(x, y)) != theme::color(theme::Role::editor);
+        return ink;
+    };
+    m_view->setHoverLine(-1);
+    QCOMPARE(inkIn(tableOpen), 0);
+    m_view->setHoverLine(table);
+    QVERIFY(inkIn(tableOpen) > 40);
+    m_view->setHoverLine(lineHolding(text, QStringLiteral("| Stage")));
+    QCOMPARE(inkIn(tableOpen), 0);
+
+    // The button, even slid or while the pointer is elsewhere on the strip.
+    QVERIFY(m_view->isFoldSpot(tableOpen.center()));
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, tableOpen.center());
+    QCOMPARE(viewers().size(), 1);
+    QCOMPARE(viewers().first()->windowTitle(), QStringLiteral("Run log — table"));
+    QVERIFY(!m_view->isFolded(table));
+    close();
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, formulaOpen.center());
+    QCOMPARE(viewers().size(), 1);
+    QCOMPARE(viewers().first()->windowTitle(), QStringLiteral("Run log — equation"));
+    close();
+
+    // A click on the block where no text is (the formula; the table's padding,
+    // beside the text of a cell) opens it too; on the text it puts the caret.
+    const QRectF header = *view->blockOfLine(table)->tableCellRect(0, 0);
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {},
+                      tableRect.topLeft() + QPoint(int(header.left()) + 12, int(header.center().y())));
+    QVERIFY(viewers().isEmpty());
+    QCOMPARE(m_view->textCursor().blockNumber(), table);
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {},
+                      tableRect.topLeft() + QPoint(int(header.right()) - 3, int(header.center().y())));
+    QCOMPARE(viewers().size(), 1);
+    QCOMPARE(viewers().first()->windowTitle(), QStringLiteral("Run log — table"));
+    close();
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, segmentOfLine(formula).center());
+    QCOMPARE(viewers().size(), 1);
+    QCOMPARE(viewers().first()->windowTitle(), QStringLiteral("Run log — equation"));
+    close();
+    // The short table's cell opens nothing.
+    const QRect shortRect = segmentOfLine(narrow);
+    const QRectF shortCell = *view->blockOfLine(narrow)->tableCellRect(0, 0);
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {},
+                      shortRect.topLeft() + QPoint(int(shortCell.right()) - 3, int(shortCell.center().y())));
+    QVERIFY(viewers().isEmpty());
+    // A wide block with no heading above it: the viewer is named for what it shows.
+    startReading(QStringLiteral("| a | b | c | d | c | d | e | f | g | h |\n|---|---|---|---|---|---|---|---|---|---|\n")
+                     + QStringLiteral("| %1 |\n").arg(QString(180, u'w')),
+                 1000, 600);
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, m_view->readOpenRect(0).center());
+    QCOMPARE(viewers().size(), 1);
+    QCOMPARE(viewers().first()->windowTitle(), QStringLiteral("table"));
+    close();
 }
 
 void TestVisualView::readModeWaitsForTheFirstParse()
