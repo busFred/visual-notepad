@@ -135,6 +135,15 @@ public:
         setContentsMargins(10, 0, 10, 0);
     }
 
+    // The line on the left that parts it from the cell before (not on the first).
+    void setDivider(bool divider)
+    {
+        if (m_divider == divider)
+            return;
+        m_divider = divider;
+        update();
+    }
+
     void setClickHandler(std::function<void()> handler)
     {
         m_handler = std::move(handler);
@@ -465,6 +474,14 @@ void MainWindow::createActions()
     m_outlineAction->setChecked(Settings::instance().flag(key::outline));
     connect(m_outlineAction, &QAction::triggered, this, &MainWindow::setOutlineShown);
     m_wrapAction = bindSetting(QStringLiteral("view.wordWrap"), key::wordWrap);
+    // Per tab, never saved: the current tab's view, where it has a choice.
+    m_columnsAction = makeAction(QStringLiteral("view.columns"));
+    m_columnsAction->setCheckable(true);
+    connect(m_columnsAction, &QAction::triggered, this, [this](bool on) {
+        if (DocumentTab *tab = currentTab())
+            tab->setColumns(on);
+        updateStatus();
+    });
     m_statusBarAction = bindSetting(QStringLiteral("view.statusBar"), key::statusBar);
 
     m_modeGroup = new QActionGroup(this);
@@ -656,7 +673,7 @@ void MainWindow::createMenus()
     QMenu *view = menuBar()->addMenu(menus.at(4));
     add(view, {"view.outline", "-", "view.modeSource", "view.modeSplit", "view.modeVisual", "-", "view.splitEditor",
                "view.splitEditorUp", "view.splitEditorDown", "view.splitEditorLeft", "view.splitEditorRight",
-               "view.focusNextGroup", "view.focusPreviousGroup", "view.moveToNewWindow", "view.copyToNewWindow", "-", "view.collapseAll", "view.expandAll", "view.wordWrap", "view.statusBar", "edit.changeLanguage", "-", "view.zoomIn", "view.zoomOut",
+               "view.focusNextGroup", "view.focusPreviousGroup", "view.moveToNewWindow", "view.copyToNewWindow", "-", "view.collapseAll", "view.expandAll", "view.wordWrap", "view.columns", "view.statusBar", "edit.changeLanguage", "-", "view.zoomIn", "view.zoomOut",
                "view.zoomReset", "view.fullScreen"});
 
     QMenu *help = menuBar()->addMenu(menus.at(5));
@@ -793,16 +810,43 @@ void MainWindow::createStatusBar()
 {
     statusBar()->setSizeGripEnabled(false);
     statusBar()->setContentsMargins(0, 0, 0, 0);
-    bool first = true;
-    for (QLabel **label : {&m_position, &m_indentation, &m_zoom, &m_lineEnding, &m_encoding, &m_language}) {
-        *label = new StatusCell(!first, this);
+    // The view cells come first, as Word's view shortcuts: Scroll | Columns,
+    // then the zoom.
+    m_viewSwitch = new QWidget(this);
+    m_viewSwitch->setObjectName(QStringLiteral("ViewSwitch"));
+    auto *switchLayout = new QHBoxLayout(m_viewSwitch);
+    switchLayout->setContentsMargins(6, 0, 6, 0);
+    switchLayout->setSpacing(2);
+    for (auto [button, icon, name, tip, columns] :
+         {std::tuple{&m_scrollButton, "view-scroll", "ViewScroll", QT_TR_NOOP("Scroll"), false},
+          std::tuple{&m_columnsButton, "view-columns", "ViewColumns", QT_TR_NOOP("Columns"), true}}) {
+        *button = new QToolButton(m_viewSwitch);
+        (*button)->setObjectName(QStringLiteral("IconButton"));
+        (*button)->setProperty("viewSwitch", QLatin1String(name));
+        (*button)->setIcon(QIcon(QStringLiteral(":/vn/icons/%1.svg").arg(QLatin1String(icon))));
+        (*button)->setIconSize({14, 14});
+        (*button)->setFixedSize(20, 20);
+        (*button)->setCheckable(true);
+        (*button)->setFocusPolicy(Qt::NoFocus);
+        (*button)->setToolTip(tr(tip));
+        switchLayout->addWidget(*button);
+        connect(*button, &QToolButton::clicked, this, [this, columns] {
+            if (DocumentTab *tab = currentTab())
+                tab->setColumns(columns);
+            updateStatus(); // (Clicking the shown view again leaves it checked.)
+        });
+    }
+    statusBar()->addPermanentWidget(m_viewSwitch);
+    for (QLabel **label :
+         {&m_zoom, &m_range, &m_position, &m_indentation, &m_lineEnding, &m_encoding, &m_language}) {
+        *label = new StatusCell(true, this);
         (*label)->setTextFormat(Qt::PlainText);
         statusBar()->addPermanentWidget(*label);
-        first = false;
     }
     const auto clickable = [](QLabel *label, std::function<void()> handler) {
         static_cast<StatusCell *>(label)->setClickHandler(std::move(handler));
     };
+    m_range->setObjectName(QStringLiteral("RangeStatus"));
     m_position->setObjectName(QStringLiteral("PositionStatus"));
     m_indentation->setObjectName(QStringLiteral("IndentationStatus"));
     clickable(m_indentation, [this] { showIndentationMenu(); });
@@ -2424,11 +2468,19 @@ void MainWindow::updateTabTitle(DocumentTab *tab)
 void MainWindow::updateStatus()
 {
     DocumentTab *tab = currentTab();
+    const QList<QLabel *> cells = {m_zoom, m_range, m_position, m_indentation, m_lineEnding, m_encoding, m_language};
     // With no file open the columns (and their dividers) are hidden.
-    for (QLabel *label : {m_position, m_indentation, m_zoom, m_lineEnding, m_encoding, m_language})
+    for (QLabel *label : cells)
         label->setVisible(tab != nullptr);
+    m_viewSwitch->setVisible(tab && tab->canShowColumns());
+    m_columnsAction->setEnabled(tab && tab->canShowColumns());
+    m_columnsAction->setChecked(tab && tab->showsColumns());
     if (!tab)
         return;
+    // Where the tab has no choice the switch is hidden, not greyed: the zoom
+    // is the first cell then.
+    m_scrollButton->setChecked(!tab->showsColumns());
+    m_columnsButton->setChecked(tab->showsColumns());
     const TextView *editor = tab->editor();
     const QTextCursor cursor = editor->textCursor();
     QString position = tr("Ln %1, Col %2").arg(cursor.blockNumber() + 1).arg(cursor.positionInBlock() + 1);
@@ -2436,12 +2488,16 @@ void MainWindow::updateStatus()
         position += u' ' + tr("(%1 selections)").arg(editor->cursorCount());
     else if (cursor.hasSelection())
         position += u' ' + tr("(%1 selected)").arg(cursor.selectionEnd() - cursor.selectionStart());
-    // Read mode: the source lines on screen instead (the caret's place
-    // until a large document's first parse shows the columns), and nothing
-    // about editing the file.
+    // In columns: the source lines on screen. Read mode shows them instead of
+    // the caret's place (which shows until a large document's first parse
+    // makes the columns), and nothing about editing the file.
+    const auto [first, last] = tab->readLineRange();
+    const bool ranged = tab->showsColumns() && first >= 0;
+    if (ranged)
+        m_range->setText(tr("Lines %1–%2 of %3").arg(first + 1).arg(last + 1).arg(tab->document()->blockCount()));
+    m_range->setVisible(ranged);
     const bool reading = tab->isReadMode();
-    if (const auto [first, last] = tab->readLineRange(); reading && first >= 0)
-        position = tr("Lines %1–%2 of %3").arg(first + 1).arg(last + 1).arg(tab->document()->blockCount());
+    m_position->setVisible(!(reading && ranged));
     for (QLabel *label : {m_indentation, m_lineEnding, m_encoding})
         label->setVisible(!reading);
     m_position->setText(position);
@@ -2454,6 +2510,14 @@ void MainWindow::updateStatus()
                                                                              : tr("Unix (LF)"));
     m_encoding->setText(tab->encodingName());
     m_language->setText(tab->languageName());
+    // The first cell shown has no line on its left.
+    bool leading = !m_viewSwitch->isVisibleTo(statusBar());
+    for (QLabel *label : cells) {
+        if (!label->isVisibleTo(statusBar()))
+            continue;
+        static_cast<StatusCell *>(label)->setDivider(!leading);
+        leading = false;
+    }
 }
 
 void MainWindow::updateOutline()

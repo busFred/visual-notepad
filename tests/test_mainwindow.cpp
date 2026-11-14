@@ -1,6 +1,7 @@
 // Offscreen checks of the main window. Set VN_SCREENSHOT=<file.png> to also
 // save a rendering of the window.
 #include "Commands.h"
+#include "EditorGroup.h"
 #include "MainWindow.h"
 #include "Theme.h"
 
@@ -22,6 +23,9 @@
 #include <QWheelEvent>
 
 #include <QTextDocument>
+#include <QScrollBar>
+#include <QSignalSpy>
+#include <QTextBlock>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTemporaryDir>
@@ -136,6 +140,12 @@ private Q_SLOTS:
     void collapseCommands();
     void readModeStatusAndPages();
     void readBarIsPerTabAndStartsFromPreferences();
+    void viewSwitchComesFirstAndHides();
+    void columnsMenuItemMirrorsTheSwitch();
+    void columnsArePerTabAndNotSaved();
+    void lockNoLongerForcesColumns();
+    void sourceColumnsLeaveForTheSplitAndComeBack();
+    void sourceColumnsStatusBarAndReadOnly();
 
 private:
     // A Markdown tab in `mode`, in a shown window; the half given has focus.
@@ -143,9 +153,15 @@ private:
     static void focusView(vn::TextView *view);
     static QWidget *accentOf(vn::TextView *view);
     // A Markdown file of many paragraphs in a tab of the window, in Visual
-    // mode, locked: read mode.
+    // mode, locked, in Columns: read mode.
     vn::DocumentTab *readingTab(vn::MainWindow &window, const QString &name);
     static void setLocked(vn::DocumentTab *tab, bool locked);
+    // The Scroll or Columns button of the status bar's view switch.
+    static QToolButton *viewButton(vn::MainWindow &window, bool columns);
+    // The status cells shown, left to right (the switch is "ViewSwitch").
+    static QStringList shownCells(vn::MainWindow &window);
+    // A Python file of `lines` lines in a tab of the window.
+    vn::DocumentTab *codeTab(vn::MainWindow &window, const QString &name, int lines);
     static void wheel(vn::TextView *over, int delta);
     QString write(const QString &name, const QByteArray &content);
 
@@ -630,7 +646,8 @@ void TestMainWindow::menuMnemonics()
         // A repeated letter only selects in QMenu; it must be unique to trigger.
         QStringList keys;
         for (QAction *item : menu->actions()) {
-            if (item->isSeparator() || item->text() == QLatin1String("Reset Zoom")) // No free letter
+            if (item->isSeparator() || item->text() == QLatin1String("Reset Zoom")
+                || item->text() == QLatin1String("Columns")) // No free letter
                 continue;
             const QString key = mnemonicLetter(item->text());
             QVERIFY2(!key.isEmpty(), qPrintable(item->text()));
@@ -1072,6 +1089,7 @@ vn::DocumentTab *TestMainWindow::readingTab(vn::MainWindow &window, const QStrin
     vn::DocumentTab *tab = window.currentTab();
     tab->setViewMode(vn::DocumentTab::ViewMode::Visual);
     setLocked(tab, true);
+    tab->setColumns(true);
     return tab;
 }
 
@@ -1083,8 +1101,9 @@ void TestMainWindow::setLocked(vn::DocumentTab *tab, bool locked)
     }
 }
 
-// The status bar in read mode: the lines on screen, the zoom and the
-// language; nothing about editing the file. Alt+PgDn turns a page.
+// The status bar in read mode: the view switch, the zoom, the lines on
+// screen and the language; nothing about editing the file. Alt+PgDn turns a
+// page.
 void TestMainWindow::readModeStatusAndPages()
 {
     for (const char *k : {vn::key::readColumns, vn::key::readChars, vn::key::readKeptLines, vn::key::zoom})
@@ -1100,8 +1119,9 @@ void TestMainWindow::readModeStatusAndPages()
     vn::VisualView *visual = tab->visualView();
     QTRY_VERIFY(visual->showsReadColumns());
     visual->grab();
-    auto *position = window.findChild<QLabel *>(QStringLiteral("PositionStatus"));
+    auto *position = window.findChild<QLabel *>(QStringLiteral("RangeStatus"));
     QVERIFY(position);
+    QVERIFY(!window.findChild<QLabel *>(QStringLiteral("PositionStatus"))->isVisible());
     const auto lines = [tab] {
         const auto [first, last] = tab->readLineRange();
         return QStringLiteral("Lines %1–%2 of %3").arg(first + 1).arg(last + 1).arg(tab->document()->blockCount());
@@ -1158,7 +1178,8 @@ void TestMainWindow::readModeStatusAndPages()
     setLocked(tab, false);
     QVERIFY(!tab->isReadMode());
     QVERIFY(!visual->showsReadColumns());
-    QTRY_VERIFY(position->text().startsWith(QLatin1String("Ln ")));
+    QTRY_VERIFY(!position->isVisible());
+    QVERIFY(window.findChild<QLabel *>(QStringLiteral("PositionStatus"))->text().startsWith(QLatin1String("Ln ")));
     for (const char *name : {"IndentationStatus", "LineEndingStatus", "EncodingStatus"})
         QVERIFY2(window.findChild<QLabel *>(QLatin1String(name))->isVisible(), name);
     vn::Settings::instance().reset(vn::key::zoom);
@@ -1248,6 +1269,342 @@ void TestMainWindow::readBarIsPerTabAndStartsFromPreferences()
     // Out of read mode the bar goes.
     setLocked(second, false);
     QVERIFY(!bar->isVisible());
+}
+
+QToolButton *TestMainWindow::viewButton(vn::MainWindow &window, bool columns)
+{
+    const QString name = columns ? QStringLiteral("ViewColumns") : QStringLiteral("ViewScroll");
+    for (QToolButton *button : window.findChildren<QToolButton *>()) {
+        if (button->property("viewSwitch").toString() == name)
+            return button;
+    }
+    return nullptr;
+}
+
+QStringList TestMainWindow::shownCells(vn::MainWindow &window)
+{
+    QList<QWidget *> cells;
+    for (QWidget *cell : window.statusBar()->findChildren<QWidget *>(Qt::FindDirectChildrenOnly)) {
+        if (cell->isVisible() && !cell->objectName().isEmpty() && cell->objectName() != QLatin1String("qt_rubberband"))
+            cells << cell;
+    }
+    std::sort(cells.begin(), cells.end(), [](QWidget *a, QWidget *b) { return a->x() < b->x(); });
+    QStringList names;
+    for (QWidget *cell : cells)
+        names << cell->objectName();
+    return names;
+}
+
+vn::DocumentTab *TestMainWindow::codeTab(vn::MainWindow &window, const QString &name, int lines)
+{
+    QByteArray text;
+    for (int i = 1; i <= lines; ++i)
+        text += "def function_" + QByteArray::number(i) + "(value):\n";
+    if (!window.openFile(write(name, text)))
+        return nullptr;
+    return window.currentTab();
+}
+
+// Scroll | Columns is the first cell of the status bar's right-aligned row,
+// the zoom next to it, in every view; where columns cannot show (the Visual
+// Editor unlocked, Source / Visual) it is hidden and the zoom comes first.
+void TestMainWindow::viewSwitchComesFirstAndHides()
+{
+    vn::MainWindow window;
+    window.resize(1200, 600);
+    vn::DocumentTab *code = codeTab(window, QStringLiteral("switch.py"), 10);
+    QVERIFY(code);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QToolButton *scroll = viewButton(window, false);
+    QToolButton *columns = viewButton(window, true);
+    QVERIFY(scroll && columns);
+    QTRY_COMPARE(shownCells(window).mid(0, 3), (QStringList{QStringLiteral("ViewSwitch"), QStringLiteral("ZoomStatus"),
+                                                           QStringLiteral("PositionStatus")}));
+    QVERIFY(scroll->isChecked() && !columns->isChecked());
+    QVERIFY(!code->showsColumns());
+    QCOMPARE(scroll->toolTip(), QStringLiteral("Scroll"));
+    QCOMPARE(columns->toolTip(), QStringLiteral("Columns"));
+    if (const QString file = qEnvironmentVariable("VN_SCREENSHOT"); !file.isEmpty())
+        window.grab().save(QString(file).replace(QStringLiteral(".png"), QStringLiteral("-switch.png")));
+
+    // Markdown: the Visual Editor, unlocked, and Source / Visual hide it.
+    QVERIFY(window.openFile(write(QStringLiteral("switch.md"), "# Title\n\nText.\n")));
+    vn::DocumentTab *md = window.currentTab();
+    md->setViewMode(vn::DocumentTab::ViewMode::Visual);
+    setLocked(md, false);
+    QTRY_VERIFY(!window.findChild<QWidget *>(QStringLiteral("ViewSwitch"))->isVisible());
+    QCOMPARE(shownCells(window).value(0), QStringLiteral("ZoomStatus"));
+    QVERIFY(!md->canShowColumns());
+    md->setViewMode(vn::DocumentTab::ViewMode::SourceVisual);
+    QTRY_COMPARE(shownCells(window).value(0), QStringLiteral("ZoomStatus"));
+    // Source, and the Visual Editor locked, show it.
+    md->setViewMode(vn::DocumentTab::ViewMode::Source);
+    QTRY_COMPARE(shownCells(window).value(0), QStringLiteral("ViewSwitch"));
+    md->setViewMode(vn::DocumentTab::ViewMode::Visual);
+    setLocked(md, true);
+    QTRY_COMPARE(shownCells(window).value(0), QStringLiteral("ViewSwitch"));
+    QVERIFY(scroll->isChecked());
+    // Another tab shows its own.
+    window.mainGroup()->setCurrentIndex(0);
+    QTRY_VERIFY(scroll->isChecked());
+}
+
+// View > Columns (checkable, no shortcut, between Word Wrap and Status
+// Bar) does what the switch does, and shows what it shows.
+void TestMainWindow::columnsMenuItemMirrorsTheSwitch()
+{
+    vn::MainWindow window;
+    window.resize(1200, 600);
+    vn::DocumentTab *tab = codeTab(window, QStringLiteral("menu.py"), 200);
+    QVERIFY(tab);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QAction *item = actionFor(window, QStringLiteral("view.columns"));
+    QVERIFY(item);
+    QVERIFY(item->isCheckable());
+    QVERIFY(item->shortcuts().isEmpty());
+    QCOMPARE(item->text(), QStringLiteral("Columns"));
+    QMenu *view = nullptr;
+    for (QAction *menu : window.menuBar()->actions()) {
+        if (menu->menu() && menu->menu()->actions().contains(item))
+            view = menu->menu();
+    }
+    QVERIFY(view);
+    const QList<QAction *> items = view->actions();
+    const qsizetype at = items.indexOf(item);
+    QCOMPARE(items.value(at - 1), actionFor(window, QStringLiteral("view.wordWrap")));
+    QCOMPARE(items.value(at + 1), actionFor(window, QStringLiteral("view.statusBar")));
+    QVERIFY(item->isEnabled() && !item->isChecked());
+
+    item->trigger();
+    QVERIFY(tab->showsColumns());
+    QVERIFY(tab->sourceView()->columnsShown());
+    QVERIFY(viewButton(window, true)->isChecked());
+    QVERIFY(!viewButton(window, false)->isChecked());
+    QVERIFY(item->isChecked());
+    viewButton(window, false)->click();
+    QVERIFY(!tab->showsColumns());
+    QVERIFY(!item->isChecked());
+    viewButton(window, true)->click();
+    QVERIFY(item->isChecked());
+    item->trigger();
+    QVERIFY(!tab->showsColumns());
+    // Where columns cannot show, it is greyed (and unchecked: the view scrolls).
+    QVERIFY(window.openFile(write(QStringLiteral("menu.md"), "# Title\n\nText.\n")));
+    vn::DocumentTab *md = window.currentTab();
+    md->setViewMode(vn::DocumentTab::ViewMode::SourceVisual);
+    QTRY_VERIFY(!item->isEnabled());
+    QVERIFY(!item->isChecked());
+}
+
+// Every tab opens in Scroll; the choice is the tab's and is saved nowhere.
+void TestMainWindow::columnsArePerTabAndNotSaved()
+{
+    vn::MainWindow window;
+    window.resize(1200, 600);
+    vn::DocumentTab *first = codeTab(window, QStringLiteral("one.py"), 100);
+    vn::DocumentTab *second = codeTab(window, QStringLiteral("two.py"), 100);
+    QVERIFY(first && second);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(!first->wantsColumns() && !second->wantsColumns());
+    QSignalSpy settingsChanged(&vn::Settings::instance(), &vn::Settings::changed);
+    second->setColumns(true);
+    QVERIFY(second->showsColumns());
+    QVERIFY(!first->showsColumns());
+    window.mainGroup()->setCurrentIndex(0);
+    QTRY_VERIFY(viewButton(window, false)->isChecked());
+    window.mainGroup()->setCurrentIndex(1);
+    QTRY_VERIFY(viewButton(window, true)->isChecked());
+    // Nothing went to the settings; a file opened again opens in Scroll.
+    QVERIFY(settingsChanged.isEmpty());
+    const QString path = second->path();
+    QVERIFY(window.closeTabs(1, vn::MainWindow::CloseScope::This));
+    QTRY_COMPARE(window.tabCount(), 1);
+    QVERIFY(window.openFile(path));
+    QVERIFY(!window.currentTab()->wantsColumns());
+    QVERIFY(!window.currentTab()->showsColumns());
+}
+
+// The lock is read-only only: a locked Visual Editor scrolls until Columns
+// is chosen. Unlocking drops to Scroll with the same line at the top and
+// the caret at its start; locking again shows columns from the caret's line
+// (from the top line, if the caret is off screen).
+void TestMainWindow::lockNoLongerForcesColumns()
+{
+    vn::MainWindow window;
+    window.resize(1000, 600);
+    QByteArray text = "# Reading\n\n";
+    for (int i = 1; i <= 120; ++i)
+        text += QByteArray("Paragraph ") + QByteArray::number(i) + " has a few words in it.\n\n";
+    QVERIFY(window.openFile(write(QStringLiteral("lock.md"), text)));
+    vn::DocumentTab *tab = window.currentTab();
+    tab->setViewMode(vn::DocumentTab::ViewMode::Visual);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    vn::VisualView *visual = tab->visualView();
+    setLocked(tab, true);
+    QVERIFY(tab->isReadOnly());
+    QVERIFY(!tab->isReadMode());
+    QVERIFY(!visual->showsReadColumns());
+    QVERIFY(visual->verticalScrollBar()->maximum() > 0); // It scrolls.
+    QTRY_VERIFY(viewButton(window, false)->isChecked());
+
+    tab->setColumns(true);
+    QVERIFY(tab->isReadMode());
+    QTRY_VERIFY(visual->showsReadColumns());
+    visual->grab();
+    visual->readPageForward();
+    const int top = tab->readLineRange().first;
+    QVERIFY(top > 0);
+    if (const QString file = qEnvironmentVariable("VN_SCREENSHOT"); !file.isEmpty())
+        window.grab().save(QString(file).replace(QStringLiteral(".png"), QStringLiteral("-locked-columns.png")));
+
+    setLocked(tab, false);
+    QVERIFY(!tab->isReadMode());
+    QVERIFY(tab->wantsColumns());
+    QCOMPARE(visual->topLine(), top);
+    QCOMPARE(visual->textCursor().blockNumber(), top);
+    QCOMPARE(visual->textCursor().positionInBlock(), 0);
+    QTRY_VERIFY(!window.findChild<QWidget *>(QStringLiteral("ViewSwitch"))->isVisible());
+
+    // Locked again: from the caret's line, which is on screen.
+    QTextCursor caret(tab->document()->findBlockByNumber(top + 4));
+    visual->setTextCursor(caret);
+    QVERIFY(visual->isLineShown(top + 4));
+    setLocked(tab, true);
+    QVERIFY(tab->isReadMode());
+    visual->grab();
+    QCOMPARE(tab->readLineRange().first, top + 4);
+
+    // The caret off screen: from the top line.
+    setLocked(tab, false);
+    visual->setTextCursor(QTextCursor(tab->document()->findBlockByNumber(230)));
+    visual->scrollToLine(100);
+    visual->grab();
+    QVERIFY(!visual->isLineShown(230));
+    const int shownTop = visual->topLine();
+    setLocked(tab, true);
+    visual->grab();
+    QCOMPARE(tab->readLineRange().first, shownTop);
+
+    // Scroll chosen while locked: it stays read-only, and scrolls.
+    viewButton(window, false)->click();
+    QVERIFY(!tab->isReadMode());
+    QVERIFY(tab->isReadOnly());
+    QVERIFY(!visual->showsReadColumns());
+}
+
+// Source columns go when the split is chosen (the same line at the top, the
+// caret at its start) and come back, from the caret's line, in Source; from
+// Source to the locked Visual Editor they stay columns at the same place.
+void TestMainWindow::sourceColumnsLeaveForTheSplitAndComeBack()
+{
+    vn::MainWindow window;
+    window.resize(1200, 600);
+    QByteArray text = "# Notes\n\n";
+    for (int i = 1; i <= 200; ++i)
+        text += QByteArray("Paragraph ") + QByteArray::number(i) + " of the notes.\n\n"; // On even lines.
+    QVERIFY(window.openFile(write(QStringLiteral("split.md"), text)));
+    vn::DocumentTab *tab = window.currentTab();
+    tab->setViewMode(vn::DocumentTab::ViewMode::Source);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    vn::TextView *source = tab->sourceView();
+    tab->setColumns(true);
+    QVERIFY(source->columnsShown());
+    source->grab();
+    source->columnsPageForward();
+    const int top = tab->readLineRange().first;
+    QVERIFY(top > 0);
+    QVERIFY(tab->isReadOnly()); // (Step 1: no edits in columns yet.)
+
+    tab->setViewMode(vn::DocumentTab::ViewMode::SourceVisual);
+    QVERIFY(!tab->showsColumns());
+    QVERIFY(!source->columnsShown());
+    QCOMPARE(source->topLine(), top);
+    QCOMPARE(tab->editor()->textCursor().blockNumber(), top);
+    QCOMPARE(tab->editor()->textCursor().positionInBlock(), 0);
+    QVERIFY(!tab->isReadOnly());
+
+    source->setFocus();
+    const int caret = (top + 4) & ~1; // A paragraph's line, a few lines down.
+    source->setTextCursor(QTextCursor(tab->document()->findBlockByNumber(caret)));
+    QVERIFY(source->isLineShown(caret));
+    tab->setViewMode(vn::DocumentTab::ViewMode::Source);
+    QVERIFY(source->columnsShown());
+    source->grab();
+    QCOMPARE(tab->readLineRange().first, caret);
+
+    // To the locked Visual Editor: still columns (read mode), at the same place.
+    tab->setViewMode(vn::DocumentTab::ViewMode::Visual);
+    setLocked(tab, true);
+    tab->setViewMode(vn::DocumentTab::ViewMode::Source);
+    source->grab();
+    QCOMPARE(tab->readLineRange().first, caret);
+    tab->setViewMode(vn::DocumentTab::ViewMode::Visual);
+    QVERIFY(tab->isReadMode());
+    tab->visualView()->grab();
+    QCOMPARE(tab->readLineRange().first, caret);
+}
+
+// A code file in columns: the status bar has the switch, the zoom, the lines
+// on screen, then the caret and the file's cells; the bar at the top right
+// (no pill: code has none). Typing waits until editing in columns is built.
+void TestMainWindow::sourceColumnsStatusBarAndReadOnly()
+{
+    vn::MainWindow window;
+    window.resize(1200, 600);
+    vn::DocumentTab *tab = codeTab(window, QStringLiteral("build.py"), 212);
+    QVERIFY(tab);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    vn::TextView *source = tab->sourceView();
+    focusView(source);
+    viewButton(window, true)->click();
+    source->grab();
+    const auto [first, last] = tab->readLineRange();
+    QCOMPARE(first, 0);
+    QVERIFY(last > 20);
+    QTRY_COMPARE(shownCells(window),
+                 (QStringList{QStringLiteral("ViewSwitch"), QStringLiteral("ZoomStatus"), QStringLiteral("RangeStatus"),
+                              QStringLiteral("PositionStatus"), QStringLiteral("IndentationStatus"),
+                              QStringLiteral("LineEndingStatus"), QStringLiteral("EncodingStatus"),
+                              QStringLiteral("LanguageStatus")}));
+    auto *range = window.findChild<QLabel *>(QStringLiteral("RangeStatus"));
+    QTRY_COMPARE(range->text(), QStringLiteral("Lines 1–%1 of 213").arg(last + 1));
+    QTRY_VERIFY(range->width() >= range->sizeHint().width());
+    QCOMPARE(window.findChild<QLabel *>(QStringLiteral("PositionStatus"))->text(), QStringLiteral("Ln 1, Col 1"));
+    auto *bar = tab->findChild<QWidget *>(QStringLiteral("ReadBar"));
+    QVERIFY(bar && bar->isVisible());
+    QVERIFY(bar->geometry().right() > tab->width() - 30);
+    for (QToolButton *button : tab->findChildren<QToolButton *>()) {
+        if (button->toolTip() == QStringLiteral("Read-only"))
+            QVERIFY(!button->isVisible());
+    }
+    if (const QString file = qEnvironmentVariable("VN_SCREENSHOT"); !file.isEmpty())
+        window.grab().save(QString(file).replace(QStringLiteral(".png"), QStringLiteral("-code-columns.png")));
+    // A page on, and the status follows.
+    QTest::keyClick(source, Qt::Key_PageDown);
+    QTRY_COMPARE(range->text(), QStringLiteral("Lines %1–%2 of 213")
+                                    .arg(tab->readLineRange().first + 1)
+                                    .arg(tab->readLineRange().second + 1));
+    QVERIFY(tab->readLineRange().first > 0);
+    // Read-only: typing, the edit commands and Replace do nothing.
+    const QString before = tab->text();
+    QVERIFY(tab->isReadOnly());
+    QTest::keyClicks(source, QStringLiteral("abc"));
+    actionFor(window, QStringLiteral("selection.deleteLine"))->trigger();
+    actionFor(window, QStringLiteral("edit.toggleComment"))->trigger();
+    QCOMPARE(tab->text(), before);
+    // Scroll: editable again.
+    viewButton(window, false)->click();
+    QVERIFY(!tab->isReadOnly());
+    QVERIFY(!bar->isVisible());
+    QTRY_VERIFY(!range->isVisible());
+    QTest::keyClicks(source, QStringLiteral("abc"));
+    QVERIFY(tab->text() != before);
 }
 
 QTEST_MAIN(TestMainWindow)

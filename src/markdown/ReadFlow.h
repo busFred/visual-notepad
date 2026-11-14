@@ -64,6 +64,10 @@ public:
     virtual QList<int> lineTops(int row) { Q_UNUSED(row); return {0}; }
     // A table's header row, repeated where the table continues in a column.
     virtual int headerHeight(int row) { Q_UNUSED(row); return 0; }
+    // The fewest lines a piece of a row cut twice may have (a row cut in
+    // more than one column). 2 for text, so no line is left alone; a source
+    // whose cuts are every line (code in columns) says 1.
+    virtual int minPieceLines(int row) { Q_UNUSED(row); return 2; }
 
     // The source line shown at a place in a row, and the place that shows a
     // source line. The defaults spread the row's source lines evenly over its

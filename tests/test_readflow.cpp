@@ -156,6 +156,7 @@ private slots:
     void gapSkippedAtTop();
     void paragraphCutRule();
     void codeCutRule();
+    void onePieceLinesForEveryLineCuts();
     void tableCutRule();
     void tableHeaderRepeats();
     void tableCutsKeepTwoRowsEachSide();
@@ -334,6 +335,48 @@ void TestReadFlow::codeCutRule()
     QCOMPARE(codeCuts(topsOf(200)).size(), 197);
     QCOMPARE(codeCuts(topsOf(200)).first(), 20);
     QCOMPARE(codeCuts(topsOf(200)).last(), 1980);
+}
+
+// A source cut between any two lines (the source view's columns) asks for
+// pieces of one line: a column is full to its last line, wherever a wrapped
+// line falls; the default keeps two lines to a piece of a row cut twice.
+void TestReadFlow::onePieceLinesForEveryLineCuts()
+{
+    class EveryLine : public FakeSource
+    {
+    public:
+        int least = 2;
+        int minPieceLines(int) override { return least; }
+    };
+    for (const int least : {2, 1}) {
+        EveryLine source;
+        source.least = least;
+        source.singles(2);
+        FakeRow wrapped;
+        wrapped.height = 7 * lineHeight;
+        wrapped.tops = topsOf(7);
+        wrapped.cuts = wrapped.tops.mid(1); // After every line.
+        wrapped.first = wrapped.last = source.nextLine();
+        source.rows.push_back(wrapped);
+        source.singles(10);
+        ReadFlow flow(&source);
+        flow.setGeometry(geo(3, 3 * lineHeight));
+        const Screen &screen = flow.toStart();
+        const Column &first = screen.columns[0];
+        if (least == 2) {
+            // One line of it would be alone at the bottom: it goes on in the next column.
+            QCOMPARE(first.segments.size(), size_t(2));
+            QCOMPARE(screen.columns[1].segments.front().yFrom, 0);
+        } else {
+            QCOMPARE(first.segments.size(), size_t(3));
+            QCOMPARE(first.segments.back().row, 2);
+            QCOMPARE(first.segments.back().yTo, lineHeight);
+            QCOMPARE(first.used, 3 * lineHeight);
+            QCOMPARE(screen.columns[1].segments.front().yFrom, lineHeight);
+            QCOMPARE(screen.columns[1].segments.front().yTo, 4 * lineHeight);
+            QCOMPARE(screen.columns[2].segments.front().yFrom, 4 * lineHeight);
+        }
+    }
 }
 
 void TestReadFlow::tableCutRule()

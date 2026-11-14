@@ -348,7 +348,7 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
         (m_viewMode == ViewMode::SourceVisual ? m_splitLocked : m_visualLocked) = locked;
         if (m_visual)
             m_visual->setReadOnly(locked);
-        updateReadMode();
+        updateColumns();
     });
     connect(m_editor, &TextView::scrolled, this, [this] { syncScroll(m_editor, m_visual); });
     connect(m_editor, &TextView::selectionChanged, this, [this] { mirrorSelection(m_editor, m_visual); });
@@ -360,6 +360,14 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
     connect(m_editor, &TextView::linkRequested, this, &DocumentTab::linkActivated);
     connect(m_editor, &TextView::filesDropped, this, &DocumentTab::filesDropped);
     connect(m_editor, &TextView::zoomRequested, this, &DocumentTab::zoomBy);
+    connect(m_editor, &TextView::columnsChanged, this, [this] {
+        if (m_columnsView != m_editor)
+            return;
+        updateReadBar();
+        Q_EMIT readStateChanged();
+    });
+    m_editor->setColumnCount(m_readColumns);
+    m_editor->setColumnChars(m_readChars);
 
     // What the file shares with every tab showing it.
     TextFile *f = m_file.get();
@@ -414,6 +422,9 @@ DocumentTab *DocumentTab::openAnotherView(QWidget *parent) const
     tab->m_visualZoom = m_visualZoom;
     tab->setReadColumns(m_readColumns);
     tab->setReadChars(m_readChars);
+    // A copy shows what this tab does (columns too, as read mode always was).
+    tab->m_wantsColumns = m_wantsColumns;
+    tab->updateColumns();
     // The views take their fonts when the tab is shown, as after setZoom.
     tab->m_settingsStale = true;
     tab->editor()->setTextCursor(editor()->textCursor());
@@ -487,8 +498,13 @@ TextView *DocumentTab::editor() const
 
 bool DocumentTab::isReadOnly() const
 {
-    // The source view is always editable, so only Visual mode can be locked.
-    return isMarkdown() && m_viewMode == ViewMode::Visual && m_visualLocked;
+    // Only Visual mode can be locked; the source view is editable but in
+    // columns, until editing there is built (TextView::isReadOnly says).
+    if (isMarkdown() && m_viewMode == ViewMode::Visual)
+        return m_visualLocked;
+    if (isMarkdown() && m_viewMode == ViewMode::SourceVisual)
+        return false;
+    return m_editor->isReadOnly();
 }
 
 void DocumentTab::ensureVisualView()
@@ -517,7 +533,7 @@ void DocumentTab::ensureVisualView()
     m_visual->setReadColumns(m_readColumns);
     m_visual->setReadChars(m_readChars);
     connect(m_visual, &VisualView::readChanged, this, [this] {
-        if (!m_readMode)
+        if (m_columnsView != m_visual)
             return;
         updateReadBar();
         // The hidden source view keeps the place too: the session saves it,
@@ -611,18 +627,51 @@ void DocumentTab::updateViews()
         mirrorSelection(active, active == m_editor ? static_cast<TextView *>(m_visual) : m_editor);
     updatePill();
     updateAccent();
-    updateReadMode();
+    updateColumns();
     Q_EMIT zoomChanged();
+}
+
+bool DocumentTab::canShowColumns() const
+{
+    if (!isMarkdown() || m_viewMode == ViewMode::Source)
+        return true;
+    // Not while editing in the Visual Editor (pictures and tables would have
+    // to move with every keystroke), and not beside the other half.
+    return m_viewMode == ViewMode::Visual && m_visualLocked;
+}
+
+void DocumentTab::setColumns(bool on)
+{
+    if (m_wantsColumns == on)
+        return;
+    m_wantsColumns = on;
+    updateColumns(true);
 }
 
 bool DocumentTab::isReadMode() const
 {
-    return m_readMode;
+    return m_columnsView && m_columnsView == m_visual;
 }
 
 std::pair<int, int> DocumentTab::readLineRange() const
 {
-    return m_readMode && m_visual ? m_visual->readLineRange() : std::pair<int, int>(-1, -1);
+    if (m_columnsView == m_editor)
+        return m_editor->columnLineRange();
+    return isReadMode() ? m_visual->readLineRange() : std::pair<int, int>(-1, -1);
+}
+
+int DocumentTab::columnsShownCount() const
+{
+    if (m_columnsView == m_editor)
+        return m_editor->shownColumnCount();
+    return isReadMode() ? m_visual->readColumnCount() : 1;
+}
+
+int DocumentTab::columnsFit() const
+{
+    if (m_columnsView == m_editor)
+        return m_editor->maxColumnCount();
+    return isReadMode() ? m_visual->readMaxColumns() : 1;
 }
 
 void DocumentTab::setReadColumns(int columns)
@@ -630,6 +679,7 @@ void DocumentTab::setReadColumns(int columns)
     // 0 is Auto; a count the window cannot fit gets what fits (the view's
     // business), so there is no fixed top here.
     m_readColumns = qMax(0, columns);
+    m_editor->setColumnCount(m_readColumns);
     if (m_visual)
         m_visual->setReadColumns(m_readColumns);
     updateReadBar();
@@ -638,21 +688,57 @@ void DocumentTab::setReadColumns(int columns)
 void DocumentTab::setReadChars(int chars)
 {
     m_readChars = qBound(50, chars, 100);
+    m_editor->setColumnChars(m_readChars);
     if (m_visual)
         m_visual->setReadChars(m_readChars);
     updateReadBar();
 }
 
-void DocumentTab::updateReadMode()
+void DocumentTab::updateColumns(bool switched)
 {
-    const bool on = isReadOnly() && m_visual;
+    const bool visual = isMarkdown() && m_viewMode == ViewMode::Visual;
+    TextView *target = nullptr;
+    if (m_wantsColumns && canShowColumns() && (!visual || m_visual))
+        target = visual ? static_cast<TextView *>(m_visual) : m_editor;
+    TextView *old = m_columnsView;
+    if (target != old) {
+        // The text at the top: the first line of the first column.
+        const int top = old == m_editor ? m_editor->topLine() : old ? m_visual->readTopLine() : -1;
+        // Off, the view scrolls to have that line at its top.
+        if (old == m_editor)
+            m_editor->setColumnsShown(false);
+        else if (old && m_visual)
+            m_visual->setReadMode(false);
+        m_columnsView = target;
+        if (target) {
+            int start = -1; // Switched on: the line at the top stays there.
+            if (old) {
+                start = top; // From Source to the Visual Editor or back: the same place.
+            } else if (!switched) {
+                // Back where columns can be: from the caret's line, if it shows.
+                const int caret = target->textCursor().blockNumber();
+                start = target->isLineShown(caret) ? caret : target->topLine();
+            }
+            if (target == m_editor)
+                m_editor->setColumnsShown(true, start);
+            else
+                m_visual->setReadMode(true, start);
+        } else if (old && m_wantsColumns && top >= 0) {
+            // Columns cannot show here: Scroll, with the same text at the top
+            // and the caret at its start, ready to edit.
+            TextView *view = editor();
+            view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(top)));
+            view->scrollToLine(top);
+            if (showsBothHalves())
+                syncScroll(view, view == m_editor ? static_cast<TextView *>(m_visual) : m_editor);
+        }
+    }
+    const bool on = m_columnsView != nullptr;
     if (on && !m_readBar) {
         m_readBar = new ReadBar(this);
         m_readBar->onColumns = [this](int step) {
-            if (!m_visual)
-                return;
-            const int shown = m_visual->readColumnCount();
-            const int fit = m_visual->readMaxColumns();
+            const int shown = columnsShownCount();
+            const int fit = columnsFit();
             if (step < 0)
                 setReadColumns(qMax(1, shown - 1));
             else
@@ -661,8 +747,6 @@ void DocumentTab::updateReadMode()
         m_readBar->onChars = [this](int chars) { setReadChars(chars); };
         m_readBar->hide();
     }
-    if (m_visual)
-        m_visual->setReadMode(on);
     if (m_readBar) {
         m_readBar->setVisible(on);
         m_readBar->raise();
@@ -670,17 +754,17 @@ void DocumentTab::updateReadMode()
     }
     updateReadBar();
     placeOverlays();
-    if (on != m_readMode) {
-        m_readMode = on;
+    if (target != old || canShowColumns() != m_couldShowColumns) {
+        m_couldShowColumns = canShowColumns();
         Q_EMIT readStateChanged();
     }
 }
 
 void DocumentTab::updateReadBar()
 {
-    if (!m_readBar || !m_visual)
+    if (!m_readBar || !m_columnsView)
         return;
-    m_readBar->setState(m_readColumns, m_visual->readColumnCount(), m_visual->readMaxColumns(), m_readChars);
+    m_readBar->setState(m_readColumns, columnsShownCount(), columnsFit(), m_readChars);
     m_readBar->adjustSize();
     placeOverlays();
 }
@@ -807,13 +891,16 @@ bool DocumentTab::eventFilter(QObject *watched, QEvent *event)
 void DocumentTab::placeOverlays()
 {
     m_pill->move(width() - m_pill->width() - pillMarginRight, pillMarginTop);
+    // Left of the pill; at the top right where there is none (Source).
     if (m_readBar && m_readBar->isVisible())
-        m_readBar->move(m_pill->x() - readBarGap - m_readBar->width(), pillMarginTop);
+        m_readBar->move(m_pill->isVisible() ? m_pill->x() - readBarGap - m_readBar->width()
+                                            : width() - m_readBar->width() - pillMarginRight,
+                        pillMarginTop);
     // The find bar hangs from the top edge, clear of the scroll bar, the pill
     // and the read bar.
     int right = m_pill->isVisible() ? m_pill->width() + pillMarginRight * 2 : findBarMarginRight;
     if (m_readBar && m_readBar->isVisible())
-        right += m_readBar->width() + readBarGap;
+        right += m_readBar->width() + (m_pill->isVisible() ? readBarGap : pillMarginRight);
     if (m_findBar) {
         m_findBar->adjustSize();
         m_findBar->move(qMax(0, width() - m_findBar->width() - right), 0);

@@ -6,6 +6,7 @@
 
 #include "../Settings.h"
 #include "../Theme.h"
+#include "../editor/ReadControls.h"
 #include "MarkdownModel.h"
 
 #include <QAbstractButton>
@@ -26,89 +27,21 @@ namespace vn {
 
 namespace {
 
-// Room around the columns: above them for the floating bar and the button
-// for a line up, below for the one for a line down, and at the sides at
-// least enough for the page arrows. The columns are centred in the rest.
-constexpr int readTop = 44;
-constexpr int readBottom = 28;
-constexpr int readSideRoom = 56;
-constexpr int readGap = 40;
-constexpr int pageArrowSize = 36;
-constexpr int pageArrowInset = 10;
-constexpr int lineButtonSize = 20;
-constexpr int lineButtonTop = 18;
-constexpr int lineButtonBottom = 24; // From the bottom edge to its top.
+// The room around the columns and the buttons are the source view's columns' too.
+constexpr int readTop = columns::topRoom;
+constexpr int readBottom = columns::bottomRoom;
+constexpr int readSideRoom = columns::sideRoom;
+constexpr int readGap = columns::gap;
+constexpr int pageArrowSize = columns::pageArrowSize;
+constexpr int pageArrowInset = columns::pageArrowInset;
+constexpr int lineButtonSize = columns::lineButtonSize;
+constexpr int lineButtonTop = columns::lineButtonTop;
+constexpr int lineButtonBottom = columns::lineButtonBottom;
 // Room a column's rows have outside it, as in the scrolling view: the
 // chevron of a heading sits left of the text (VisualView.cpp's sideMargin).
 constexpr qreal readMargin = 26;
 
-// A round page arrow at a side of the view, or one of the small buttons for
-// a line up or down: a chevron, greyed when there is nowhere to go. They
-// never take the focus, which stays on the text.
-class ReadButton : public QAbstractButton
-{
-public:
-    enum class Direction { Left, Right, Up, Down };
-
-    ReadButton(Direction direction, bool round, QWidget *parent)
-        : QAbstractButton(parent)
-        , m_direction(direction)
-        , m_round(round)
-    {
-        setFocusPolicy(Qt::NoFocus);
-        setCursor(Qt::ArrowCursor);
-        setAttribute(Qt::WA_Hover);
-        const int size = round ? pageArrowSize : lineButtonSize;
-        setFixedSize(size, size);
-    }
-
-protected:
-    void paintEvent(QPaintEvent *) override
-    {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing);
-        const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
-        const bool hot = isEnabled() && underMouse();
-        if (m_round) {
-            QPainterPath circle;
-            circle.addEllipse(r);
-            painter.fillPath(circle, theme::color(isDown() ? theme::Role::panelTitle
-                                                  : hot     ? theme::Role::sideBarHover
-                                                            : theme::Role::sideBar));
-            painter.setPen(theme::color(theme::Role::divider));
-            painter.drawPath(circle);
-        } else if (hot) {
-            QPainterPath box;
-            box.addRoundedRect(r, 3, 3);
-            painter.fillPath(box, theme::color(isDown() ? theme::Role::panelTitle : theme::Role::sideBarHover));
-        }
-        // A chevron 10 px across, as in the mockups' 8-unit glyph.
-        const qreal s = 1.25;
-        const QPointF c = QRectF(rect()).center();
-        QPolygonF chevron;
-        switch (m_direction) {
-        case Direction::Left:
-            chevron << c + QPointF(1.5 * s, -3 * s) << c + QPointF(-1.5 * s, 0) << c + QPointF(1.5 * s, 3 * s);
-            break;
-        case Direction::Right:
-            chevron << c + QPointF(-1.5 * s, -3 * s) << c + QPointF(1.5 * s, 0) << c + QPointF(-1.5 * s, 3 * s);
-            break;
-        case Direction::Up:
-            chevron << c + QPointF(-3 * s, 1.5 * s) << c + QPointF(0, -1.5 * s) << c + QPointF(3 * s, 1.5 * s);
-            break;
-        case Direction::Down:
-            chevron << c + QPointF(-3 * s, -1.5 * s) << c + QPointF(0, 1.5 * s) << c + QPointF(3 * s, -1.5 * s);
-            break;
-        }
-        painter.setPen(QPen(theme::color(isEnabled() ? theme::Role::text : theme::Role::mutedText), 1.5, Qt::SolidLine,
-                            Qt::RoundCap, Qt::RoundJoin));
-        painter.drawPolyline(chevron);
-    }
-
-private:
-    Direction m_direction;
-    bool m_round;
-};
+using ReadButton = columns::PageButton;
 
 } // namespace
 
@@ -244,13 +177,13 @@ private:
 // ---------------------------------------------------------------------------
 // Mode and layout
 
-void VisualView::setReadMode(bool on)
+void VisualView::setReadMode(bool on, int startLine)
 {
     if (m_readMode == on)
         return;
     const bool wasActive = readActive();
     // The place, as a line position, at the width it was found at.
-    const qreal position = wasActive ? m_readLinePosition : topLinePosition();
+    const qreal position = wasActive ? m_readLinePosition : startLine >= 0 ? startLine : topLinePosition();
     m_readMode = on;
     m_readWheel = 0;
     m_readOffsets.clear();

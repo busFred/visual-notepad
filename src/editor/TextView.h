@@ -16,6 +16,7 @@
 #include <QTextCursor>
 #include <QTextLayout>
 
+#include <QSet>
 #include <QString>
 #include <QStringList>
 
@@ -32,6 +33,10 @@ class QMenu;
 class QTextDocument;
 
 namespace vn {
+
+namespace md {
+struct Screen;
+}
 
 class TextView : public QAbstractScrollArea
 {
@@ -53,7 +58,9 @@ public:
     void setInsertSpaces(bool on);
     void setLineSpacing(qreal factor);
     void setCommentMarker(const QString &marker);
-    bool isReadOnly() const { return m_readOnly; }
+    // Locked (setReadOnly), or showing columns while editing in them is not
+    // built yet (see columnsBlockEditing).
+    bool isReadOnly() const { return m_readOnly || columnsBlockEditing(); }
     void setReadOnly(bool on);
     // Modifier that adds a caret on click: Alt (default) or Ctrl.
     void setMultiCursorModifier(Qt::KeyboardModifier modifier) { m_multiCursorModifier = modifier; }
@@ -112,6 +119,8 @@ public:
     int topLine() const;
     // The last line the viewport can show, at most (fewer with wrapping).
     int bottomLine() const;
+    // Whether some of a line is in the viewport (on the screen, in columns).
+    bool isLineShown(int line);
     void scrollToLine(int line);
     // The same with fractions: 12.3 is 30% of the way from where line 12
     // starts to where line 13 starts. Rendered rows place lines through
@@ -140,6 +149,37 @@ public:
 
     // Background highlights for find results; current is an index or -1.
     void setSearchHighlights(const QList<search::Range> &ranges, int current);
+
+    // Columns (TextViewColumns.cpp): the lines in columns of a set width, a
+    // screen at a time, with a page arrow at each side and a button for a
+    // line up and down, as read mode shows a rendered document (md::ReadFlow
+    // places the lines in both). Only for a view whose rows are source lines,
+    // not the visual view (it has read mode). Turned on, the first column
+    // starts at startLine (-1: the line at the top); turned off, the view
+    // scrolls so the first column's first line is at the top.
+    void setColumnsShown(bool on, int startLine = -1);
+    bool columnsShown() const { return m_columnsOn; }
+    // 0: as many as fit.
+    void setColumnCount(int columns);
+    // Characters of text per column, in the editor font's character width.
+    void setColumnChars(int chars);
+    int shownColumnCount();
+    int maxColumnCount();
+    // The lines on screen in columns (0-based, both included), or (-1, -1).
+    std::pair<int, int> columnLineRange();
+    void columnsPageForward();
+    void columnsPageBack();
+    // Negative: up. Lines are the rows the screen shows (wrapped ones count).
+    void columnsNudge(int lines);
+    void columnsToStart();
+    void columnsToEnd();
+    // Where a column is in the viewport, its gutter included; empty if none.
+    QRect columnRect(int column);
+    // How far a column's lines are scrolled sideways (Word Wrap off: each
+    // column has its own), and its scroll bar (empty if it needs none).
+    qreal columnOffset(int column);
+    void setColumnOffset(int column, qreal offset);
+    QRect columnBarRect(int column);
 
 public Q_SLOTS:
     void undo();
@@ -233,6 +273,9 @@ Q_SIGNALS:
     void linkRequested(const QString &url);
     // Ctrl+wheel: this many notches up (positive) or down.
     void zoomRequested(int notches);
+    // Columns came or went, or the screen or what fits changed. Sent once
+    // the event that changed it is done.
+    void columnsChanged();
 
 protected:
     struct Row
@@ -352,6 +395,54 @@ protected:
     void dropEvent(QDropEvent *event) override;
 
 private:
+    // Columns of source lines; see setColumnsShown (TextViewColumns.cpp).
+    struct Columns;
+    class ColumnRows;
+    struct ColumnLayout
+    {
+        int count = 1;    // Columns shown.
+        int fit = 1;      // The most that fit.
+        int left = 0;     // Of the first column, its gutter included.
+        int top = 0;
+        int width = 0;    // Of a column's text.
+        int textLeft = 0; // From a column's left edge to its text.
+        int gap = 0;
+        int height = 0;   // What the lines get; the scroll bars go below.
+        int columnWidth() const { return textLeft + width; }
+        int columnLeft(int column) const { return left + column * (columnWidth() + gap); }
+    };
+    // STEP 1 of columns for text: no edits while columns show. The one place
+    // that says so; editing in columns lifts it.
+    bool columnsBlockEditing() const { return m_columnsOn; }
+    // Made on first use.
+    Columns &columnState();
+    const ColumnLayout &columnLayout();
+    qreal columnsCharWidth() const;
+    const md::Screen &columnsScreen();
+    void columnsMoved(bool keepOffsets);
+    // The lines changed: renumbered (a line added or removed, all laid out
+    // anew), or only their colours or heights.
+    void columnsRowsChanged(bool renumbered);
+    void noteColumns();
+    void placeColumnControls();
+    void updateColumnControls();
+    void paintColumns(QPaintEvent *event);
+    bool columnsKey(QKeyEvent *event);
+    void columnsWheel(QWheelEvent *event);
+    void columnsEnsureCursorVisible();
+    int columnsPositionAt(const QPointF &point);
+    int columnsRowAt(const QPointF &point, QPointF *origin);
+    // Where a caret is drawn in columns, and in which column; null if it is
+    // not on the screen.
+    QRectF columnsCaretRect(const QTextCursor &cursor, int *column = nullptr);
+    // The column (and its x) a point is in: the nearest, the gaps shared.
+    int columnAtX(qreal x);
+    // Widest line a column shows (Word Wrap off), to scroll it sideways.
+    qreal columnContentWidth(int column);
+    bool columnBarPressed(QMouseEvent *event);
+    bool columnBarMoved(QMouseEvent *event);
+    void columnsPage(bool forward, bool moveCarets, bool select);
+
     struct DiagnosticRange
     {
         QTextCursor start;
@@ -485,6 +576,26 @@ private:
     void normalizeCarets();
     void undoRedo(bool undo);
     void caretsChanged();
+    // Paints a source line's layout at origin: what is behind it (shade is
+    // the strip the current line gets), find results, selections, the text,
+    // diagnostics and carets. The state is the same for every line of a paint.
+    struct LinePaintState
+    {
+        QSet<int> currentLines;
+        struct DiagnosticSpan
+        {
+            int start;
+            int end;
+            int index;
+        };
+        std::vector<DiagnosticSpan> diagnosticSpans;
+        std::vector<int> diagnosticMaxEnd;
+        QColor selectionText;
+        bool recolorSelection = false;
+    };
+    LinePaintState linePaintState() const;
+    void paintSourceLine(QPainter &painter, int lineNo, const QPointF &origin, const QRectF &shade,
+                         const LinePaintState &state);
     QTextCursor wordAt(const QTextCursor &cursor) const;
     QTextCursor findNext(const QString &text, int from) const;
     void restartBlink();
@@ -637,6 +748,13 @@ private:
     // Double click time and place, for detecting the triple click.
     QElapsedTimer m_doubleClickTime;
     QPointF m_doubleClickPos;
+
+    // Columns: made when first shown.
+    std::unique_ptr<Columns> m_columns;
+    bool m_columnsOn = false;
+    // The first and last line on screen in columns, for the const queries.
+    int m_columnsFirst = 0;
+    int m_columnsLast = 0;
 
     // Caret blink and input method.
     QBasicTimer m_blink;

@@ -174,6 +174,8 @@ QList<Command> build()
         {QStringLiteral("view.scrollPageUp"), view, tr("Scroll Page Up"), {k("Alt+PgUp")}},
         {QStringLiteral("view.scrollPageDown"), view, tr("Scroll Page Down"), {k("Alt+PgDown")}},
         {QStringLiteral("view.wordWrap"), view, tr("&Word Wrap"), {k("Alt+Z")}},
+        // Scroll or Columns, as the switch in the status bar (no free letter).
+        {QStringLiteral("view.columns"), view, tr("Columns"), {}},
         {QStringLiteral("view.statusBar"), view, tr("St&atus Bar"), {}},
         {QStringLiteral("view.collapseAll"), view, tr("Collapse All &Blocks"), {k("Ctrl+K, Ctrl+0")}},
         {QStringLiteral("view.expandAll"), view, tr("E&xpand All"), {k("Ctrl+K, Ctrl+J")}},

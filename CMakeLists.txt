@@ -66,12 +66,16 @@ add_library(vn_app STATIC
     src/editor/Indentation.cpp
     src/editor/Indentation.h
     src/editor/FindBar.h
+    src/editor/ReadControls.cpp
+    src/editor/ReadControls.h
     src/editor/Search.cpp
     src/editor/Search.h
     src/editor/TextView.cpp
     src/editor/TextViewFormat.cpp
     src/editor/TableSizePicker.cpp
     src/editor/TableSizePicker.h
+    src/editor/TextViewColumns.cpp
+    src/editor/TextViewColumns.h
     src/editor/TextViewTable.cpp
     src/editor/TextView.h
     src/markdown/BlockRenderer.cpp

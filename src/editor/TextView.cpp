@@ -5,6 +5,7 @@
 #include "../Theme.h"
 #include "DocumentLayout.h"
 #include "TableSizePicker.h"
+#include "TextViewColumns.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -124,8 +125,6 @@ TextView::TextView(QTextDocument *document, QWidget *parent)
     connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this] { viewport()->update(); });
     updateScrollBars();
 }
-
-TextView::~TextView() = default;
 
 // ---------------------------------------------------------------------------
 // Options
@@ -410,6 +409,7 @@ void TextView::onDocumentChanged(int from, int charsRemoved, int charsAdded)
         spliceTableRun(first, oldAffected, newAffected);
     }
     m_topRow = qBound(0, m_topRow, qMax(0, rowCount() - 1));
+    columnsRowsChanged(true);
     rowsMayHaveChanged();
     updateScrollBars();
     viewport()->update();
@@ -489,6 +489,7 @@ void TextView::shiftSearchRanges(int from, int charsRemoved, int charsAdded)
 void TextView::relayout()
 {
     invalidateLayouts();
+    columnsRowsChanged(true);
     rowsMayHaveChanged();
     updateScrollBars();
     viewport()->update();
@@ -512,6 +513,7 @@ void TextView::formatsChanged(int firstLine, int lastLine)
     }
     if (!laidOut)
         return;
+    columnsRowsChanged(false);
     updateScrollBars();
     viewport()->update();
 }
@@ -533,6 +535,8 @@ qreal TextView::textLeft() const
 
 qreal TextView::textWidth() const
 {
+    if (m_columnsOn) // A column's.
+        return const_cast<TextView *>(this)->columnLayout().width;
     return qMax<qreal>(m_charWidth * 4, viewport()->width() - textLeft() - m_rightMargin);
 }
 
@@ -546,16 +550,38 @@ void TextView::setTextMargins(qreal left, qreal right, qreal top)
 
 int TextView::topLine() const
 {
+    if (m_columnsOn)
+        return m_columnsFirst;
     return row(m_topRow).firstLine;
 }
 
 int TextView::bottomLine() const
 {
+    if (m_columnsOn)
+        return m_columnsLast;
     return qMin(m_doc->blockCount() - 1, topLine() + viewport()->height() / qMax(1, m_lineHeight) + 1);
+}
+
+bool TextView::isLineShown(int line)
+{
+    if (m_columnsOn) {
+        const std::pair<int, int> range = columnLineRange();
+        return range.first >= 0 && line >= range.first && line <= range.second;
+    }
+    qreal top = 0;
+    qreal bottom = 0;
+    return lineBounds(line, &top, &bottom) && bottom > 0 && top < viewport()->height();
 }
 
 void TextView::scrollToLine(int line)
 {
+    if (m_columnsOn) {
+        // The screen that starts with it, at the next paint.
+        m_columns->startLine = qBound(0, line, m_doc->blockCount() - 1);
+        m_columns->needsStart = true;
+        viewport()->update();
+        return;
+    }
     const int target = qBound(0, rowOfLine(qBound(0, line, m_doc->blockCount() - 1)), qMax(0, rowCount() - 1));
     if (target == m_topRow && m_topOffset == 0)
         return;
@@ -687,6 +713,8 @@ qreal TextView::scrollPixels()
 
 int TextView::rowAtPoint(const QPointF &point, QPointF *origin)
 {
+    if (m_columnsOn)
+        return columnsRowAt(point, origin);
     qreal top = 0;
     const int index = rowAt(point.y(), &top);
     *origin = QPointF(textLeft(), top);
@@ -806,7 +834,7 @@ void TextView::updateScrollBars()
     v->setValue(m_topRow);
 
     QScrollBar *h = horizontalScrollBar();
-    if (m_wordWrap) {
+    if (m_wordWrap || m_columnsOn) { // (Each column scrolls on its own.)
         h->setRange(0, 0);
     } else {
         h->setRange(0, qMax(0, int(m_maxLineWidth - textWidth() + m_charWidth * 2)));
@@ -920,6 +948,8 @@ bool TextView::lineBounds(int line, qreal *top, qreal *bottom)
 
 QRectF TextView::caretRect(const QTextCursor &cursor)
 {
+    if (m_columnsOn)
+        return columnsCaretRect(cursor);
     const QTextBlock block = cursor.block();
     const int rowIndex = rowOfLine(block.blockNumber());
     qreal top = 0;
@@ -946,6 +976,8 @@ qreal TextView::cursorX(const QTextCursor &cursor)
 
 int TextView::positionAt(const QPointF &point)
 {
+    if (m_columnsOn)
+        return columnsPositionAt(point);
     qreal y = firstRowY();
     const int rows = rowCount();
     int r = m_topRow;
@@ -979,6 +1011,8 @@ int TextView::positionAt(const QPointF &point)
 
 void TextView::ensureCursorVisible()
 {
+    if (m_columnsOn)
+        return columnsEnsureCursorVisible();
     if (viewport()->height() <= 0)
         return;
     const QTextCursor cursor = textCursor();
@@ -1049,6 +1083,8 @@ void TextView::ensureCursorVisible()
 
 void TextView::centerCursor()
 {
+    if (m_columnsOn)
+        return columnsEnsureCursorVisible(); // (The screen that starts with it, if it is not on this one.)
     const int rowIndex = rowOfLine(textCursor().blockNumber());
     qreal remaining = viewport()->height() / 2.0;
     int topRow = rowIndex;
@@ -1074,8 +1110,152 @@ void TextView::setSearchHighlights(const QList<search::Range> &ranges, int curre
 // ---------------------------------------------------------------------------
 // Painting
 
+TextView::LinePaintState TextView::linePaintState() const
+{
+    LinePaintState state;
+    // Lines that hold a caret with no selection get the current-line shade.
+    for (const Caret &caret : m_carets) {
+        if (!caret.cursor.hasSelection())
+            state.currentLines.insert(caret.cursor.blockNumber());
+    }
+    // Diagnostics by start, with the running maximum of their ends, so each
+    // line finds the ones reaching it by binary search.
+    state.diagnosticSpans.reserve(m_diagnostics.size());
+    for (int i = 0; i < m_diagnostics.size(); ++i)
+        state.diagnosticSpans.push_back({m_diagnostics.at(i).start.position(), m_diagnostics.at(i).end.position(), i});
+    std::stable_sort(state.diagnosticSpans.begin(), state.diagnosticSpans.end(),
+                     [](const LinePaintState::DiagnosticSpan &a, const LinePaintState::DiagnosticSpan &b) {
+                         return a.start < b.start;
+                     });
+    int runningEnd = 0;
+    for (const LinePaintState::DiagnosticSpan &d : state.diagnosticSpans)
+        state.diagnosticMaxEnd.push_back(runningEnd = qMax(runningEnd, d.end));
+    // A selection text colour other than the normal text (Legacy's white on
+    // navy) replaces the syntax colours inside the selection.
+    state.selectionText = theme::color(theme::Role::selectionText);
+    state.recolorSelection = state.selectionText != theme::color(theme::Role::text);
+    return state;
+}
+
+void TextView::paintSourceLine(QPainter &painter, int lineNo, const QPointF &origin, const QRectF &shade,
+                               const LinePaintState &state)
+{
+    const QTextBlock block = m_doc->findBlockByNumber(lineNo);
+    QTextLayout *layout = layoutForLine(lineNo);
+    const qreal y = origin.y();
+    paintLineBackground(painter, lineNo, shade);
+    if (m_highlightCurrentLine && state.currentLines.contains(lineNo))
+        painter.fillRect(shade, theme::color(theme::Role::currentLine));
+
+    const int blockStart = block.position();
+    const int blockEnd = blockStart + block.length(); // Includes the separator.
+
+    // Backgrounds are filled by hand so they span the full line height
+    // (QTextLayout's own selection only covers the font height).
+    const auto fillRange = [&](int start, int end, const QColor &color, bool newline) {
+        for (int i = 0; i < layout->lineCount(); ++i) {
+            const QTextLine textLine = layout->lineAt(i);
+            const int ls = textLine.textStart();
+            const int le = ls + textLine.textLength();
+            const bool last = i == layout->lineCount() - 1;
+            const int s = qMax(start, ls);
+            const int e = qMin(end, le);
+            if (s > e || (s == e && !(newline && last && e == le)))
+                continue;
+            qreal x1 = textLine.cursorToX(s);
+            qreal x2 = textLine.cursorToX(e);
+            if (x1 > x2)
+                std::swap(x1, x2);
+            if (newline && last && end > le)
+                x2 += m_charWidth; // Show the selected line break.
+            painter.fillRect(QRectF(origin.x() + x1, y + textLine.y() - m_linePad, x2 - x1, m_lineHeight), color);
+        }
+    };
+    // The ranges are sorted, so start at the first one reaching this line.
+    const auto firstMatch = std::lower_bound(m_searchRanges.cbegin(), m_searchRanges.cend(), blockStart,
+                                             [](const search::Range &r, int pos) { return r.end <= pos; });
+    for (int i = int(firstMatch - m_searchRanges.cbegin()); i < m_searchRanges.size(); ++i) {
+        const search::Range &match = m_searchRanges.at(i);
+        if (match.start >= blockEnd)
+            break;
+        fillRange(match.start - blockStart, match.end - blockStart,
+                  i == m_searchCurrent ? searchCurrentColor() : searchColor(), false);
+    }
+    QList<QTextLayout::FormatRange> selectedText;
+    // Carets are sorted and disjoint: only the ones reaching this line.
+    const auto firstCaret = std::lower_bound(m_carets.begin(), m_carets.end(), blockStart,
+                                             [](const Caret &c, int pos) { return c.cursor.selectionEnd() < pos; });
+    const auto endCaret = std::find_if(firstCaret, m_carets.end(), [blockEnd](const Caret &c) {
+        return c.cursor.selectionStart() >= blockEnd;
+    });
+    for (auto it = firstCaret; it != endCaret; ++it) {
+        const QTextCursor &c = it->cursor;
+        if (!c.hasSelection())
+            continue;
+        fillRange(c.selectionStart() - blockStart, c.selectionEnd() - blockStart, theme::color(theme::Role::selection),
+                  c.selectionEnd() >= blockEnd);
+        if (state.recolorSelection) {
+            QTextLayout::FormatRange range;
+            range.start = qMax(c.selectionStart(), blockStart) - blockStart;
+            range.length = qMin(c.selectionEnd(), blockEnd) - blockStart - range.start;
+            range.format.setForeground(state.selectionText);
+            selectedText.append(range);
+        }
+    }
+
+    painter.setPen(theme::color(theme::Role::text));
+    layout->draw(&painter, origin, selectedText);
+
+    const auto &spans = state.diagnosticSpans;
+    const auto &maxEnd = state.diagnosticMaxEnd;
+    for (auto span = spans.begin() + (std::upper_bound(maxEnd.begin(), maxEnd.end(), blockStart) - maxEnd.begin());
+         span != spans.end() && span->start < blockEnd; ++span) {
+        const int rangeStart = span->start;
+        const int rangeEnd = span->end;
+        if (rangeEnd <= blockStart)
+            continue;
+        painter.save();
+        painter.setPen(QPen(diagnosticColor(), 1));
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const int ds = qMax(rangeStart, blockStart) - blockStart;
+        const int de = qMin(rangeEnd, blockEnd - 1) - blockStart;
+        for (int i = 0; i < layout->lineCount(); ++i) {
+            const QTextLine textLine = layout->lineAt(i);
+            const int s = qMax(ds, textLine.textStart());
+            const int e = qMin(de, textLine.textStart() + textLine.textLength());
+            if (s >= e)
+                continue;
+            const qreal x1 = origin.x() + textLine.cursorToX(s);
+            const qreal x2 = origin.x() + textLine.cursorToX(e);
+            const qreal base = y + textLine.y() + textLine.ascent() + 2.5;
+            QPolygonF wave;
+            bool up = false;
+            for (qreal x = x1; x < x2; x += 2, up = !up)
+                wave << QPointF(x, base + (up ? -1.0 : 1.0));
+            wave << QPointF(x2, base);
+            painter.drawPolyline(wave);
+        }
+        painter.restore();
+    }
+
+    if (hasFocus() && m_caretOn) {
+        painter.setPen(isReadOnly() ? theme::color(theme::Role::mutedText) : theme::color(theme::Role::text));
+        for (auto it = firstCaret; it != endCaret; ++it) {
+            const Caret &caret = *it;
+            if (caret.cursor.block() != block)
+                continue;
+            int pos = caret.cursor.positionInBlock();
+            if (!m_preedit.isEmpty() && &caret == &m_carets[m_primary])
+                pos += m_preedit.size();
+            layout->drawCursor(&painter, origin, pos, 2);
+        }
+    }
+}
+
 void TextView::paintEvent(QPaintEvent *event)
 {
+    if (m_columnsOn)
+        return paintColumns(event);
     QPainter painter(viewport());
     const QRect area = event->rect();
     painter.fillRect(area, theme::color(theme::Role::editor));
@@ -1085,13 +1265,7 @@ void TextView::paintEvent(QPaintEvent *event)
     const int gutter = gutterWidth();
     const int height = viewport()->height();
     const int rows = rowCount();
-
-    // Lines that hold a caret with no selection get the current-line shade.
-    QSet<int> currentLines;
-    for (const Caret &caret : m_carets) {
-        if (!caret.cursor.hasSelection())
-            currentLines.insert(caret.cursor.blockNumber());
-    }
+    const LinePaintState state = linePaintState();
 
     struct VisibleLine
     {
@@ -1100,25 +1274,6 @@ void TextView::paintEvent(QPaintEvent *event)
         qreal height;
     };
     QList<VisibleLine> visibleLines;
-
-    // Diagnostics by start, with the running maximum of their ends, so each
-    // line finds the ones reaching it by binary search.
-    struct DiagnosticSpan
-    {
-        int start;
-        int end;
-        int index;
-    };
-    std::vector<DiagnosticSpan> diagnosticSpans;
-    std::vector<int> diagnosticMaxEnd;
-    diagnosticSpans.reserve(m_diagnostics.size());
-    for (int i = 0; i < m_diagnostics.size(); ++i)
-        diagnosticSpans.push_back({m_diagnostics.at(i).start.position(), m_diagnostics.at(i).end.position(), i});
-    std::stable_sort(diagnosticSpans.begin(), diagnosticSpans.end(),
-                     [](const DiagnosticSpan &a, const DiagnosticSpan &b) { return a.start < b.start; });
-    int runningEnd = 0;
-    for (const DiagnosticSpan &d : diagnosticSpans)
-        diagnosticMaxEnd.push_back(runningEnd = qMax(runningEnd, d.end));
     int paintedFirst = -1;
     int paintedLast = -1;
 
@@ -1140,124 +1295,9 @@ void TextView::paintEvent(QPaintEvent *event)
             y += h;
             continue;
         }
-
         const int lineNo = info.firstLine;
-        const QTextBlock block = m_doc->findBlockByNumber(lineNo);
-        QTextLayout *layout = layoutForLine(lineNo);
-        const QRectF rowRect(gutter, y, viewport()->width() - gutter, h);
-        paintLineBackground(painter, lineNo, rowRect);
-        if (m_highlightCurrentLine && currentLines.contains(lineNo))
-            painter.fillRect(rowRect, theme::color(theme::Role::currentLine));
-
-        const int blockStart = block.position();
-        const int blockEnd = blockStart + block.length(); // Includes the separator.
-        const QPointF origin(left - hscroll, y);
-
-        // Backgrounds are filled by hand so they span the full line height
-        // (QTextLayout's own selection only covers the font height).
-        const auto fillRange = [&](int start, int end, const QColor &color, bool newline) {
-            for (int i = 0; i < layout->lineCount(); ++i) {
-                const QTextLine textLine = layout->lineAt(i);
-                const int ls = textLine.textStart();
-                const int le = ls + textLine.textLength();
-                const bool last = i == layout->lineCount() - 1;
-                const int s = qMax(start, ls);
-                const int e = qMin(end, le);
-                if (s > e || (s == e && !(newline && last && e == le)))
-                    continue;
-                qreal x1 = textLine.cursorToX(s);
-                qreal x2 = textLine.cursorToX(e);
-                if (x1 > x2)
-                    std::swap(x1, x2);
-                if (newline && last && end > le)
-                    x2 += m_charWidth; // Show the selected line break.
-                painter.fillRect(QRectF(origin.x() + x1, y + textLine.y() - m_linePad, x2 - x1, m_lineHeight), color);
-            }
-        };
-        // The ranges are sorted, so start at the first one reaching this line.
-        const auto firstMatch = std::lower_bound(m_searchRanges.cbegin(), m_searchRanges.cend(), blockStart,
-                                                 [](const search::Range &r, int pos) { return r.end <= pos; });
-        for (int i = int(firstMatch - m_searchRanges.cbegin()); i < m_searchRanges.size(); ++i) {
-            const search::Range &match = m_searchRanges.at(i);
-            if (match.start >= blockEnd)
-                break;
-            fillRange(match.start - blockStart, match.end - blockStart,
-                      i == m_searchCurrent ? searchCurrentColor() : searchColor(), false);
-        }
-        // A selection text colour other than the normal text (Legacy's white on
-        // navy) replaces the syntax colours inside the selection.
-        const QColor selectionText = theme::color(theme::Role::selectionText);
-        const bool recolorSelection = selectionText != theme::color(theme::Role::text);
-        QList<QTextLayout::FormatRange> selectedText;
-        // Carets are sorted and disjoint: only the ones reaching this line.
-        const auto firstCaret =
-            std::lower_bound(m_carets.begin(), m_carets.end(), blockStart,
-                             [](const Caret &c, int pos) { return c.cursor.selectionEnd() < pos; });
-        const auto endCaret = std::find_if(firstCaret, m_carets.end(), [blockEnd](const Caret &c) {
-            return c.cursor.selectionStart() >= blockEnd;
-        });
-        for (auto it = firstCaret; it != endCaret; ++it) {
-            const QTextCursor &c = it->cursor;
-            if (!c.hasSelection())
-                continue;
-            fillRange(c.selectionStart() - blockStart, c.selectionEnd() - blockStart, theme::color(theme::Role::selection),
-                      c.selectionEnd() >= blockEnd);
-            if (recolorSelection) {
-                QTextLayout::FormatRange range;
-                range.start = qMax(c.selectionStart(), blockStart) - blockStart;
-                range.length = qMin(c.selectionEnd(), blockEnd) - blockStart - range.start;
-                range.format.setForeground(selectionText);
-                selectedText.append(range);
-            }
-        }
-
-        painter.setPen(theme::color(theme::Role::text));
-        layout->draw(&painter, origin, selectedText);
-
-        for (auto span = diagnosticSpans.begin()
-                         + (std::upper_bound(diagnosticMaxEnd.begin(), diagnosticMaxEnd.end(), blockStart)
-                            - diagnosticMaxEnd.begin());
-             span != diagnosticSpans.end() && span->start < blockEnd; ++span) {
-            const int rangeStart = span->start;
-            const int rangeEnd = span->end;
-            if (rangeEnd <= blockStart)
-                continue;
-            painter.save();
-            painter.setPen(QPen(diagnosticColor(), 1));
-            painter.setRenderHint(QPainter::Antialiasing, true);
-            const int ds = qMax(rangeStart, blockStart) - blockStart;
-            const int de = qMin(rangeEnd, blockEnd - 1) - blockStart;
-            for (int i = 0; i < layout->lineCount(); ++i) {
-                const QTextLine textLine = layout->lineAt(i);
-                const int s = qMax(ds, textLine.textStart());
-                const int e = qMin(de, textLine.textStart() + textLine.textLength());
-                if (s >= e)
-                    continue;
-                const qreal x1 = origin.x() + textLine.cursorToX(s);
-                const qreal x2 = origin.x() + textLine.cursorToX(e);
-                const qreal base = y + textLine.y() + textLine.ascent() + 2.5;
-                QPolygonF wave;
-                bool up = false;
-                for (qreal x = x1; x < x2; x += 2, up = !up)
-                    wave << QPointF(x, base + (up ? -1.0 : 1.0));
-                wave << QPointF(x2, base);
-                painter.drawPolyline(wave);
-            }
-            painter.restore();
-        }
-
-        if (hasFocus() && m_caretOn) {
-            painter.setPen(m_readOnly ? theme::color(theme::Role::mutedText) : theme::color(theme::Role::text));
-            for (auto it = firstCaret; it != endCaret; ++it) {
-                const Caret &caret = *it;
-                if (caret.cursor.block() != block)
-                    continue;
-                int pos = caret.cursor.positionInBlock();
-                if (!m_preedit.isEmpty() && &caret == &m_carets[m_primary])
-                    pos += m_preedit.size();
-                layout->drawCursor(&painter, origin, pos, 2);
-            }
-        }
+        paintSourceLine(painter, lineNo, QPointF(left - hscroll, y), QRectF(gutter, y, viewport()->width() - gutter, h),
+                        state);
         visibleLines.append({lineNo, y, h});
         y += h;
     }
@@ -1268,7 +1308,8 @@ void TextView::paintEvent(QPaintEvent *event)
         painter.setFont(font());
         const QFontMetricsF fm(font());
         for (const VisibleLine &line : std::as_const(visibleLines)) {
-            painter.setPen(currentLines.contains(line.line) ? theme::color(theme::Role::text) : theme::color(theme::Role::gutterText));
+            painter.setPen(state.currentLines.contains(line.line) ? theme::color(theme::Role::text)
+                                                                  : theme::color(theme::Role::gutterText));
             painter.drawText(QRectF(0, line.top + m_linePad, gutter - gutterRightPad, fm.height()),
                              Qt::AlignRight | Qt::AlignVCenter, QString::number(line.line + 1));
         }
@@ -1322,6 +1363,8 @@ bool TextView::event(QEvent *event)
 
 void TextView::keyPressEvent(QKeyEvent *event)
 {
+    if (m_columnsOn && columnsKey(event))
+        return;
     const auto mods = event->modifiers() & ~Qt::KeypadModifier;
     const bool shift = mods & Qt::ShiftModifier;
     const bool ctrl = mods & Qt::ControlModifier;
@@ -1505,7 +1548,7 @@ QVariant TextView::inputMethodQuery(Qt::InputMethodQuery query) const
     const QTextCursor cursor = textCursor();
     switch (query) {
     case Qt::ImEnabled:
-        return !m_readOnly;
+        return !isReadOnly();
     case Qt::ImCursorRectangle:
         return self->caretRect(cursor).toAlignedRect().translated(viewport()->pos());
     case Qt::ImFont:
@@ -1539,6 +1582,8 @@ void TextView::mousePressEvent(QMouseEvent *event)
         return;
     }
     setFocus(Qt::MouseFocusReason);
+    if (m_columnsOn && columnBarPressed(event))
+        return;
     QPointF origin;
     const int pressedRow = rowAtPoint(event->position(), &origin);
     if (pressedRow >= 0) {
@@ -1569,7 +1614,7 @@ void TextView::mousePressEvent(QMouseEvent *event)
 
     const auto others = mods & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier);
     if ((mods & Qt::ShiftModifier) && others == m_multiCursorModifier && pressedRow >= 0
-        && !row(pressedRow).rendered) {
+        && !row(pressedRow).rendered && !m_columnsOn) { // (Not across columns.)
         // Shift+Alt+drag (Shift+Ctrl+drag): box selection. It starts from the
         // primary caret, or from where the previous box selection started.
         const QTextCursor primary = textCursor();
@@ -1769,6 +1814,8 @@ bool TextView::columnSelectTo(const QPointF &point)
 
 void TextView::mouseMoveEvent(QMouseEvent *event)
 {
+    if (m_columnsOn && columnBarMoved(event))
+        return;
     if (m_markdown && !m_dragging && event->buttons() == Qt::NoButton) {
         // Rendered rows are the subclass's business.
         qreal top = 0;
@@ -1808,6 +1855,10 @@ void TextView::mouseMoveEvent(QMouseEvent *event)
 void TextView::mouseReleaseEvent(QMouseEvent *event)
 {
     Q_UNUSED(event);
+    if (m_columns && m_columns->barDrag.active) {
+        m_columns->barDrag = {};
+        viewport()->update();
+    }
     m_dragging = false;
     m_columnDragging = false;
     m_autoScroll.stop();
@@ -1829,6 +1880,8 @@ void TextView::wheelEvent(QWheelEvent *event)
         event->accept();
         return;
     }
+    if (m_columnsOn)
+        return columnsWheel(event);
     if (event->angleDelta().x() != 0 && !m_wordWrap) {
         horizontalScrollBar()->setValue(horizontalScrollBar()->value() - event->angleDelta().x() / 2);
     }
@@ -1873,6 +1926,10 @@ void TextView::resizeEvent(QResizeEvent *event)
     if (m_wordWrap)
         rowsMayHaveChanged();
     updateScrollBars();
+    if (m_columnsOn) {
+        placeColumnControls();
+        noteColumns();
+    }
 }
 
 void TextView::timerEvent(QTimerEvent *event)
@@ -1883,9 +1940,10 @@ void TextView::timerEvent(QTimerEvent *event)
     } else if (event->timerId() == m_autoScroll.timerId()) {
         const qreal h = viewport()->height();
         QScrollBar *v = verticalScrollBar();
-        if (m_lastMousePos.y() < 0)
+        // (Columns do not move under a drag yet.)
+        if (!m_columnsOn && m_lastMousePos.y() < 0)
             v->setValue(v->value() - 1);
-        else if (m_lastMousePos.y() > h)
+        else if (!m_columnsOn && m_lastMousePos.y() > h)
             v->setValue(v->value() + 1);
         if (m_columnDragging) {
             columnSelectTo(QPointF(m_lastMousePos.x(), qBound<qreal>(0, m_lastMousePos.y(), h - 1)));
@@ -2253,6 +2311,8 @@ QString TextView::searchSeedText() const
 
 void TextView::scrollPage(bool forward)
 {
+    if (m_columnsOn)
+        return columnsPage(forward, false, false);
     // A page is the window's height less two lines, as in VS Code.
     const int lines = qMax(1, viewport()->height() / m_lineHeight - 2);
     m_topOffset += (forward ? 1 : -1) * lines * m_lineHeight;
@@ -2350,7 +2410,7 @@ void TextView::applyCursorHistory(int index, bool undo)
 
 bool TextView::canEdit() const
 {
-    return !m_readOnly;
+    return !isReadOnly();
 }
 
 void TextView::beginEdit()

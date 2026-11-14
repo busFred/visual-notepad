@@ -231,13 +231,14 @@ QList<int> legalCuts(RowSource *source, int row, RowKind kind, int h)
 // the cuts are 2 lines from the row's ends, but a row cut again, in a later
 // column, must not leave a line alone either. a is where the piece starts and
 // b where it ends; a piece that goes to the row's end is left to the cuts.
-bool piece2Lines(const QList<int> &tops, int a, int b, int h)
+// (The source can ask for fewer: RowSource::minPieceLines.)
+bool piece2Lines(const QList<int> &tops, int a, int b, int h, int least = 2)
 {
     if (b >= h)
         return true;
     const auto lo = std::lower_bound(tops.begin(), tops.end(), a);
     const auto hi = std::lower_bound(tops.begin(), tops.end(), b);
-    return hi - lo >= 2;
+    return hi - lo >= least;
 }
 
 } // namespace
@@ -294,8 +295,9 @@ Position ReadFlow::fillColumn(Position position, Column &column) const
         int cut = 0;
         if (!cuts.isEmpty()) {
             const QList<int> t = tops(row);
+            const int least = m_source->minPieceLines(row);
             for (auto it = cuts.rbegin(); it != cuts.rend(); ++it) {
-                if (*it > y && *it - y + header <= room && piece2Lines(t, y, *it, h)) {
+                if (*it > y && *it - y + header <= room && piece2Lines(t, y, *it, h, least)) {
                     cut = *it;
                     break;
                 }
@@ -476,9 +478,10 @@ Position ReadFlow::backwardStart(Position end) const
             const int header = kind == RowKind::Table ? qMax(0, m_source->headerHeight(row)) : 0;
             const QList<int> cuts = legalCuts(m_source, row, kind, h);
             const QList<int> t = cuts.isEmpty() ? QList<int>() : tops(row);
+            const int least = m_source->minPieceLines(row);
             int cut = -1;
             for (const int c2 : cuts) {
-                if (c2 < yEnd && yEnd - c2 + header <= room && piece2Lines(t, c2, yEnd, h)) {
+                if (c2 < yEnd && yEnd - c2 + header <= room && piece2Lines(t, c2, yEnd, h, least)) {
                     cut = c2;
                     break;
                 }
