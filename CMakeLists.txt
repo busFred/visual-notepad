@@ -66,6 +66,8 @@ add_library(vn_app STATIC
     src/editor/Indentation.cpp
     src/editor/Indentation.h
     src/editor/FindBar.h
+    src/editor/ReadControls.cpp
+    src/editor/ReadControls.h
     src/editor/Search.cpp
     src/editor/Search.h
     src/editor/TextView.cpp
