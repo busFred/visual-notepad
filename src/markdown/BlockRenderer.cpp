@@ -1577,6 +1577,82 @@ QTextTable *onlyTable(const QTextDocument &doc)
     return table;
 }
 
+// Lays the one table of `doc` out in a column `width` wide the way browsers
+// lay out an automatic table (CSS 2.2, 17.5.2.2). Each column has a least
+// width (its longest word, a formula or a picture, which cannot wrap) and a
+// widest (its text on one line). The table takes its widest, if that fits the
+// column. If not, but the least widths do, each column gets its least plus a
+// share of what is left in proportion to how much wider it would like to
+// be, so that long text wraps and short columns stay as they are. Returns 0
+// when the table fits, else its widest width, laid out so (the caller scrolls
+// it). Cells that span columns or rows have no width of their own: such a
+// table is left to Qt, which squeezes its widest columns first.
+qreal fitTable(QTextDocument &doc, QTextTable &table, qreal width)
+{
+    // Words wrap at their ends only (Qt's default breaks them anywhere, so
+    // its narrowest layout would not tell the longest word).
+    QTextOption option = doc.defaultTextOption();
+    option.setWrapMode(QTextOption::WordWrap);
+    doc.setDefaultTextOption(option);
+
+    doc.setTextWidth(unboundedWidth);
+    const qreal widest = std::ceil(doc.idealWidth());
+    if (widest <= width) {
+        doc.setTextWidth(width);
+        return 0;
+    }
+    // Every column as narrow as it goes.
+    doc.setTextWidth(1);
+    const qreal narrowest = std::ceil(doc.idealWidth());
+    if (narrowest > width)
+        return widest;
+
+    const int columns = table.columns();
+    bool plain = columns > 0;
+    for (int row = 0; plain && row < table.rows(); ++row) {
+        for (int col = 0; col < columns; ++col) {
+            const QTextTableCell cell = table.cellAt(row, col);
+            if (cell.columnSpan() != 1 || cell.rowSpan() != 1)
+                plain = false;
+        }
+    }
+    if (!plain) {
+        doc.setTextWidth(width);
+        return 0;
+    }
+    // The text of each column (as wide in every row): from the first row.
+    QAbstractTextDocumentLayout *layout = doc.documentLayout();
+    const auto texts = [&] {
+        QList<QRectF> rects;
+        for (int col = 0; col < columns; ++col)
+            rects.push_back(layout->blockBoundingRect(table.cellAt(0, col).firstCursorPosition().block()));
+        return rects;
+    };
+    const QList<QRectF> least = texts();
+    doc.setTextWidth(unboundedWidth);
+    const QList<QRectF> most = texts();
+    // What a column takes around its text: the padding and border between
+    // one column's text and the next one's.
+    const qreal around = columns > 1 ? most[1].left() - most[0].right() : 2 * table.format().cellPadding() + 1;
+    qreal wanted = 0;
+    for (int col = 0; col < columns; ++col)
+        wanted += most[col].width() - least[col].width();
+    // What is left of the column past the narrowest layout, in Qt's fixed
+    // point (1/64 px; the shares rounded down so that they never add up to more).
+    const qreal spare = std::floor((width - narrowest) * 64) / 64;
+    QList<QTextLength> lengths;
+    for (int col = 0; col < columns; ++col) {
+        const qreal share =
+            wanted > 0 ? std::floor(spare * (most[col].width() - least[col].width()) / wanted * 64) / 64 : 0;
+        lengths.push_back(QTextLength(QTextLength::FixedLength, least[col].width() + around + share));
+    }
+    QTextTableFormat format = table.format();
+    format.setColumnWidthConstraints(lengths);
+    table.setFormat(format);
+    doc.setTextWidth(width);
+    return 0;
+}
+
 std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString &definition,
                                             const RenderContext &context, qreal width, bool wrapAnywhere,
                                             bool highlight)
@@ -1934,19 +2010,18 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
             r.m_item.topMargin = first.blockFormat().topMargin();
             r.m_item.bottomMargin = doc->lastBlock().blockFormat().bottomMargin();
         }
-        doc->setTextWidth(context.width);
-        if (context.overflow && !item && onlyTable(*doc)) {
-            // A table keeps the width its cells ask for (not squeezed to the
-            // column, its text wrapped), when that is wider than the column.
-            doc->setTextWidth(unboundedWidth);
-            const qreal ideal = std::ceil(doc->idealWidth());
-            if (ideal > context.width) {
-                doc->setTextWidth(ideal);
-                r.m_contentWidth = ideal;
+        QTextTable *only = context.overflow && !item ? onlyTable(*doc) : nullptr;
+        if (only) {
+            // A table fits the column as a browser fits one (see fitTable),
+            // and keeps the width its cells ask for, scrolled sideways, only
+            // when even its narrowest layout is wider than the column.
+            if (const qreal wide = fitTable(*doc, *only, context.width); wide > 0) {
+                doc->setTextWidth(wide);
+                r.m_contentWidth = wide;
                 r.m_scrollRoom = scrollBarHeight;
-            } else {
-                doc->setTextWidth(context.width);
             }
+        } else {
+            doc->setTextWidth(context.width);
         }
         // An item ends where the next starts (see itemAdvance).
         r.m_height = doc->size().height() + (item ? 0 : blockGap) + r.m_scrollRoom;

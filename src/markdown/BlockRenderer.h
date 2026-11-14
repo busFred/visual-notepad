@@ -53,9 +53,12 @@ struct RenderContext
     // block's source: for each figure of the block, in order, how large it
     // is relative to its fitted size (1: fitted; missing: 1).
     QHash<QString, QList<qreal>> figureScales;
-    // Read mode: a display formula keeps its size, and a block that is one
-    // table lays out at its natural width, when either is wider than the
-    // column (see RenderedBlock::contentWidth); the view scrolls it sideways.
+    // Read mode: a display formula keeps its size when it is wider than the
+    // column, and a block that is one table fits the column as a browser
+    // fits one (long text wraps, words and formulas stay whole, short columns
+    // keep their width) and keeps its natural width only when even its
+    // narrowest layout is wider than the column (see
+    // RenderedBlock::contentWidth); the view scrolls those sideways.
     // Everywhere else they are fitted to the width.
     bool overflow = false;
 };

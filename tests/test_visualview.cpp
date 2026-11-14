@@ -171,13 +171,33 @@ QString wideDocument(int rows = 8)
     text += QStringLiteral("| Run | Branch | Commit | Runner | Cache | Checkout | Configure | Compile | Test | Package |\n"
                            "|---|---|---|---|---|---|---|---|---|---|\n");
     for (int i = 1; i <= rows; ++i)
-        text += QStringLiteral("| #48%1 | feature/cache-%1-and-its-long-name | a41c9e%1 | runner-0%1 | partly | %1 s | 11 s | 138 s | 94 s | 22 s |\n")
+        text += QStringLiteral("| #48%1 | feature_cache_%1_and_its_long_name | a41c9e%1 | runner-0%1 | partly | %1 s | 11 s | 138 s | 94 s | 22 s |\n")
                     .arg(i);
     QStringList terms;
     for (int i = 1; i <= 40; ++i)
         terms << QStringLiteral("x_{%1}").arg(i);
     text += QStringLiteral("\n$$\n") + terms.join(QStringLiteral(" + ")) + QStringLiteral("\n$$\n\n");
     text += QStringLiteral("## Stage timings\n\n| Stage | Median |\n|---|---|\n| Checkout | 4 s |\n\nThe end.\n");
+    for (int i = 1; i <= 40; ++i)
+        text += QStringLiteral("\nFiller paragraph %1, so that the document goes on below the screen.\n").arg(i);
+    return text;
+}
+
+// Read mode's tables that squeeze into the column (long text in one column,
+// short words in the others), and one that cannot (ten columns of long words
+// that cannot wrap), each under a heading.
+QString squeezeDocument()
+{
+    QString text = QStringLiteral("# Notes\n\n| Id | Description | Owner |\n|---|---|---|\n");
+    const QString words =
+        QStringLiteral("the quick brown fox jumps over the lazy dog and keeps running through the fields until night "
+                       "falls and everybody goes home ");
+    for (int i = 1; i <= 4; ++i)
+        text += QStringLiteral("| %1 | %2 | ana |\n").arg(i).arg(words + words);
+    text += QStringLiteral("\n## Hashes\n\n| a | b | c | d | e | f | g | h | i | j |\n|---|---|---|---|---|---|---|---|---|---|\n");
+    const QString word = QStringLiteral("abcdefghijklmnop");
+    text += QStringLiteral("| %1 |\n").arg(QStringList(10, word).join(QStringLiteral(" | ")));
+    text += QStringLiteral("\nThe end.\n");
     for (int i = 1; i <= 40; ++i)
         text += QStringLiteral("\nFiller paragraph %1, so that the document goes on below the screen.\n").arg(i);
     return text;
@@ -461,6 +481,8 @@ private Q_SLOTS:
     void wideBlocksScrollSideways();
     void repeatedHeaderFollowsTheOffset();
     void openShowsAWideBlockInTheViewer();
+    void tablesSqueezeBeforeTheyScroll();
+    void tablesScrollWhenTheirLongestWordsDoNotFit();
     void readModeWaitsForTheFirstParse();
     void figureBarKeepsClicksAndPictureClickStillZooms();
     void networkPaths();
@@ -5976,6 +5998,94 @@ void TestVisualView::openShowsAWideBlockInTheViewer()
     QCOMPARE(viewers().size(), 1);
     QCOMPARE(viewers().first()->windowTitle(), QStringLiteral("table"));
     close();
+}
+
+namespace {
+
+// A table's column, as wide as the grid draws it.
+qreal gridColumn(const RenderedBlock::TableGrid &grid, int col)
+{
+    return grid.xs[col + 1] - grid.xs[col];
+}
+
+} // namespace
+
+// A table whose columns cannot all be as wide as their text asks fits the
+// column by wrapping the long text (CSS 2.2 17.5.2.2: each column is as narrow
+// as its longest word, and shares what is left in proportion to how much wider
+// it would like to be): no scrolling, so no Open and no scrollbar.
+void TestVisualView::tablesSqueezeBeforeTheyScroll()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const QString text = squeezeDocument();
+    const int squeezed = lineHolding(text, QStringLiteral("| Id"));
+    startReading(text, 1000, 1000);
+    const qreal column = view->columnWidth();
+
+    // The same table with all the room it asks for.
+    RenderContext wide;
+    wide.font = theme::textFont();
+    wide.codeFont = theme::editorFont();
+    wide.width = 100000;
+    wide.overflow = true;
+    std::unique_ptr<RenderedBlock> natural;
+    for (const core::Block &block : m_model->blocks()) {
+        if (int(block.first_line) == squeezed) {
+            const QString source = text.split(u'\n').mid(squeezed, int(block.last_line - block.first_line) + 1).join(u'\n');
+            natural = RenderedBlock::create(block, source, wide);
+        }
+    }
+    QVERIFY(natural);
+    const RenderedBlock::TableGrid *plain = natural->tableGrid();
+    QVERIFY(plain);
+    QCOMPARE(plain->cols(), 3);
+    QVERIFY(plain->xs.back() > column + 300); // Far too wide for the column as it stands.
+
+    // In the view it takes the column (no wider, and none of it spare), with no scrolling.
+    const RenderedBlock *block = view->blockOfLine(squeezed);
+    const RenderedBlock::TableGrid *grid = block->tableGrid();
+    QVERIFY(grid);
+    QCOMPARE(grid->cols(), 3);
+    QVERIFY(view->contentWidthOfLine(squeezed) <= column + 0.5);
+    QVERIFY(view->tableRightOfLine(squeezed) <= column + 1);
+    QVERIFY(view->tableRightOfLine(squeezed) > column - 4);
+    QVERIFY(block->scrollTrack(column).isNull());
+    QVERIFY(m_view->readOpenRect(squeezed).isNull());
+    // The columns of short words are as wide as they were, the long text's
+    // column gave up the room, and wrapped (the table is taller).
+    QVERIFY(qAbs(gridColumn(*grid, 0) - gridColumn(*plain, 0)) < 1.5);
+    QVERIFY(qAbs(gridColumn(*grid, 2) - gridColumn(*plain, 2)) < 1.5);
+    QVERIFY(gridColumn(*grid, 1) < gridColumn(*plain, 1) - 300);
+    QVERIFY(grid->ys.back() > 2 * plain->ys.back());
+    // Words are not broken: the column is as wide as its longest word.
+    const QFontMetricsF metrics(theme::textFont());
+    QVERIFY(gridColumn(*grid, 1) >= metrics.horizontalAdvance(QStringLiteral("everybody")));
+    if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
+        m_view->grab().save(dir + QStringLiteral("/read-table-squeezed.png"));
+    // Out of read mode nothing changed: Qt squeezes the table as it did.
+    m_view->setReadMode(false);
+    QVERIFY(view->contentWidthOfLine(squeezed) <= view->columnWidth() + 0.5);
+}
+
+// ... and only when even the least widths are too wide does it scroll, at the
+// width its text asks for (the table in the same document that does fit does not).
+void TestVisualView::tablesScrollWhenTheirLongestWordsDoNotFit()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const QString text = squeezeDocument();
+    const int squeezed = lineHolding(text, QStringLiteral("| Id"));
+    const int stuck = lineHolding(text, QStringLiteral("| a | b"));
+    startReading(text, 1000, 1000);
+    const qreal column = view->columnWidth();
+    QVERIFY(view->contentWidthOfLine(stuck) > column + 20);
+    QVERIFY(qAbs(view->contentWidthOfLine(stuck) - view->tableRightOfLine(stuck)) < 2);
+    QVERIFY(!view->blockOfLine(stuck)->scrollTrack(column).isNull());
+    // Only that one has the Open button.
+    QVERIFY(!m_view->readOpenRect(stuck).isNull());
+    QVERIFY(m_view->readOpenRect(squeezed).isNull());
+    // The words are not broken: the table is as wide as ten of them side by side.
+    const QFontMetricsF metrics(theme::textFont());
+    QVERIFY(view->contentWidthOfLine(stuck) > 10 * metrics.horizontalAdvance(QStringLiteral("abcdefghijklmnop")));
 }
 
 void TestVisualView::readModeWaitsForTheFirstParse()
