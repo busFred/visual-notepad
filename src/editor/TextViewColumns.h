@@ -4,6 +4,7 @@
 #include "../markdown/ReadFlow.h"
 #include "TextView.h"
 
+#include <QElapsedTimer>
 #include <QPointer>
 
 #include <memory>
@@ -106,6 +107,8 @@ struct TextView::Columns
     // "Caret moved to the next column", under the column it left.
     QPointer<QLabel> note;
     QPointer<QTimer> noteTimer;
+    // When a drag past the last column last moved the view.
+    QElapsedTimer dragShift;
     QPointer<QAbstractButton> back;
     QPointer<QAbstractButton> forward;
     QPointer<QAbstractButton> up;

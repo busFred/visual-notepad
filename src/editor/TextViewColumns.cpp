@@ -39,6 +39,9 @@ namespace {
 constexpr int scrollBarHeight = 12;
 constexpr int scrollBarRoom = scrollBarHeight + 4;
 constexpr int gutterRightPad = 14; // As TextView.cpp's.
+// A drag past the last column moves the view a column at a time, slowly
+// enough to read what comes in.
+constexpr int dragShiftInterval = 500;
 // How long the note under a column the caret left stays.
 constexpr int noteTime = 3000;
 
@@ -508,6 +511,36 @@ bool TextView::columnsShift(int direction)
     }
     columnsMoved(true);
     return true;
+}
+
+int TextView::columnsDragDirection(const QPointF &point)
+{
+    if (!m_columnsOn)
+        return 0;
+    const ColumnLayout &l = columnLayout();
+    const int column = columnAtX(point.x());
+    if (point.y() >= l.top + l.height && column == l.count - 1)
+        return 1;
+    if (point.y() < l.top && column == 0)
+        return -1;
+    return 0;
+}
+
+// The autoscroll timer's tick while selecting in columns: under the last
+// column (or past the viewport's bottom there) the view moves on by a column,
+// above the first back by one, and the selection grows with the lines that
+// come in. One column moves a line a tick, as a scrolling view does.
+void TextView::columnsDragTick()
+{
+    const int direction = columnsDragDirection(m_lastMousePos);
+    if (direction == 0)
+        return;
+    Columns &c = *m_columns;
+    const int interval = columnLayout().count > 1 ? dragShiftInterval : 0;
+    if (c.dragShift.isValid() && c.dragShift.elapsed() < interval)
+        return;
+    if (columnsShift(direction))
+        c.dragShift.start();
 }
 
 // The note shows once a key held down (its auto-repeat) has moved the caret

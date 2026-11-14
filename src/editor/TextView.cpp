@@ -1591,6 +1591,7 @@ void TextView::mousePressEvent(QMouseEvent *event)
     setFocus(Qt::MouseFocusReason);
     if (m_columnsOn) {
         hideColumnsNote(); // (A click shows where the caret is.)
+        m_columns->dragShift.invalidate();
         if (columnBarPressed(event))
             return;
     }
@@ -1840,7 +1841,8 @@ void TextView::mouseMoveEvent(QMouseEvent *event)
         return;
     m_lastMousePos = event->position();
     const QRectF bounds = viewport()->rect();
-    if (!bounds.contains(m_lastMousePos)) {
+    // (Columns move under a drag past the last one from inside the viewport.)
+    if (!bounds.contains(m_lastMousePos) || columnsDragDirection(m_lastMousePos) != 0) {
         if (!m_autoScroll.isActive())
             m_autoScroll.start(50, this);
     } else {
@@ -1951,10 +1953,11 @@ void TextView::timerEvent(QTimerEvent *event)
     } else if (event->timerId() == m_autoScroll.timerId()) {
         const qreal h = viewport()->height();
         QScrollBar *v = verticalScrollBar();
-        // (Columns do not move under a drag yet.)
-        if (!m_columnsOn && m_lastMousePos.y() < 0)
+        if (m_columnsOn)
+            columnsDragTick();
+        else if (m_lastMousePos.y() < 0)
             v->setValue(v->value() - 1);
-        else if (!m_columnsOn && m_lastMousePos.y() > h)
+        else if (m_lastMousePos.y() > h)
             v->setValue(v->value() + 1);
         if (m_columnDragging) {
             columnSelectTo(QPointF(m_lastMousePos.x(), qBound<qreal>(0, m_lastMousePos.y(), h - 1)));

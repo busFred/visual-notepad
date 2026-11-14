@@ -53,6 +53,7 @@ private Q_SLOTS:
     void columnsDownGoesToTheNextColumnWithANote();
     void columnsMoveOnOneColumnAtTheLastColumn();
     void columnsTypingReflowsOverTheBreaks();
+    void columnsMouseSelectsAcrossColumns();
     void columnsOffsetsTravelWithTheText();
     void columnsEditAtSeveralCarets();
     void columnsStayFastOnABigFile();
@@ -135,6 +136,7 @@ private:
     int caretLine() const { return m_view->textCursor().blockNumber(); }
     // A key held down: a press the keyboard repeats.
     void repeatKey(Qt::Key key);
+    void dragTo(const QPointF &point);
 
     QTextDocument *m_doc = nullptr;
     TextView *m_view = nullptr;
@@ -1314,6 +1316,14 @@ void TestTextView::repeatKey(Qt::Key key)
     QApplication::sendEvent(m_view, &press);
 }
 
+void TestTextView::dragTo(const QPointF &point)
+{
+    QWidget *viewport = m_view->viewport();
+    QMouseEvent move(QEvent::MouseMove, point, viewport->mapToGlobal(point), Qt::NoButton, Qt::LeftButton,
+                     Qt::NoModifier);
+    QApplication::sendEvent(viewport, &move);
+}
+
 bool TestTextView::inked(const QImage &image, const QRect &rect)
 {
     const QRgb background = image.pixel(rect.topLeft());
@@ -1777,6 +1787,47 @@ void TestTextView::columnsTypingReflowsOverTheBreaks()
     type(QStringLiteral("typed"));
     QCOMPARE(probe->positionAtPoint(columnPoint(0, 0)) - wrapped.position(), into);
     QCOMPARE(lineAtPoint(columnPoint(m_view->shownColumnCount() - 1, 0)), caret);
+}
+
+// The mouse selects in text order across columns; below the last column the
+// view moves on a column at a time while the selection grows, above the first
+// back again.
+void TestTextView::columnsMouseSelectsAcrossColumns()
+{
+    auto *probe = static_cast<ProbeView *>(m_view);
+    showColumns(300);
+    const int per = perColumn();
+    const int count = m_view->shownColumnCount();
+    QWidget *viewport = m_view->viewport();
+    const QPointF from = columnPoint(0, 1);
+    const int anchor = probe->positionAtPoint(from);
+    QTest::mousePress(viewport, Qt::LeftButton, {}, from.toPoint());
+    dragTo(columnPoint(1, 3));
+    QCOMPARE(m_view->textCursor().anchor(), anchor);
+    QCOMPARE(caretLine(), per + 3);
+    QVERIFY(m_view->selectedText().contains(QStringLiteral("line %1").arg(per))); // Column 1's end.
+    // Back into column 1: it shrinks.
+    dragTo(columnPoint(0, 4));
+    QCOMPARE(caretLine(), 4);
+    QCOMPARE(m_view->textCursor().anchor(), anchor);
+    // Below the last column, inside the window.
+    const QRect lastColumn = m_view->columnRect(count - 1);
+    dragTo(QPointF(lastColumn.center().x(), lastColumn.bottom() + 8));
+    QTRY_COMPARE(m_view->columnLineRange().first, per);
+    QCOMPARE(m_view->textCursor().anchor(), anchor); // (Off screen now.)
+    QTRY_COMPARE(m_view->columnLineRange().first, 2 * per);
+    QTRY_COMPARE(caretLine(), m_view->columnLineRange().second);
+    // Above the first column: back.
+    const QRect firstColumn = m_view->columnRect(0);
+    const QPointF above(firstColumn.center().x(), firstColumn.top() - 8);
+    dragTo(above);
+    QTRY_COMPARE(m_view->columnLineRange().first, per);
+    QTRY_COMPARE(caretLine(), per);
+    QTest::mouseRelease(viewport, Qt::LeftButton, {}, above.toPoint());
+    QTest::qWait(600);
+    QCOMPARE(m_view->columnLineRange().first, per); // (Released: it stays.)
+    QCOMPARE(m_view->textCursor().anchor(), anchor);
+    QCOMPARE(caretLine(), per);
 }
 
 // Word Wrap off: a column's sideways offset goes with its lines when the view
