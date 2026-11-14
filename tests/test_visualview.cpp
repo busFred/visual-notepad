@@ -5290,7 +5290,7 @@ void TestVisualView::pageTurnsGreyKeptLinesOnlyGoingForward()
     QTRY_VERIFY(!back->isEnabled());
     QVERIFY(forward->isEnabled());
 
-    // Forward: the last lines of the page before stay on top, greyed.
+    // Forward: the last lines of the page before stay on top, marked by a line.
     m_view->readPageForward();
     const md::Screen second = m_view->readScreen();
     QVERIFY(second.hasKept);
@@ -5305,7 +5305,7 @@ void TestVisualView::pageTurnsGreyKeptLinesOnlyGoingForward()
     m_view->grab();
     QVERIFY(m_view->readScreen().hasKept);
     QCOMPARE(m_view->readScreen().start, second.start);
-    // Painted under a veil, with a thin line under them.
+    // Painted as any text, with a thin line under them.
     m_view->grab();
     const QImage image = m_view->viewport()->grab().toImage();
     if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
@@ -5319,7 +5319,7 @@ void TestVisualView::pageTurnsGreyKeptLinesOnlyGoingForward()
     QVERIFY(keptBottom > 0);
     const QRect column = m_view->readColumnRect(0);
     QCOMPARE(QColor(image.pixel(column.left() + 2, keptBottom - 1)), theme::color(theme::Role::divider));
-    // The text above it is lighter than the text below: no pixel as dark.
+    // The text above it is as dark as the text below: not greyed.
     const auto darkest = [&](int from, int to) {
         int dark = 255;
         for (int y = from; y < to; ++y)
@@ -5327,7 +5327,7 @@ void TestVisualView::pageTurnsGreyKeptLinesOnlyGoingForward()
                 dark = qMin(dark, qGray(image.pixel(x, y)));
         return dark;
     };
-    QVERIFY(darkest(column.top(), keptBottom - 2) > darkest(keptBottom, keptBottom + 60) + 40);
+    QVERIFY(qAbs(darkest(column.top(), keptBottom - 2) - darkest(keptBottom, keptBottom + 60)) < 40);
 
     // Back: the first screen again, nothing greyed.
     m_view->readPageBack();

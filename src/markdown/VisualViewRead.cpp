@@ -41,8 +41,6 @@ constexpr int lineButtonBottom = 24; // From the bottom edge to its top.
 // Room a column's rows have outside it, as in the scrolling view: the
 // chevron of a heading sits left of the text (VisualView.cpp's sideMargin).
 constexpr qreal readMargin = 26;
-// Kept lines of a page turn are veiled by the editor colour at this alpha.
-constexpr int keptVeil = 150;
 
 // A round page arrow at a side of the view, or one of the small buttons for
 // a line up or down: a chevron, greyed when there is nowhere to go. They
@@ -833,8 +831,6 @@ void VisualView::paintRead(QPaintEvent *event)
     painter.fillRect(event->rect(), background);
     const md::Screen &screen = ensureReadScreen();
     const ReadLayout &l = readLayout();
-    QColor veil = background;
-    veil.setAlpha(keptVeil);
     for (int c = 0; c < int(screen.columns.size()); ++c) {
         const qreal left = l.left + c * (l.width + l.gap);
         const QRectF band(left - readMargin, 0, l.width + 2 * readMargin, viewport()->height());
@@ -891,10 +887,10 @@ void VisualView::paintRead(QPaintEvent *event)
                 painter.restore();
             }
             if (s.keptTo > s.yFrom) {
-                // Lines kept from the page before: shown, but quieter.
-                const qreal kept = qMin(s.keptTo, s.yTo) - s.yFrom;
-                painter.fillRect(QRectF(left - readMargin, y, l.width + 2 * readMargin, kept), veil);
-                keptBottom = y + kept;
+                // Lines kept from the page before are shown as any line: the
+                // thin line under them is what marks them (greyed, they read
+                // as disabled).
+                keptBottom = y + qMin(s.keptTo, s.yTo) - s.yFrom;
             }
             y += h;
         }
