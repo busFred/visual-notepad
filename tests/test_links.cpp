@@ -55,6 +55,9 @@ private Q_SLOTS:
     void invisibleCharactersAreSpelledOut_data();
     void invisibleCharactersAreSpelledOut();
     void promptShowsDisguisedNames();
+    void otherFileTypesAsk_data();
+    void otherFileTypesAsk();
+    void webPromptShowsTheSite();
 
 private:
     QString write(const QString &name, const QByteArray &content);
@@ -673,6 +676,62 @@ static void useTestSettings()
     vn::Settings::instance().useFile(dir.filePath(QStringLiteral("settings.ini")));
 }
 Q_COREAPP_STARTUP_FUNCTION(useTestSettings)
+
+
+void TestLinks::otherFileTypesAsk_data()
+{
+    QTest::addColumn<QString>("name");
+    // Types some program runs or opens with macros (not on any list of
+    // programs), and ordinary documents: all ask, in the "another app" words.
+    for (const char *name : {"app.pyz", "app.pyzw", "mod.pyc", "deck.ppsm", "book.xlsb", "old.xls", "page.mht",
+                             "c.cab", "report.docx", "archive.zip"})
+        QTest::newRow(name) << QString::fromLatin1(name);
+}
+
+void TestLinks::otherFileTypesAsk()
+{
+    QFETCH(QString, name);
+    write(name, QByteArray("\x50\x4b\x03\x04 not text \x00\x01\x02", 20));
+    QStringList boxes;
+    MainWindow::setLaunchConfirmer({});
+    MainWindow window;
+    DocumentTab *tab = openDocument(window);
+    QVERIFY(tab);
+    closeBoxes(&window, &boxes);
+    Q_EMIT tab->linkActivated(name);
+    QTRY_COMPARE(boxes.size(), 1);
+    QVERIFY2(boxes.first().startsWith(QLatin1String("This link opens a file in another app:"))
+                 || boxes.first().startsWith(QLatin1String("This link would run a program:")),
+             qPrintable(boxes.first()));
+    QVERIFY(m_opened.isEmpty());
+}
+
+void TestLinks::webPromptShowsTheSite()
+{
+    MainWindow window;
+    DocumentTab *tab = openDocument(window);
+    QVERIFY(tab);
+    // The middle of a long address is cut; the real host must still show.
+    const QString url = QStringLiteral("https://accounts.example-bank.com\u2215login\u2215") + QString(190, u'a')
+                        + QStringLiteral("@evil.example/") + QString(220, u'b');
+    QString text;
+    QString informative;
+    bool cancelIsDefault = false;
+    inspectNextBox([&](QMessageBox *box) {
+        text = box->text();
+        informative = box->informativeText();
+        cancelIsDefault = box->defaultButton() == box->button(QMessageBox::Cancel);
+    });
+    Q_EMIT tab->linkActivated(url);
+    QVERIFY2(text.endsWith(QLatin1String("Site: evil.example")), qPrintable(text));
+    QVERIFY(!informative.contains(QLatin1String("evil.example")));
+    QVERIFY(cancelIsDefault);
+    // A look-alike name in another script also shows its ASCII form.
+    inspectNextBox([&](QMessageBox *box) { text = box->text(); });
+    Q_EMIT tab->linkActivated(QStringLiteral("https://\u0430pple.com/"));
+    QVERIFY2(text.contains(QLatin1String("(xn--")), qPrintable(text));
+    QVERIFY(m_opened.isEmpty());
+}
 
 QTEST_MAIN(TestLinks)
 #include "test_links.moc"

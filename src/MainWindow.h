@@ -156,6 +156,8 @@ public:
     // dialog, and catch what links hand to the OS through the opener instead
     // of QDesktopServices::openUrl. Empty functions restore the defaults.
     static void setLaunchConfirmer(std::function<bool(const QString &)> confirmer);
+    // For tests: answers the question asked before a very big file is opened.
+    static void setLargeOpenConfirmer(std::function<bool(const QString &)> confirmer);
     static void setUrlOpener(std::function<void(const QUrl &)> opener);
 
     // Outline bookkeeping, for tests. outlineParses() counts the documents
@@ -232,7 +234,11 @@ private:
     void openLink(DocumentTab *tab, const QString &url);
     // Asks before a link runs `target` (a native path or a URL), naming
     // `fileName` (the file's own name, for a path) on a line of its own.
-    bool confirmLaunch(const QString &target, const QString &fileName = {});
+    // What a launch prompt warns of: a program that runs, or a file another
+    // app opens (which may run code too).
+    enum class LaunchKind { Program, OtherApp };
+    bool confirmLaunch(const QString &target, const QString &fileName = {}, LaunchKind kind = LaunchKind::Program);
+    bool confirmLargeOpen(const QString &path, qint64 size);
     static void openUrl(const QUrl &url);
 
     // Auto save: writes a modified tab that has a path; failures only reach

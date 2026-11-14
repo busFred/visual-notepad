@@ -47,6 +47,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenuBar>
+#include <QLocale>
 #include <QMessageBox>
 #include <QPainter>
 #include <QPromise>
@@ -1271,6 +1272,9 @@ bool MainWindow::openFile(const QString &path, std::function<void(DocumentTab *)
 
     // Open in another window: a new tab on the same document.
     if (!file) {
+        // A very big file takes long and much memory: only when asked for.
+        if (const qint64 size = QFileInfo(path).size(); size >= TextFile::confirmLoadBytes && !confirmLargeOpen(path, size))
+            return false;
         file = TextFile::create();
         if (QFileInfo(path).size() >= TextFile::largeLoadBytes) {
             auto pending = std::make_shared<PendingOpen>();
@@ -1523,6 +1527,12 @@ std::function<bool(const QString &)> &launchConfirmer()
     return confirmer;
 }
 
+std::function<bool(const QString &)> &largeOpenConfirmer()
+{
+    static std::function<bool(const QString &)> confirmer;
+    return confirmer;
+}
+
 std::function<void(const QUrl &)> &urlOpener()
 {
     static std::function<void(const QUrl &)> opener;
@@ -1534,6 +1544,11 @@ std::function<void(const QUrl &)> &urlOpener()
 void MainWindow::setLaunchConfirmer(std::function<bool(const QString &)> confirmer)
 {
     launchConfirmer() = std::move(confirmer);
+}
+
+void MainWindow::setLargeOpenConfirmer(std::function<bool(const QString &)> confirmer)
+{
+    largeOpenConfirmer() = std::move(confirmer);
 }
 
 void MainWindow::setUrlOpener(std::function<void(const QUrl &)> opener)
@@ -1549,7 +1564,22 @@ void MainWindow::openUrl(const QUrl &url)
         QDesktopServices::openUrl(url);
 }
 
-bool MainWindow::confirmLaunch(const QString &target, const QString &fileName)
+bool MainWindow::confirmLargeOpen(const QString &path, qint64 size)
+{
+    if (const auto &confirmer = largeOpenConfirmer())
+        return confirmer(path);
+    QMessageBox box(QMessageBox::Warning, productName(),
+                    tr("%1 is %2. Opening it may take a while and use a lot of memory.")
+                        .arg(QFileInfo(path).fileName(), QLocale().formattedDataSize(size)),
+                    QMessageBox::NoButton, this);
+    makePlainText(box); // Names the file.
+    QPushButton *open = box.addButton(tr("Open"), QMessageBox::AcceptRole);
+    box.setDefaultButton(box.addButton(QMessageBox::Cancel));
+    box.exec();
+    return box.clickedButton() == open;
+}
+
+bool MainWindow::confirmLaunch(const QString &target, const QString &fileName, LaunchKind kind)
 {
     if (const auto &confirmer = launchConfirmer())
         return confirmer(target);
@@ -1560,9 +1590,10 @@ bool MainWindow::confirmLaunch(const QString &target, const QString &fileName)
     QString shown = md::withVisibleControls(target);
     if (!fileName.isEmpty())
         shown += u"\n\n" + tr("File name: %1").arg(md::withVisibleControls(fileName));
+    const QString what = kind == LaunchKind::Program ? tr("This link would run a program:")
+                                                     : tr("This link opens a file in another app:");
     QMessageBox box(QMessageBox::Warning, productName(),
-                    tr("This link would run a program:\n\n%1\n\nOnly continue if you trust this document and the file.")
-                        .arg(shown),
+                    tr("%1\n\n%2\n\nOnly continue if you trust this document and the file.").arg(what, shown),
                     QMessageBox::NoButton, this);
     box.setTextFormat(Qt::PlainText);
     QPushButton *open = box.addButton(tr("Open Anyway"), QMessageBox::AcceptRole);
@@ -1857,7 +1888,9 @@ void MainWindow::dropEvent(QDropEvent *event)
     }
     const auto urls = event->mimeData()->urls();
     for (const QUrl &url : urls) {
-        if (url.isLocalFile())
+        // file://host/share/x is another machine: not even a look (on Windows
+        // that is an SMB login, which sends the user's password hash).
+        if (url.isLocalFile() && url.host().isEmpty() && !md::isNetworkPath(url.toLocalFile()))
             openFile(url.toLocalFile());
     }
     event->acceptProposedAction();
@@ -2607,14 +2640,27 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
         QMessageBox box(QMessageBox::Information, productName(),
                         tr("Do you want %1 to open the external website?").arg(productName()), QMessageBox::NoButton,
                         this);
+        // The site on a line of its own, whole, under the question: a long
+        // address shortened in the middle could hide it
+        // ("https://bank.example\u2215login…@evil.example/…" goes to
+        // evil.example). Invisible characters spelled out, as in the launch
+        // prompt, and a name in other scripts that can look like a familiar
+        // one ("аpple" with a Cyrillic а) gets its ASCII form beside it.
+        if (scheme != QLatin1String("mailto")) {
+            QString site = md::withVisibleControls(target.host(QUrl::FullyDecoded));
+            if (const QString ascii = target.host(QUrl::FullyEncoded);
+                !ascii.isEmpty() && ascii != target.host(QUrl::FullyDecoded))
+                site += QStringLiteral(" (%1)").arg(ascii);
+            box.setText(box.text() + u"\n\n" + tr("Site: %1").arg(site));
+        }
         // The address as written (Copy takes all of it): plain text without
         // links, or markup in it would load pictures and links in it open.
         box.setInformativeText(elideMiddle(url, 400));
         makePlainText(box);
         QPushButton *open = box.addButton(tr("Open"), QMessageBox::AcceptRole);
         QPushButton *copy = box.addButton(tr("Copy"), QMessageBox::ActionRole);
-        box.addButton(QMessageBox::Cancel);
-        box.setDefaultButton(open);
+        // Enter does not leave the app: opening is a deliberate click.
+        box.setDefaultButton(box.addButton(QMessageBox::Cancel));
         box.exec();
         if (box.clickedButton() == open)
             openUrl(target);
@@ -2652,9 +2698,20 @@ void MainWindow::openLink(DocumentTab *tab, const QString &url)
     const QMimeType mime = QMimeDatabase().mimeTypeForFile(path);
     if (!mime.inherits(QStringLiteral("text/plain"))) {
         // Text (scripts included) opens here; the rest goes to the OS, which
-        // runs programs, installers and shortcuts.
-        if (md::isLaunchable(path)
-            && !confirmLaunch(QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath()), QFileInfo(path).fileName()))
+        // runs programs, installers and shortcuts. Only what is known to be
+        // passive goes without asking: a folder, a picture, a PDF. Anything
+        // else may be a type some program runs (.pyz, .ppsm, .xlsb, .mht ...);
+        // a list of the dangerous ones is never complete.
+        const QFileInfo info(path);
+        const QString shown = QDir::toNativeSeparators(info.absoluteFilePath());
+        const bool passive = !md::isLaunchable(path)
+                             && (info.isDir()
+                                 || (mime.name().startsWith(QLatin1String("image/"))
+                                     && mime.name() != QLatin1String("image/svg+xml"))
+                                 || mime.name() == QLatin1String("application/pdf"));
+        if (!passive
+            && !confirmLaunch(shown, info.fileName(),
+                              md::isLaunchable(path) ? LaunchKind::Program : LaunchKind::OtherApp))
             return;
         openUrl(QUrl::fromLocalFile(path));
         return;
