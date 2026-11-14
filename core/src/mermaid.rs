@@ -152,6 +152,19 @@ fn layout_is_affordable(code: &str, graph: &Graph) -> bool {
     }
 }
 
+/// How a diagram's SVG is read. A diagram's own text reaches the SVG (a
+/// `style` line can close an attribute and add an <image>), so an image may
+/// only be one carried in the SVG itself (data:, as in the C4 person icon),
+/// never a file: else a document could read any local file, or a network
+/// share on Windows, just by being opened.
+fn svg_options(font_family: String) -> usvg::Options<'static> {
+    let image_href_resolver = usvg::ImageHrefResolver {
+        resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
+        resolve_string: Box::new(|_, _| None),
+    };
+    usvg::Options { fontdb: fonts(), font_family, image_href_resolver, ..Default::default() }
+}
+
 /// Renders a diagram to premultiplied RGBA8 pixels at the given scale (device
 /// pixel ratio); a diagram too big for that scale is drawn at a smaller one.
 /// Returns the width, height, pixels and the scale actually used.
@@ -175,7 +188,7 @@ pub fn raster(code: &str, theme_name: &str, scale: f32) -> Result<(u32, u32, Vec
         return Err(String::from("diagram too large"));
     }
 
-    let options = usvg::Options { fontdb: fonts(), font_family: theme.font_family.clone(), ..Default::default() };
+    let options = svg_options(theme.font_family.clone());
     let tree = usvg::Tree::from_str(&svg, &options).map_err(|e| e.to_string())?;
     drop(svg);
     let wanted = if scale.is_finite() { scale.clamp(MIN_SCALE, 4.0) } else { 1.0 };
@@ -199,6 +212,45 @@ mod tests {
         assert!(w > 0 && h > 0);
         assert_eq!(pixels.len(), (w * h * 4) as usize);
         assert!(pixels.iter().any(|&b| b != 0));
+    }
+
+    /// A `style` value that closes its attribute and adds an <image> of a
+    /// local file: the file is not drawn (nor read).
+    #[test]
+    fn injected_images_of_files_are_not_drawn() {
+        let dir = std::env::temp_dir().join(format!("vn-mermaid-image-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let target = dir.join("red.svg");
+        std::fs::write(
+            &target,
+            "<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><rect width='120' height='120' fill='#ff0000'/></svg>",
+        )
+        .expect("write");
+        let code = format!(
+            "flowchart LR\nA-->B\nstyle A fill:#fff\"/><image href=\"{}\" x=\"0\" y=\"0\" width=\"120\" height=\"120\"/><rect fill=\"#fff\n",
+            target.display()
+        );
+        let result = raster(&code, "default", 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
+        // The diagram still renders (so the test sees what would be drawn).
+        let (_, _, pixels, _) = result.expect("render");
+        // Premultiplied RGBA: pure red is 255, 0, 0, 255.
+        let red = pixels.chunks_exact(4).filter(|p| p[0] > 200 && p[1] < 40 && p[2] < 40 && p[3] > 200).count();
+        assert_eq!(red, 0, "the injected file was drawn");
+    }
+
+    /// A data: picture inside the SVG still draws (Mermaid's C4 person
+    /// icon); a file named the same way does not.
+    #[test]
+    fn data_images_still_draw() {
+        // A 40 x 40 red square, as SVG in base64.
+        let svg = "<svg xmlns='http://www.w3.org/2000/svg' width='40' height='40'><image width='40' height='40' \
+                   href='data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSc0MCcgaGVpZ2h0PSc0MCc+PHJlY3Qgd2lkdGg9JzQwJyBoZWlnaHQ9JzQwJyBmaWxsPScjZmYwMDAwJy8+PC9zdmc+'/></svg>";
+        let tree = usvg::Tree::from_str(svg, &svg_options(String::from("sans-serif"))).expect("parse");
+        let mut pixmap = Pixmap::new(40, 40).expect("pixmap");
+        resvg::render(&tree, Transform::default(), &mut pixmap.as_mut());
+        let red = pixmap.data().chunks_exact(4).filter(|p| p[0] > 200 && p[1] < 40 && p[2] < 40 && p[3] > 200).count();
+        assert!(red > 0, "a data: picture should still draw");
     }
 
     #[test]
