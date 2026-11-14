@@ -285,6 +285,22 @@ public:
     using LineAnchor = std::pair<int, qreal>;
     const std::vector<LineAnchor> &lineAnchors() const { return m_lineAnchors; }
 
+    // Where read mode (md::ReadFlow) may break the block between two columns,
+    // from its top, in whole pixels: the tops of its visual lines (a table:
+    // of its rows), and the legal cuts by the rules of md::paragraphCuts,
+    // codeCuts and tableCuts (rich text also breaks between its paragraphs
+    // and list items, but not inside a table). Pictures have neither. Made
+    // once, when first asked for.
+    struct Breaks
+    {
+        QList<int> lineTops;
+        QList<int> cuts;
+        bool table = false;  // The block is one table (see tableGrid).
+        int headerTop = 0;   // Its header row, repeated over a part of it
+        int headerHeight = 0; // that goes on in another column.
+    };
+    const Breaks &breaks() const;
+
 private:
     static std::unique_ptr<RenderedBlock> create(const core::Block &block, const QString &source,
                                                  const RenderContext &context, bool item);
@@ -334,6 +350,7 @@ private:
     std::vector<LineAnchor> m_lineAnchors;
     mutable QString m_renderedText; // Cached; null until asked for.
     mutable std::optional<std::optional<TableGrid>> m_tableGrid; // Empty until asked for.
+    mutable std::optional<Breaks> m_breaks; // Empty until asked for.
 };
 
 // The picture in downloaded bytes, or null: also for an SVG that names a

@@ -5,6 +5,7 @@
 #include "MarkdownEditing.h"
 #include "MathObject.h"
 #include "MathRenderer.h"
+#include "ReadFlow.h"
 #include "RemoteImages.h"
 
 #include <KSyntaxHighlighting/Definition>
@@ -2337,6 +2338,60 @@ const RenderedBlock::TableGrid *RenderedBlock::tableGrid() const
         }
     }
     return m_tableGrid->has_value() ? &**m_tableGrid : nullptr;
+}
+
+const RenderedBlock::Breaks &RenderedBlock::breaks() const
+{
+    if (m_breaks)
+        return *m_breaks;
+    Breaks &b = m_breaks.emplace();
+    if (!m_doc || (m_kind != Kind::Rich && m_kind != Kind::Code))
+        return b;
+    QAbstractTextDocumentLayout *layout = m_doc->documentLayout();
+    const qreal top = contentOffset().y();
+    // The tops of a paragraph's lines, as collectLineAnchors reads them.
+    const auto linesOf = [&](const QTextBlock &block) {
+        QList<int> tops;
+        const QTextLayout *lines = block.layout();
+        const qreal y = top + layout->blockBoundingRect(block).top();
+        for (int i = 0; lines && i < lines->lineCount(); ++i)
+            tops.push_back(int(std::floor(y + lines->lineAt(i).y())));
+        return tops;
+    };
+    const auto sorted = [](QList<int> &list) {
+        std::sort(list.begin(), list.end());
+        list.erase(std::unique(list.begin(), list.end()), list.end());
+    };
+    if (m_kind == Kind::Code) {
+        for (QTextBlock block = m_doc->begin(); block.isValid(); block = block.next())
+            b.lineTops += linesOf(block);
+        sorted(b.lineTops);
+        b.cuts = md::codeCuts(b.lineTops);
+        return b;
+    }
+    if (const TableGrid *grid = tableGrid()) {
+        b.table = true;
+        for (int row = 0; row < grid->rows(); ++row)
+            b.lineTops.push_back(int(std::floor(grid->ys[row])));
+        b.headerTop = int(std::floor(grid->ys[0]));
+        b.headerHeight = int(std::ceil(grid->ys[1])) - b.headerTop;
+        b.cuts = md::tableCuts(b.lineTops, 1);
+        return b;
+    }
+    for (QTextBlock block = m_doc->begin(); block.isValid(); block = block.next()) {
+        if (QTextCursor(block).currentTable())
+            continue; // (An HTML table among other text: in one piece.)
+        const QList<int> tops = linesOf(block);
+        if (tops.isEmpty())
+            continue;
+        if (!b.lineTops.isEmpty())
+            b.cuts.push_back(tops.front());
+        b.cuts += md::paragraphCuts(tops);
+        b.lineTops += tops;
+    }
+    sorted(b.lineTops);
+    sorted(b.cuts);
+    return b;
 }
 
 std::optional<RenderedBlock::TableCellHit> RenderedBlock::tableCellAt(const QPointF &point) const

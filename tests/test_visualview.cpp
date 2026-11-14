@@ -18,6 +18,7 @@
 #include <KSyntaxHighlighting/SyntaxHighlighter>
 #include <KSyntaxHighlighting/Theme>
 
+#include <QAbstractButton>
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
 #include <QPainterPath>
@@ -142,6 +143,36 @@ QString longDocument()
 
 // A document over MarkdownModel::backgroundParseChars (or `chars`): sections
 // of a heading, a paragraph, a task list and a code block.
+// Read mode's pages: headings, paragraphs that wrap over several lines in a
+// column, and at the end a 60-row table and a last paragraph.
+QString readDocument()
+{
+    const QString words = QStringLiteral("The quick brown fox jumps over the lazy dog while the cache keeps every "
+                                         "result it has built so far. ");
+    QString text = QStringLiteral("# Read mode\n\n");
+    for (int i = 1; i <= 40; ++i) {
+        if (i % 8 == 1)
+            text += QStringLiteral("## Part %1\n\n").arg(i / 8 + 1);
+        text += QStringLiteral("Paragraph %1. ").arg(i) + words.repeated(3).trimmed() + QStringLiteral("\n\n");
+    }
+    text += QStringLiteral("| Row | Value |\n|-----|-------|\n");
+    for (int i = 1; i <= 60; ++i)
+        text += QStringLiteral("| r%1 | value %1 |\n").arg(i);
+    text += QStringLiteral("\nThe end.\n");
+    return text;
+}
+
+// The first line of `text` that holds `needle`.
+int lineHolding(const QString &text, const QString &needle)
+{
+    const QStringList lines = text.split(u'\n');
+    for (int i = 0; i < lines.size(); ++i) {
+        if (lines[i].contains(needle))
+            return i;
+    }
+    return -1;
+}
+
 QString largeDocument(qsizetype chars = MarkdownModel::backgroundParseChars + 4096)
 {
     QString text;
@@ -382,6 +413,16 @@ private Q_SLOTS:
     void collapseAllLeavesSectionsAndExpandAllOpensThem();
     void copiedTabKeepsItsFolds();
     void blocksStartCollapsedWhenAsked();
+    void readModeKeepsThePlace();
+    void readColumnsFollowWidthCharactersAndZoom();
+    void pageTurnsGreyKeptLinesOnlyGoingForward();
+    void readNudgesByButtonsWheelAndKeys();
+    void longTablesRepeatTheirHeader();
+    void readFiguresFitTheColumnHeight();
+    void findAndGoToLineShowTheirScreen();
+    void readLineRangeIsTheScreens();
+    void readModeClicks();
+    void readModeWaitsForTheFirstParse();
     void figureBarKeepsClicksAndPictureClickStillZooms();
     void networkPaths();
     void plainToolTipText();
@@ -438,6 +479,11 @@ private:
     void compareWithWholeList(const QString &text, int first, int last);
     // A table of five rows and three columns on line 2, rendered; read-write.
     void useSelectionTable();
+    // Text in a view of the given size, locked, in read mode.
+    void startReading(const QString &text, int width, int height);
+    // Where segment `index` of column `column` (or the first of the row
+    // showing `line`) is in the viewport.
+    QRect segmentOfLine(int line, int *column = nullptr, int *index = nullptr);
     int countColor(const QImage &image, const QColor &color) const;
 };
 
@@ -5061,6 +5107,579 @@ void TestVisualView::blocksStartCollapsedWhenAsked()
     QCOMPARE(view.foldCount(), 5);
 }
 
+// ---------------------------------------------------------------------------
+// Read mode
+
+void TestVisualView::startReading(const QString &text, int width, int height)
+{
+    m_view->resize(width, height);
+    setDocument(text, 0);
+    m_view->setReadOnly(true);
+    m_view->setReadMode(true);
+    m_view->grab();
+}
+
+QRect TestVisualView::segmentOfLine(int line, int *column, int *index)
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const md::Screen &screen = m_view->readScreen();
+    const int row = view->rowIndexOf(line);
+    for (int c = 0; c < int(screen.columns.size()); ++c) {
+        for (int i = 0; i < int(screen.columns[c].segments.size()); ++i) {
+            if (screen.columns[c].segments[i].row != row)
+                continue;
+            if (column)
+                *column = c;
+            if (index)
+                *index = i;
+            return m_view->readSegmentRect(c, i);
+        }
+    }
+    return {};
+}
+
+void TestVisualView::readModeKeepsThePlace()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const QString text = readDocument();
+    m_view->resize(760, 600);
+    setDocument(text, 0);
+    m_view->setReadOnly(true);
+    m_view->grab();
+    const int line = lineHolding(text, QStringLiteral("Paragraph 12."));
+    m_view->scrollToLine(line);
+    m_view->grab();
+    m_view->setReadMode(true);
+    QVERIFY(m_view->showsReadColumns());
+    m_view->grab();
+    QCOMPARE(m_view->readLineRange().first, line);
+    QVERIFY(!m_view->verticalScrollBar()->isVisible());
+    // A page on, then out of read mode: the view starts where the screen did.
+    m_view->readPageForward();
+    const int first = m_view->readLineRange().first;
+    QVERIFY(first > line);
+    m_view->setReadMode(false);
+    m_view->grab();
+    QVERIFY(!m_view->showsReadColumns());
+    QCOMPARE(view->rowIndexOf(m_view->topLine()), view->rowIndexOf(first));
+    // In again, and through changes of layout: the same line first.
+    m_view->setReadMode(true);
+    m_view->grab();
+    QCOMPARE(m_view->readLineRange().first, first);
+    m_view->setReadChars(50);
+    m_view->grab();
+    QCOMPARE(m_view->readLineRange().first, first);
+    m_view->resize(1400, 500);
+    QTRY_VERIFY(m_view->viewport()->width() > 1300);
+    m_view->grab();
+    QCOMPARE(m_view->readLineRange().first, first);
+    QFont zoomed = m_view->font();
+    zoomed.setPointSizeF(zoomed.pointSizeF() * 1.5);
+    m_view->setFont(zoomed);
+    m_view->grab();
+    QCOMPARE(m_view->readLineRange().first, first);
+}
+
+void TestVisualView::readColumnsFollowWidthCharactersAndZoom()
+{
+    // As the view works it out: characters of the text font at the zoom, the
+    // room left by the page arrows, 40 px between columns.
+    const auto charWidth = [this] {
+        QFont body = theme::textFont();
+        body.setPointSizeF(body.pointSizeF() * m_view->font().pointSizeF() / theme::editorFont().pointSizeF());
+        return QFontMetricsF(body).averageCharWidth();
+    };
+    const auto fits = [&](int chars) {
+        const int room = m_view->viewport()->width() - 2 * 56;
+        const int width = qMin(qRound(chars * charWidth()), room);
+        return qMax(1, (room + 40) / (width + 40));
+    };
+    startReading(readDocument(), 1500, 600);
+    QCOMPARE(m_view->readMaxColumns(), fits(70));
+    QVERIFY(m_view->readMaxColumns() >= 2);
+    QCOMPARE(m_view->readColumnCount(), m_view->readMaxColumns());
+    QCOMPARE(int(m_view->readScreen().columns.size()), m_view->readColumnCount());
+    QCOMPARE(m_view->readColumnRect(0).width(), qRound(70 * charWidth()));
+    // Centred: the spare room is the margins.
+    const QRect firstColumn = m_view->readColumnRect(0);
+    const QRect lastColumn = m_view->readColumnRect(m_view->readColumnCount() - 1);
+    QVERIFY(qAbs(firstColumn.left() - (m_view->viewport()->width() - lastColumn.right() - 1)) <= 1);
+    QCOMPARE(m_view->readColumnRect(1).left() - firstColumn.right() - 1, 40);
+    // The text is laid out at the column's width.
+    QCOMPARE(static_cast<ProbeView *>(m_view)->columnWidth(), qreal(firstColumn.width()));
+
+    // Fewer characters: more columns.
+    const int at70 = m_view->readMaxColumns();
+    m_view->setReadChars(50);
+    m_view->grab();
+    QCOMPARE(m_view->readMaxColumns(), fits(50));
+    QVERIFY(m_view->readMaxColumns() > at70);
+    // Zoomed in, characters are wider: fewer.
+    const int at50 = m_view->readMaxColumns();
+    QFont zoomed = m_view->font();
+    zoomed.setPointSizeF(zoomed.pointSizeF() * 1.5);
+    m_view->setFont(zoomed);
+    m_view->grab();
+    QCOMPARE(m_view->readMaxColumns(), fits(50));
+    QVERIFY(m_view->readMaxColumns() < at50);
+    // A number asked for, but never more than fit.
+    m_view->setReadColumns(1);
+    QCOMPARE(m_view->readColumnCount(), 1);
+    QCOMPARE(int(m_view->readScreen().columns.size()), 1);
+    m_view->setReadColumns(9);
+    QCOMPARE(m_view->readColumnCount(), m_view->readMaxColumns());
+    // A window narrower than a column: one, as wide as the room.
+    m_view->setReadColumns(0);
+    m_view->resize(400, 600);
+    QTRY_VERIFY(m_view->viewport()->width() < 450);
+    m_view->grab();
+    QCOMPARE(m_view->readMaxColumns(), 1);
+    QCOMPARE(m_view->readColumnRect(0).width(), m_view->viewport()->width() - 2 * 56);
+}
+
+void TestVisualView::pageTurnsGreyKeptLinesOnlyGoingForward()
+{
+    Settings::instance().reset(key::readKeptLines);
+    const auto restore = qScopeGuard([] { Settings::instance().reset(key::readKeptLines); });
+    startReading(readDocument(), 760, 600);
+    const md::Screen first = m_view->readScreen();
+    QVERIFY(first.atStart && !first.atEnd);
+    QVERIFY(!first.hasKept);
+    auto *back = m_view->viewport()->findChild<QAbstractButton *>(QStringLiteral("ReadPageBack"));
+    auto *forward = m_view->viewport()->findChild<QAbstractButton *>(QStringLiteral("ReadPageForward"));
+    QVERIFY(back && forward);
+    QTRY_VERIFY(!back->isEnabled());
+    QVERIFY(forward->isEnabled());
+
+    // Forward: the last lines of the page before stay on top, greyed.
+    m_view->readPageForward();
+    const md::Screen second = m_view->readScreen();
+    QVERIFY(second.hasKept);
+    QVERIFY(second.start < first.end);
+    QVERIFY(second.end > first.end);
+    const md::Segment &top = second.columns[0].segments[0];
+    QVERIFY(top.keptTo > top.yFrom);
+    QVERIFY(back->isEnabled());
+    // A click (the caret moves, the rows are looked at again) leaves them so.
+    const QRect below = m_view->readSegmentRect(0, int(second.columns[0].segments.size()) - 1);
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(below.left() + 4, below.top() + 4));
+    m_view->grab();
+    QVERIFY(m_view->readScreen().hasKept);
+    QCOMPARE(m_view->readScreen().start, second.start);
+    // Painted under a veil, with a thin line under them.
+    m_view->grab();
+    const QImage image = m_view->viewport()->grab().toImage();
+    if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
+        image.save(dir + QStringLiteral("/read-mode-kept.png"));
+    int keptBottom = -1;
+    for (int i = 0; i < int(second.columns[0].segments.size()); ++i) {
+        const md::Segment &s = second.columns[0].segments[i];
+        if (s.keptTo > s.yFrom)
+            keptBottom = m_view->readSegmentRect(0, i).top() + qMin(s.keptTo, s.yTo) - s.yFrom;
+    }
+    QVERIFY(keptBottom > 0);
+    const QRect column = m_view->readColumnRect(0);
+    QCOMPARE(QColor(image.pixel(column.left() + 2, keptBottom - 1)), theme::color(theme::Role::divider));
+    // The text above it is lighter than the text below: no pixel as dark.
+    const auto darkest = [&](int from, int to) {
+        int dark = 255;
+        for (int y = from; y < to; ++y)
+            for (int x = column.left(); x < column.right(); ++x)
+                dark = qMin(dark, qGray(image.pixel(x, y)));
+        return dark;
+    };
+    QVERIFY(darkest(column.top(), keptBottom - 2) > darkest(keptBottom, keptBottom + 60) + 40);
+
+    // Back: the first screen again, nothing greyed.
+    m_view->readPageBack();
+    QCOMPARE(m_view->readScreen().start, first.start);
+    QVERIFY(!m_view->readScreen().hasKept);
+    // On again and a nudge: shown as any line.
+    m_view->readPageForward();
+    QVERIFY(m_view->readScreen().hasKept);
+    m_view->readNudge(1);
+    QVERIFY(!m_view->readScreen().hasKept);
+    // A jump too.
+    m_view->readPageForward();
+    QVERIFY(m_view->readScreen().hasKept);
+    m_view->readToStart();
+    QVERIFY(!m_view->readScreen().hasKept);
+    QCOMPARE(m_view->readScreen().start, first.start);
+
+    // None kept: the next page starts where this one ended.
+    Settings::instance().setValue(key::readKeptLines, 0);
+    m_view->readPageForward();
+    QVERIFY(!m_view->readScreen().hasKept);
+    QCOMPARE(m_view->readScreen().start, first.end);
+
+    // The last screen: forward goes nowhere.
+    m_view->readToEnd();
+    const md::Screen last = m_view->readScreen();
+    QVERIFY(last.atEnd);
+    m_view->readPageForward();
+    QCOMPARE(m_view->readScreen().start, last.start);
+    QTRY_VERIFY(!forward->isEnabled());
+}
+
+void TestVisualView::readNudgesByButtonsWheelAndKeys()
+{
+    startReading(readDocument(), 760, 600);
+    m_view->readPageForward();
+    m_view->readNudge(1); // (No kept lines to tell the screens apart.)
+    const md::Position s0 = m_view->readScreen().start;
+    m_view->readNudge(1);
+    const md::Position s1 = m_view->readScreen().start;
+    QVERIFY(s1 > s0);
+    m_view->readNudge(-1);
+    QCOMPARE(m_view->readScreen().start, s0);
+    const auto start = [this] { return m_view->readScreen().start; };
+
+    // The line buttons.
+    auto *up = m_view->viewport()->findChild<QAbstractButton *>(QStringLiteral("ReadLineUp"));
+    auto *down = m_view->viewport()->findChild<QAbstractButton *>(QStringLiteral("ReadLineDown"));
+    QVERIFY(up && down && up->isVisible() && down->isVisible());
+    QVERIFY(!up->toolTip().isEmpty() && !down->toolTip().isEmpty());
+    QTest::mouseClick(down, Qt::LeftButton);
+    QCOMPARE(start(), s1);
+    QTest::mouseClick(up, Qt::LeftButton);
+    QCOMPARE(start(), s0);
+    // They cover no text: above the first column, below the last.
+    QVERIFY(up->geometry().bottom() < m_view->readColumnRect(0).top());
+    QVERIFY(down->geometry().top() > m_view->readColumnRect(0).bottom());
+
+    // A notch of the wheel is a line; a touchpad's pixels add up to one.
+    const auto notch = [this](int dy) {
+        const QPointF pos(300, 200);
+        QWheelEvent event(pos, m_view->viewport()->mapToGlobal(pos), QPoint(), QPoint(0, dy), Qt::NoButton,
+                          Qt::NoModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(m_view->viewport(), &event);
+    };
+    notch(-120);
+    QCOMPARE(start(), s1);
+    notch(60);
+    QCOMPARE(start(), s1);
+    notch(60);
+    QCOMPARE(start(), s0);
+    const auto pixels = [this](int dy) {
+        const QPointF pos(300, 200);
+        QWheelEvent event(pos, m_view->viewport()->mapToGlobal(pos), QPoint(0, dy), QPoint(0, dy * 8), Qt::NoButton,
+                          Qt::NoModifier, Qt::ScrollUpdate, false);
+        QApplication::sendEvent(m_view->viewport(), &event);
+    };
+    int moved = 0;
+    for (int i = 0; i < 100 && start() == s0; ++i, moved += 2)
+        pixels(-2);
+    QCOMPARE(start(), s1);
+    QVERIFY2(moved > 10, qPrintable(QString::number(moved))); // About a line of text.
+    for (int i = 0; i < moved / 2; ++i)
+        pixels(2);
+    QCOMPARE(start(), s0);
+
+    // The keys.
+    QTest::keyClick(m_view, Qt::Key_Down);
+    QCOMPARE(start(), s1);
+    QTest::keyClick(m_view, Qt::Key_Up);
+    QCOMPARE(start(), s0);
+    QTest::keyClick(m_view, Qt::Key_Down, Qt::ControlModifier);
+    QCOMPARE(start(), s1);
+    QTest::keyClick(m_view, Qt::Key_Up, Qt::ControlModifier);
+    QCOMPARE(start(), s0);
+    m_view->readPageForward();
+    const md::Position next = start();
+    m_view->readPageBack();
+    QCOMPARE(start(), s0);
+    for (const auto &[key, mods] : {std::pair{Qt::Key_PageDown, Qt::NoModifier}, std::pair{Qt::Key_Space, Qt::NoModifier},
+                                    std::pair{Qt::Key_Right, Qt::NoModifier}, std::pair{Qt::Key_PageDown, Qt::AltModifier}}) {
+        QTest::keyClick(m_view, key, mods);
+        QCOMPARE(start(), next);
+        m_view->readPageBack();
+        QCOMPARE(start(), s0);
+    }
+    for (const auto &[key, mods] : {std::pair{Qt::Key_PageUp, Qt::NoModifier}, std::pair{Qt::Key_Space, Qt::ShiftModifier},
+                                    std::pair{Qt::Key_Left, Qt::NoModifier}, std::pair{Qt::Key_PageUp, Qt::AltModifier}}) {
+        m_view->readPageForward();
+        QCOMPARE(start(), next);
+        QTest::keyClick(m_view, key, mods);
+        QCOMPARE(start(), s0);
+    }
+    QTest::keyClick(m_view, Qt::Key_End, Qt::ControlModifier);
+    QVERIFY(m_view->readScreen().atEnd);
+    QTest::keyClick(m_view, Qt::Key_Home, Qt::ControlModifier);
+    QVERIFY(m_view->readScreen().atStart);
+    // The page arrows, and what TextView::scrollPage (Alt+PgDn) does.
+    auto *forward = m_view->viewport()->findChild<QAbstractButton *>(QStringLiteral("ReadPageForward"));
+    auto *back = m_view->viewport()->findChild<QAbstractButton *>(QStringLiteral("ReadPageBack"));
+    QTest::mouseClick(forward, Qt::LeftButton);
+    QVERIFY(!m_view->readScreen().atStart);
+    QTest::mouseClick(back, Qt::LeftButton);
+    QVERIFY(m_view->readScreen().atStart);
+    m_view->scrollPage(true);
+    QVERIFY(!m_view->readScreen().atStart);
+    m_view->scrollPage(false);
+    QVERIFY(m_view->readScreen().atStart);
+    // Ctrl+wheel still zooms.
+    QSignalSpy zoom(m_view, &TextView::zoomRequested);
+    const QPointF pos(300, 200);
+    QWheelEvent ctrl(pos, m_view->viewport()->mapToGlobal(pos), QPoint(), QPoint(0, 120), Qt::NoButton,
+                     Qt::ControlModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(m_view->viewport(), &ctrl);
+    QCOMPARE(zoom.count(), 1);
+    QVERIFY(m_view->readScreen().atStart);
+}
+
+void TestVisualView::longTablesRepeatTheirHeader()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    const QString text = longDocument(); // A 60-row table on lines 2 to 63.
+    startReading(text, 760, 500);
+    const int tableRow = view->rowIndexOf(2);
+    // Taller than a column: it goes on in the next one (page) with its header.
+    int column = -1;
+    int index = -1;
+    for (int page = 0; page < 6 && column < 0; ++page) {
+        const md::Screen &screen = m_view->readScreen();
+        for (int c = 0; c < int(screen.columns.size()) && column < 0; ++c) {
+            for (int i = 0; i < int(screen.columns[c].segments.size()); ++i) {
+                const md::Segment &s = screen.columns[c].segments[i];
+                if (s.row == tableRow && s.repeatHeader) {
+                    column = c;
+                    index = i;
+                    break;
+                }
+            }
+        }
+        if (column < 0)
+            m_view->readPageForward();
+    }
+    QVERIFY(column >= 0);
+    const md::Segment s = m_view->readScreen().columns[column].segments[index];
+    // Cut between body rows, two at least on either side of it.
+    const QRect body = m_view->readSegmentRect(column, index);
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(body.left() + 12, body.top() + 3));
+    const int firstShown = m_view->textCursor().blockNumber();
+    QVERIFY2(firstShown >= 6 && firstShown <= 63 - 1, qPrintable(QString::number(firstShown)));
+    QVERIFY(s.yFrom > 0);
+    // The header is painted above the part, and a click on it is a click on it.
+    m_view->grab();
+    const QImage image = m_view->viewport()->grab().toImage();
+    if (const QString dir = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !dir.isEmpty())
+        image.save(dir + QStringLiteral("/read-mode-table.png"));
+    int ink = 0;
+    for (int y = body.top() - 12; y < body.top(); ++y)
+        for (int x = body.left(); x < body.left() + 100; ++x)
+            ink += QColor(image.pixel(x, y)) != theme::color(theme::Role::editor);
+    QVERIFY(ink > 20);
+    const md::Position shown = m_view->readScreen().start;
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(body.left() + 12, body.top() - 8));
+    QCOMPARE(m_view->textCursor().blockNumber(), 2);
+    QCOMPARE(m_view->readScreen().start, shown); // (No page turn to the caret a click put there.)
+    // From the table's top a line down is its first body row, under its header.
+    m_view->readToStart();
+    while (m_view->readScreen().start.row < tableRow)
+        m_view->readNudge(1);
+    QCOMPARE(m_view->readScreen().start, md::Position({tableRow, 0}));
+    QCOMPARE(m_view->readLineRange().first, 2);
+    m_view->readNudge(1);
+    QVERIFY(m_view->readScreen().columns[0].segments[0].repeatHeader);
+    QCOMPARE(m_view->readLineRange().first, 4);
+    // The range starts at the first row shown (not the one before, whose
+    // line ends a border's width below the cut), and a change of layout
+    // starts the screen at that row again.
+    m_view->readNudge(1);
+    const int first = m_view->readLineRange().first;
+    const md::Segment &part = m_view->readScreen().columns[0].segments[0];
+    QCOMPARE(part.row, tableRow);
+    const QRect top = m_view->readSegmentRect(0, 0);
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(top.left() + 12, top.top() + 4));
+    QCOMPARE(m_view->textCursor().blockNumber(), first);
+    QFont zoomed = m_view->font();
+    zoomed.setPointSizeF(zoomed.pointSizeF() * 1.5);
+    m_view->setFont(zoomed);
+    m_view->grab();
+    QCOMPARE(m_view->readLineRange().first, first);
+    // The buttons follow the columns.
+    auto *up = m_view->viewport()->findChild<QAbstractButton *>(QStringLiteral("ReadLineUp"));
+    QTRY_COMPARE(up->x(), m_view->readColumnRect(0).left() - 4);
+}
+
+void TestVisualView::readFiguresFitTheColumnHeight()
+{
+    QTemporaryDir dir;
+    savePicture(dir, QStringLiteral("tall.png"), 300, 2000);
+    m_view->setBaseDirectory(dir.path());
+    startReading(QStringLiteral("Text\n\n![tall](tall.png)\n\nMore text\n"), 1200, 800);
+    auto *view = static_cast<ProbeView *>(m_view);
+    const QRect column = m_view->readColumnRect(0);
+    const RenderedBlock::Figure figure = view->figuresAtLine(2).at(0);
+    // Three quarters of the column (in 16 px steps), not of the view.
+    QVERIFY(figure.rect.height() <= column.height() * 0.75);
+    QVERIFY(figure.rect.height() > column.height() * 0.75 - 17);
+    QVERIFY(figure.rect.width() <= column.width());
+    // In one piece on the screen.
+    int c = -1;
+    int i = -1;
+    const QRect shown = segmentOfLine(2, &c, &i);
+    QVERIFY(!shown.isNull());
+    QCOMPARE(m_view->readScreen().columns[c].segments[i].yFrom, 0);
+    QVERIFY(shown.height() >= figure.rect.height());
+}
+
+void TestVisualView::findAndGoToLineShowTheirScreen()
+{
+    const QString text = readDocument();
+    startReading(text, 760, 600);
+    const int line = lineHolding(text, QStringLiteral("Paragraph 30."));
+    QVERIFY(m_view->readLineRange().second < line);
+    // Find selects the match: the screen that starts with its line.
+    QTextCursor match(m_doc->findBlockByNumber(line));
+    match.movePosition(QTextCursor::NextWord, QTextCursor::KeepAnchor);
+    m_view->setTextCursor(match);
+    QCOMPARE(m_view->readLineRange().first, line);
+    // A match on this screen already: nothing moves; nor for a selection
+    // that is partly on it (Select All).
+    const md::Position start = m_view->readScreen().start;
+    const int shown = m_view->readLineRange().second;
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(shown)));
+    QCOMPARE(m_view->readScreen().start, start);
+    m_view->selectAll();
+    QCOMPARE(m_view->readScreen().start, start);
+    // Go to line (and the outline) put the caret there and centre it.
+    const int other = lineHolding(text, QStringLiteral("Paragraph 3."));
+    QTextCursor caret(m_doc->findBlockByNumber(other));
+    m_view->setTextCursor(caret);
+    m_view->revealCaret();
+    m_view->centerCursor();
+    QCOMPARE(m_view->readLineRange().first, other);
+    // A line in a folded section: the section opens and the screen shows it.
+    const int heading = lineHolding(text, QStringLiteral("## Part 4"));
+    const int inside = lineHolding(text, QStringLiteral("Paragraph 27."));
+    QVERIFY(m_view->setFolded(heading, true));
+    m_view->grab();
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(inside)));
+    m_view->revealCaret();
+    m_view->centerCursor();
+    QVERIFY(!m_view->isFolded(heading));
+    const auto range = m_view->readLineRange();
+    QVERIFY(range.first <= inside && inside <= range.second);
+}
+
+void TestVisualView::readLineRangeIsTheScreens()
+{
+    const QString text = readDocument();
+    startReading(text, 1500, 600);
+    // From the first line to the last one the screen shows.
+    QCOMPARE(m_view->readLineRange().first, 0);
+    const md::Screen &screen = m_view->readScreen();
+    const md::Segment &last = screen.columns.back().segments.back();
+    auto *view = static_cast<ProbeView *>(m_view);
+    // (Its last row may be cut: the range ends in it, or at its end.)
+    const int lastRow = last.row;
+    const int lastLine = m_view->readLineRange().second;
+    QVERIFY(view->rowIndexOf(lastLine) == lastRow || view->rowIndexOf(lastLine) == lastRow - 1);
+    // The last screen ends with the last line that shows anything.
+    m_view->readToEnd();
+    QCOMPARE(m_view->readLineRange().second, lineHolding(text, QStringLiteral("The end.")));
+    // Out of read mode: none.
+    m_view->setReadMode(false);
+    QCOMPARE(m_view->readLineRange(), std::make_pair(-1, -1));
+}
+
+void TestVisualView::readModeClicks()
+{
+    QTemporaryDir dir;
+    savePicture(dir, QStringLiteral("pic.png"), 240, 140);
+    m_view->setBaseDirectory(dir.path());
+    const QString text = QStringLiteral("A paragraph with [a link](https://example.com/) in it.\n\n"
+                                        "| a | b |\n|---|---|\n| 1 | 2 |\n\n![pic](pic.png)\n\nThe end.\n");
+    startReading(text, 1500, 600);
+    // The link: a pointing hand over it, and a click follows it.
+    QSignalSpy links(m_view, &VisualView::linkActivated);
+    const QRect paragraph = segmentOfLine(0);
+    QVERIFY(!paragraph.isNull());
+    int x = -1;
+    for (int probe = paragraph.left(); probe < paragraph.right() && x < 0; probe += 3) {
+        QTest::mouseMove(m_view->viewport(), QPoint(probe, paragraph.top() + 8));
+        if (m_view->viewport()->cursor().shape() == Qt::PointingHandCursor)
+            x = probe;
+    }
+    QVERIFY(x > paragraph.left());
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(x, paragraph.top() + 8));
+    QCOMPARE(links.count(), 1);
+    QCOMPARE(links.first().first().toString(), QStringLiteral("https://example.com/"));
+    // A click on text puts the caret there; a drag selects.
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(paragraph.left() + 3, paragraph.top() + 8));
+    QCOMPARE(m_view->textCursor().blockNumber(), 0);
+    QTest::mousePress(m_view->viewport(), Qt::LeftButton, {}, QPoint(paragraph.left() + 1, paragraph.top() + 8));
+    QTest::mouseMove(m_view->viewport(), QPoint(x - 10, paragraph.top() + 8));
+    QTest::mouseRelease(m_view->viewport(), Qt::LeftButton, {}, QPoint(x - 10, paragraph.top() + 8));
+    QVERIFY(m_view->textCursor().hasSelection());
+    QVERIFY(m_view->selectedText().startsWith(QLatin1String("A paragraph")));
+
+    // The table's strip folds it, and a click on its chip opens it.
+    m_view->setHoverLine(2);
+    m_view->grab();
+    QRect spot = m_view->foldSpotRect(2);
+    QVERIFY(!spot.isNull());
+    QVERIFY(m_view->isFoldSpot(QPoint(spot.left() + 3, spot.center().y())));
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(spot.left() + 3, spot.center().y()));
+    QVERIFY(m_view->isFolded(2));
+    m_view->grab();
+    spot = m_view->foldSpotRect(2);
+    QVERIFY(!spot.isNull());
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, spot.center());
+    QVERIFY(!m_view->isFolded(2));
+    m_view->grab();
+
+    // The picture opens in the viewer.
+    const int pictureLine = lineHolding(text, QStringLiteral("![pic]"));
+    const QRect picture = segmentOfLine(pictureLine);
+    QVERIFY(!picture.isNull());
+    const RenderedBlock::Figure figure = static_cast<ProbeView *>(m_view)->figuresAtLine(pictureLine).at(0);
+    QVERIFY(m_view->window()->findChildren<ImageViewer *>().isEmpty());
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {},
+                      picture.topLeft() + figure.rect.center().toPoint() + QPoint(0, 10));
+    const auto viewers = m_view->window()->findChildren<ImageViewer *>();
+    QCOMPARE(viewers.size(), 1);
+    viewers.first()->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    // Pointing at it shows its bar, at its corner in the column.
+    QTest::mouseMove(m_view->viewport(), picture.topLeft() + figure.rect.center().toPoint());
+    auto *bar = m_view->viewport()->findChild<QWidget *>(QStringLiteral("FigureBar"));
+    QVERIFY(bar && bar->isVisible());
+    QVERIFY(bar->geometry().right() <= picture.left() + figure.rect.right() + 1);
+    QVERIFY(bar->geometry().left() >= picture.left());
+    QCOMPARE(m_doc->toPlainText(), text);
+}
+
+void TestVisualView::readModeWaitsForTheFirstParse()
+{
+    // A large document: its source stands in, scrolling, until the parse.
+    m_view->hide();
+    QTextDocument doc;
+    doc.setDocumentLayout(new DocumentLayout(&doc));
+    doc.setPlainText(largeDocument(MarkdownModel::backgroundShowChars + 4096));
+    auto *model = new MarkdownModel(&doc);
+    ProbeView view(model);
+    view.resize(600, 500);
+    view.setReadOnly(true);
+    view.setReadMode(true);
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    QVERIFY(model->isAwaitingParse());
+    QVERIFY(!view.showsReadColumns());
+    QCOMPARE(view.readLineRange(), std::make_pair(-1, -1));
+    QVERIFY(!view.grab().isNull());
+    view.scrollToLine(101); // (A paragraph: blank lines do not start a column.)
+    // The place it scrolled to is where the columns start.
+    QTRY_VERIFY_WITH_TIMEOUT(!model->isAwaitingParse(), 20000);
+    QTRY_VERIFY((view.grab(), view.showsReadColumns()));
+    const auto range = view.readLineRange();
+    QVERIFY2(range.first == 101 && 101 <= range.second,
+             qPrintable(QStringLiteral("%1-%2").arg(range.first).arg(range.second)));
+    QVERIFY(!view.verticalScrollBar()->isVisible());
+    view.readPageForward();
+    QVERIFY(view.readLineRange().first > range.first);
+}
 
 QTEST_MAIN(TestVisualView)
 #include "test_visualview.moc"

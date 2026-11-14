@@ -99,6 +99,7 @@ add_library(vn_app STATIC
     src/markdown/TableToolbar.cpp
     src/markdown/TableToolbar.h
     src/markdown/VisualView.cpp
+    src/markdown/VisualViewRead.cpp
     src/markdown/VisualView.h
 )
 target_include_directories(vn_app PUBLIC src)

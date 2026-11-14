@@ -680,6 +680,7 @@ void PreferencesDialog::buildMarkdownPage()
     // Tables, figures, equations and code blocks, when a document opens.
     addCombo(tr("Blocks start"), key::blocksStartCollapsed,
              {{tr("Expanded"), false}, {tr("Collapsed"), true}});
+    addReadModeRows();
     addHeading(tr("Rendering"));
     addSwitch(tr("Treat single line breaks as line breaks"), key::breaks);
     addSwitch(tr("Turn URL-like text into links"), key::linkify);
@@ -717,6 +718,47 @@ void PreferencesDialog::buildMarkdownPage()
     addSwitch(tr("Update links when pasting Markdown"), key::updateLinksOnPaste);
     addSwitch(tr("Check links for errors"), key::validateLinks);
     endPage(tr("Markdown"), QStringLiteral("markdown"));
+}
+
+// Where a tab in read mode (Visual mode, locked) starts; the bar over it
+// changes that tab only.
+void PreferencesDialog::addReadModeRows()
+{
+    addHeading(tr("Read mode"));
+    addCombo(tr("Columns"), key::readColumns,
+             {{tr("Auto"), 0}, {QStringLiteral("1"), 1}, {QStringLiteral("2"), 2}, {QStringLiteral("3"), 3},
+              {QStringLiteral("4"), 4}});
+    auto *note = new QLabel(tr("Auto uses as many columns as fit at the current window width, font size and zoom."));
+    note->setObjectName(QStringLiteral("PrefMuted"));
+    note->setWordWrap(true);
+    note->setContentsMargins(rowIndent + 14, 0, 0, 4);
+    m_page->addWidget(note);
+
+    auto *spin = new QSpinBox;
+    spin->setObjectName(QString::fromLatin1(key::readChars));
+    spin->setRange(50, 100);
+    spin->setSingleStep(5);
+    spin->setKeyboardTracking(false); // one change when typing is done, not one per digit
+    spin->setFixedHeight(26);
+    spin->setMinimumWidth(110);
+    addRow(tr("Characters per column"), spin);
+    connect(spin, &QSpinBox::valueChanged, this, [spin](int chars) {
+        // In steps of 5, as the bar's slider has them.
+        const int stepped = qBound(50, qRound(chars / 5.0) * 5, 100);
+        Settings::instance().setValue(key::readChars, stepped);
+        if (stepped != chars) {
+            const QSignalBlocker blocker(spin);
+            spin->setValue(stepped);
+        }
+    });
+    track(key::readChars, [spin] {
+        const QSignalBlocker blocker(spin);
+        spin->setValue(Settings::instance().number(key::readChars));
+    });
+
+    addCombo(tr("Lines kept from the previous page"), key::readKeptLines,
+             {{QStringLiteral("0"), 0}, {QStringLiteral("1"), 1}, {QStringLiteral("2"), 2}, {QStringLiteral("3"), 3},
+              {QStringLiteral("4"), 4}, {QStringLiteral("5"), 5}});
 }
 
 void PreferencesDialog::addPictureCacheRow()
