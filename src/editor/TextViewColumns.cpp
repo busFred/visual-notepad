@@ -19,6 +19,7 @@
 #include <QFontInfo>
 #include <QFontMetricsF>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QPainter>
 #include <QScrollBar>
 #include <QTextBlock>
@@ -38,6 +39,8 @@ namespace {
 constexpr int scrollBarHeight = 12;
 constexpr int scrollBarRoom = scrollBarHeight + 4;
 constexpr int gutterRightPad = 14; // As TextView.cpp's.
+// How long the note under a column the caret left stays.
+constexpr int noteTime = 3000;
 
 // The line top before a place (a wrapped row of the same line, or the last
 // row of the line before), if there is one.
@@ -137,6 +140,8 @@ void TextView::setColumnsShown(bool on, int startLine)
     }
     m_columnsOn = on;
     m_columns->offsets.clear();
+    m_columns->key = {};
+    hideColumnsNote();
     m_columns->barDrag = {};
     m_columns->wheel = 0;
     m_dragging = false;
@@ -282,6 +287,7 @@ void TextView::columnsMoved(bool keepOffsets)
 {
     if (!keepOffsets)
         m_columns->offsets.clear();
+    hideColumnsNote(); // (Its column shows other lines now.)
     noteColumns();
     viewport()->update();
     Q_EMIT scrolled();
@@ -502,6 +508,74 @@ bool TextView::columnsShift(int direction)
     }
     columnsMoved(true);
     return true;
+}
+
+// The note shows once a key held down (its auto-repeat) has moved the caret
+// to another column while the view stayed: the caret is then far from where
+// the eye was. Never for a click, which puts the caret where the eye is.
+void TextView::columnsKeyStarting(QKeyEvent *event)
+{
+    Columns &c = *m_columns;
+    if (!event->isAutoRepeat())
+        c.key.noted = false;
+    int column = -1;
+    c.key.column = columnsCaretRect(textCursor(), &column).isNull() ? -1 : column;
+    c.key.start = c.flow.screen().start;
+}
+
+void TextView::columnsKeyDone()
+{
+    if (!m_columnsOn)
+        return;
+    Columns &c = *m_columns;
+    const int before = c.key.column;
+    c.key.column = -1;
+    if (before < 0 || c.key.noted)
+        return;
+    int column = -1;
+    if (columnsCaretRect(textCursor(), &column).isNull() || column == before || !(c.flow.screen().start == c.key.start))
+        return;
+    c.key.noted = true;
+    showColumnsNote(before, column > before);
+}
+
+// Under the column's lines (and its scroll bar), at its text's left, in the
+// colours of a tooltip; gone by itself after a few seconds.
+void TextView::showColumnsNote(int column, bool forward)
+{
+    Columns &c = *m_columns;
+    if (!c.note) {
+        auto *note = new QLabel(viewport());
+        note->setObjectName(QStringLiteral("ColumnsCaretNote"));
+        note->setAttribute(Qt::WA_TransparentForMouseEvents);
+        auto *timer = new QTimer(note);
+        timer->setSingleShot(true);
+        timer->setInterval(noteTime);
+        connect(timer, &QTimer::timeout, note, &QWidget::hide);
+        c.note = note;
+        c.noteTimer = timer;
+    }
+    QLabel *note = c.note;
+    note->setText(forward ? tr("Caret moved to the next column →") : tr("← Caret moved to the previous column"));
+    // (Set each time: the theme may have changed since.)
+    note->setStyleSheet(QStringLiteral("QLabel { background: %1; color: %2; border: 1px solid %3; border-radius: 3px;"
+                                       " padding: 1px 6px; }")
+                            .arg(palette().color(QPalette::ToolTipBase).name(),
+                                 palette().color(QPalette::ToolTipText).name(),
+                                 theme::color(theme::Role::divider).name()));
+    note->adjustSize();
+    const ColumnLayout &l = columnLayout();
+    const int top = l.top + l.height + (m_wordWrap ? 0 : scrollBarRoom) + 2;
+    note->move(l.columnLeft(column) + l.textLeft, qMax(0, qMin(top, viewport()->height() - note->height())));
+    note->show();
+    note->raise();
+    c.noteTimer->start();
+}
+
+void TextView::hideColumnsNote()
+{
+    if (m_columns && m_columns->note)
+        m_columns->note->hide();
 }
 
 // ---------------------------------------------------------------------------

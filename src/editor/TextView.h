@@ -441,6 +441,11 @@ private:
     void columnsPage(bool forward, bool moveCarets, bool select);
     // Moves the view on (1) or back (-1) by one column; false if it cannot.
     bool columnsShift(int direction);
+    // Around a key press: the note under a column the caret left.
+    void columnsKeyStarting(QKeyEvent *event);
+    void columnsKeyDone();
+    void showColumnsNote(int column, bool forward);
+    void hideColumnsNote();
 
     struct DiagnosticRange
     {

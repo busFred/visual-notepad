@@ -1358,6 +1358,13 @@ bool TextView::event(QEvent *event)
         event->ignore();
         return true;
     }
+    if (event->type() == QEvent::KeyPress && m_columnsOn) {
+        // In columns, a key that takes the caret to another column says so.
+        columnsKeyStarting(static_cast<QKeyEvent *>(event));
+        const bool done = QAbstractScrollArea::event(event);
+        columnsKeyDone();
+        return done;
+    }
     return QAbstractScrollArea::event(event);
 }
 
@@ -1582,8 +1589,11 @@ void TextView::mousePressEvent(QMouseEvent *event)
         return;
     }
     setFocus(Qt::MouseFocusReason);
-    if (m_columnsOn && columnBarPressed(event))
-        return;
+    if (m_columnsOn) {
+        hideColumnsNote(); // (A click shows where the caret is.)
+        if (columnBarPressed(event))
+            return;
+    }
     QPointF origin;
     const int pressedRow = rowAtPoint(event->position(), &origin);
     if (pressedRow >= 0) {
@@ -1927,6 +1937,7 @@ void TextView::resizeEvent(QResizeEvent *event)
         rowsMayHaveChanged();
     updateScrollBars();
     if (m_columnsOn) {
+        hideColumnsNote();
         placeColumnControls();
         noteColumns();
     }

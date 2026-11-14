@@ -6,6 +6,7 @@
 #include "editor/TextView.h"
 
 #include <QApplication>
+#include <QLabel>
 #include <QLineEdit>
 #include <QVBoxLayout>
 #include <QClipboard>
@@ -49,6 +50,7 @@ private Q_SLOTS:
     void columnsScrollSidewaysOneByOne();
     void columnsTurnPagesAndNudge();
     void columnsCaretBringsItsLine();
+    void columnsDownGoesToTheNextColumnWithANote();
     void columnsMoveOnOneColumnAtTheLastColumn();
     void columnsTypingReflowsOverTheBreaks();
     void columnsOffsetsTravelWithTheText();
@@ -131,6 +133,8 @@ private:
     int perColumn();
     QPointF columnPoint(int column, int row);
     int caretLine() const { return m_view->textCursor().blockNumber(); }
+    // A key held down: a press the keyboard repeats.
+    void repeatKey(Qt::Key key);
 
     QTextDocument *m_doc = nullptr;
     TextView *m_view = nullptr;
@@ -1304,6 +1308,12 @@ QPointF TestTextView::columnPoint(int column, int row)
     return QPointF(rect.left() + probe->left() + 12, rect.top() + (row + 0.5) * h);
 }
 
+void TestTextView::repeatKey(Qt::Key key)
+{
+    QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier, QString(), true);
+    QApplication::sendEvent(m_view, &press);
+}
+
 bool TestTextView::inked(const QImage &image, const QRect &rect)
 {
     const QRgb background = image.pixel(rect.topLeft());
@@ -1608,6 +1618,59 @@ void TestTextView::columnsCaretBringsItsLine()
     m_view->scrollToLine(150);
     m_view->grab();
     QCOMPARE(m_view->columnLineRange().first, 150);
+}
+
+// Down at the bottom of a column: the caret goes to the top of the next and
+// nothing moves; a note under the column it left says so, once while the key
+// is held down, never after a click, and goes by itself.
+void TestTextView::columnsDownGoesToTheNextColumnWithANote()
+{
+    showColumns(300);
+    m_view->setColumnChars(30);
+    m_view->grab();
+    QVERIFY(m_view->shownColumnCount() >= 3);
+    const int per = perColumn();
+    const QString next = QStringLiteral("Caret moved to the next column →");
+    const auto noteIn = [this](QLabel *note, int column) {
+        const QRect rect = m_view->columnRect(column);
+        return note->isVisible() && note->x() >= rect.left() && note->x() < rect.right()
+               && note->y() >= rect.bottom();
+    };
+    place(per - 2, 0);
+    // Held down: the first press stays in column 1, a repeat crosses over.
+    QTest::keyPress(m_view, Qt::Key_Down);
+    QCOMPARE(caretLine(), per - 1);
+    auto *note = m_view->findChild<QLabel *>(QStringLiteral("ColumnsCaretNote"));
+    QVERIFY(!note || !note->isVisible());
+    repeatKey(Qt::Key_Down);
+    QCOMPARE(caretLine(), per);
+    QCOMPARE(lineAtPoint(columnPoint(1, 0)), per); // At the top of column 2...
+    QCOMPARE(m_view->columnLineRange().first, 0);  // ...and nothing moved.
+    note = m_view->findChild<QLabel *>(QStringLiteral("ColumnsCaretNote"));
+    QVERIFY(note);
+    QVERIFY(noteIn(note, 0));
+    QCOMPARE(note->text(), next);
+    // Still held: on into column 3, and no new note (it stays under column 1).
+    for (int i = 0; i < per; ++i)
+        repeatKey(Qt::Key_Down);
+    QTest::keyRelease(m_view, Qt::Key_Down);
+    QCOMPARE(caretLine(), 2 * per);
+    QVERIFY(noteIn(note, 0));
+    // A new press back up to column 2: a note under column 3, pointing back.
+    QTest::keyClick(m_view, Qt::Key_Up);
+    QCOMPARE(caretLine(), 2 * per - 1);
+    QCOMPARE(m_view->columnLineRange().first, 0);
+    QVERIFY(noteIn(note, 2));
+    QCOMPARE(note->text(), QStringLiteral("← Caret moved to the previous column"));
+    // It goes by itself.
+    QTRY_VERIFY_WITH_TIMEOUT(!note->isVisible(), 5000);
+    // A click into another column shows none.
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, columnPoint(0, 3).toPoint());
+    QCOMPARE(caretLine(), 3);
+    QVERIFY(!note->isVisible());
+    // Nor a key that moves within a column.
+    QTest::keyClick(m_view, Qt::Key_Down);
+    QVERIFY(!note->isVisible());
 }
 
 // Down or Enter at the bottom of the last column moves the view on by one
