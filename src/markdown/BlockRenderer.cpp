@@ -918,6 +918,24 @@ public:
             figure.fittedWidth = fit.fittedWidth;
             m_figures.push_back({spots[index].position, figure});
         }
+        // A line height of N% makes the line of a figure N% as high as the
+        // figure (QTextBlockFormat::lineHeight), far more than the box it was
+        // fitted to. As for formulas (placeMath), a paragraph with figures
+        // spaces its lines by its text's height instead.
+        QTextCursor cursor(this);
+        QTextBlock last;
+        for (const auto &[position, figure] : m_figures) {
+            const QTextBlock block = findBlock(position);
+            if (block == last)
+                continue;
+            last = block;
+            QTextBlockFormat format = block.blockFormat();
+            if (format.lineHeightType() != QTextBlockFormat::ProportionalHeight)
+                continue;
+            format.setLineHeight(lineGap(block), QTextBlockFormat::LineDistanceHeight);
+            cursor.setPosition(block.position());
+            cursor.setBlockFormat(format);
+        }
     }
 
     // The figures sizeFigures() sized, with where each is in the text.
