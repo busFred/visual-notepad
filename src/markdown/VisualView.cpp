@@ -1695,6 +1695,7 @@ namespace {
 // How far the strip's chevron is from its label, and the label's room to the
 // right of it (the part of the strip a click on collapses).
 constexpr qreal stripGap = 6;
+constexpr qreal openPad = 7; // Each side of the label of the Open button.
 constexpr qreal stripLabelPad = 8;
 // The heading's chevron is this far left of the text, centred in the margin.
 constexpr qreal headingChevronOffset = 13;
@@ -1917,6 +1918,11 @@ VisualView::FoldSpot VisualView::foldSpotAt(const QPointF &point)
     FoldSpot spot;
     spot.line = info.row.firstLine;
     spot.top = top;
+    if (!info.chip && block->stripHeight() > 0 && info.row.firstLine == span.first
+        && openRect(block, QRectF(left + readOffset(index), top, textWidth(), block->stripHeight())).contains(point)) {
+        spot.where = FoldSpot::Open;
+        return spot;
+    }
     if (info.chip) {
         if (block->chipRect().translated(left, top).contains(point))
             spot.where = FoldSpot::Chip;
@@ -1974,6 +1980,10 @@ bool VisualView::foldPressed(QMouseEvent *event)
     setFocus(Qt::MouseFocusReason);
     event->accept();
     const int index = rowOfLine(spot.line);
+    if (spot.where == FoldSpot::Open) {
+        openWideBlock(m_rows[index].row);
+        return true;
+    }
     const RowInfo &info = m_rows[index];
     const MarkdownModel::Span &span = m_model->spans()[info.span];
     // (A fold of the heading stays at its first line whatever its rows.)
@@ -1988,13 +1998,80 @@ void VisualView::paintStrip(QPainter &painter, const RenderedBlock *block, const
                                 theme::color(theme::Role::text));
     painter.save();
     painter.setFont(renderContext().font);
-    // (Wide tables and equations get an "Open" button at the right end: the
-    // viewer it opens comes with read mode.)
+    // Wide tables and equations (read mode) get an "Open" button at the right end.
+    const QRectF open = openRect(block, rect);
+    const qreal labelRight = open.isEmpty() ? rect.right() : open.left() - stripGap;
     RenderedBlock::drawSecondaryText(painter,
                                      QRectF(rect.left() + stripLabelPad + stripGap, rect.top(),
-                                            rect.width() - stripLabelPad - stripGap, height),
+                                            labelRight - rect.left() - stripLabelPad - stripGap, height),
                                      Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine, render->chipLabel);
+    if (!open.isEmpty()) {
+        painter.setRenderHint(QPainter::Antialiasing);
+        QPainterPath box;
+        box.addRoundedRect(open.adjusted(0.5, 0.5, -0.5, -0.5), 3, 3);
+        painter.fillPath(box, theme::color(theme::Role::surface));
+        painter.setPen(theme::color(theme::Role::divider));
+        painter.drawPath(box);
+        painter.setPen(theme::color(theme::Role::text));
+        painter.drawText(open, Qt::AlignCenter | Qt::TextSingleLine, tr("Open"));
+    }
     painter.restore();
+}
+
+QRectF VisualView::openRect(const RenderedBlock *block, const QRectF &rect)
+{
+    if (!readActive() || block->stripHeight() <= 0 || block->contentWidth() <= textWidth())
+        return {};
+    const qreal width = QFontMetricsF(renderContext().font).horizontalAdvance(tr("Open")) + 2 * openPad;
+    return QRectF(rect.left() + textWidth() - width, rect.top() + 1, width, block->stripHeight() - 2);
+}
+
+QRect VisualView::readOpenRect(int line)
+{
+    const int index = rowOfLine(line);
+    const std::optional<QPointF> origin = rowOrigin(line);
+    const RenderedBlock *block = index < int(m_rows.size()) && m_rows[index].row.rendered
+                                     ? renderedForRow(m_rows[index].row)
+                                     : nullptr;
+    if (!origin || !block)
+        return {};
+    return openRect(block, QRectF(origin->x() + readOffset(index), origin->y(), textWidth(), block->stripHeight()))
+        .toAlignedRect();
+}
+
+QString VisualView::headingBefore(int line)
+{
+    // The nearest heading above the block (its own section's, if it has one).
+    for (int s = m_rows[rowOfLine(line)].span - 1; s >= 0; --s) {
+        const MarkdownModel::Span &span = m_model->spans()[s];
+        const int blockIndex = span.block >= 0 ? span.block : span.previous;
+        if (blockIndex < 0 || blockClass(blockIndex).kind != FoldKind::Heading)
+            continue;
+        static const QRegularExpression marks(QStringLiteral("^\\s{0,3}#{1,6}\\s+|\\s+#+\\s*$"));
+        QString text = document()->findBlockByNumber(span.first).text();
+        text.remove(marks);
+        text = text.trimmed();
+        if (!text.isEmpty())
+            return text;
+    }
+    return {};
+}
+
+bool VisualView::openWideBlock(const Row &r)
+{
+    const RenderedBlock *block = readActive() && r.rendered ? renderedForRow(r) : nullptr;
+    if (!block || block->contentWidth() <= textWidth())
+        return false;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const QImage image = block->contentImage(devicePixelRatioF());
+    QApplication::restoreOverrideCursor();
+    if (image.isNull())
+        return false;
+    const QString what = block->kind() == RenderedBlock::Kind::Image ? tr("equation") : tr("table");
+    const QString heading = headingBefore(r.firstLine);
+    // Closes itself; the window is the parent so it stays on top of this tab.
+    (new ImageViewer(image, heading.isEmpty() ? what : tr("%1 \u2014 %2").arg(heading, what), window()))->show();
+    return true;
 }
 
 void VisualView::paintHeadingMarks(QPainter &painter, const RowInfo &info, const RenderedBlock *block,
@@ -2034,7 +2111,8 @@ const RenderContext &VisualView::renderContext()
     const qreal width = textWidth();
     const qreal figureHeight = figureBoxHeight();
     if (!m_contextValid || m_contextFrame != m_frame || m_contextRevision != m_model->revision()
-        || m_contextWidth != width || m_context.devicePixelRatio != devicePixelRatioF()
+        || m_contextWidth != width || m_contextOverflow != readActive()
+        || m_context.devicePixelRatio != devicePixelRatioF()
         || m_contextFigureHeight != figureHeight || m_contextFigureRevision != m_figureRevision) {
         m_context = context();
         // (The figures' box and sizes are the key's part for every block: see renderKey.)
@@ -2048,6 +2126,7 @@ const RenderContext &VisualView::renderContext()
         m_contextFrame = m_frame;
         m_contextRevision = m_model->revision();
         m_contextWidth = width;
+        m_contextOverflow = readActive();
         m_contextValid = true;
     }
     return m_context;
@@ -2070,6 +2149,7 @@ RenderContext VisualView::context() const
     ctx.figureWidth = qMin(ctx.width, figureColumns * QFontMetricsF(ctx.font).averageCharWidth());
     ctx.figureHeight = figureBoxHeight();
     ctx.figureScales = m_figureScales;
+    ctx.overflow = readActive();
     return ctx;
 }
 
@@ -2380,11 +2460,13 @@ const VisualView::Render *VisualView::rendered(const Row &r)
 
     const qreal width = textWidth();
     const qreal dpr = devicePixelRatioF();
-    if (m_rendersRevision != m_model->revision() || m_rendersWidth != width || m_rendersDpr != dpr) {
+    if (m_rendersRevision != m_model->revision() || m_rendersWidth != width || m_rendersDpr != dpr
+        || m_rendersOverflow != readActive()) {
         resetRenders();
         m_rendersRevision = m_model->revision();
         m_rendersWidth = width;
         m_rendersDpr = dpr;
+        m_rendersOverflow = readActive();
     }
     if (m_rendersFigureHeight != figureBoxHeight() || m_rendersFigureRevision != m_figureRevision) {
         dropFigureRenders();
@@ -2516,7 +2598,7 @@ QString VisualView::renderKey(const RenderContext &ctx, core::BlockKind kind, co
 {
     // Identical blocks render identically, so the source (by hash, checked
     // on a hit) is the key.
-    QString key = QStringLiteral("%1|%2|%3|%4|%5|%6|%7|%8|%9")
+    QString key = QStringLiteral("%1|%2|%3|%4|%5|%6|%7|%8|%9|%10")
                       .arg(int(ctx.width))
                       .arg(ctx.font.pointSizeF())
                       .arg(ctx.font.family())
@@ -2525,7 +2607,8 @@ QString VisualView::renderKey(const RenderContext &ctx, core::BlockKind kind, co
                       .arg(ctx.codeFont.family())
                       .arg(ctx.devicePixelRatio)
                       .arg(source.size())
-                      .arg(qHash(source));
+                      .arg(qHash(source))
+                      .arg(ctx.overflow);
     // Only blocks with figures depend on the box they fit (the height of the
     // view) and on what the user made of them.
     if (RenderedBlock::mayHaveFigure(source)) {
@@ -2627,7 +2710,8 @@ const RenderedBlock *VisualView::renderedForRow(const Row &r)
 const VisualView::Render *VisualView::memoized(const Row &r) const
 {
     if (m_rendersRevision != m_model->revision() || m_rendersWidth != textWidth()
-        || m_rendersDpr != devicePixelRatioF() || m_rendersFigureHeight != figureBoxHeight()
+        || m_rendersDpr != devicePixelRatioF() || m_rendersOverflow != readActive()
+        || m_rendersFigureHeight != figureBoxHeight()
         || m_rendersFigureRevision != m_figureRevision)
         return nullptr;
     const auto it = m_renders.find(r.firstLine);
@@ -2689,7 +2773,9 @@ void VisualView::paintRenderedRow(QPainter &painter, const Row &r, const QRectF 
         selection.caretOn = hasFocus() && std::any_of(carets.cbegin(), carets.cend(),
                                                       [start](const QTextCursor &c) { return c.position() == start; });
     }
-    block->paint(painter, rect.topLeft(), rect.width(), selection);
+    // (A wide block of read mode is slid sideways; its strip stays.)
+    const QPointF origin = rect.topLeft() - QPointF(m_readSlide, 0);
+    block->paint(painter, origin, rect.width(), selection);
     if (info && block->kind() != RenderedBlock::Kind::Chip) {
         // The pointer is over a block with a strip, or a heading.
         if (block->stripHeight() > 0 && r.firstLine == m_hoverLine)
@@ -2727,7 +2813,7 @@ void VisualView::paintRenderedRow(QPainter &painter, const Row &r, const QRectF 
         QRectF caret(0, 0, 2, qMin<qreal>(lineHeight(), block->height()));
         if (const auto at = block->caretRect(k))
             caret = *at;
-        painter.fillRect(caret.translated(rect.topLeft()), theme::color(theme::Role::text));
+        painter.fillRect(caret.translated(origin), theme::color(theme::Role::text));
     }
 }
 
@@ -2864,6 +2950,12 @@ void VisualView::mouseReleaseEvent(QMouseEvent *event)
 {
     // (In read mode the caret the pointer places is on screen: no page turns to it.)
     const QScopedValueRollback<bool> pointing(m_readPointing, m_readPointing || readActive());
+    if (m_readBarDrag.active && event->button() == Qt::LeftButton) {
+        m_readBarDrag = {};
+        viewport()->update();
+        event->accept();
+        return;
+    }
     if (m_tableDrag.active && event->button() == Qt::LeftButton) {
         // The selection of cells, rows or columns is made as it was dragged.
         m_tableDrag = {};
@@ -2956,6 +3048,11 @@ bool VisualView::renderedRowPressed(const Row &r, const QPointF &point, QMouseEv
     if (!block)
         return false;
     const QString anchor = block->anchorAt(point);
+    // A click on a wide table or equation that is not on text (where a click
+    // would put the caret) shows all of it, as Open does.
+    if (anchor.isEmpty() && readActive() && block->contentWidth() > textWidth() && zoomClick(event)
+        && (block->kind() == RenderedBlock::Kind::Image || !block->textAt(point)) && openWideBlock(r))
+        return true;
     if (anchor.isEmpty())
         return openPicture(block, point, event) || tableCellPressed(r, point, event);
     if (anchor.startsWith(QLatin1String("vn-task:"))) {
@@ -3032,6 +3129,8 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
 {
     // (In read mode the caret the pointer places is on screen: no page turns to it.)
     const QScopedValueRollback<bool> pointing(m_readPointing, m_readPointing || readActive());
+    if (m_readBarDrag.active && readBarMoved(event))
+        return;
     if (m_tableDrag.active) {
         if (event->buttons() & Qt::LeftButton) {
             updateTableDrag(event->position());
@@ -3087,6 +3186,11 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
         }
         if (m_hoverFold) {
             viewport()->setCursor(Qt::PointingHandCursor);
+            QToolTip::hideText();
+            return;
+        }
+        if (readActive() && readBarAt(event->position())) {
+            viewport()->setCursor(Qt::ArrowCursor);
             QToolTip::hideText();
             return;
         }
@@ -3410,6 +3514,9 @@ void VisualView::mousePressEvent(QMouseEvent *event)
 {
     // (In read mode the caret the pointer places is on screen: no page turns to it.)
     const QScopedValueRollback<bool> pointing(m_readPointing, m_readPointing || readActive());
+    // The scrollbar under a wide table or equation.
+    if (readActive() && readBarPressed(event))
+        return;
     if (event->button() == Qt::LeftButton && !isReadOnly() && markdownEditing()) {
         TableSpot spot = tableSpotAt(event->position());
         const bool shift = (event->modifiers() & ~Qt::KeypadModifier) == Qt::ShiftModifier;

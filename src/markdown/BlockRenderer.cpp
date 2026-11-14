@@ -60,6 +60,13 @@ constexpr qreal chipPadX = 10;
 constexpr qreal chipChevronGap = 7;
 constexpr qreal chevronSize = 8;
 constexpr qreal stripExtraHeight = 4;
+// The scrollbar under a block wider than its column: as high as the style's
+// (QScrollBar:horizontal in Theme.cpp), a line above its thumb included.
+constexpr qreal scrollBarHeight = 12;
+constexpr qreal scrollThumbMargin = 2;
+constexpr qreal scrollThumbMin = 24;
+// Wide enough for a table's natural width to be laid out unwrapped.
+constexpr qreal unboundedWidth = 1e6;
 
 qsizetype imageCost(const QImage &image)
 {
@@ -1542,6 +1549,34 @@ bool highlightsCode(qsizetype sourceChars)
     return !layoutGuard || sourceChars <= highlightMax;
 }
 
+// The one table a document of rich text is (RenderedBlock::tableCells), or
+// null: its root frame holds the table directly and nothing else but the
+// empty paragraphs around it.
+QTextTable *onlyTable(const QTextDocument &doc)
+{
+    QTextTable *table = nullptr;
+    for (QTextFrame *frame : doc.rootFrame()->childFrames()) {
+        if (auto *t = qobject_cast<QTextTable *>(frame)) {
+            if (table)
+                return nullptr;
+            table = t;
+        } else {
+            return nullptr;
+        }
+    }
+    if (!table)
+        return nullptr;
+    for (QTextBlock b = doc.begin(); b.isValid() && b.position() < table->firstPosition(); b = b.next()) {
+        if (!b.text().isEmpty())
+            return nullptr;
+    }
+    for (QTextBlock b = doc.findBlock(table->lastPosition() + 1); b.isValid(); b = b.next()) {
+        if (!b.text().isEmpty())
+            return nullptr;
+    }
+    return table;
+}
+
 std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString &definition,
                                             const RenderContext &context, qreal width, bool wrapAnywhere,
                                             bool highlight)
@@ -1804,14 +1839,21 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
         r.m_height = 0;
         return result;
     case core::BlockKind::Math: {
-        // Drawn as shapes (see paint()), shrunk to the column if wider.
+        // Drawn as shapes (see paint()), shrunk to the column if wider (in
+        // read mode it keeps its size, and the view scrolls it).
         r.m_kind = Kind::Image;
         r.m_formula = cachedFormula(math::withMacros(text), true);
         r.m_formulaScale = QFontInfo(context.font).pixelSize() * displayMathScale / math::layoutPixelSize;
-        if (r.m_formula->width * r.m_formulaScale > context.width && context.width > 0)
+        const bool wide = r.m_formula->width * r.m_formulaScale > context.width && context.width > 0;
+        if (wide && !context.overflow)
             r.m_formulaScale = context.width / r.m_formula->width;
         r.m_centered = true;
         r.m_height = r.pictureSize().height() + 2 * codePadY + blockGap;
+        if (wide && context.overflow) {
+            r.m_contentWidth = r.pictureSize().width();
+            r.m_scrollRoom = scrollBarHeight;
+            r.m_height += r.m_scrollRoom;
+        }
         return result;
     }
     case core::BlockKind::Code:
@@ -1893,8 +1935,21 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
             r.m_item.bottomMargin = doc->lastBlock().blockFormat().bottomMargin();
         }
         doc->setTextWidth(context.width);
+        if (context.overflow && !item && onlyTable(*doc)) {
+            // A table keeps the width its cells ask for (not squeezed to the
+            // column, its text wrapped), when that is wider than the column.
+            doc->setTextWidth(unboundedWidth);
+            const qreal ideal = std::ceil(doc->idealWidth());
+            if (ideal > context.width) {
+                doc->setTextWidth(ideal);
+                r.m_contentWidth = ideal;
+                r.m_scrollRoom = scrollBarHeight;
+            } else {
+                doc->setTextWidth(context.width);
+            }
+        }
         // An item ends where the next starts (see itemAdvance).
-        r.m_height = doc->size().height() + (item ? 0 : blockGap);
+        r.m_height = doc->size().height() + (item ? 0 : blockGap) + r.m_scrollRoom;
         // Backgrounds are asked for when painted: start their downloads now.
         if (context.allowRemoteImages && mayLoadPictures(QByteArrayView(block.html.data(), qsizetype(block.html.size()))))
             doc->loadPaintedPictures();
@@ -2229,29 +2284,7 @@ QTextTable *RenderedBlock::theTable() const
 {
     if (m_kind != Kind::Rich || !m_doc)
         return nullptr;
-    // The root frame holds the table directly and nothing else but the empty
-    // paragraphs around it.
-    QTextTable *table = nullptr;
-    for (QTextFrame *frame : m_doc->rootFrame()->childFrames()) {
-        if (auto *t = qobject_cast<QTextTable *>(frame)) {
-            if (table)
-                return nullptr;
-            table = t;
-        } else {
-            return nullptr;
-        }
-    }
-    if (!table)
-        return nullptr;
-    for (QTextBlock b = m_doc->begin(); b.isValid() && b.position() < table->firstPosition(); b = b.next()) {
-        if (!b.text().isEmpty())
-            return nullptr;
-    }
-    for (QTextBlock b = m_doc->findBlock(table->lastPosition() + 1); b.isValid(); b = b.next()) {
-        if (!b.text().isEmpty())
-            return nullptr;
-    }
-    return table;
+    return onlyTable(*m_doc);
 }
 
 QSize RenderedBlock::tableCells() const
@@ -2521,6 +2554,63 @@ QImage RenderedBlock::pictureImage(const Picture &picture) const
     QImage image = m_image;
     image.setDevicePixelRatio(1);
     return image;
+}
+
+QRectF RenderedBlock::scrollTrack(qreal width) const
+{
+    if (m_scrollRoom <= 0)
+        return {};
+    return QRectF(0, m_height - blockGap - m_scrollRoom, width, m_scrollRoom);
+}
+
+QRectF RenderedBlock::scrollThumb(const QRectF &track, qreal content, qreal offset)
+{
+    if (content <= track.width() || track.isEmpty())
+        return {};
+    const qreal width = qBound(qMin(scrollThumbMin, track.width()), track.width() * track.width() / content,
+                               track.width());
+    const qreal range = content - track.width();
+    const qreal along = qBound<qreal>(0, offset / range, 1) * (track.width() - width);
+    // Under the line that sets the track off, between its margins.
+    return QRectF(track.left() + along, track.top() + 1 + scrollThumbMargin, width,
+                  track.height() - 1 - 2 * scrollThumbMargin);
+}
+
+void RenderedBlock::paintScrollBar(QPainter &painter, const QRectF &track, qreal content, qreal offset, bool hot)
+{
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    painter.fillRect(track, theme::color(theme::Role::editor));
+    painter.fillRect(QRectF(track.left(), track.top(), track.width(), 1), theme::color(theme::Role::sideBar));
+    painter.fillRect(scrollThumb(track, content, offset), theme::color(hot ? theme::Role::divider : theme::Role::panelTitle));
+    painter.restore();
+}
+
+QImage RenderedBlock::contentImage(qreal devicePixelRatio) const
+{
+    if (m_scrollRoom <= 0)
+        return {};
+    const QSizeF size(m_contentWidth, m_height - m_strip - m_scrollRoom - blockGap);
+    // (A table of thousands of columns would take gigabytes at full size.)
+    constexpr qreal maxSide = 30000;
+    constexpr qreal maxPixels = 120e6;
+    qreal ratio = qMax<qreal>(devicePixelRatio, 1);
+    ratio = std::min({ratio, maxSide / qMax(size.width(), size.height()), std::sqrt(maxPixels / (size.width() * size.height()))});
+    QImage image(QSize(qMax(1, qCeil(size.width() * ratio)), qMax(1, qCeil(size.height() * ratio))),
+                 QImage::Format_ARGB32_Premultiplied);
+    image.fill(theme::color(theme::Role::editor));
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.scale(ratio, ratio);
+    paint(painter, QPointF(0, -m_strip), m_contentWidth);
+    return image;
+}
+
+bool RenderedBlock::textAt(const QPointF &point) const
+{
+    if (!m_doc || (m_kind != Kind::Rich && m_kind != Kind::Code))
+        return false;
+    return m_doc->documentLayout()->hitTest(point - contentOffset(), Qt::ExactHit) >= 0;
 }
 
 std::optional<QRectF> RenderedBlock::caretRect(int position) const

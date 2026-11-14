@@ -167,6 +167,16 @@ public:
     const md::Screen &readScreen();
     QRect readColumnRect(int column);
     QRect readSegmentRect(int column, int index);
+    // For tests: how far the table or equation that starts on `line` is
+    // scrolled sideways (0 if it is not wider than its column), the
+    // scrollbar under a segment's part of one, and its Open button.
+    qreal readOffsetOfLine(int line);
+    QRect readBarRect(int column, int index);
+    QRect readOpenRect(int line);
+    // For tests: whether the render context asks for blocks that overflow.
+    bool rendersOverflow() { return renderContext().overflow; }
+    // For tests: the rendered block of the row holding `line`, or null.
+    const RenderedBlock *renderedBlockOfLine(int line);
     // The page turns follow the lock, a page back or on, and the nudges the
     // keys and wheel do.
     void ensureCursorVisible() override;
@@ -313,12 +323,19 @@ private:
     void toggleFoldAt(int line, FoldKind kind);
     struct FoldSpot
     {
-        enum Where { None, Chevron, Chip, Strip } where = None;
+        enum Where { None, Chevron, Chip, Strip, Open } where = None;
         int line = -1;
         qreal top = 0; // Of the row, in the viewport.
     };
     FoldSpot foldSpotAt(const QPointF &point);
     bool foldPressed(QMouseEvent *event);
+    // The Open button at the right end of the strip of a block wider than
+    // its column, in a row whose top-left corner is `rect`'s (read mode).
+    QRectF openRect(const RenderedBlock *block, const QRectF &rect);
+    // Shows the whole of a wide block in the picture viewer.
+    bool openWideBlock(const Row &row);
+    // The title of the heading the block that starts on `line` is under.
+    QString headingBefore(int line);
     void paintStrip(QPainter &painter, const RenderedBlock *block, const Render *render, const QRectF &rect);
     void paintHeadingMarks(QPainter &painter, const RowInfo &info, const RenderedBlock *block, const QRectF &rect);
     RenderContext context() const;
@@ -672,6 +689,7 @@ private:
     quint64 m_contextFrame = 0;
     int m_contextRevision = -1;
     qreal m_contextWidth = -1;
+    bool m_contextOverflow = false;
     qreal m_contextFigureHeight = -1;
     int m_contextFigureRevision = -1;
     bool m_contextValid = false;
@@ -709,6 +727,7 @@ private:
     qint64 m_renderKiB = 0;
     int m_rendersRevision = -1;
     qreal m_rendersWidth = -1;
+    bool m_rendersOverflow = false;
     qreal m_rendersDpr = -1;
     qreal m_rendersFigureHeight = -1;
     int m_rendersFigureRevision = -1;
@@ -771,6 +790,20 @@ private:
     // Where the row's top-left corner is for a hit (rowAtPoint's origin).
     QPointF readOrigin(const ReadHit &hit);
     bool readKey(QKeyEvent *event);
+    // A table or equation wider than its column slides sideways under its
+    // strip; each keeps its own offset (by its first line) until the layout
+    // changes or read mode ends. The offset of a row, clamped.
+    qreal readOffset(int rowIndex);
+    void setReadOffset(int rowIndex, qreal offset);
+    // Scrolls the wide block under a viewport point by `dx` pixels; false if
+    // there is none.
+    bool readScrollAt(const QPointF &point, qreal dx);
+    // The scrollbar of a segment, in the viewport (null if it shows no part
+    // of it), and the one at a point.
+    QRectF readBarOf(const ReadHit &hit);
+    std::optional<ReadHit> readBarAt(const QPointF &point);
+    bool readBarPressed(QMouseEvent *event);
+    bool readBarMoved(QMouseEvent *event);
     // The viewport origin of the row showing `line` (its first line), if on screen.
     std::optional<QPointF> rowOrigin(int line);
 
@@ -789,6 +822,16 @@ private:
     bool m_readWheelPixels = false;
     // A mouse event is being handled: the caret it places is on screen.
     bool m_readPointing = false;
+    std::unordered_map<int, qreal> m_readOffsets; // By first line of the block.
+    // How far the block being painted is slid (see paintRenderedRow).
+    qreal m_readSlide = 0;
+    // A drag of a scrollbar's thumb: the block's row, and where in the thumb it holds.
+    struct BarDrag
+    {
+        bool active = false;
+        int line = -1;
+        qreal grab = 0;
+    } m_readBarDrag;
     // What readChanged() last told: the screen's start and end, the lines, and the fit.
     struct ReadNews
     {

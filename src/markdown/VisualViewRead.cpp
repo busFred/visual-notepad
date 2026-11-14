@@ -13,6 +13,7 @@
 #include <QKeyEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QScopedValueRollback>
 #include <QTextBlock>
 #include <QTimer>
 #include <QWheelEvent>
@@ -254,6 +255,8 @@ void VisualView::setReadMode(bool on)
     const qreal position = wasActive ? m_readLinePosition : topLinePosition();
     m_readMode = on;
     m_readWheel = 0;
+    m_readOffsets.clear();
+    m_readBarDrag = {};
     if (readActive()) {
         m_readLinePosition = position;
         m_readNeedsStart = true;
@@ -371,8 +374,10 @@ const md::Screen &VisualView::ensureReadScreen()
     if (m_readNeedsStart) {
         m_readNeedsStart = false;
         m_readDirty = false;
-        if (!(m_readFlow->geometry().key() == geometry.key()))
+        if (!(m_readFlow->geometry().key() == geometry.key())) {
             m_readFlow->setGeometry(geometry);
+            m_readOffsets.clear();
+        }
         // Where the line position is drawn, at the top of its visual line.
         const auto [row, y] = placeOfLinePosition(m_readLinePosition);
         const QList<int> tops = m_readRows->lineTops(row);
@@ -386,6 +391,7 @@ const md::Screen &VisualView::ensureReadScreen()
     } else if (!(m_readFlow->geometry().key() == geometry.key())) {
         m_readDirty = false;
         m_readFlow->setGeometry(geometry);
+        m_readOffsets.clear(); // (The layout changed: so did what is wide.)
     } else if (m_readDirty) {
         m_readDirty = false;
         m_readFlow->reflow();
@@ -589,13 +595,179 @@ QPointF VisualView::readOrigin(const ReadHit &hit)
 {
     const ReadLayout &l = readLayout();
     const md::Segment &s = m_readFlow->screen().columns[hit.column].segments[hit.index];
-    const qreal left = l.left + hit.column * (l.width + l.gap);
+    // (A wide table or equation is slid sideways.)
+    const qreal left = l.left + hit.column * (l.width + l.gap) - readOffset(s.row);
     if (hit.header) {
         const RenderedBlock *block = renderedForRow(m_rows[s.row].row);
         return QPointF(left, hit.top - (block ? block->breaks().headerTop : 0));
     }
     const int header = s.repeatHeader ? m_readRows->headerHeight(s.row) : 0;
     return QPointF(left, hit.top + header - s.yFrom);
+}
+
+qreal VisualView::readOffset(int rowIndex)
+{
+    if (!readActive() || rowIndex < 0 || rowIndex >= int(m_rows.size()) || !m_rows[rowIndex].row.rendered)
+        return 0;
+    const Row r = m_rows[rowIndex].row;
+    const RenderedBlock *block = renderedForRow(r);
+    const qreal range = block ? block->contentWidth() - readLayout().width : 0;
+    if (range <= 0)
+        return 0;
+    const auto it = m_readOffsets.find(r.firstLine);
+    return it == m_readOffsets.end() ? 0 : qBound<qreal>(0, it->second, range);
+}
+
+void VisualView::setReadOffset(int rowIndex, qreal offset)
+{
+    if (!readActive() || rowIndex < 0 || rowIndex >= int(m_rows.size()))
+        return;
+    const RenderedBlock *block = renderedForRow(m_rows[rowIndex].row);
+    const qreal range = block ? block->contentWidth() - readLayout().width : 0;
+    if (range <= 0)
+        return;
+    offset = qBound<qreal>(0, offset, range);
+    qreal &kept = m_readOffsets[m_rows[rowIndex].row.firstLine];
+    if (kept == offset)
+        return;
+    kept = offset;
+    hideFigureBar();
+    viewport()->update();
+}
+
+const RenderedBlock *VisualView::renderedBlockOfLine(int line)
+{
+    const Row r = row(rowOfLine(line));
+    return r.rendered ? renderedForRow(r) : nullptr;
+}
+
+qreal VisualView::readOffsetOfLine(int line)
+{
+    return readOffset(rowOfLine(line));
+}
+
+bool VisualView::readScrollAt(const QPointF &point, qreal dx)
+{
+    if (!readActive() || ensureReadScreen().empty())
+        return false;
+    const ReadHit hit = readHitAt(point, true);
+    if (hit.index < 0)
+        return false;
+    const int index = m_readFlow->screen().columns[hit.column].segments[hit.index].row;
+    const RenderedBlock *block = m_rows[index].row.rendered ? renderedForRow(m_rows[index].row) : nullptr;
+    if (!block || block->contentWidth() <= readLayout().width)
+        return false;
+    setReadOffset(index, readOffset(index) + dx);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// The scrollbar of a wide block
+
+QRectF VisualView::readBarOf(const ReadHit &hit)
+{
+    if (hit.index < 0)
+        return {};
+    const md::Segment &s = m_readFlow->screen().columns[hit.column].segments[hit.index];
+    const Row r = m_rows[s.row].row;
+    const RenderedBlock *block = r.rendered ? renderedForRow(r) : nullptr;
+    const ReadLayout &l = readLayout();
+    if (!block || block->contentWidth() <= l.width)
+        return {};
+    // (Only the part of a split table that has the block's bottom shows it.)
+    const QRectF track = block->scrollTrack(l.width);
+    if (track.isEmpty() || track.top() < s.yFrom || track.bottom() > s.yTo)
+        return {};
+    ReadHit body = hit;
+    body.header = false;
+    const qreal left = l.left + hit.column * (l.width + l.gap);
+    return track.translated(left, readOrigin(body).y());
+}
+
+QRect VisualView::readBarRect(int column, int index)
+{
+    const md::Screen &screen = ensureReadScreen();
+    if (column < 0 || column >= int(screen.columns.size()))
+        return {};
+    qreal y = readLayout().top;
+    const auto &segments = screen.columns[column].segments;
+    for (int i = 0; i < int(segments.size()) && i <= index; ++i) {
+        if (i == index)
+            return readBarOf({column, i, y, false}).toAlignedRect();
+        y += m_readFlow->drawnHeight(segments[i]);
+    }
+    return {};
+}
+
+std::optional<VisualView::ReadHit> VisualView::readBarAt(const QPointF &point)
+{
+    if (!readActive() || ensureReadScreen().empty())
+        return std::nullopt;
+    const ReadHit hit = readHitAt(point, true);
+    if (hit.index < 0 || !readBarOf(hit).contains(point))
+        return std::nullopt;
+    return hit;
+}
+
+bool VisualView::readBarPressed(QMouseEvent *event)
+{
+    if (event->button() != Qt::LeftButton)
+        return false;
+    const std::optional<ReadHit> hit = readBarAt(event->position());
+    if (!hit)
+        return false;
+    const int index = m_readFlow->screen().columns[hit->column].segments[hit->index].row;
+    const RenderedBlock *block = renderedForRow(m_rows[index].row);
+    const QRectF bar = readBarOf(*hit);
+    const QRectF thumb = RenderedBlock::scrollThumb(bar, block->contentWidth(), readOffset(index));
+    const qreal x = event->position().x();
+    // A press on the thumb holds it where it is; elsewhere on the track the
+    // thumb comes to the pointer.
+    const bool onThumb = x >= thumb.left() && x < thumb.right();
+    m_readBarDrag = {true, m_rows[index].row.firstLine, onThumb ? x - thumb.left() : thumb.width() / 2};
+    setFocus(Qt::MouseFocusReason);
+    event->accept();
+    if (!onThumb)
+        readBarMoved(event);
+    viewport()->update();
+    return true;
+}
+
+bool VisualView::readBarMoved(QMouseEvent *event)
+{
+    if (!m_readBarDrag.active)
+        return false;
+    if (!(event->buttons() & Qt::LeftButton)) {
+        m_readBarDrag = {}; // (The release went elsewhere.)
+        viewport()->update();
+        return false;
+    }
+    // The bar of the block's row, where it shows now.
+    const md::Screen &screen = ensureReadScreen();
+    for (int c = 0; c < int(screen.columns.size()); ++c) {
+        qreal y = readLayout().top;
+        const auto &segments = screen.columns[c].segments;
+        for (int i = 0; i < int(segments.size()); ++i) {
+            const md::Segment &s = segments[i];
+            const ReadHit hit{c, i, y, false};
+            y += m_readFlow->drawnHeight(s);
+            if (m_rows[s.row].row.firstLine != m_readBarDrag.line)
+                continue;
+            const QRectF bar = readBarOf(hit);
+            if (bar.isEmpty())
+                continue;
+            const RenderedBlock *block = renderedForRow(m_rows[s.row].row);
+            const qreal thumbWidth = RenderedBlock::scrollThumb(bar, block->contentWidth(), 0).width();
+            const qreal room = bar.width() - thumbWidth;
+            if (room > 0) {
+                const qreal along = qBound<qreal>(0, event->position().x() - m_readBarDrag.grab - bar.left(), room);
+                setReadOffset(s.row, along / room * (block->contentWidth() - bar.width()));
+            }
+            event->accept();
+            return true;
+        }
+    }
+    return true;
 }
 
 int VisualView::rowAtPoint(const QPointF &point, QPointF *origin)
@@ -679,6 +851,9 @@ void VisualView::paintRead(QPaintEvent *event)
                 const RenderedBlock *block = renderedForRow(r);
                 painter.save();
                 painter.setClipRect(QRectF(left - readMargin, y, l.width + 2 * readMargin, header));
+                if (block && block->contentWidth() > l.width)
+                    painter.setClipRect(QRectF(left, y, l.width, header), Qt::IntersectClip);
+                const QScopedValueRollback<qreal> slide(m_readSlide, readOffset(s.row));
                 paintRenderedRow(painter, r, QRectF(left, y - (block ? block->breaks().headerTop : 0), l.width, rowHeight));
                 painter.restore();
                 y += header;
@@ -686,10 +861,27 @@ void VisualView::paintRead(QPaintEvent *event)
             const qreal h = s.yTo - s.yFrom;
             if (h > 0 && QRectF(band.left(), y, band.width(), h).intersects(event->rect())) {
                 painter.save();
-                // (A wide table or equation is cut at the column's edge.)
                 painter.setClipRect(QRectF(left - readMargin, y, l.width + readMargin + 2, h));
                 if (r.rendered) {
-                    paintRenderedRow(painter, r, QRectF(left, y - s.yFrom, l.width, rowHeight));
+                    const RenderedBlock *block = renderedForRow(r);
+                    const QRectF rowRect(left, y - s.yFrom, l.width, rowHeight);
+                    if (block && block->contentWidth() > l.width) {
+                        // A wide table or equation is cut at the column's
+                        // edges and slides under its strip; its scrollbar stays.
+                        painter.setClipRect(QRectF(left, y, l.width, h), Qt::IntersectClip);
+                        {
+                            const QScopedValueRollback<qreal> slide(m_readSlide, readOffset(s.row));
+                            paintRenderedRow(painter, r, rowRect);
+                        }
+                        const QRectF track = block->scrollTrack(l.width);
+                        if (track.top() >= s.yFrom && track.bottom() <= s.yTo) {
+                            RenderedBlock::paintScrollBar(painter, track.translated(rowRect.topLeft()),
+                                                          block->contentWidth(), readOffset(s.row),
+                                                          m_readBarDrag.active && m_readBarDrag.line == r.firstLine);
+                        }
+                    } else {
+                        paintRenderedRow(painter, r, rowRect);
+                    }
                 } else {
                     // Source standing in for a block not parsed yet.
                     painter.setPen(theme::color(theme::Role::text));
@@ -829,14 +1021,25 @@ void VisualView::wheelEvent(QWheelEvent *event)
     if (!readActive() || (event->modifiers() & Qt::ControlModifier))
         return TextView::wheelEvent(event);
     event->accept();
-    // A line a notch; a touchpad's pixels add up to lines of body text.
     const bool pixels = !event->pixelDelta().isNull();
+    const QPoint delta = pixels ? event->pixelDelta() : event->angleDelta();
+    // Sideways (a horizontal wheel or touchpad swipe, or Shift with the wheel)
+    // scrolls the wide block under the pointer, and nothing else.
+    const bool shift = event->modifiers() & Qt::ShiftModifier;
+    if (shift || qAbs(delta.x()) > qAbs(delta.y())) {
+        const int along = shift && delta.x() == 0 ? delta.y() : delta.x();
+        // A notch is three lines of text, a touchpad's pixels are pixels.
+        const qreal dx = pixels ? along : along / 120.0 * 3 * readLineHeight();
+        readScrollAt(event->position(), -dx);
+        return;
+    }
+    // A line a notch; a touchpad's pixels add up to lines of body text.
     if (pixels != m_readWheelPixels) {
         m_readWheelPixels = pixels;
         m_readWheel = 0;
     }
     const int step = pixels ? qMax(1, qRound(readLineHeight())) : 120;
-    m_readWheel += pixels ? event->pixelDelta().y() : event->angleDelta().y();
+    m_readWheel += delta.y();
     const int notches = m_readWheel / step;
     m_readWheel -= notches * step;
     readNudge(-notches);
