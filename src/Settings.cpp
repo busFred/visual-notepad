@@ -28,6 +28,7 @@ const QHash<QString, QVariant> &defaults()
         {key::multiCursorModifier, QStringLiteral("alt")},
         {key::defaultMode, QStringLiteral("split")},
         {key::highlightActiveBlock, true},
+        {key::blocksStartCollapsed, false},
         {key::breaks, false},
         {key::linkify, true},
         {key::typographer, false},

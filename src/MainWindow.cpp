@@ -11,6 +11,7 @@
 #include "editor/TableSizePicker.h"
 #include "editor/TextView.h"
 #include "markdown/BlockRenderer.h"
+#include "markdown/VisualView.h"
 #include "vn_core_bridge/lib.h"
 
 #include <QAction>
@@ -495,6 +496,16 @@ void MainWindow::createActions()
             moveTabsToNewWindow(m_activeGroup->selectedTabs(), std::nullopt, false, true);
     });
     makeAction(QStringLiteral("edit.changeLanguage"), [this] { showLanguageMenu(); });
+    // Collapsing works on the rendered view, so these need Markdown shown
+    // rendered (see updateModeControls).
+    makeAction(QStringLiteral("view.collapseAll"), [this] {
+        if (auto *tab = currentTab(); tab && tab->visualView())
+            tab->visualView()->collapseAllBlocks();
+    })->setEnabled(false);
+    makeAction(QStringLiteral("view.expandAll"), [this] {
+        if (auto *tab = currentTab(); tab && tab->visualView())
+            tab->visualView()->expandAll();
+    })->setEnabled(false);
     makeAction(QStringLiteral("view.scrollPageUp"), [this] {
         if (auto *tab = currentTab())
             tab->editor()->scrollPage(false);
@@ -644,7 +655,7 @@ void MainWindow::createMenus()
     QMenu *view = menuBar()->addMenu(menus.at(4));
     add(view, {"view.outline", "-", "view.modeSource", "view.modeSplit", "view.modeVisual", "-", "view.splitEditor",
                "view.splitEditorUp", "view.splitEditorDown", "view.splitEditorLeft", "view.splitEditorRight",
-               "view.focusNextGroup", "view.focusPreviousGroup", "view.moveToNewWindow", "view.copyToNewWindow", "-", "view.wordWrap", "view.statusBar", "edit.changeLanguage", "-", "view.zoomIn", "view.zoomOut",
+               "view.focusNextGroup", "view.focusPreviousGroup", "view.moveToNewWindow", "view.copyToNewWindow", "-", "view.collapseAll", "view.expandAll", "view.wordWrap", "view.statusBar", "edit.changeLanguage", "-", "view.zoomIn", "view.zoomOut",
                "view.zoomReset", "view.fullScreen"});
 
     QMenu *help = menuBar()->addMenu(menus.at(5));
@@ -2715,6 +2726,9 @@ void MainWindow::updateModeControls()
     }
     for (QAction *action : m_modeGroup->actions())
         action->setEnabled(markdown);
+    const bool rendered = markdown && tab->viewMode() != DocumentTab::ViewMode::Source;
+    action(QStringLiteral("view.collapseAll"))->setEnabled(rendered);
+    action(QStringLiteral("view.expandAll"))->setEnabled(rendered);
     if (!markdown) {
         // An exclusive group cannot be fully unchecked; drop exclusivity briefly.
         m_modeGroup->setExclusionPolicy(QActionGroup::ExclusionPolicy::None);

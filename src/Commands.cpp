@@ -175,6 +175,8 @@ QList<Command> build()
         {QStringLiteral("view.scrollPageDown"), view, tr("Scroll Page Down"), {k("Alt+PgDown")}},
         {QStringLiteral("view.wordWrap"), view, tr("&Word Wrap"), {k("Alt+Z")}},
         {QStringLiteral("view.statusBar"), view, tr("St&atus Bar"), {}},
+        {QStringLiteral("view.collapseAll"), view, tr("Collapse All &Blocks"), {k("Ctrl+K, Ctrl+0")}},
+        {QStringLiteral("view.expandAll"), view, tr("E&xpand All"), {k("Ctrl+K, Ctrl+J")}},
         {QStringLiteral("edit.changeLanguage"), view, tr("Change Lan&guage Mode…"), {k("Ctrl+K, M")}},
         {QStringLiteral("view.zoomIn"), view, tr("&Zoom In"), {k("Ctrl+="), k("Ctrl++")}},
         {QStringLiteral("view.zoomOut"), view, tr("Zoom Ou&t"), {k("Ctrl+-")}},

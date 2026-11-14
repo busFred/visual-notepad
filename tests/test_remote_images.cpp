@@ -457,7 +457,7 @@ void TestRemoteImages::downloadsAfterConsent()
     QVERIFY(done->height() != placeholder->height());
     QCOMPARE(m_stub->requests, QStringList{QStringLiteral("/ok.png")});
     // The picture is 40x20 and can be enlarged without downloading again.
-    const auto picture = done->pictureAt(QPointF(10, 5));
+    const auto picture = done->pictureAt(QPointF(10, 5 + done->stripHeight()));
     QVERIFY(picture);
     QCOMPARE(picture->title, QStringLiteral("ok.png"));
     QCOMPARE(done->pictureImage(*picture).size(), QSize(40, 20));
@@ -473,7 +473,7 @@ void TestRemoteImages::wideDownloadsShrinkAndZoom()
     const auto rendered = renderHtml(imageTag(url), context(true));
     QVERIFY2(rendered->height() < 200, qPrintable(QString::number(rendered->height())));
     QVERIFY(rendered->height() > 100);
-    const auto picture = rendered->pictureAt(QPointF(200, 50));
+    const auto picture = rendered->pictureAt(QPointF(200, 50 + rendered->stripHeight()));
     QVERIFY(picture);
     QCOMPARE(rendered->pictureImage(*picture).size(), QSize(2000, 500));
 }
@@ -725,7 +725,7 @@ void TestRemoteImages::localImagesStillLoad()
     ctx.baseDirectory = dir.path();
     const auto block = renderHtml(QStringLiteral("<p><img src=\"local.png\"></p>"), ctx);
     QVERIFY(!block->isPending());
-    const auto point = block->pictureAt(QPointF(10, 5));
+    const auto point = block->pictureAt(QPointF(10, 5 + block->stripHeight()));
     QVERIFY(point);
     QCOMPARE(point->path, dir.filePath(QStringLiteral("local.png")));
     QVERIFY(point->url.isEmpty());

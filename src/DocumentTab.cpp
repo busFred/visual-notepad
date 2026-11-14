@@ -241,6 +241,12 @@ DocumentTab *DocumentTab::openAnotherView(QWidget *parent) const
     // The views take their fonts when the tab is shown, as after setZoom.
     tab->m_settingsStale = true;
     tab->editor()->setTextCursor(editor()->textCursor());
+    // What is collapsed in the copy's rendered view is as here (and goes no
+    // further: the state is not saved).
+    if (m_visual) {
+        tab->ensureVisualView();
+        tab->m_visual->setFoldState(m_visual->foldState());
+    }
     return tab;
 }
 
@@ -293,6 +299,7 @@ void DocumentTab::goToLine(int line)
         return;
     TextView *view = editor();
     view->setTextCursor(QTextCursor(block));
+    view->revealCaret();
     view->centerCursor();
     view->setFocus();
 }
@@ -323,6 +330,7 @@ void DocumentTab::ensureVisualView()
     connect(m_visual, &VisualView::linkActivated, this, &DocumentTab::linkActivated);
     connect(m_visual, &TextView::linkRequested, this, &DocumentTab::linkActivated);
     connect(m_visual, &TextView::filesDropped, this, &DocumentTab::filesDropped);
+    connect(m_file.get(), &TextFile::contentReset, m_visual, &VisualView::documentReset);
     m_visual->setDiagnostics(m_file->diagnostics());
     connect(m_visual, &TextView::scrolled, this, [this] { syncScroll(m_visual, m_editor); });
     connect(m_visual, &TextView::selectionChanged, this, [this] { mirrorSelection(m_visual, m_editor); });

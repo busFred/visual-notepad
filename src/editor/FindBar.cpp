@@ -470,6 +470,7 @@ void FindBar::selectMatch(int index)
         return;
     m_current = index;
     m_view->setTextCursor(cursorFor(m_matches[index]));
+    m_view->revealCaret();
     m_view->setSearchHighlights(m_matches, m_current);
     m_searchStart = m_matches[index].start;
     updateCount();
@@ -555,6 +556,7 @@ void FindBar::selectAllMatchesNow()
     for (const search::Range &match : std::as_const(m_matches))
         cursors.append(cursorFor(match));
     m_view->setCursors(cursors, qMax(0, m_current));
+    m_view->revealCaret();
     m_view->setFocus();
 }
 

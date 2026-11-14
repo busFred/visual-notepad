@@ -9,6 +9,7 @@
 #include <QTimer>
 
 #include <memory>
+#include <span>
 #include <vector>
 
 class QTextDocument;
@@ -53,6 +54,12 @@ public:
     int spanAt(int line);
     // A block of the last parse (valid until the next reparsed signal).
     const core::Block &parsedBlock(int index) const { return m_parsed->blocks()[index]; }
+    // All the blocks of the last parse (valid until the next reparsed signal).
+    std::span<const core::Block> parsedBlocks() const
+    {
+        return m_parsed ? std::span<const core::Block>(m_parsed->blocks().data(), m_parsed->blocks().size())
+                        : std::span<const core::Block>();
+    }
     // Blocks of the last parse, without reparsing (0 before the first).
     int parsedBlockCount() const { return m_parsed ? int(m_parsed->blocks().size()) : 0; }
     // Bumped whenever spans() changes (edits and reparses).

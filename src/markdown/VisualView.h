@@ -7,6 +7,7 @@
 
 #include "../editor/TextView.h"
 #include "BlockRenderer.h"
+#include "Folding.h"
 #include "TableCellEditor.h"
 
 #include <QCache>
@@ -84,6 +85,47 @@ public:
     // A new table stays rendered, with its first header's box open (its
     // text selected, to type over), as a word processor does.
     void insertTable(int rows, int cols) override;
+    // Collapsing. A table, figure, equation or code block shows as a chip
+    // (RenderedBlock::createChip), a Markdown section as its heading with a
+    // hint of what is hidden under it. Which are collapsed is kept for this
+    // view only, in memory, as cursors on the first lines, so that it follows
+    // edits; a fold whose block is gone (or is not of its kind any more) is
+    // dropped.
+    using FoldKind = folding::FoldKind;
+    // (First line, kind) of every fold, to give another view of the document.
+    using FoldState = std::vector<std::pair<int, FoldKind>>;
+    FoldState foldState() const;
+    void setFoldState(const FoldState &state);
+    // Collapses every table, figure, equation and code block (not sections).
+    void collapseAllBlocks();
+    // Opens every collapsed block and section.
+    void expandAll();
+    // Collapses (or opens) the block, or the section under the heading, that
+    // starts on `line`; false if there is none, or it is not collapsible.
+    bool setFolded(int line, bool folded);
+    bool isFolded(int line) const;
+    int foldCount() const { return int(m_folds.size()); }
+    // Opens what hides the carets (on purpose: find, go to line, the outline).
+    void revealCaret() override;
+    // The text was replaced wholesale (a file opened or read again): nothing
+    // is collapsed but what the preference says.
+    void documentReset();
+    // For tests: the hint after the folded heading that starts on `line`
+    // ("· 3 paragraphs hidden"), the label and detail of the chip of a
+    // collapsed block (null for a row that is not a chip).
+    QString foldHintAt(int line);
+    // For tests: the room reserved over the block starting on `line` for its
+    // strip (0 if it has none).
+    qreal stripHeightAt(int line);
+    // For tests: whether a click at this viewport point folds or opens something.
+    bool isFoldSpot(const QPoint &point) { return foldSpotAt(point).where != FoldSpot::None; }
+    QString chipTextAt(int line);
+    // For tests: the pointer is over the row showing `line` (what the strip
+    // and the heading's chevron wait for); -1: nowhere.
+    void setHoverLine(int line);
+    // For tests: where a click collapses (open) or opens (collapsed) the
+    // block, or folds a section, that starts on `line`, in viewport coordinates.
+    QRect foldSpotRect(int line);
     // For tests: where a cell of the rendered table starting at `line` is, in
     // viewport coordinates; null if it is not shown as a table.
     QRect tableCellViewRect(int line, int row, int col);
@@ -132,6 +174,9 @@ private:
         Row row;
         int span = -1; // Index into the model's spans, -1 for gaps.
         int item = -1; // Index into m_itemRows: a row of a long list's item.
+        bool chip = false;   // A collapsed block: the row shows its chip.
+        bool folded = false; // A heading whose section is folded: the row runs on over it.
+        QString hint;        // ... "· 3 paragraphs hidden", shown after the heading.
     };
     // Long lists show an item a row (see itemRows): each item renders on its
     // own (RenderedBlock::createItem) and the view draws its marker, so that
@@ -176,6 +221,10 @@ private:
         bool textual = false;
         quint64 used = 0; // The last frame (see m_frame) that asked for it.
         QString html; // A list item's (RenderedBlock::createItem): what it was made from.
+        // What a table, figure, equation or code block says of itself (see
+        // folding::chipText), for its strip and chip.
+        QString chipLabel;
+        QString chipDetail;
     };
     // What the view knows of a block it may show in parts (see
     // RenderedBlock::createPart), for one parse.
@@ -195,6 +244,34 @@ private:
     Place place();
     void restorePlace(const Place &place);
     void rebuildRows();
+    // The kind of a block of the last parse, and the section a heading of it
+    // heads: up to (not including) the block `end`, and what it holds as the
+    // hint after the heading. Kept for one parse.
+    folding::Fold blockClass(int blockIndex);
+    struct Section
+    {
+        int end = 0;
+        QString hint;
+    };
+    const Section &sectionOf(int blockIndex);
+    // The fold on a line, or -1.
+    int foldIndexAt(int line) const;
+    void addFold(int line, FoldKind kind);
+    void removeFold(int line);
+    // The rows were laid out with other folds: forget what they showed.
+    void foldsChanged();
+    // The fold at `line` was clicked (the chevron, the chip, the strip).
+    void toggleFoldAt(int line, FoldKind kind);
+    struct FoldSpot
+    {
+        enum Where { None, Chevron, Chip, Strip } where = None;
+        int line = -1;
+        qreal top = 0; // Of the row, in the viewport.
+    };
+    FoldSpot foldSpotAt(const QPointF &point);
+    bool foldPressed(QMouseEvent *event);
+    void paintStrip(QPainter &painter, const RenderedBlock *block, const Render *render, const QRectF &rect);
+    void paintHeadingMarks(QPainter &painter, const RowInfo &info, const RenderedBlock *block, const QRectF &rect);
     RenderContext context() const;
     // context(), made once for a frame (it reads fonts and settings).
     const RenderContext &renderContext();
@@ -482,6 +559,23 @@ private:
     std::vector<RowInfo> m_rows;
     std::vector<int> m_lineToRow;
     QSet<int> m_expandedBlocks; // Span indices.
+    struct Fold
+    {
+        QTextCursor anchor; // At the first line of the block, or the heading.
+        FoldKind kind = FoldKind::Other;
+    };
+    std::vector<Fold> m_folds;
+    // The document was just opened: its blocks start as the preference says,
+    // once its first parse is shown.
+    bool m_startFoldsDue = true;
+    bool m_revealPending = false; // revealCaret() waits for the rows.
+    std::vector<int> m_rowsFoldCarets; // What the rows' folds were opened for.
+    int m_hoverLine = -1; // First line of the row the pointer is over.
+    bool m_hoverFold = false; // ... and it is on something that folds.
+    void updateHover(const QPoint &point);
+    std::unordered_map<int, folding::Fold> m_classes;
+    std::unordered_map<int, Section> m_sections;
+    int m_classesGeneration = -1;
     // Blocks holding the carets show as source (while focused): set by a
     // double click or a fallback edit, cleared by Esc, a click on blank space
     // or the caret moving out of them (see rebuildRows).

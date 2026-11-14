@@ -261,6 +261,14 @@ bool isTextual(const core::Block &block, const QString &source)
            || (html.size() > 2 && starts("<h") && html[2] >= '1' && html[2] <= '6');
 }
 
+// A block of this kind collapses to a chip.
+bool isCollapsible(folding::FoldKind kind)
+{
+    using folding::FoldKind;
+    return kind == FoldKind::Table || kind == FoldKind::Figure || kind == FoldKind::Equation
+           || kind == FoldKind::Code;
+}
+
 // The pointer over a column's top edge (an arrow down) or a row's left edge
 // (an arrow right); Qt has no such cursors. Made once for each pixel ratio.
 QCursor edgeArrowCursor(bool down, qreal ratio)
@@ -631,6 +639,10 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
     // (The mark of the quick insert is kept in viewport coordinates.)
     connect(this, &TextView::scrolled, this, &VisualView::clearTableHover);
     connect(this, &TextView::scrolled, this, &VisualView::hideFigureBar);
+    // What is under a pointer that did not move.
+    connect(this, &TextView::scrolled, this, [this] {
+        updateHover(underMouse() ? viewport()->mapFromGlobal(QCursor::pos()) : QPoint(-1, -1));
+    });
     connect(model, &MarkdownModel::optionsChanged, this, [this] {
         clearRenderCache();
         relayout();
@@ -1331,6 +1343,12 @@ void VisualView::rebuildRows()
     }
     m_showsParse = true;
     const auto &spans = m_model->spans();
+    // A document just opened: its blocks start as the preference says.
+    if (m_startFoldsDue && !m_model->hasPendingEdits()) {
+        m_startFoldsDue = false;
+        if (Settings::instance().flag(key::blocksStartCollapsed))
+            collapseAllBlocks(); // (Marks the rows stale.)
+    }
 
     // Blocks open for editing only while this view has focus, so a document
     // opens (and stays, when you look elsewhere) fully rendered.
@@ -1388,8 +1406,19 @@ void VisualView::rebuildRows()
         }
         std::sort(caretGaps.begin(), caretGaps.end());
     }
+    // Folds the carets are in open (the view has the focus: a caret moved
+    // there by the user; the other half of a split mirrors its carets
+    // without), or on purpose (revealCaret). A caret at the very start of a
+    // chip is on the chip, which stays shut.
+    const bool revealing = std::exchange(m_revealPending, false);
+    std::vector<int> foldCarets;
+    if (!m_folds.empty() && (hasFocus() || revealing)) {
+        for (const QTextCursor &c : cursors())
+            foldCarets.push_back(c.position());
+        std::sort(foldCarets.begin(), foldCarets.end());
+    }
     if (!m_rowsStale && m_rowsRevision == m_model->revision() && int(m_lineToRow.size()) == lines
-        && expanded == m_rowsExpanded && caretGaps == m_rowsCaretGaps)
+        && expanded == m_rowsExpanded && caretGaps == m_rowsCaretGaps && foldCarets == m_rowsFoldCarets && !revealing)
         return;
 
     // Rows that matched the document and now open or close for editing
@@ -1418,6 +1447,29 @@ void VisualView::rebuildRows()
     int liveFirst = -1;
     int liveLast = -2;
     liveLines(&liveFirst, &liveLast);
+    // Folds by their first line; each is kept if its block is still there, of
+    // its kind, and nothing opens it.
+    std::unordered_map<int, size_t> foldAt;
+    std::vector<bool> keepFold(m_folds.size(), false);
+    for (size_t i = 0; i < m_folds.size(); ++i) {
+        if (!m_folds[i].anchor.isNull())
+            foldAt.emplace(m_folds[i].anchor.blockNumber(), i);
+    }
+    // Whether a caret is in lines [first, last] (not at the start of `first`
+    // unless the user asked to go there).
+    const auto caretIn = [&](int first, int last) {
+        QTextDocument *doc = document();
+        for (const int position : foldCarets) {
+            const QTextBlock block = doc->findBlock(position);
+            const int caretLine = block.blockNumber();
+            if (caretLine < first || caretLine > last)
+                continue;
+            if (!revealing && caretLine == first && position == block.position())
+                continue;
+            return true;
+        }
+        return false;
+    };
     const auto gapRow = [&](int l) {
         m_lineToRow[l] = int(m_rows.size());
         m_rows.push_back({{l, l, !touched(l, l) && !std::binary_search(caretGaps.begin(), caretGaps.end(), l)}, -1});
@@ -1433,6 +1485,57 @@ void VisualView::rebuildRows()
             const bool open = touched(line, last);
             if (open)
                 m_expandedBlocks.insert(int(s));
+            // A fold on this block: a chip instead of it, or the section under
+            // a heading hidden (the heading's rows below run on over it).
+            int hiddenLast = -1;
+            QString hint;
+            size_t after = s + 1;
+            if (const auto fold = foldAt.find(line); fold != foldAt.end()) {
+                const int blockIndex = span.block >= 0 ? span.block : span.previous;
+                // Edited with nothing parsed to say what it is: nothing
+                // changes until the reparse.
+                if (blockIndex < 0) {
+                    keepFold[fold->second] = true;
+                } else if (blockClass(blockIndex).kind == m_folds[fold->second].kind) {
+                    if (m_folds[fold->second].kind != FoldKind::Heading) {
+                        if (!caretIn(line, last)) {
+                            keepFold[fold->second] = true;
+                            for (int l = line; l <= last; ++l)
+                                m_lineToRow[l] = int(m_rows.size());
+                            RowInfo chip{{line, last, true}, int(s)};
+                            chip.chip = true;
+                            m_rows.push_back(chip);
+                            line = last + 1;
+                            ++s;
+                            continue;
+                        }
+                    } else {
+                        // The spans of the blocks under the heading.
+                        const Section &section = sectionOf(blockIndex);
+                        size_t t = s + 1;
+                        for (; t < spans.size(); ++t) {
+                            const int under = spans[t].block >= 0 ? spans[t].block : spans[t].previous;
+                            if (under >= section.end)
+                                break;
+                            hiddenLast = qMin(spans[t].last, lines - 1);
+                        }
+                        if (hiddenLast < 0) {
+                            keepFold[fold->second] = true; // Nothing under it (yet).
+                        } else if (!caretIn(last + 1, hiddenLast)) {
+                            keepFold[fold->second] = true;
+                            hint = section.hint;
+                            after = t; // The loop goes on past the hidden spans.
+                            // What is folded inside stays folded, for when it shows.
+                            for (size_t u = s + 1; u < t; ++u) {
+                                if (const auto inner = foldAt.find(spans[u].first); inner != foldAt.end())
+                                    keepFold[inner->second] = true;
+                            }
+                        } else {
+                            hiddenLast = -1; // A caret opens it.
+                        }
+                    }
+                }
+            }
             if (!open && (span.block >= 0 || span.previous >= 0) && itemRows(int(s), line, last)) {
                 // A long list: a row an item.
             } else if (!open && span.block < 0 && line <= liveLast && last >= liveFirst) {
@@ -1475,12 +1578,35 @@ void VisualView::rebuildRows()
                 m_rows.push_back({{line, last, true}, int(s)});
             }
             line = last + 1;
-            ++s;
+            if (hiddenLast >= 0) {
+                // The heading's last row runs on over what is hidden; the
+                // hint shows after the heading.
+                for (int l = line; l <= hiddenLast; ++l)
+                    m_lineToRow[l] = int(m_rows.size()) - 1;
+                RowInfo &heading = m_rows.back();
+                if (heading.row.rendered && heading.span == int(s)) {
+                    heading.row.lastLine = hiddenLast;
+                    heading.folded = true;
+                    heading.hint = hint;
+                }
+                line = hiddenLast + 1;
+            }
+            s = after;
             continue;
         }
         // A line outside every block (blank): a small gap unless edited.
         gapRow(line++);
     }
+    // Folds whose block is gone, or is not what it was, are dropped.
+    if (std::count(keepFold.begin(), keepFold.end(), false) > 0) {
+        std::vector<Fold> kept;
+        for (size_t i = 0; i < m_folds.size(); ++i) {
+            if (keepFold[i])
+                kept.push_back(std::move(m_folds[i]));
+        }
+        m_folds = std::move(kept);
+    }
+    m_rowsFoldCarets = std::move(foldCarets);
     m_rowsStale = false;
     m_rowsRevision = m_model->revision();
     m_rowsExpanded = std::move(expanded);
@@ -1525,6 +1651,343 @@ int VisualView::spanForRow(const Row &r) const
 {
     const int index = rowOfLine(r.firstLine);
     return index < int(m_rows.size()) ? m_rows[index].span : -1;
+}
+
+// ---------------------------------------------------------------------------
+// Collapsing
+
+namespace {
+
+// How far the strip's chevron is from its label, and the label's room to the
+// right of it (the part of the strip a click on collapses).
+constexpr qreal stripGap = 6;
+constexpr qreal stripLabelPad = 8;
+// The heading's chevron is this far left of the text, centred in the margin.
+constexpr qreal headingChevronOffset = 13;
+
+} // namespace
+
+folding::Fold VisualView::blockClass(int blockIndex)
+{
+    if (m_classesGeneration != m_model->parseGeneration()) {
+        m_classes.clear();
+        m_sections.clear();
+        m_classesGeneration = m_model->parseGeneration();
+    }
+    if (blockIndex < 0 || blockIndex >= m_model->parsedBlockCount())
+        return {};
+    const auto found = m_classes.find(blockIndex);
+    if (found != m_classes.end())
+        return found->second;
+    return m_classes.emplace(blockIndex, folding::classify(m_model->parsedBlock(blockIndex))).first->second;
+}
+
+const VisualView::Section &VisualView::sectionOf(int blockIndex)
+{
+    blockClass(blockIndex); // (Forgets the sections of an earlier parse.)
+    const auto found = m_sections.find(blockIndex);
+    if (found != m_sections.end())
+        return found->second;
+    const std::span<const core::Block> blocks = m_model->parsedBlocks();
+    Section section;
+    section.end = folding::sectionEnd(blocks, blockIndex);
+    section.hint = folding::sectionHintLine(blocks.subspan(blockIndex + 1, section.end - blockIndex - 1));
+    return m_sections.emplace(blockIndex, std::move(section)).first->second;
+}
+
+int VisualView::foldIndexAt(int line) const
+{
+    for (size_t i = 0; i < m_folds.size(); ++i) {
+        if (!m_folds[i].anchor.isNull() && m_folds[i].anchor.blockNumber() == line)
+            return int(i);
+    }
+    return -1;
+}
+
+void VisualView::addFold(int line, FoldKind kind)
+{
+    // Not "keep position on insert": a line break typed at the start of the
+    // first line pushes the cursor on with the block's text, not onto the
+    // blank line it made.
+    m_folds.push_back({QTextCursor(document()->findBlockByNumber(line)), kind});
+}
+
+void VisualView::removeFold(int line)
+{
+    if (const int i = foldIndexAt(line); i >= 0)
+        m_folds.erase(m_folds.begin() + i);
+}
+
+void VisualView::foldsChanged()
+{
+    // The renders are keyed by first line: a chip and its block share one.
+    // The top of the view stays at the same source line.
+    const Place kept = place();
+    m_rowsStale = true;
+    hideFigureBar();
+    resetRenders();
+    relayout();
+    restorePlace(kept);
+}
+
+VisualView::FoldState VisualView::foldState() const
+{
+    FoldState state;
+    for (const Fold &fold : m_folds) {
+        if (!fold.anchor.isNull())
+            state.push_back({fold.anchor.blockNumber(), fold.kind});
+    }
+    return state;
+}
+
+void VisualView::setFoldState(const FoldState &state)
+{
+    m_folds.clear();
+    m_startFoldsDue = false;
+    for (const auto &[line, kind] : state) {
+        if (line >= 0 && line < document()->blockCount())
+            addFold(line, kind);
+    }
+    foldsChanged();
+}
+
+void VisualView::collapseAllBlocks()
+{
+    QSet<int> folded;
+    for (const Fold &fold : m_folds) {
+        if (!fold.anchor.isNull())
+            folded.insert(fold.anchor.blockNumber());
+    }
+    bool changed = false;
+    for (const MarkdownModel::Span &span : m_model->spans()) {
+        const int blockIndex = span.block >= 0 ? span.block : span.previous;
+        if (blockIndex < 0 || folded.contains(span.first))
+            continue;
+        const FoldKind kind = blockClass(blockIndex).kind;
+        if (isCollapsible(kind)) {
+            addFold(span.first, kind);
+            changed = true;
+        }
+    }
+    if (!changed)
+        return;
+    // (Called by rebuildRows when a document opens: it goes on to build them.)
+    m_rowsStale = true;
+    if (!m_startFoldsDue && m_showsParse && !m_standIn)
+        foldsChanged();
+}
+
+void VisualView::expandAll()
+{
+    if (m_folds.empty())
+        return;
+    m_folds.clear();
+    foldsChanged();
+}
+
+bool VisualView::setFolded(int line, bool folded)
+{
+    const int s = m_model->spanAt(line);
+    if (s < 0 || m_model->spans()[s].first != line)
+        return false;
+    const MarkdownModel::Span &span = m_model->spans()[s];
+    const FoldKind kind = blockClass(span.block >= 0 ? span.block : span.previous).kind;
+    if (!isCollapsible(kind) && kind != FoldKind::Heading)
+        return false;
+    if (folded == (foldIndexAt(line) >= 0))
+        return true;
+    if (folded)
+        addFold(line, kind);
+    else
+        removeFold(line);
+    foldsChanged();
+    return true;
+}
+
+bool VisualView::isFolded(int line) const
+{
+    return foldIndexAt(line) >= 0;
+}
+
+void VisualView::toggleFoldAt(int line, FoldKind kind)
+{
+    if (foldIndexAt(line) >= 0)
+        removeFold(line);
+    else
+        addFold(line, kind);
+    foldsChanged();
+}
+
+void VisualView::revealCaret()
+{
+    if (m_folds.empty())
+        return;
+    m_revealPending = true;
+    if (isVisible())
+        rebuildRows();
+    else
+        m_rowsStale = true;
+}
+
+void VisualView::documentReset()
+{
+    m_folds.clear();
+    m_startFoldsDue = true;
+    m_rowsStale = true;
+}
+
+QString VisualView::foldHintAt(int line)
+{
+    const int index = rowOfLine(line);
+    return index < int(m_rows.size()) && m_rows[index].folded ? m_rows[index].hint : QString();
+}
+
+qreal VisualView::stripHeightAt(int line)
+{
+    const int index = rowOfLine(line);
+    const Render *render = index < int(m_rows.size()) && m_rows[index].row.rendered ? rendered(m_rows[index].row) : nullptr;
+    return render && render->block ? render->block->stripHeight() : 0;
+}
+
+QString VisualView::chipTextAt(int line)
+{
+    const int index = rowOfLine(line);
+    if (index >= int(m_rows.size()) || !m_rows[index].chip)
+        return {};
+    const Render *render = rendered(m_rows[index].row);
+    return render ? render->chipLabel + QLatin1Char('\n') + render->chipDetail : QString();
+}
+
+void VisualView::setHoverLine(int line)
+{
+    m_hoverLine = line;
+    m_hoverFold = false;
+    viewport()->update();
+}
+
+VisualView::FoldSpot VisualView::foldSpotAt(const QPointF &point)
+{
+    qreal top = 0;
+    const int index = rowAt(point.y(), &top);
+    if (index < 0 || index >= int(m_rows.size()) || !m_rows[index].row.rendered || m_rows[index].span < 0)
+        return {};
+    const RowInfo &info = m_rows[index];
+    const MarkdownModel::Span &span = m_model->spans()[info.span];
+    const int blockIndex = span.block >= 0 ? span.block : span.previous;
+    const qreal left = textLeft();
+    const Render *render = memoized(info.row);
+    if (!render || !render->block)
+        return {};
+    const RenderedBlock *block = render->block.get();
+    FoldSpot spot;
+    spot.line = info.row.firstLine;
+    spot.top = top;
+    if (info.chip) {
+        if (block->chipRect().translated(left, top).contains(point))
+            spot.where = FoldSpot::Chip;
+        return spot.where == FoldSpot::None ? FoldSpot() : spot;
+    }
+    if (block->stripHeight() > 0 && info.row.firstLine == span.first) {
+        const QFontMetricsF metrics(renderContext().font);
+        const qreal width = 2 * stripLabelPad + stripGap + metrics.horizontalAdvance(render->chipLabel);
+        if (QRectF(left, top, width, block->stripHeight()).contains(point)) {
+            spot.where = FoldSpot::Strip;
+            return spot;
+        }
+    }
+    if (blockClass(blockIndex).kind == FoldKind::Heading) {
+        // The margin left of the heading's first line.
+        const std::optional<QRectF> first = block->caretRect(0);
+        const qreal height = first ? first->bottom() : lineHeight();
+        if (QRectF(left - sideMargin, top, sideMargin, height).contains(point)) {
+            spot.where = FoldSpot::Chevron;
+            return spot;
+        }
+    }
+    return {};
+}
+
+QRect VisualView::foldSpotRect(int line)
+{
+    qreal top = 0;
+    qreal bottom = 0;
+    if (!lineBounds(line, &top, &bottom))
+        return {};
+    const int index = rowOfLine(line);
+    if (index >= int(m_rows.size()))
+        return {};
+    const RowInfo &info = m_rows[index];
+    const Render *render = memoized(info.row);
+    if (!render || !render->block)
+        return {};
+    const RenderedBlock *block = render->block.get();
+    if (info.chip)
+        return block->chipRect().translated(textLeft(), top).toAlignedRect();
+    if (block->stripHeight() > 0)
+        return QRectF(textLeft(), top, 2 * stripLabelPad, block->stripHeight()).toAlignedRect();
+    return QRectF(textLeft() - sideMargin, top, sideMargin, lineHeight()).toAlignedRect();
+}
+
+bool VisualView::foldPressed(QMouseEvent *event)
+{
+    const FoldSpot spot = foldSpotAt(event->position());
+    if (spot.where == FoldSpot::None)
+        return false;
+    closeCellEditor(TableCellEditor::Exit::Commit);
+    clearTableSelection();
+    setFocus(Qt::MouseFocusReason);
+    event->accept();
+    const int index = rowOfLine(spot.line);
+    const RowInfo &info = m_rows[index];
+    const MarkdownModel::Span &span = m_model->spans()[info.span];
+    // (A fold of the heading stays at its first line whatever its rows.)
+    toggleFoldAt(spot.line, blockClass(span.block >= 0 ? span.block : span.previous).kind);
+    return true;
+}
+
+void VisualView::paintStrip(QPainter &painter, const RenderedBlock *block, const Render *render, const QRectF &rect)
+{
+    const qreal height = block->stripHeight();
+    RenderedBlock::paintChevron(painter, QPointF(rect.left() + stripLabelPad / 2 + 1, rect.top() + height / 2), true,
+                                theme::color(theme::Role::text));
+    painter.save();
+    painter.setFont(renderContext().font);
+    // (Wide tables and equations get an "Open" button at the right end: the
+    // viewer it opens comes with read mode.)
+    RenderedBlock::drawSecondaryText(painter,
+                                     QRectF(rect.left() + stripLabelPad + stripGap, rect.top(),
+                                            rect.width() - stripLabelPad - stripGap, height),
+                                     Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine, render->chipLabel);
+    painter.restore();
+}
+
+void VisualView::paintHeadingMarks(QPainter &painter, const RowInfo &info, const RenderedBlock *block,
+                                   const QRectF &rect)
+{
+    // The chevron shows when the pointer is over the heading; a folded
+    // heading always has one.
+    if (info.folded || info.row.firstLine == m_hoverLine) {
+        const std::optional<QRectF> first = block->caretRect(0);
+        const qreal y = rect.top() + (first ? first->center().y() : lineHeight() / 2);
+        RenderedBlock::paintChevron(painter, QPointF(rect.left() - headingChevronOffset, y), !info.folded,
+                                    theme::color(theme::Role::text));
+    }
+    if (!info.folded || info.hint.isEmpty())
+        return;
+    const std::optional<QRectF> last = block->lastLineRect();
+    if (!last)
+        return;
+    QFont font = renderContext().font;
+    font.setBold(false);
+    painter.save();
+    painter.setFont(font);
+    const qreal x = rect.left() + last->right() + 8;
+    const QFontMetricsF metrics(font);
+    const QString text = metrics.elidedText(info.hint, Qt::ElideRight, rect.right() - x);
+    if (!text.isEmpty())
+        RenderedBlock::drawSecondaryText(painter, QRectF(x, rect.top() + last->top(), rect.right() - x, last->height()),
+                                         Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine, text);
+    painter.restore();
 }
 
 // ---------------------------------------------------------------------------
@@ -1870,9 +2333,11 @@ const VisualView::Render *VisualView::rendered(const Row &r)
     // edited in rendered text (see rebuildRows).
     const int blockIndex = span.block >= 0 ? span.block : span.previous;
     const ItemRow *item = itemOfRow(rowOfLine(r.firstLine));
+    const bool chip = m_rows[rowOfLine(r.firstLine)].chip;
     int liveFirst = -1;
     int liveLast = -2;
-    const bool live = !item && span.block < 0 && liveLines(&liveFirst, &liveLast) && span.first <= liveLast
+    // (A chip is made from the block as it was parsed, edited or not.)
+    const bool live = !item && !chip && span.block < 0 && liveLines(&liveFirst, &liveLast) && span.first <= liveLast
                       && span.last >= liveFirst && !m_partSpans.contains(index);
     if (blockIndex < 0 && !live && !item)
         return nullptr;
@@ -1932,7 +2397,7 @@ const VisualView::Render *VisualView::rendered(const Row &r)
     } else {
     const core::Block &block = m_model->parsedBlock(blockIndex);
     // A part of a long code box: the lines of the row, and where it sits in the box.
-    const bool inParts = m_partSpans.contains(index);
+    const bool inParts = !chip && m_partSpans.contains(index);
     RenderedBlock::Part part;
     QString source;
     if (inParts) {
@@ -1949,6 +2414,8 @@ const VisualView::Render *VisualView::rendered(const Row &r)
                 box->wrap = wrap;
         }
         part.wrapAnywhere = wrap == 1;
+        // Only the box's first part has the strip over it.
+        part.strip = part.first && isCollapsible(blockClass(blockIndex).kind);
     } else {
         source = m_model->sourceText(span.first, span.last);
     }
@@ -1956,19 +2423,27 @@ const VisualView::Render *VisualView::rendered(const Row &r)
     // on a hit) is the key. A stand-in pairs an old parse with new source:
     // never mistake it for the real render of that source.
     QString key = renderKey(ctx, block.kind, source);
-    if (inParts)
+    if (chip)
+        key += QStringLiteral("|chip");
+    else if (inParts)
         key += QStringLiteral("|part:%1%2%3").arg(int(part.first)).arg(int(part.last)).arg(int(part.wrapAnywhere));
-    else if (span.block < 0)
+    if (!inParts && span.block < 0)
         key += QStringLiteral("|stale:%1:%2").arg(m_model->parseGeneration()).arg(blockIndex);
     const Render *hit = m_cache.object(key);
     if (hit && hit->source == source) {
         memo = *hit;
     } else {
-        const std::shared_ptr<RenderedBlock> created(inParts ? RenderedBlock::createPart(source, part, ctx)
-                                                             : RenderedBlock::create(block, source, ctx));
+        folding::Chip text;
+        if (chip || isCollapsible(blockClass(blockIndex).kind))
+            text = folding::chipText(block);
+        const std::shared_ptr<RenderedBlock> created(
+            chip ? RenderedBlock::createChip({text.label, text.detail}, ctx)
+                 : inParts ? RenderedBlock::createPart(source, part, ctx) : RenderedBlock::create(block, source, ctx));
         const int cost = created->cost() + int(source.size() / 512);
         ++m_renderCount;
         memo = {source, key, created, block.kind, cost, isTextual(block, source)};
+        memo.chipLabel = text.label;
+        memo.chipDetail = text.detail;
         if (created->isPending())
             m_pendingKeys.insert(key);
         m_cache.insert(key, new Render(memo), cost);
@@ -2082,6 +2557,11 @@ VisualView::Render VisualView::liveRender(const core::Block &parsed, const QStri
     const int cost = created->cost() + int(source.size() / 512);
     ++m_renderCount;
     Render memo{source, key, created, parsed.kind, cost, isTextual(parsed, source)};
+    if (created->stripHeight() > 0) {
+        const folding::Chip text = folding::chipText(parsed);
+        memo.chipLabel = text.label;
+        memo.chipDetail = text.detail;
+    }
     if (created->isPending())
         m_pendingKeys.insert(key);
     m_cache.insert(key, new Render(memo), cost);
@@ -2134,6 +2614,12 @@ qreal VisualView::renderedRowHeight(const Row &r, qreal)
         if (render && (!itemOfRow(index) || next < 0 || after))
             return render->block->itemAdvance(after ? after->block.get() : nullptr);
         m_estimated = true;
+        // (A chip stands for a whole block, a folded heading for its section.)
+        const RowInfo &info = m_rows[index];
+        if (info.chip)
+            return lineHeight() * 2;
+        if (info.folded)
+            return lineHeight() * (m_model->spans()[info.span].last - m_model->spans()[info.span].first + 1);
         return lineHeight() * (r.lastLine - r.firstLine + 1);
     }
     const Render *render = rendered(r);
@@ -2155,8 +2641,30 @@ void VisualView::paintRenderedRow(QPainter &painter, const Row &r, const QRectF 
     if (!render)
         return;
     const RenderedBlock *block = render->block.get();
-    const RenderedSelection selection = selectionForRow(r, block, render->source);
+    RenderedSelection selection = selectionForRow(r, block, render->source);
+    const int rowIndex = rowOfLine(r.firstLine);
+    const RowInfo *info = rowIndex < int(m_rows.size()) ? &m_rows[rowIndex] : nullptr;
+    if (block->kind() == RenderedBlock::Kind::Chip) {
+        selection.hot = m_hoverFold && r.firstLine == m_hoverLine;
+        // A caret on the chip (at the start of its first line, see rebuildRows).
+        const int start = document()->findBlockByNumber(r.firstLine).position();
+        const QList<QTextCursor> carets = cursors();
+        selection.caretOn = hasFocus() && std::any_of(carets.cbegin(), carets.cend(),
+                                                      [start](const QTextCursor &c) { return c.position() == start; });
+    }
     block->paint(painter, rect.topLeft(), rect.width(), selection);
+    if (info && block->kind() != RenderedBlock::Kind::Chip) {
+        // The pointer is over a block with a strip, or a heading.
+        if (block->stripHeight() > 0 && r.firstLine == m_hoverLine)
+            paintStrip(painter, block, render, rect);
+        if (info->span >= 0 && (info->folded || r.firstLine == m_hoverLine)) {
+            const MarkdownModel::Span &span = m_model->spans()[info->span];
+            if (blockClass(span.block >= 0 ? span.block : span.previous).kind == FoldKind::Heading)
+                paintHeadingMarks(painter, *info, block, rect);
+        }
+    }
+    if (block->kind() == RenderedBlock::Kind::Chip)
+        return;
     if (const ItemRow *item = itemOfRow(rowOfLine(r.firstLine))) {
         const ItemList &list = m_itemLists[item->list];
         if (list.markers)
@@ -2278,6 +2786,7 @@ RenderedSelection VisualView::selectionForRow(const Row &r, const RenderedBlock 
             break;
         }
         case RenderedBlock::Kind::Empty:
+        case RenderedBlock::Kind::Chip:
             break;
         }
     }
@@ -2366,6 +2875,9 @@ int VisualView::hitTestRenderedRow(const Row &r, const QPointF &point)
     if (s < 0 || !render)
         return first.position();
     const RenderedBlock *block = render->block.get();
+    // A chip is one unit: the start of its block.
+    if (block->kind() == RenderedBlock::Kind::Chip)
+        return first.position();
 
     switch (render->kind) {
     case core::BlockKind::Html: {
@@ -2508,6 +3020,7 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
         }
     }
     if (event->buttons() == Qt::NoButton) {
+        updateHover(event->position().toPoint());
         updateFigureBar(event->position().toPoint());
         // The edges of a table: arrows to select a column or a row, and the
         // marks to insert one.
@@ -2525,6 +3038,11 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
             } else {
                 viewport()->setCursor(Qt::PointingHandCursor);
             }
+            QToolTip::hideText();
+            return;
+        }
+        if (m_hoverFold) {
+            viewport()->setCursor(Qt::PointingHandCursor);
             QToolTip::hideText();
             return;
         }
@@ -2549,9 +3067,29 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
     TextView::mouseMoveEvent(event);
 }
 
+void VisualView::updateHover(const QPoint &point)
+{
+    int line = -1;
+    bool onFold = false;
+    if (viewport()->rect().contains(point)) {
+        qreal top = 0;
+        const int index = rowAt(point.y(), &top);
+        if (index >= 0 && index < int(m_rows.size()) && m_rows[index].row.rendered && m_rows[index].span >= 0) {
+            line = m_rows[index].row.firstLine;
+            onFold = foldSpotAt(point).where != FoldSpot::None;
+        }
+    }
+    if (line == m_hoverLine && onFold == m_hoverFold)
+        return;
+    m_hoverLine = line;
+    m_hoverFold = onFold;
+    viewport()->update();
+}
+
 bool VisualView::viewportEvent(QEvent *event)
 {
     if (event->type() == QEvent::Leave) {
+        updateHover(QPoint(-1, -1));
         clearTableHover();
         // (Not left when the pointer went on to the bar.)
         updateFigureBar(viewport()->mapFromGlobal(QCursor::pos()));
@@ -2851,11 +3389,21 @@ void VisualView::mousePressEvent(QMouseEvent *event)
             clearTableSelection();
         }
     }
+    // Chevrons, chips and strips collapse and open, in a locked view too.
+    // (The band above a table, which reaches into its strip, comes first.)
+    if (event->button() == Qt::LeftButton && foldPressed(event))
+        return;
     typingMousePress(event);
 }
 
 void VisualView::mouseDoubleClickEvent(QMouseEvent *event)
 {
+    // The second click of a click on a fold is a click on it too: the first
+    // changed what is under the pointer, and this one opens no source.
+    if (event->button() == Qt::LeftButton && foldSpotAt(event->position()).where != FoldSpot::None) {
+        event->accept();
+        return;
+    }
     // A quick second click on an edge is another click on it, not a word.
     if (event->button() == Qt::LeftButton && !isReadOnly() && markdownEditing()) {
         const TableSpot spot = tableSpotAt(event->position());
@@ -3400,8 +3948,9 @@ std::optional<VisualView::Spot> VisualView::spotAt(int position)
         spot.textual = render->textual && spot.block->tableCells().isEmpty();
         // (A long list's item is limited alone, as it renders alone.)
         spot.items = itemOfRow(index) != nullptr;
+        // (A folded heading's row runs on over its section: typing opens it as source.)
         spot.editable = spot.textual && spot.source.size() <= liveEditChars
-                        && r.lastLine - r.firstLine < liveEditLines;
+                        && r.lastLine - r.firstLine < liveEditLines && !m_rows[index].folded;
     }
     return spot;
 }
@@ -3808,7 +4357,8 @@ void VisualView::moveRendered(int key, bool select)
 {
     const QTextCursor c = textCursor();
     const std::optional<Spot> spot = spotAt(c.position());
-    if (!spot || spot->block->kind() != RenderedBlock::Kind::Rich)
+    const bool onChip = spot && spot->block->kind() == RenderedBlock::Kind::Chip;
+    if (!spot || (spot->block->kind() != RenderedBlock::Kind::Rich && !onChip))
         return;
     const QString &text = spot->text;
     const int n = int(text.size());
@@ -3834,10 +4384,29 @@ void VisualView::moveRendered(int key, bool select)
                 const QString t = render->block->renderedText();
                 return start + caretSourceOffset(t, render->source, direction < 0 ? int(t.size()) : 0);
             }
+            // A chip is one unit, whichever way it is entered.
+            if (render->block->kind() == RenderedBlock::Kind::Chip)
+                return start;
             return direction < 0 ? start + int(render->source.size()) : start;
         }
         return -1;
     };
+    if (onChip) {
+        // On a chip (the caret at the start of its block) the arrows go on to
+        // the block before or after it.
+        const int direction = key == Qt::Key_Left || key == Qt::Key_Up ? -1
+                              : key == Qt::Key_Right || key == Qt::Key_Down ? 1
+                                                                            : 0;
+        if (direction == 0)
+            return;
+        target = rowEdge(direction);
+        if (target < 0)
+            return;
+        QTextCursor moved = c;
+        moved.setPosition(target, select ? QTextCursor::KeepAnchor : QTextCursor::MoveAnchor);
+        setTextCursor(moved);
+        return;
+    }
     switch (key) {
     case Qt::Key_Left:
     case Qt::Key_Right: {
@@ -3995,7 +4564,8 @@ bool VisualView::renderedKey(QKeyEvent *event)
     }
     const bool inRow = c.selectionStart() >= spot->start && c.selectionEnd() <= spot->start + spot->source.size();
     const bool rich = spot->block->kind() == RenderedBlock::Kind::Rich;
-    if (!ctrl && !alt && rich && inRow
+    const bool onChip = spot->block->kind() == RenderedBlock::Kind::Chip;
+    if (!ctrl && !alt && (rich || onChip) && inRow
         && (key == Qt::Key_Left || key == Qt::Key_Right || key == Qt::Key_Up || key == Qt::Key_Down
             || key == Qt::Key_Home || key == Qt::Key_End)) {
         moveRendered(key, shift);
@@ -4007,6 +4577,19 @@ bool VisualView::renderedKey(QKeyEvent *event)
     if (!inRow) {
         openAndForward(event);
         return true;
+    }
+    if (onChip) {
+        // Enter opens it; a chip takes no typing.
+        if (enter && !ctrl && !alt && !shift)
+            setFolded(spot->row.firstLine, false);
+        return true;
+    }
+    // Enter at the end of a folded heading opens its section, then makes the
+    // new line as it does in a heading.
+    if (enter && !ctrl && !alt && !shift && m_rows[spot->index].folded && spot->offsetOf(c.position()) >= spot->text.size()) {
+        removeFold(spot->row.firstLine);
+        foldsChanged();
+        return renderedKey(event);
     }
     if (!spot->editable) {
         // Tab moves between the cells of a table, as in source.
