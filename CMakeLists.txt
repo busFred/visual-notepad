@@ -74,6 +74,8 @@ add_library(vn_app STATIC
     src/editor/TextViewFormat.cpp
     src/editor/TableSizePicker.cpp
     src/editor/TableSizePicker.h
+    src/editor/TextViewColumns.cpp
+    src/editor/TextViewColumns.h
     src/editor/TextViewTable.cpp
     src/editor/TextView.h
     src/markdown/BlockRenderer.cpp
