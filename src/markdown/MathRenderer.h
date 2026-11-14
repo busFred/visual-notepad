@@ -90,6 +90,12 @@ void setWorkerProgram(const QString &program);
 // input until it is closed. Never returns.
 [[noreturn]] void runWorker(int &argc, char **argv);
 
+// Takes the user's files, writing and the network from the calling
+// process, for good (the worker does this once MicroTeX has started).
+// Returns which locks took: 1 the file system (Linux Landlock), 2 sockets
+// (seccomp); 0 on systems without them. For tests and the worker.
+int lockDownWorker();
+
 // Whether the last layout() had to show source text, and how many times a
 // worker was started; for tests.
 bool lastRenderFellBack();

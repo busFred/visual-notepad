@@ -45,7 +45,17 @@
 #include <unistd.h>
 #endif
 #ifdef Q_OS_LINUX
+#include <QLibraryInfo>
+#include <QStandardPaths>
+
+#include <cstddef>
+#include <fcntl.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
 #include <sys/prctl.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #endif
 
@@ -1063,6 +1073,167 @@ int workerStarts()
     return starts;
 }
 
+#ifdef Q_OS_LINUX
+namespace {
+
+// Landlock (Linux 5.13 and later; see Documentation/userspace-api/landlock.rst),
+// called directly: the C library has no wrappers, and the header of the
+// build machine may know fewer rights than the kernel the app runs on.
+constexpr long landlockCreateRuleset = 444;
+constexpr long landlockAddRule = 445;
+constexpr long landlockRestrictSelf = 446;
+constexpr quint32 landlockCreateRulesetVersion = 1U << 0;
+constexpr int landlockRulePathBeneath = 1;
+constexpr quint64 fsExecute = 1ULL << 0;
+constexpr quint64 fsReadFile = 1ULL << 2;
+constexpr quint64 fsReadDir = 1ULL << 3;
+constexpr quint64 netBindTcp = 1ULL << 0;
+constexpr quint64 netConnectTcp = 1ULL << 1;
+constexpr quint64 scopeAbstractUnixSocket = 1ULL << 0;
+constexpr quint64 scopeSignal = 1ULL << 1;
+
+struct RulesetAttr
+{
+    quint64 handledAccessFs = 0;
+    quint64 handledAccessNet = 0; // ABI 4
+    quint64 scoped = 0;           // ABI 6
+};
+
+struct [[gnu::packed]] PathBeneathAttr
+{
+    quint64 allowedAccess = 0;
+    qint32 parentFd = -1;
+};
+
+// Every file system right the kernel knows of, by Landlock ABI version.
+quint64 fsRights(int abi)
+{
+    quint64 rights = (1ULL << 13) - 1; // ABI 1: execute .. make_sym
+    if (abi >= 2)
+        rights |= 1ULL << 13; // refer
+    if (abi >= 3)
+        rights |= 1ULL << 14; // truncate
+    if (abi >= 5)
+        rights |= 1ULL << 15; // ioctl_dev
+    return rights;
+}
+
+// Where the worker may still read (and load code from): fonts and their
+// configuration, the system's and the app's own files. Not the home
+// folder, documents or anything else, and nothing may be written anywhere.
+QStringList readablePlaces(const QString &resources)
+{
+    QStringList places = {resources,
+                          QStringLiteral("/usr"),
+                          QStringLiteral("/lib"),
+                          QStringLiteral("/lib64"),
+                          QStringLiteral("/etc/fonts"),
+                          QStringLiteral("/var/cache/fontconfig"),
+                          QDir::cleanPath(QCoreApplication::applicationDirPath() + QStringLiteral("/..")),
+                          QLibraryInfo::path(QLibraryInfo::PrefixPath)};
+    places += QStandardPaths::standardLocations(QStandardPaths::FontsLocation);
+    places += QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation) + QStringLiteral("/fontconfig");
+    places += QDir::homePath() + QStringLiteral("/.fonts");
+    return places;
+}
+
+// Takes the file system (but for reading the places above) and TCP from
+// the worker, for good. False if the kernel has no Landlock.
+bool landlock(const QString &resources)
+{
+    const long abi = syscall(landlockCreateRuleset, nullptr, 0, landlockCreateRulesetVersion);
+    if (abi < 1)
+        return false;
+    RulesetAttr attr;
+    attr.handledAccessFs = fsRights(int(abi));
+    size_t size = offsetof(RulesetAttr, handledAccessNet);
+    if (abi >= 4) {
+        attr.handledAccessNet = netBindTcp | netConnectTcp;
+        size = offsetof(RulesetAttr, scoped);
+    }
+    if (abi >= 6) {
+        attr.scoped = scopeAbstractUnixSocket | scopeSignal;
+        size = sizeof(RulesetAttr);
+    }
+    const int ruleset = int(syscall(landlockCreateRuleset, &attr, size, 0));
+    if (ruleset < 0)
+        return false;
+    for (const QString &place : readablePlaces(resources)) {
+        if (place.isEmpty())
+            continue;
+        const int fd = open(QFile::encodeName(place).constData(), O_PATH | O_CLOEXEC);
+        if (fd < 0)
+            continue;
+        struct stat info = {};
+        PathBeneathAttr rule;
+        // A file (not a folder) takes only the rights a file can have.
+        rule.allowedAccess = fsExecute | fsReadFile;
+        if (fstat(fd, &info) == 0 && S_ISDIR(info.st_mode))
+            rule.allowedAccess |= fsReadDir;
+        rule.parentFd = fd;
+        syscall(landlockAddRule, ruleset, landlockRulePathBeneath, &rule, 0);
+        close(fd);
+    }
+    const bool done = syscall(landlockRestrictSelf, ruleset, 0) == 0;
+    close(ruleset);
+    return done;
+}
+
+// No new sockets of any kind (UDP and local ones included, which Landlock
+// does not cover) and no io_uring, which could make them without a
+// system call: socket() and io_uring_setup() fail with EPERM.
+bool noSockets()
+{
+#if defined(__x86_64__)
+    constexpr quint32 arch = AUDIT_ARCH_X86_64;
+#elif defined(__aarch64__)
+    constexpr quint32 arch = AUDIT_ARCH_AARCH64;
+#else
+    return false;
+#endif
+#if defined(__x86_64__) || defined(__aarch64__)
+    constexpr quint32 deny = SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA);
+    sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, arch, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, nr)),
+        // x32 system calls (numbers with bit 30 set) would bypass the rest.
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, deny),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_socket, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, deny),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_io_uring_setup, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, deny),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    sock_fprog program = {static_cast<unsigned short>(std::size(filter)), filter};
+    return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) == 0;
+#endif
+}
+
+} // namespace
+#endif
+
+// MicroTeX is not to be trusted with what it reads (see the top of the
+// header): once it has started, the worker can no longer open the user's
+// files, write anywhere or reach the network, so a formula that takes it
+// over gets nothing. Best effort: an older kernel without Landlock still
+// gets the socket ban.
+int lockDownWorker()
+{
+    int locks = 0;
+#ifdef Q_OS_LINUX
+    // Both need no new privileges (set in confineWorker) to work unprivileged.
+    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    if (landlock(findResources()))
+        locks |= 1;
+    if (noSockets())
+        locks |= 2;
+#endif
+    return locks;
+}
+
 void runWorker(int &argc, char **argv)
 {
     // First: Qt's start is the worker's too.
@@ -1090,6 +1261,7 @@ void runWorker(int &argc, char **argv)
     const qint32 hello[2] = {qint32(answerMagic), ensureInitialized() ? 1 : 0};
     if (!writeFully(reinterpret_cast<const char *>(hello), sizeof hello))
         endWorker(1);
+    lockDownWorker();
     for (;;) {
         quint32 size = 0;
         if (!readFully(reinterpret_cast<char *>(&size), sizeof size))

@@ -10,6 +10,14 @@
 #include <QVariantMap>
 #include <QtMath>
 
+#ifdef Q_OS_LINUX
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 using namespace vn;
 
 namespace {
@@ -51,6 +59,8 @@ class TestMath : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
+    void lockedDownWorkerReadsNoUserFiles();
+    void lockedDownWorkerStillDrawsEveryFont();
     void fractionIsTallerThanText();
     void displayIsLargerThanInline();
     void baselineIsReported_data();
@@ -391,6 +401,68 @@ static void useTestSettings()
     vn::Settings::instance().useFile(dir.filePath(QStringLiteral("settings.ini")));
 }
 Q_COREAPP_STARTUP_FUNCTION(useTestSettings)
+
+// Once locked down (as the worker is after MicroTeX starts), a process can
+// still read fonts but not the user's files, cannot write and cannot make
+// sockets. Checked in a child process: the lock is for good.
+void TestMath::lockedDownWorkerReadsNoUserFiles()
+{
+#ifdef Q_OS_LINUX
+    QTemporaryDir home(QDir::homePath() + QStringLiteral("/.vn-lock-test-XXXXXX"));
+    QVERIFY(home.isValid());
+    const QByteArray secret = QFile::encodeName(home.filePath(QStringLiteral("secret.txt")));
+    {
+        QFile file(QFile::decodeName(secret));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("secret");
+    }
+    const QByteArray written = QFile::encodeName(home.filePath(QStringLiteral("new.txt")));
+    const pid_t child = fork();
+    if (child == 0) {
+        const int locks = vn::math::lockDownWorker();
+        int code = 0;
+        if (!(locks & 2))
+            code |= 1; // sockets were not banned
+        if ((locks & 1)) {
+            if (open(secret.constData(), O_RDONLY) >= 0 || errno != EACCES)
+                code |= 2; // a user file could be read
+            if (open(written.constData(), O_WRONLY | O_CREAT, 0600) >= 0)
+                code |= 4; // a file could be written
+            if (access("/etc/fonts", F_OK) == 0 && open("/etc/fonts/fonts.conf", O_RDONLY) < 0 && errno == EACCES)
+                code |= 8; // fonts could not be read
+        } else {
+            code |= 16; // no Landlock here (reported, not failed)
+        }
+        if (socket(AF_INET, SOCK_STREAM, 0) >= 0 || socket(AF_UNIX, SOCK_STREAM, 0) >= 0)
+            code |= 32;
+        _exit(code);
+    }
+    QVERIFY(child > 0);
+    int status = 0;
+    QVERIFY(waitpid(child, &status, 0) == child);
+    QVERIFY(WIFEXITED(status));
+    const int code = WEXITSTATUS(status);
+    if (code & 16)
+        qWarning("Landlock is not available on this kernel: only the socket ban was checked");
+    QCOMPARE(code & ~16, 0);
+    QVERIFY(!QFile::exists(QFile::decodeName(written)));
+#else
+    QSKIP("The lock down is Linux only for now");
+#endif
+}
+
+// The worker locks itself down after MicroTeX starts; fonts MicroTeX or Qt
+// load only when a formula first needs them must still be readable.
+void TestMath::lockedDownWorkerStillDrawsEveryFont()
+{
+    for (const QString &tex : {QStringLiteral("\\mathfrak{A}\\mathcal{B}\\mathbb{C}\\mathscr{D}"),
+                               QStringLiteral("\\text{caf\u00e9 \u0394 \u4e2d\u6587}\\operatorname{sinc}"),
+                               QStringLiteral("\\mathtt{x}\\mathsf{y}\\boldsymbol{\\alpha}\\oint_C"),
+                               QStringLiteral("\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}")}) {
+        QVERIFY(!math::render(tex, displayStyle()).isNull());
+        QVERIFY2(!math::lastRenderFellBack(), qPrintable(tex));
+    }
+}
 
 QTEST_MAIN(TestMath)
 #include "test_math.moc"
