@@ -170,6 +170,10 @@ void run(Job &job)
         job.error = file.errorString();
         return;
     }
+    if (file.isSequential()) {
+        job.error = TextFile::notRegularFileError();
+        return;
+    }
     QByteArray bytes;
     bytes.reserve(file.size());
     for (;;) {
@@ -521,11 +525,23 @@ void TextFile::setPath(const QString &path)
     Q_EMIT pathChanged();
 }
 
+QString TextFile::notRegularFileError()
+{
+    return tr("This is not a regular file (a pipe or a device, for example), so it was not read.");
+}
+
 bool TextFile::load(const QString &path)
 {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
         m_error = file.errorString();
+        return false;
+    }
+    // A pipe, a socket or a device (a symlink to /dev/zero in an archive)
+    // never ends, or never starts: reading it would hang the window or fill
+    // memory. Only regular files are text files here.
+    if (file.isSequential()) {
+        m_error = notRegularFileError();
         return false;
     }
     const QByteArray bytes = file.readAll();

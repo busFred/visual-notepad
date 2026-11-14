@@ -79,6 +79,10 @@ public:
     static bool isLoadingPath(const QString &path);
     // The size from which callers should prefer loadAsync() to load().
     static constexpr qint64 largeLoadBytes = 512 * 1024;
+    // Files this big are opened only after the user agrees (MainWindow).
+    static constexpr qint64 confirmLoadBytes = qint64(200) * 1024 * 1024;
+    // Why a pipe or device was not read.
+    static QString notRegularFileError();
     bool reopenWithEncoding(const Encoding &encoding);
     // Unsaved content from hot exit; the file is marked modified. The disk
     // baseline for conflict detection is what is on disk now unless

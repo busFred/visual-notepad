@@ -15,6 +15,8 @@
 #include <QSignalSpy>
 #include <QStringEncoder>
 #include <QTemporaryDir>
+#include <QMimeData>
+#include <QDropEvent>
 #include <QTest>
 #include <QTextBlock>
 #include <QTextCursor>
@@ -24,7 +26,12 @@
 
 #include <memory>
 
+#ifdef Q_OS_UNIX
+#include <sys/stat.h>
+#endif
+
 using vn::DocumentTab;
+using vn::MainWindow;
 using vn::TextFile;
 namespace enc = vn::encoding;
 
@@ -103,6 +110,9 @@ private Q_SLOTS:
     void mainWindowOpensTheSameFileOnce();
     void closingTheWindowMidLoadIsSafe();
     void largeFileOfAnotherWindowIsShared();
+    void pipesAndDevicesAreNotRead();
+    void veryLargeFilesAsk();
+    void droppedNetworkPathsAreRefused();
 
 private:
     QString write(const QString &name, const QByteArray &content);
@@ -519,6 +529,67 @@ static void useTestSettings()
     vn::Settings::instance().useFile(dir.filePath(QStringLiteral("settings.ini")));
 }
 Q_COREAPP_STARTUP_FUNCTION(useTestSettings)
+
+// A pipe or a device never ends (or never starts): refused, not read.
+void TestOpen::pipesAndDevicesAreNotRead()
+{
+#ifdef Q_OS_UNIX
+    auto file = TextFile::create();
+    QVERIFY(!file->load(QStringLiteral("/dev/zero")));
+    QCOMPARE(file->errorString(), TextFile::notRegularFileError());
+    const QByteArray fifo = QFile::encodeName(m_dir.filePath(QStringLiteral("pipe.md")));
+    QVERIFY(::mkfifo(fifo.constData(), 0600) == 0);
+    // Opening a FIFO for reading waits for a writer: give it one.
+    QFile writer;
+    QTimer::singleShot(0, [&] {
+        writer.setFileName(QFile::decodeName(fifo));
+        writer.open(QIODevice::WriteOnly);
+    });
+    auto other = TextFile::create();
+    QSignalSpy finished(other.get(), &TextFile::loadFinished);
+    other->loadAsync(QFile::decodeName(fifo));
+    QTRY_COMPARE(finished.size(), 1);
+    QCOMPARE(finished.first().first().toBool(), false);
+#else
+    QSKIP("Unix only");
+#endif
+}
+
+// A very big file opens only when the user agrees.
+void TestOpen::veryLargeFilesAsk()
+{
+    const QString path = m_dir.filePath(QStringLiteral("huge.log"));
+    {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QVERIFY(file.resize(TextFile::confirmLoadBytes + 1)); // Sparse: no real space used.
+    }
+    QStringList asked;
+    MainWindow::setLargeOpenConfirmer([&](const QString &p) {
+        asked.append(p);
+        return false;
+    });
+    const auto restore = qScopeGuard([] { MainWindow::setLargeOpenConfirmer({}); });
+    MainWindow window;
+    const int before = window.tabCount();
+    QVERIFY(!window.openFile(path));
+    QCOMPARE(asked, QStringList{path});
+    QCOMPARE(window.tabCount(), before);
+}
+
+// file://host/share/x dropped on the window is another machine: ignored.
+void TestOpen::droppedNetworkPathsAreRefused()
+{
+    MainWindow window;
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    const int before = window.tabCount();
+    QMimeData data;
+    data.setUrls({QUrl(QStringLiteral("file://attacker.invalid/share/notes.md"))});
+    QDropEvent drop(QPointF(10, 10), Qt::CopyAction, &data, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(&window, &drop);
+    QCOMPARE(window.tabCount(), before);
+}
 
 QTEST_MAIN(TestOpen)
 #include "test_open.moc"
