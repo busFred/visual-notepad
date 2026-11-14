@@ -677,6 +677,9 @@ void PreferencesDialog::buildMarkdownPage()
               {tr("Source / Visual"), QStringLiteral("split")},
               {tr("Visual Editor"), QStringLiteral("visual")}});
     addSwitch(tr("Highlight the block being edited"), key::highlightActiveBlock);
+    // Tables, figures, equations and code blocks, when a document opens.
+    addCombo(tr("Blocks start"), key::blocksStartCollapsed,
+             {{tr("Expanded"), false}, {tr("Collapsed"), true}});
     addHeading(tr("Rendering"));
     addSwitch(tr("Treat single line breaks as line breaks"), key::breaks);
     addSwitch(tr("Turn URL-like text into links"), key::linkify);

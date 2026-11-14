@@ -21,6 +21,7 @@
 #include <QScreen>
 #include <QStackedWidget>
 #include <QScrollBar>
+#include <QScopeGuard>
 #include <QScrollArea>
 #include <QSignalSpy>
 #include <QSpinBox>
@@ -62,6 +63,7 @@ private Q_SLOTS:
     void externalChangeUpdatesSwitch();
     void spaceTogglesSwitch();
     void comboWritesValue();
+    void blocksStartRow();
     void externalChangeUpdatesCombo();
     void tabWidthSpin();
     void pictureCacheSpin();
@@ -173,6 +175,22 @@ void TestPreferences::comboWritesValue()
     QVERIFY(zoom);
     zoom->setCurrentIndex(zoom->findData(125));
     QCOMPARE(Settings::instance().number(key::zoom), 125);
+}
+
+void TestPreferences::blocksStartRow()
+{
+    Settings::instance().reset(key::blocksStartCollapsed);
+    const auto restore = qScopeGuard([] { Settings::instance().reset(key::blocksStartCollapsed); });
+    PreferencesDialog::showPage(nullptr, QStringLiteral("markdown"));
+    auto *combo = find<QComboBox>(key::blocksStartCollapsed);
+    QVERIFY(combo);
+    QCOMPARE(combo->count(), 2);
+    QCOMPARE(combo->currentText(), QStringLiteral("Expanded"));
+    QVERIFY(!Settings::instance().flag(key::blocksStartCollapsed));
+    combo->setCurrentIndex(combo->findText(QStringLiteral("Collapsed")));
+    QVERIFY(Settings::instance().flag(key::blocksStartCollapsed));
+    Settings::instance().setValue(key::blocksStartCollapsed, false);
+    QCOMPARE(combo->currentText(), QStringLiteral("Expanded"));
 }
 
 void TestPreferences::externalChangeUpdatesCombo()

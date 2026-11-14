@@ -195,6 +195,8 @@ public:
     // The viewport y range of the row holding a line, or false.
     bool boundsOfLine(int line, qreal *top, qreal *bottom) { return lineBounds(line, top, bottom); }
     qreal textStart() const { return textLeft(); }
+    using VisualView::stripHeightAt;
+    using VisualView::isFoldSpot;
     qreal columnWidth() const { return textWidth(); }
     using VisualView::hasTableSelection;
     using VisualView::populateSelectionMenu;
@@ -371,6 +373,15 @@ private Q_SLOTS:
     void formulasAreNotFigures();
     void diagramsFitTheBox();
     void figureBarSizesOneFigure();
+    void collapsedBlocksAreOneChip();
+    void foldsFollowEditsAndGoWithTheirBlock();
+    void foldedSectionsHideTheirBlocks();
+    void caretsOpenFoldsOnlyWithFocus();
+    void stripSpaceIsAlwaysReserved();
+    void clicksCollapseAndOpen();
+    void collapseAllLeavesSectionsAndExpandAllOpensThem();
+    void copiedTabKeepsItsFolds();
+    void blocksStartCollapsedWhenAsked();
     void figureBarKeepsClicksAndPictureClickStillZooms();
     void networkPaths();
     void plainToolTipText();
@@ -942,10 +953,12 @@ void TestVisualView::taskCheckboxToggles()
     QVERIFY(m_doc->findBlockByNumber(13).text().startsWith(QLatin1String("- [ ]")));
     // The boxes sit on adjacent lines: click the top and bottom of the hits.
     QList<QPoint> hits;
+    auto *probe = static_cast<ProbeView *>(m_view);
     for (int y = 0; y < m_view->viewport()->height(); y += 2) {
         for (int x = 20; x < 140; x += 2) {
             QTest::mouseMove(m_view->viewport(), QPoint(x, y));
-            if (m_view->viewport()->cursor().shape() == Qt::PointingHandCursor) {
+            // (A strip's label is a hand too, but not a box.)
+            if (m_view->viewport()->cursor().shape() == Qt::PointingHandCursor && !probe->isFoldSpot(QPoint(x, y))) {
                 hits.append(QPoint(x + 2, y));
                 break;
             }
@@ -1429,7 +1442,8 @@ QPoint cellPoint(VisualView *view, int row, int col)
     qreal bottom = 0;
     if (!probe->boundsOfLine(24, &top, &bottom))
         return {};
-    return QPoint(int(probe->textStart()) + (col == 0 ? 30 : 100), int(top) + 18 + 38 * row);
+    // (The strip's room is above the table.)
+    return QPoint(int(probe->textStart()) + (col == 0 ? 30 : 100), int(top + probe->stripHeightAt(24)) + 18 + 38 * row);
 }
 
 // Clicks a cell and returns the editor that opens over it, if any.
@@ -1567,6 +1581,7 @@ void TestVisualView::clickingAColumnEdgeSelectsTheColumn()
     const QRect header = m_view->tableCellViewRect(2, 0, 1);
     QVERIFY(header.isValid());
     // Just above the header cell: the arrow pointing down, not the text cursor.
+    // (The band reaches into the strip's room: it wins in a view that can edit.)
     const QPoint above(header.center().x(), header.top() - 6);
     QTest::mouseMove(viewport, above);
     QCOMPARE(viewport->cursor().shape(), Qt::BitmapCursor);
@@ -1838,14 +1853,16 @@ void TestVisualView::tableSelectionNeedsAnEditableView()
     const QRect header = m_view->tableCellViewRect(2, 0, 1);
     const QRect a = m_view->tableCellViewRect(2, 1, 0);
     const QRect b = m_view->tableCellViewRect(2, 2, 1);
-    const QPoint above(header.center().x(), header.top() - 6);
+    // (Right of the strip's label, which a click on collapses.)
+    const QPoint above(m_view->tableCellViewRect(2, 0, 2).right() - 1, header.top() - 6);
     const QPoint border(a.left() - 6, a.bottom());
     m_view->setReadOnly(true);
     m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(0)));
     QTest::qWait(20);
-    const QImage plain = m_view->grab().toImage();
     QTest::mouseMove(viewport, above);
     QVERIFY(viewport->cursor().shape() != Qt::BitmapCursor);
+    // (With the pointer over the table, its strip shows.)
+    const QImage plain = m_view->grab().toImage();
     QTest::mouseClick(viewport, Qt::LeftButton, {}, above);
     QVERIFY(!probe->hasTableSelection());
     QTest::mouseMove(viewport, border);
@@ -2769,11 +2786,13 @@ static QImage paintHtml(const QString &html, const QString &folder, qreal width,
     const QByteArray utf8 = html.toUtf8();
     block.html = rust::String(utf8.constData(), utf8.size());
     const auto rendered = RenderedBlock::create(block, html, ctx);
-    QImage image(QSize(int(width * dpr), qMax(1, int(rendered->height() * dpr))), QImage::Format_RGB32);
+    // (Without the room for the strip a picture has over it.)
+    const qreal strip = rendered->stripHeight();
+    QImage image(QSize(int(width * dpr), qMax(1, int((rendered->height() - strip) * dpr))), QImage::Format_RGB32);
     image.setDevicePixelRatio(dpr);
     image.fill(Qt::white);
     QPainter painter(&image);
-    rendered->paint(painter, QPointF(0, 0), width);
+    rendered->paint(painter, QPointF(0, -strip), width);
     return image;
 }
 
@@ -2927,19 +2946,21 @@ void TestVisualView::codeBlocksArePaintedAsTheStockHighlighterDoes()
     highlighter.setDefinition(theme::syntaxRepository().definitionForName(QStringLiteral("Markdown")));
     highlighter.rehighlight();
 
-    const QSize size(int(ctx.width), int(rendered->height()));
+    // (Without the room for the strip a code box has over it.)
+    const qreal strip = rendered->stripHeight();
+    const QSize size(int(ctx.width), int(rendered->height() - strip));
     QImage actual(size, QImage::Format_RGB32);
     QImage expected(size, QImage::Format_RGB32);
     actual.fill(Qt::white);
     expected.fill(Qt::white);
     {
         QPainter painter(&actual);
-        rendered->paint(painter, QPointF(0, 0), ctx.width);
+        rendered->paint(painter, QPointF(0, -strip), ctx.width);
     }
     {
         QPainter painter(&expected);
         QPainterPath box;
-        box.addRoundedRect(QRectF(QPointF(0, 0), QSizeF(ctx.width, rendered->height() - 4)), 3, 3);
+        box.addRoundedRect(QRectF(QPointF(0, 0), QSizeF(ctx.width, rendered->height() - strip - 4)), 3, 3);
         painter.setRenderHint(QPainter::Antialiasing);
         painter.fillPath(box, theme::color(theme::Role::codeBlock));
         painter.setRenderHint(QPainter::Antialiasing, false);
@@ -2948,7 +2969,7 @@ void TestVisualView::codeBlocksArePaintedAsTheStockHighlighterDoes()
         paint.palette.setColor(QPalette::Text, theme::color(theme::Role::text));
         reference.documentLayout()->draw(&painter, paint);
     }
-    QCOMPARE(reference.size().height() + 10 + 4, rendered->height());
+    QCOMPARE(reference.size().height() + 10 + 4, rendered->height() - strip);
     QVERIFY(actual == expected);
     // Highlighted, not plain: more than the text colour and the box.
     QSet<QRgb> colors;
@@ -3525,7 +3546,7 @@ void TestVisualView::rawPictureNamesAreNotOpened()
         rendered->paint(painter, QPointF(0, 0), ctx.width);
     }
     QCOMPARE(countColor(image, Qt::red) > 0, loads);
-    QCOMPARE(bool(rendered->pictureAt(QPointF(20, 20))), loads);
+    QCOMPARE(bool(rendered->pictureAt(QPointF(20, 20 + rendered->stripHeight()))), loads);
     if (!loads)
         QCOMPARE(RenderedBlock::pictureFileReads(), reads);
     // Listing the pictures for the remote-image banner opens nothing either.
@@ -3686,14 +3707,14 @@ void TestVisualView::networkPathsAreNotOpened()
     QCOMPARE(countColor(image, Qt::red) > 0, loads);
     if (source.contains(QLatin1String(".svg"))) {
         // The SVG itself is local; its zoomed view must not reach out either.
-        const auto picture = rendered->pictureAt(QPointF(20, 20));
+        const auto picture = rendered->pictureAt(QPointF(20, 20 + rendered->stripHeight()));
         QVERIFY(picture);
         QCOMPARE(rendered->pictureImage(*picture).isNull(), !loads);
     } else if (source.contains(QLatin1String("disguised"))) {
         // A .png by name: the picture is listed, but nothing was drawn (above).
     } else if (source.contains(QLatin1String("img")) || markdown) {
         // A click on a picture that did not load must not open it either.
-        QCOMPARE(bool(rendered->pictureAt(QPointF(20, 20))), loads);
+        QCOMPARE(bool(rendered->pictureAt(QPointF(20, 20 + rendered->stripHeight()))), loads);
     }
 }
 
@@ -4425,6 +4446,7 @@ void TestVisualView::longCodeBoxPartsLookLikeTheBox()
         RenderedBlock::Part part;
         part.first = first == 0;
         part.last = first + count == lines.size();
+        part.strip = part.first; // (As in a view: the whole box has its strip.)
         part.wrapAnywhere = RenderedBlock::wrapsAnywhere(markdown);
         RenderContext ctx;
         ctx.font = theme::textFont();
@@ -4502,6 +4524,12 @@ void TestVisualView::longCodeBoxesShowInParts()
     reference.setTextCursor(selection);
     view.clearFocus();
     reference.clearFocus();
+    // The pointer is not over either (a strip shows under it).
+    for (ProbeView *shown : {&reference, &view}) {
+        shown->setAttribute(Qt::WA_UnderMouse, false);
+        shown->viewport()->setAttribute(Qt::WA_UnderMouse, false);
+        shown->setHoverLine(-1);
+    }
     for (const qreal position : {0.0, codeFirst + 585.5, codeFirst + 6000.25, qreal(codeLast - 10)}) {
         view.scrollToLinePosition(position);
         reference.scrollToLinePosition(position);
@@ -4714,6 +4742,325 @@ static void useTestSettings()
     vn::Settings::instance().useFile(dir.filePath(QStringLiteral("settings.ini")));
 }
 Q_COREAPP_STARTUP_FUNCTION(useTestSettings)
+
+// The sample's blocks: code 19-22, table 24-27, equation 31-33, diagram
+// 35-37; the "Goals" section starts on line 7 and the "Install" one on 15.
+void TestVisualView::collapsedBlocksAreOneChip()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    m_view->grab();
+    QCOMPARE(m_view->chipTextAt(24), QString());
+    const QString open = m_view->renderedTextAt(24);
+    QVERIFY(open.contains(QLatin1String("Platform")));
+    QVERIFY(m_view->setFolded(24, true));
+    QVERIFY(m_view->isFolded(24));
+    m_view->grab();
+    // One row for the block, which is not rendered: only the chip is.
+    QCOMPARE(view->rowIndexOf(24), view->rowIndexOf(27));
+    QCOMPARE(view->firstLineOfRow(view->rowIndexOf(26)), 24);
+    QCOMPARE(m_view->renderedTextAt(24), QString());
+    {
+        // Nothing but the chip is rendered for it (the sample's diagram renders late).
+        setDocument(QStringLiteral("Intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nOutro\n"), 0);
+        m_view->grab();
+        const int renders = m_view->renderCount();
+        QVERIFY(m_view->setFolded(2, true));
+        m_view->grab();
+        QVERIFY2(m_view->renderCount() - renders <= 1, qPrintable(QString::number(m_view->renderCount() - renders)));
+        QVERIFY(m_view->setFolded(2, false));
+        setDocument(QString::fromUtf8(sample), 0);
+        QVERIFY(m_view->setFolded(24, true));
+        m_view->grab();
+    }
+    const QStringList chip = m_view->chipTextAt(24).split(u'\n');
+    QCOMPARE(chip.value(0), QStringLiteral("Table · 2 × 3"));
+    QCOMPARE(chip.value(1), QStringLiteral("Platform, Status"));
+    // A chip paints in the secondary colour of the style, and is not taller than a line of text.
+    QVERIFY(view->heightOfRow(view->rowIndexOf(24)) < 60);
+    QVERIFY(m_view->setFolded(24, false));
+    QCOMPARE(m_view->foldCount(), 0);
+    m_view->grab();
+    QCOMPARE(m_view->renderedTextAt(24), open);
+    // Not collapsible: a paragraph, a list.
+    QVERIFY(!m_view->setFolded(9, true));
+    QVERIFY(!m_view->setFolded(12, true));
+    // Code and equations and diagrams collapse too.
+    for (const int line : {19, 31, 35})
+        QVERIFY2(m_view->setFolded(line, true), qPrintable(QString::number(line)));
+    QVERIFY2(m_view->chipTextAt(19).startsWith(QStringLiteral("Code · python · 2 lines")), qPrintable(m_view->chipTextAt(19)));
+    QVERIFY(m_view->chipTextAt(31).startsWith(QLatin1String("Equation")));
+    QVERIFY(m_view->chipTextAt(35).startsWith(QLatin1String("Diagram")));
+    QVERIFY(view->rowsConsistent());
+}
+
+void TestVisualView::foldsFollowEditsAndGoWithTheirBlock()
+{
+    QVERIFY(m_view->setFolded(24, true));
+    m_view->grab();
+    // A line above: the fold moves with its block.
+    QTextCursor edit(m_doc);
+    edit.insertText(QStringLiteral("Before.\n\n"));
+    m_model->flush();
+    m_view->grab();
+    QVERIFY(m_view->isFolded(26));
+    QVERIFY(!m_view->isFolded(24));
+    QCOMPARE(m_view->foldCount(), 1);
+    // A change inside the block (what a replace all in the source half does):
+    // the chip stays, its summary is that of the new text.
+    QTextCursor inside(m_doc->findBlockByNumber(28));
+    inside.movePosition(QTextCursor::EndOfBlock);
+    inside.insertText(QStringLiteral("x"));
+    m_model->flush();
+    m_view->grab();
+    QCOMPARE(m_view->foldCount(), 1);
+    QVERIFY(m_view->chipTextAt(26).startsWith(QLatin1String("Table")));
+    // The block goes: so does its fold.
+    QTextCursor remove(m_doc->findBlockByNumber(26));
+    remove.setPosition(m_doc->findBlockByNumber(31).position(), QTextCursor::KeepAnchor);
+    remove.removeSelectedText();
+    m_model->flush();
+    m_view->grab();
+    QCOMPARE(m_view->foldCount(), 0);
+    // Changed into something else (a paragraph): the same.
+    // (Two lines were added above, and the table is gone: the code is on line 21.)
+    QVERIFY(m_view->setFolded(21, true));
+    m_view->grab();
+    QTextCursor change(m_doc->findBlockByNumber(21));
+    change.setPosition(m_doc->findBlockByNumber(21).position() + 3, QTextCursor::KeepAnchor);
+    change.removeSelectedText(); // "python" stays, the fence is gone.
+    m_model->flush();
+    m_view->grab();
+    QVERIFY(!m_view->isFolded(21));
+}
+
+void TestVisualView::foldedSectionsHideTheirBlocks()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    // Away from the section, so the caret does not open it.
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(4)));
+    QVERIFY(m_view->setFolded(15, true));
+    m_view->grab();
+    QCOMPARE(m_view->foldHintAt(15), QStringLiteral("· 1 paragraph, 1 code block, 1 table, 1 quote, 1 equation, 1 figure hidden"));
+    // The heading's row runs over every line of the section: the spans have no rows of their own.
+    QCOMPARE(view->rowIndexOf(15), view->rowIndexOf(37));
+    QCOMPARE(view->rowIndexOf(24), view->rowIndexOf(15));
+    QVERIFY(view->rowsConsistent());
+    QVERIFY(m_view->renderedTextAt(24).contains(QLatin1String("Install")));
+    // A chip inside it is kept for when it opens.
+    QVERIFY(m_view->setFolded(24, true));
+    QCOMPARE(m_view->foldCount(), 2);
+    // The scroll position still maps lines to places.
+    m_view->scrollToLine(30);
+    QVERIFY(m_view->topLinePosition() >= 15);
+    // A jump into it (find, go to line, the outline) opens it.
+    m_view->clearFocus();
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(31)));
+    QVERIFY(m_view->isFolded(15));
+    m_view->revealCaret();
+    QVERIFY(!m_view->isFolded(15));
+    QVERIFY(m_view->isFolded(24)); // (Not the chip, which the caret is not in.)
+    m_view->grab();
+    QCOMPARE(m_view->foldHintAt(15), QString());
+    QVERIFY(view->rowIndexOf(15) != view->rowIndexOf(31));
+    // Expand all opens blocks and sections.
+    QVERIFY(m_view->setFolded(15, true));
+    m_view->expandAll();
+    QCOMPARE(m_view->foldCount(), 0);
+}
+
+void TestVisualView::caretsOpenFoldsOnlyWithFocus()
+{
+    // The caret comes into a collapsed block with the focus: it opens.
+    QVERIFY(m_view->setFolded(24, true));
+    QVERIFY(m_view->hasFocus());
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(26)));
+    QVERIFY(!m_view->isFolded(24));
+    // At the very start of the block it is on the chip, which stays.
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(4)));
+    QVERIFY(m_view->setFolded(24, true));
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(24)));
+    QVERIFY(m_view->isFolded(24));
+    // A caret mirrored from the other half does not open it (the source
+    // half's carets go where they like).
+    TextView source(m_doc);
+    source.setTextCursor(QTextCursor(m_doc->findBlockByNumber(26)));
+    m_view->clearFocus();
+    QVERIFY(!m_view->hasFocus());
+    m_view->mirrorCursorsFrom(&source, true);
+    QCOMPARE(m_view->textCursor().blockNumber(), 26);
+    QVERIFY(m_view->isFolded(24));
+    m_view->grab();
+    QVERIFY(m_view->isFolded(24));
+    // The chip takes no typing; Enter on it opens it.
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(24)));
+    m_view->setFocus();
+    QTRY_VERIFY(m_view->hasFocus());
+    QVERIFY(m_view->isFolded(24));
+    const int lines = m_doc->blockCount();
+    QTest::keyClicks(m_view, QStringLiteral("x"));
+    QCOMPARE(m_doc->blockCount(), lines);
+    QCOMPARE(m_doc->findBlockByNumber(24).text(), QStringLiteral("| Platform | Status |"));
+    QTest::keyClick(m_view, Qt::Key_Return);
+    QVERIFY(!m_view->isFolded(24));
+    // The arrows treat a chip as one block: Down from above lands on it, and the next goes past it.
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(17)));
+    QVERIFY(m_view->setFolded(19, true));
+    QVERIFY(m_view->setFolded(24, true));
+    QTest::keyClick(m_view, Qt::Key_Down);
+    QCOMPARE(m_view->textCursor().blockNumber(), 19);
+    QTest::keyClick(m_view, Qt::Key_Down);
+    QCOMPARE(m_view->textCursor().blockNumber(), 24);
+    QTest::keyClick(m_view, Qt::Key_Down);
+    QCOMPARE(m_view->textCursor().blockNumber(), 29);
+    QVERIFY(m_view->isFolded(19) && m_view->isFolded(24));
+    QTest::keyClick(m_view, Qt::Key_Up);
+    QCOMPARE(m_view->textCursor().blockNumber(), 24);
+    QTest::keyClick(m_view, Qt::Key_Up);
+    QCOMPARE(m_view->textCursor().blockNumber(), 19);
+    QVERIFY(m_view->isFolded(19) && m_view->isFolded(24));
+}
+
+void TestVisualView::stripSpaceIsAlwaysReserved()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    m_view->grab();
+    // Tables, code, equations and diagrams have the room; text has none.
+    for (const int line : {19, 24, 31, 35})
+        QVERIFY2(view->stripHeightAt(line) > 0, qPrintable(QString::number(line)));
+    for (const int line : {9, 12, 29})
+        QCOMPARE(view->stripHeightAt(line), 0.0);
+    qreal top = 0;
+    qreal bottom = 0;
+    for (const int line : {19, 24, 31, 35}) {
+        m_view->setHoverLine(-1);
+        m_view->grab();
+        QVERIFY(view->boundsOfLine(line, &top, &bottom));
+        const qreal height = bottom - top;
+        m_view->setHoverLine(line);
+        const QImage hovered = m_view->viewport()->grab().toImage();
+        QVERIFY(view->boundsOfLine(line, &top, &bottom));
+        QCOMPARE(bottom - top, height);
+        // And the strip shows then: the row's top differs from the one without.
+        m_view->setHoverLine(-1);
+        QVERIFY(hovered != m_view->viewport()->grab().toImage());
+    }
+}
+
+void TestVisualView::clicksCollapseAndOpen()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    for (const bool readOnly : {false, true}) {
+        m_view->setReadOnly(readOnly);
+        m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(4)));
+        m_view->grab();
+        // The strip's chevron collapses.
+        QRect spot = m_view->foldSpotRect(31);
+        QVERIFY(!spot.isNull());
+        QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, QPoint(spot.left() + 3, spot.center().y()));
+        QVERIFY(m_view->isFolded(31));
+        QVERIFY(view->rowsConsistent());
+        m_view->grab();
+        // A click on the chip opens it.
+        spot = m_view->foldSpotRect(31);
+        QVERIFY(!spot.isNull());
+        QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, spot.center());
+        QVERIFY(!m_view->isFolded(31));
+        m_view->grab();
+        // A heading's chevron, in the margin, folds its section.
+        spot = m_view->foldSpotRect(7);
+        QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, spot.center());
+        QVERIFY(m_view->isFolded(7));
+        m_view->grab();
+        QCOMPARE(m_view->foldHintAt(7), QStringLiteral("· 1 paragraph, 1 list hidden"));
+        spot = m_view->foldSpotRect(7);
+        QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, spot.center());
+        QVERIFY(!m_view->isFolded(7));
+    }
+    // The clicks leave the text as it was.
+    QCOMPARE(m_doc->toPlainText(), QString::fromUtf8(sample));
+}
+
+void TestVisualView::collapseAllLeavesSectionsAndExpandAllOpensThem()
+{
+    m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(4)));
+    m_view->collapseAllBlocks();
+    // The front matter (shown as a table), code, table, equation, diagram:
+    // five blocks, no section.
+    QString folded;
+    for (const auto &[line, kind] : m_view->foldState())
+        folded += QStringLiteral("%1:%2 ").arg(line).arg(int(kind));
+    QVERIFY2(m_view->foldCount() == 5, qPrintable(folded));
+    for (const int line : {0, 19, 24, 31, 35})
+        QVERIFY(m_view->isFolded(line));
+    QVERIFY(!m_view->isFolded(7));
+    QVERIFY(!m_view->isFolded(15));
+    QVERIFY(m_view->setFolded(15, true));
+    m_view->collapseAllBlocks();
+    QCOMPARE(m_view->foldCount(), 6);
+    m_view->expandAll();
+    QCOMPARE(m_view->foldCount(), 0);
+    m_view->grab();
+    QVERIFY(m_view->renderedTextAt(24).contains(QLatin1String("Platform")));
+}
+
+void TestVisualView::copiedTabKeepsItsFolds()
+{
+    QTemporaryDir dir;
+    QFile file(dir.filePath(QStringLiteral("folds.md")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(sample);
+    file.close();
+    DocumentTab tab;
+    QVERIFY(tab.load(file.fileName()));
+    tab.setViewMode(DocumentTab::ViewMode::Visual);
+    tab.resize(760, 600);
+    tab.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&tab));
+    VisualView *visual = tab.visualView();
+    QVERIFY(visual);
+    QVERIFY(visual->setFolded(24, true));
+    QVERIFY(visual->setFolded(15, true));
+    std::unique_ptr<DocumentTab> copy(tab.openAnotherView());
+    QVERIFY(copy->visualView());
+    QVERIFY(copy->visualView()->isFolded(24));
+    QVERIFY(copy->visualView()->isFolded(15));
+    QCOMPARE(copy->visualView()->foldCount(), 2);
+    // And they are the copy's own.
+    copy->visualView()->expandAll();
+    QVERIFY(visual->isFolded(24));
+}
+
+void TestVisualView::blocksStartCollapsedWhenAsked()
+{
+    Settings &settings = Settings::instance();
+    settings.setValue(key::blocksStartCollapsed, true);
+    const auto restore = qScopeGuard([&] { settings.reset(key::blocksStartCollapsed); });
+    QTextDocument doc;
+    doc.setDocumentLayout(new DocumentLayout(&doc));
+    doc.setPlainText(QString::fromUtf8(sample));
+    MarkdownModel model(&doc);
+    ProbeView view(&model);
+    view.resize(760, 900);
+    view.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    view.grab();
+    QCOMPARE(view.foldCount(), 5);
+    // Typed later: expanded.
+    QTextCursor end(&doc);
+    end.movePosition(QTextCursor::End);
+    end.insertText(QStringLiteral("\n| a | b |\n|---|---|\n| 1 | 2 |\n"));
+    model.flush();
+    view.grab();
+    QCOMPARE(view.foldCount(), 5);
+    // A document replaced as a whole starts again.
+    view.expandAll();
+    view.documentReset();
+    doc.setPlainText(QString::fromUtf8(sample));
+    model.flush();
+    view.grab();
+    QCOMPARE(view.foldCount(), 5);
+}
+
 
 QTEST_MAIN(TestVisualView)
 #include "test_visualview.moc"

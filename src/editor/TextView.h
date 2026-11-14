@@ -101,6 +101,9 @@ public:
 
     void ensureCursorVisible();
     void centerCursor();
+    // The caret was put where the user asked to go (find, go to line, the
+    // outline): a view that hides text (collapsed blocks) shows it.
+    virtual void revealCaret() {}
     // Space left and right of the text (the gutter is extra).
     void setTextMargins(qreal left, qreal right, qreal top = 0);
 

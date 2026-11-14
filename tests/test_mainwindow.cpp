@@ -131,6 +131,7 @@ private Q_SLOTS:
     void zoomPopupInSingleView();
     void newTabStartsAtDefaultZoom();
     void adoptedTabKeepsItsZoom();
+    void collapseCommands();
 
 private:
     // A Markdown tab in `mode`, in a shown window; the half given has focus.
@@ -972,6 +973,55 @@ void TestMainWindow::newTabStartsAtDefaultZoom()
 
 // A tab moved or copied to another window keeps its zoom, and does not
 // change the zoom of the tabs already there.
+// Collapse all folds blocks only; Expand all opens blocks and sections. Both
+// need Markdown shown rendered.
+void TestMainWindow::collapseCommands()
+{
+    for (const char *id : {"view.collapseAll", "view.expandAll"})
+        QVERIFY(vn::command(QLatin1String(id)));
+    QCOMPARE(vn::command(QStringLiteral("view.collapseAll"))->defaults,
+             QList<QKeySequence>{QKeySequence(QStringLiteral("Ctrl+K, Ctrl+0"), QKeySequence::PortableText)});
+    QCOMPARE(vn::command(QStringLiteral("view.expandAll"))->defaults,
+             QList<QKeySequence>{QKeySequence(QStringLiteral("Ctrl+K, Ctrl+J"), QKeySequence::PortableText)});
+
+    vn::MainWindow window;
+    const QString path = write(QStringLiteral("collapse.md"),
+                               "# One\n\nText.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```\ncode\n```\n\n## Two\n\nMore.\n");
+    window.resize(900, 600);
+    QVERIFY(window.openFile(path));
+    vn::DocumentTab *tab = window.currentTab();
+    tab->setViewMode(vn::DocumentTab::ViewMode::Source);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    window.activateWindow();
+    QAction *collapse = actionFor(window, QStringLiteral("view.collapseAll"));
+    QAction *expand = actionFor(window, QStringLiteral("view.expandAll"));
+    QVERIFY(collapse && expand);
+    // Only the source is shown: nothing to collapse.
+    QVERIFY(!collapse->isEnabled());
+    QVERIFY(!expand->isEnabled());
+    tab->setViewMode(vn::DocumentTab::ViewMode::Visual);
+    QTRY_VERIFY(collapse->isEnabled());
+    QVERIFY(expand->isEnabled());
+    vn::VisualView *visual = tab->visualView();
+    QVERIFY(visual);
+    // A section folded by hand stays folded by Collapse all; the two blocks fold.
+    QTRY_VERIFY(visual->setFolded(12, true));
+    collapse->trigger();
+    QCOMPARE(visual->foldCount(), 3);
+    QVERIFY(visual->isFolded(12));
+    QVERIFY(visual->isFolded(4));
+    QVERIFY(visual->isFolded(8));
+    QVERIFY(!visual->isFolded(0));
+    // Expand all opens the blocks and the section.
+    expand->trigger();
+    QCOMPARE(visual->foldCount(), 0);
+    // A file that is not Markdown has none.
+    const QString text = write(QStringLiteral("plain.txt"), "text\n");
+    QVERIFY(window.openFile(text));
+    QVERIFY(!collapse->isEnabled());
+}
+
 void TestMainWindow::adoptedTabKeepsItsZoom()
 {
     vn::MainWindow one;

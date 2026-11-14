@@ -35,6 +35,7 @@ inline constexpr char multiCursorModifier[] = "editor/multiCursorModifier"; // "
 // Markdown
 inline constexpr char defaultMode[] = "markdown/defaultMode"; // "source" | "split" | "visual"
 inline constexpr char highlightActiveBlock[] = "markdown/highlightActiveBlock";
+inline constexpr char blocksStartCollapsed[] = "markdown/blocksStartCollapsed"; // tables, figures, equations, code
 inline constexpr char breaks[] = "markdown/breaks";
 inline constexpr char linkify[] = "markdown/linkify";
 inline constexpr char typographer[] = "markdown/typographer";

@@ -1,6 +1,7 @@
 #include "BlockRenderer.h"
 
 #include "../Theme.h"
+#include "Folding.h"
 #include "MarkdownEditing.h"
 #include "MathObject.h"
 #include "MathRenderer.h"
@@ -13,6 +14,8 @@
 #include <KSyntaxHighlighting/Theme>
 
 #include <QAbstractTextDocumentLayout>
+#include <QApplication>
+#include <QStyle>
 #include <QBuffer>
 #include <QCache>
 #include <QDateTime>
@@ -49,6 +52,13 @@ using namespace Qt::StringLiterals;
 constexpr qreal codePadX = 10;
 constexpr qreal codePadY = 5;
 constexpr qreal blockGap = 4;
+// A chip is this much higher than the text in it (and this much wider than
+// its content on each side); the strip over a block is this much higher.
+constexpr qreal chipExtraHeight = 8;
+constexpr qreal chipPadX = 10;
+constexpr qreal chipChevronGap = 7;
+constexpr qreal chevronSize = 8;
+constexpr qreal stripExtraHeight = 4;
 
 qsizetype imageCost(const QImage &image)
 {
@@ -1635,6 +1645,8 @@ std::unique_ptr<RenderedBlock> RenderedBlock::createPart(const QString &source, 
     r.m_width = context.width;
     r.m_kind = Kind::Code;
     r.m_part = part;
+    if (part.first && part.strip)
+        r.m_strip = stripHeight(context);
     // As codeBox() makes the whole box: the same text options, unhighlighted.
     // A part above another ends in its last line break, so that a selection
     // that runs on shows it as the box does; the empty line after it is
@@ -1643,7 +1655,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::createPart(const QString &source, 
                            part.wrapAnywhere, false);
     const qreal textHeight = part.last ? r.m_doc->size().height()
                                        : r.m_doc->documentLayout()->blockBoundingRect(r.m_doc->lastBlock()).top();
-    r.m_height = textHeight + (part.first ? codePadY : 0) + (part.last ? codePadY + blockGap : 0);
+    r.m_height = r.m_strip + textHeight + (part.first ? codePadY : 0) + (part.last ? codePadY + blockGap : 0);
     r.collectLineAnchors(int(source.count(u'\n')) + 1);
     return result;
 }
@@ -1677,6 +1689,89 @@ std::unique_ptr<RenderedBlock> RenderedBlock::createItem(const core::Block &bloc
 
 std::unique_ptr<RenderedBlock> RenderedBlock::create(const core::Block &block, const QString &source,
                                                      const RenderContext &context, bool item)
+{
+    auto result = build(block, source, context, item);
+    if (item)
+        return result;
+    switch (folding::classify(block).kind) {
+    case folding::FoldKind::Table:
+    case folding::FoldKind::Figure:
+    case folding::FoldKind::Equation:
+    case folding::FoldKind::Code:
+        // The room for the strip is the block's own: its parts (anchors,
+        // heights) are laid out as they were, one strip lower.
+        result->m_strip = stripHeight(context);
+        result->m_height += result->m_strip;
+        for (LineAnchor &anchor : result->m_lineAnchors)
+            anchor.second += result->m_strip;
+        break;
+    default:
+        break;
+    }
+    return result;
+}
+
+qreal RenderedBlock::stripHeight(const RenderContext &context)
+{
+    return std::ceil(QFontMetricsF(context.font).height()) + stripExtraHeight;
+}
+
+std::unique_ptr<RenderedBlock> RenderedBlock::createChip(const ChipInfo &info, const RenderContext &context)
+{
+    auto result = std::unique_ptr<RenderedBlock>(new RenderedBlock);
+    RenderedBlock &r = *result;
+    r.m_kind = Kind::Chip;
+    r.m_width = context.width;
+    const QFontMetricsF metrics(context.font);
+    const qreal height = std::ceil(metrics.height()) + chipExtraHeight;
+    r.m_chipFont = context.font;
+    r.m_chipLabel = info.label;
+    const qreal labelWidth = metrics.horizontalAdvance(info.label);
+    const qreal lead = chipPadX + chevronSize + chipChevronGap;
+    const qreal gap = metrics.horizontalAdvance(QStringLiteral("  "));
+    // The detail takes what is left of the column.
+    const qreal room = context.width - lead - labelWidth - gap - chipPadX;
+    if (!info.detail.isEmpty() && room > metrics.averageCharWidth() * 3)
+        r.m_chipDetail = metrics.elidedText(info.detail, Qt::ElideRight, room);
+    qreal width = lead + labelWidth + chipPadX;
+    if (!r.m_chipDetail.isEmpty())
+        width += gap + metrics.horizontalAdvance(r.m_chipDetail);
+    r.m_chipRect = QRectF(0, 0, qMin(width, qMax<qreal>(context.width, 1)), height);
+    r.m_height = height + 2 * blockGap;
+    return result;
+}
+
+void RenderedBlock::paintChevron(QPainter &painter, const QPointF &center, bool open, const QColor &color)
+{
+    // As the mockups draw it: a 8 × 8 box holding a "›" (collapsed) or "⌄".
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(color, 1.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setBrush(Qt::NoBrush);
+    const qreal h = chevronSize / 2;
+    QPainterPath path;
+    if (open) {
+        path.moveTo(center + QPointF(-h + 1, -h / 2 + 0.5));
+        path.lineTo(center + QPointF(0, h / 2 + 0.5));
+        path.lineTo(center + QPointF(h - 1, -h / 2 + 0.5));
+    } else {
+        path.moveTo(center + QPointF(-h / 2 + 0.5, -h + 1));
+        path.lineTo(center + QPointF(h / 2 + 0.5, 0));
+        path.lineTo(center + QPointF(-h / 2 + 0.5, h - 1));
+    }
+    painter.drawPath(path);
+    painter.restore();
+}
+
+void RenderedBlock::drawSecondaryText(QPainter &painter, const QRectF &rect, int flags, const QString &text)
+{
+    // The style draws disabled text (with the etch the theme asks for).
+    QApplication::style()->drawItemText(&painter, rect.toRect(), flags, QApplication::palette(), false, text,
+                                        QPalette::Text);
+}
+
+std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, const QString &source,
+                                                    const RenderContext &context, bool item)
 {
     auto result = std::unique_ptr<RenderedBlock>(new RenderedBlock);
     RenderedBlock &r = *result;
@@ -1866,7 +1961,7 @@ QSizeF RenderedBlock::pictureSize() const
 
 QPointF RenderedBlock::contentOffset() const
 {
-    return m_kind == Kind::Code ? QPointF(codePadX, m_part.first ? codePadY : 0) : QPointF(0, 0);
+    return m_kind == Kind::Code ? QPointF(codePadX, m_strip + (m_part.first ? codePadY : 0)) : QPointF(0, m_strip);
 }
 
 void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width, const RenderedSelection &selection) const
@@ -1874,10 +1969,37 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
     switch (m_kind) {
     case Kind::Empty:
         return;
+    case Kind::Chip: {
+        const QRectF box = m_chipRect.translated(topLeft);
+        const QFontMetricsF metrics(m_chipFont);
+        painter.save();
+        painter.setFont(m_chipFont);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QPainterPath path;
+        const QRectF outline = box.adjusted(0.5, 0.5, -0.5, -0.5);
+        path.addRoundedRect(outline, outline.height() / 2, outline.height() / 2);
+        painter.fillPath(path, theme::color(selection.hot ? theme::Role::buttonHover : theme::Role::sideBar));
+        painter.setPen(QPen(theme::color(selection.caretOn ? theme::Role::accent : theme::Role::divider), 1));
+        painter.drawPath(path);
+        paintChevron(painter, QPointF(box.left() + chipPadX + chevronSize / 2, box.center().y()), false,
+                     theme::color(theme::Role::text));
+        const QRectF textRect(box.left() + chipPadX + chevronSize + chipChevronGap, box.top(),
+                              box.width(), box.height());
+        const qreal labelWidth = metrics.horizontalAdvance(m_chipLabel);
+        painter.setPen(theme::color(theme::Role::text));
+        painter.drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine, m_chipLabel);
+        if (!m_chipDetail.isEmpty()) {
+            const qreal x = textRect.left() + labelWidth + metrics.horizontalAdvance(QStringLiteral("  "));
+            drawSecondaryText(painter, QRectF(x, box.top(), box.right() - chipPadX - x + 1, box.height()),
+                              Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine, m_chipDetail);
+        }
+        painter.restore();
+        return;
+    }
     case Kind::Image: {
         const QSizeF size = pictureSize();
         const qreal x = m_centered ? topLeft.x() + qMax<qreal>(0, (width - size.width()) / 2) : topLeft.x();
-        const QRectF imageRect(QPointF(x, topLeft.y() + codePadY), size);
+        const QRectF imageRect(QPointF(x, topLeft.y() + m_strip + codePadY), size);
         if (m_formula) {
             m_formula->draw(painter, imageRect.topLeft() + QPointF(0, m_formula->ascent * m_formulaScale),
                             m_formulaScale, theme::color(theme::Role::text));
@@ -1905,7 +2027,7 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
         // that it covers: the box runs on past the edges it shares with the
         // other parts.
         constexpr qreal radius = 3;
-        const qreal top = m_part.first ? topLeft.y() : topLeft.y() - 2 * radius;
+        const qreal top = m_part.first ? topLeft.y() + m_strip : topLeft.y() - 2 * radius;
         const qreal bottom = m_part.last ? topLeft.y() + m_height - blockGap : topLeft.y() + m_height + 2 * radius;
         QPainterPath box;
         box.addRoundedRect(QRectF(topLeft.x(), top, width, bottom - top), radius, radius);
@@ -2236,13 +2358,13 @@ std::optional<RenderedBlock::Picture> RenderedBlock::pictureAt(const QPointF &po
         const QSizeF size = pictureSize();
         // paint() centres these in the column.
         const qreal x = m_centered ? qMax<qreal>(0, (m_width - size.width()) / 2) : 0;
-        if (!QRectF(QPointF(x, codePadY), size).contains(point))
+        if (!QRectF(QPointF(x, m_strip + codePadY), size).contains(point))
             return std::nullopt;
         return Picture{m_diagramCode.isNull() ? QObject::tr("Equation") : QObject::tr("Diagram"), {}};
     }
     if (m_kind != Kind::Rich)
         return std::nullopt;
-    const QString source = m_doc->documentLayout()->imageAt(point);
+    const QString source = m_doc->documentLayout()->imageAt(point - contentOffset());
     if (source.isEmpty())
         return std::nullopt;
     const auto *doc = static_cast<const ResourceDocument *>(m_doc.get());
@@ -2275,7 +2397,7 @@ std::vector<RenderedBlock::Figure> RenderedBlock::figures() const
         const QSizeF size = pictureSize();
         const qreal x = m_centered ? qMax<qreal>(0, (m_width - size.width()) / 2) : 0;
         Figure figure = m_diagramFigure;
-        figure.rect = QRectF(QPointF(x, codePadY), size);
+        figure.rect = QRectF(QPointF(x, m_strip + codePadY), size);
         result.push_back(figure);
     } else if (m_kind == Kind::Rich) {
         const auto *doc = static_cast<const ResourceDocument *>(m_doc.get());
@@ -2345,6 +2467,21 @@ std::optional<QRectF> RenderedBlock::caretRect(int position) const
     // (table cells included), as collectLineAnchors reads it.
     const QPointF origin = m_doc->documentLayout()->blockBoundingRect(block).topLeft() + contentOffset();
     return QRectF(origin.x() + line.cursorToX(inBlock), origin.y() + line.y(), 2, line.height());
+}
+
+std::optional<QRectF> RenderedBlock::lastLineRect() const
+{
+    if (!m_doc || (m_kind != Kind::Rich && m_kind != Kind::Code))
+        return std::nullopt;
+    const QTextLayout *layout = m_doc->lastBlock().layout();
+    if (!layout || layout->lineCount() == 0)
+        return std::nullopt;
+    const QTextLine line = layout->lineAt(layout->lineCount() - 1);
+    // The layout's origin is in document coordinates, as in caretRect().
+    const QPointF origin = m_doc->documentLayout()->blockBoundingRect(m_doc->lastBlock()).topLeft() + contentOffset();
+    QRectF rect = line.naturalTextRect();
+    rect.translate(origin);
+    return rect;
 }
 
 std::pair<int, int> RenderedBlock::lineAt(int position) const

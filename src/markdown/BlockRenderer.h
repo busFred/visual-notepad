@@ -67,6 +67,10 @@ struct RenderedSelection
     // selected).
     bool runsOn = false;
     bool markerSelected = false;
+    // A chip (RenderedBlock::createChip): the pointer is over it, or the
+    // caret is on it.
+    bool hot = false;
+    bool caretOn = false;
     bool isEmpty() const { return ranges.isEmpty() && !whole && !runsOn && !markerSelected; }
 };
 
@@ -91,7 +95,7 @@ Q_SIGNALS:
 class RenderedBlock
 {
 public:
-    enum class Kind { Rich, Code, Image, Empty };
+    enum class Kind { Rich, Code, Image, Empty, Chip };
 
     static std::unique_ptr<RenderedBlock> create(const core::Block &block, const QString &source,
                                                  const RenderContext &context);
@@ -112,6 +116,7 @@ public:
         bool first = true; // Has the top of the box.
         bool last = true;  // Has the bottom.
         bool wrapAnywhere = false;
+        bool strip = false; // The box is a collapsible block (see stripHeight()).
     };
     // A part, from the lines of the source it covers.
     static std::unique_ptr<RenderedBlock> createPart(const QString &source, const Part &part,
@@ -124,6 +129,29 @@ public:
     // next item. A view shows a long list so, an item a row (VisualView).
     static std::unique_ptr<RenderedBlock> createItem(const core::Block &block, const QString &source,
                                                      const RenderContext &context);
+    // What a collapsed table, figure, equation or code block shows instead of
+    // itself: a rounded box with its label and, after it in the secondary
+    // text colour, a detail (see folding::chipText), elided to the width.
+    struct ChipInfo
+    {
+        QString label;
+        QString detail;
+    };
+    static std::unique_ptr<RenderedBlock> createChip(const ChipInfo &info, const RenderContext &context);
+    // The chip's box, relative to the block's top-left (Kind::Chip only).
+    QRectF chipRect() const { return m_chipRect; }
+    // The space above a table, picture, diagram, equation or code box (not a
+    // list's item), at the top of the block, for the strip a view shows over
+    // it when pointed at (see paintStrip). It is always there, so that nothing
+    // moves when the strip shows. 0 for other blocks.
+    qreal stripHeight() const { return m_strip; }
+    static qreal stripHeight(const RenderContext &context);
+    // The chevron of chips, strips and headings, pointing right (collapsed)
+    // or down, centred on `center`.
+    static void paintChevron(QPainter &painter, const QPointF &center, bool open, const QColor &color);
+    // Text in the secondary colour of the style (the disabled text colour,
+    // etched on themes that etch it); `rect` as for QPainter::drawText.
+    static void drawSecondaryText(QPainter &painter, const QRectF &rect, int flags, const QString &text);
     // How far below this item's top the next item starts in the whole list
     // (its margins and the next item's, as Qt's layout spaces them), or for
     // the last item (next null) where the list ends.
@@ -158,6 +186,9 @@ public:
     // of the source) is drawn, relative to the block's top-left; none for
     // pictures and empty blocks.
     std::optional<QRectF> caretRect(int position) const;
+    // The last laid-out line of the text (where it ends), relative to the
+    // block's top-left; none for pictures and empty blocks.
+    std::optional<QRectF> lastLineRect() const;
     // The [start, end) of the laid-out line holding `position`.
     std::pair<int, int> lineAt(int position) const;
     // Something still arriving: a Mermaid diagram rendering (shown as its
@@ -257,6 +288,8 @@ public:
 private:
     static std::unique_ptr<RenderedBlock> create(const core::Block &block, const QString &source,
                                                  const RenderContext &context, bool item);
+    static std::unique_ptr<RenderedBlock> build(const core::Block &block, const QString &source,
+                                                const RenderContext &context, bool item);
     static std::unique_ptr<RenderedBlock> codeBox(std::unique_ptr<RenderedBlock> result, const QString &source,
                                                   const RenderContext &context);
     QPointF contentOffset() const;
@@ -282,6 +315,11 @@ private:
     bool m_pending = false;
     Figure m_diagramFigure; // Of a diagram (m_diagramCode not null), without its rectangle.
     Part m_part; // Of a code box; the whole box by default.
+    qreal m_strip = 0; // See stripHeight().
+    QRectF m_chipRect;
+    QFont m_chipFont;
+    QString m_chipLabel;
+    QString m_chipDetail; // Elided to fit.
     // Of an item made by createItem: its list (in m_doc), whose marker style
     // was taken off for paintItemMarker, and its outer margins.
     struct Item
