@@ -627,7 +627,9 @@ std::pair<int, int> DocumentTab::readLineRange() const
 
 void DocumentTab::setReadColumns(int columns)
 {
-    m_readColumns = qBound(0, columns, 4);
+    // 0 is Auto; a count the window cannot fit gets what fits (the view's
+    // business), so there is no fixed top here.
+    m_readColumns = qMax(0, columns);
     if (m_visual)
         m_visual->setReadColumns(m_readColumns);
     updateReadBar();

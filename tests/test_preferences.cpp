@@ -212,14 +212,16 @@ void TestPreferences::readModeRows()
         heading = heading || label->text() == QStringLiteral("Read mode");
     QVERIFY(heading);
 
-    // Columns: Auto or 1 to 4, with a note under it.
-    auto *columns = find<QComboBox>(key::readColumns);
+    // Columns: Auto or any count (no fixed top), with a note under it.
+    auto *columns = find<QSpinBox>(key::readColumns);
     QVERIFY(columns);
-    QCOMPARE(columns->count(), 5);
-    QCOMPARE(columns->currentText(), QStringLiteral("Auto"));
-    QCOMPARE(columns->itemText(4), QStringLiteral("4"));
-    columns->setCurrentIndex(columns->findText(QStringLiteral("2")));
+    QCOMPARE(columns->value(), 0);
+    QCOMPARE(columns->text(), QStringLiteral("Auto"));
+    QVERIFY(columns->maximum() > 4);
+    columns->setValue(2);
     QCOMPARE(Settings::instance().number(key::readColumns), 2);
+    columns->setValue(7);
+    QCOMPARE(Settings::instance().number(key::readColumns), 7);
     const QLabel *note = nullptr;
     for (const QLabel *label : window->findChildren<QLabel *>(QStringLiteral("PrefMuted"))) {
         if (label->text().startsWith(QLatin1String("Auto uses as many columns as fit")))

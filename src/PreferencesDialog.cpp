@@ -725,9 +725,22 @@ void PreferencesDialog::buildMarkdownPage()
 void PreferencesDialog::addReadModeRows()
 {
     addHeading(tr("Read mode"));
-    addCombo(tr("Columns"), key::readColumns,
-             {{tr("Auto"), 0}, {QStringLiteral("1"), 1}, {QStringLiteral("2"), 2}, {QStringLiteral("3"), 3},
-              {QStringLiteral("4"), 4}});
+    // Auto (0) or a count. No fixed top: a count wider than the window
+    // allows gets what fits, so a very wide screen can use many.
+    auto *columns = new QSpinBox;
+    columns->setObjectName(QString::fromLatin1(key::readColumns));
+    columns->setRange(0, 99);
+    columns->setSpecialValueText(tr("Auto"));
+    columns->setKeyboardTracking(false);
+    columns->setFixedHeight(26);
+    columns->setMinimumWidth(110);
+    addRow(tr("Columns"), columns);
+    connect(columns, &QSpinBox::valueChanged, this,
+            [](int count) { Settings::instance().setValue(key::readColumns, count); });
+    track(key::readColumns, [columns] {
+        const QSignalBlocker blocker(columns);
+        columns->setValue(Settings::instance().number(key::readColumns));
+    });
     auto *note = new QLabel(tr("Auto uses as many columns as fit at the current window width, font size and zoom."));
     note->setObjectName(QStringLiteral("PrefMuted"));
     note->setWordWrap(true);
