@@ -10,12 +10,16 @@
 // Enter then "a" (a new list item, timed per pair). In the visual
 // editor the keystrokes go into rendered text; VN_PROBE_OPEN=1 opens the
 // line's block as source first. VN_PROBE_PAINT=1 paints after each one.
+// VN_PROBE_READ=1 times read mode on a Markdown file (Visual mode, locked):
+// turning it on, 50 page turns, 50 pages back, 50 nudges of a line and a
+// resize, each painted.
 #include "DocumentTab.h"
 #include "TextFile.h"
 #include "editor/TextView.h"
 #include "markdown/VisualView.h"
 #include <QApplication>
 #include <QElapsedTimer>
+#include <QToolButton>
 #include <QTest>
 #include <QTextBlock>
 #include <QTextCursor>
@@ -159,6 +163,55 @@ int main(int argc, char **argv)
                 tab.grab();
             }
             qInfo().noquote() << argv[i] << "zoom step+paint ms" << lap.take(int(steps.size()));
+        }
+        if (qEnvironmentVariableIntValue("VN_PROBE_READ") != 0 && tab.isMarkdown()) {
+            tab.setViewMode(vn::DocumentTab::ViewMode::Visual);
+            vn::VisualView *visual = tab.visualView();
+            visual->grab();
+            lap.restart();
+            for (QToolButton *button : tab.findChildren<QToolButton *>()) {
+                if (button->toolTip() == QLatin1String("Read-only"))
+                    button->click();
+            }
+            visual->grab();
+            // (A large document shows its columns once its parse is in.)
+            QElapsedTimer waited;
+            waited.start();
+            while (!visual->showsReadColumns() && waited.elapsed() < 120000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                visual->grab();
+            }
+            qInfo().noquote() << argv[i] << "read mode on+paint ms" << lap.take() << visual->readColumnCount()
+                              << "columns";
+            for (int k = 0; k < 50; ++k) {
+                visual->readPageForward();
+                visual->grab();
+            }
+            qInfo().noquote() << argv[i] << "page turn+paint ms" << lap.take(50);
+            for (int k = 0; k < 50; ++k) {
+                visual->readPageBack();
+                visual->grab();
+            }
+            qInfo().noquote() << argv[i] << "page back+paint ms" << lap.take(50);
+            for (int k = 0; k < 50; ++k) {
+                visual->readNudge(1);
+                visual->grab();
+            }
+            qInfo().noquote() << argv[i] << "nudge+paint ms" << lap.take(50);
+            // Pages back with nothing remembered to go back to.
+            for (int k = 0; k < 10; ++k) {
+                visual->readPageBack();
+                visual->grab();
+            }
+            qInfo().noquote() << argv[i] << "page back (worked out)+paint ms" << lap.take(10);
+            tab.resize(1400, 900);
+            visual->grab();
+            qInfo().noquote() << argv[i] << "resize+paint ms" << lap.take() << visual->readColumnCount() << "columns";
+            visual->readToEnd();
+            visual->grab();
+            qInfo().noquote() << argv[i] << "to the end+paint ms" << lap.take();
+            const auto [first, last] = visual->readLineRange();
+            qInfo().noquote() << argv[i] << "last screen: lines" << first + 1 << "to" << last + 1;
         }
         view->scrollToLine(90000);
         view->grab();

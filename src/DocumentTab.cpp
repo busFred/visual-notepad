@@ -18,14 +18,17 @@
 #include <algorithm>
 
 #include <QEvent>
+#include <QFrame>
 #include <QGraphicsDropShadowEffect>
 #include <QFileInfo>
 #include <QButtonGroup>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QLineEdit>
 #include <QPainter>
 #include <QPainterPath>
+#include <QSlider>
 #include <QSplitter>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -39,6 +42,7 @@ namespace {
 constexpr int pillMarginRight = 12;
 constexpr int pillMarginTop = 8;
 constexpr int findBarMarginRight = 24;
+constexpr int readBarGap = 8; // Between the read bar and the pill.
 
 QIcon pillIcon(const QString &name)
 {
@@ -98,6 +102,173 @@ protected:
 private:
     QToolButton *m_lock;
     QToolButton *m_pen;
+};
+
+namespace {
+
+// The glyphs of the read bar, in the text colour: two columns, or a width
+// between two bars.
+class ReadBarIcon : public QWidget
+{
+public:
+    enum class Kind { Columns, Width };
+
+    ReadBarIcon(Kind kind, QWidget *parent)
+        : QWidget(parent)
+        , m_kind(kind)
+    {
+        setFixedSize(16, 16);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(theme::color(theme::Role::text), 1.25, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.setBrush(Qt::NoBrush);
+        if (m_kind == Kind::Columns) {
+            painter.drawRoundedRect(QRectF(1.5, 2.5, 5.5, 11), 1, 1);
+            painter.drawRoundedRect(QRectF(9, 2.5, 5.5, 11), 1, 1);
+            return;
+        }
+        painter.drawLine(QPointF(2.5, 3.5), QPointF(2.5, 12.5));
+        painter.drawLine(QPointF(13.5, 3.5), QPointF(13.5, 12.5));
+        painter.drawLine(QPointF(2.5, 8), QPointF(13.5, 8));
+        painter.drawPolyline(QPolygonF({QPointF(5, 5.7), QPointF(2.7, 8), QPointF(5, 10.3)}));
+        painter.drawPolyline(QPolygonF({QPointF(11, 5.7), QPointF(13.3, 8), QPointF(11, 10.3)}));
+    }
+
+private:
+    Kind m_kind;
+};
+
+} // namespace
+
+// Floating bar left of the pill in read mode: the number of columns (− 2
+// (auto) +; "(auto)" while it is as many as fit) and their width in
+// characters (a slider). The words are in the tooltips.
+class ReadBar : public QWidget
+{
+public:
+    explicit ReadBar(QWidget *parent)
+        : QWidget(parent)
+    {
+        setObjectName(QStringLiteral("ReadBar"));
+        setFixedHeight(30);
+        auto *layout = new QHBoxLayout(this);
+        layout->setContentsMargins(12, 0, 10, 0);
+        layout->setSpacing(8);
+        auto *columns = new ReadBarIcon(ReadBarIcon::Kind::Columns, this);
+        columns->setToolTip(DocumentTab::tr("Columns"));
+        layout->addWidget(columns);
+        auto *count = new QWidget(this);
+        auto *countLayout = new QHBoxLayout(count);
+        countLayout->setContentsMargins(0, 0, 0, 0);
+        countLayout->setSpacing(3);
+        m_fewer = stepButton(QStringLiteral("−"), QStringLiteral("ReadFewerColumns"), DocumentTab::tr("Fewer columns"));
+        m_count = new QLabel(this);
+        m_count->setObjectName(QStringLiteral("ReadColumnCount"));
+        m_count->setAlignment(Qt::AlignCenter);
+        m_count->setMinimumWidth(56);
+        m_more = stepButton(QStringLiteral("+"), QStringLiteral("ReadMoreColumns"),
+                            DocumentTab::tr("More columns (the most that fit is Auto)"));
+        countLayout->addWidget(m_fewer);
+        countLayout->addWidget(m_count);
+        countLayout->addWidget(m_more);
+        layout->addWidget(count);
+        auto *separator = new QFrame(this);
+        separator->setObjectName(QStringLiteral("ReadBarSeparator"));
+        separator->setFixedSize(1, 16);
+        layout->addWidget(separator);
+        auto *width = new ReadBarIcon(ReadBarIcon::Kind::Width, this);
+        width->setToolTip(DocumentTab::tr("Characters per column"));
+        layout->addWidget(width);
+        m_chars = new QSlider(Qt::Horizontal, this);
+        m_chars->setObjectName(QStringLiteral("ReadCharsSlider"));
+        m_chars->setFocusPolicy(Qt::NoFocus);
+        m_chars->setRange(50, 100);
+        m_chars->setSingleStep(5);
+        m_chars->setPageStep(5);
+        m_chars->setFixedWidth(92);
+        m_chars->setToolTip(DocumentTab::tr("Characters per column"));
+        layout->addWidget(m_chars);
+        m_charsValue = new QLabel(this);
+        m_charsValue->setObjectName(QStringLiteral("ReadCharsValue"));
+        m_charsValue->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        m_charsValue->setMinimumWidth(18);
+        m_charsValue->setToolTip(DocumentTab::tr("Characters per column"));
+        layout->addWidget(m_charsValue);
+        connect(m_chars, &QSlider::valueChanged, this, [this](int value) {
+            // In steps of 5 however it was dragged.
+            const int stepped = qBound(50, qRound(value / 5.0) * 5, 100);
+            if (stepped != value) {
+                m_chars->setValue(stepped);
+                return;
+            }
+            m_charsValue->setText(QString::number(stepped));
+            if (onChars)
+                onChars(stepped);
+        });
+        connect(m_fewer, &QToolButton::clicked, this, [this] {
+            if (onColumns)
+                onColumns(-1);
+        });
+        connect(m_more, &QToolButton::clicked, this, [this] {
+            if (onColumns)
+                onColumns(1);
+        });
+    }
+
+    // columns: 0 for Auto; shown: how many show; fit: how many fit.
+    void setState(int columns, int shown, int fit, int chars)
+    {
+        m_count->setText(columns == 0 ? DocumentTab::tr("%1 (auto)").arg(shown) : QString::number(shown));
+        m_count->setToolTip(columns == 0 ? DocumentTab::tr("Columns: as many as fit (%1)").arg(fit)
+                                         : DocumentTab::tr("Columns: %1 of the %2 that fit").arg(shown).arg(fit));
+        m_fewer->setEnabled(shown > 1);
+        // + goes back to Auto at the most that fit; Auto is the most already.
+        m_more->setEnabled(columns != 0);
+        const QSignalBlocker blocker(m_chars);
+        m_chars->setValue(chars);
+        m_charsValue->setText(QString::number(chars));
+    }
+
+    std::function<void(int)> onColumns; // -1 or 1.
+    std::function<void(int)> onChars;
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        // The pill's look.
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QPainterPath path;
+        const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+        path.addRoundedRect(r, r.height() / 2, r.height() / 2);
+        painter.fillPath(path, theme::color(theme::Role::sideBar));
+        painter.setPen(theme::color(theme::Role::divider));
+        painter.drawPath(path);
+    }
+
+private:
+    QToolButton *stepButton(const QString &text, const QString &name, const QString &tip)
+    {
+        auto *button = new QToolButton(this);
+        button->setObjectName(name);
+        button->setProperty("readStep", true);
+        button->setText(text);
+        button->setToolTip(tip);
+        button->setFocusPolicy(Qt::NoFocus);
+        button->setFixedSize(22, 22);
+        return button;
+    }
+
+    QToolButton *m_fewer = nullptr;
+    QToolButton *m_more = nullptr;
+    QLabel *m_count = nullptr;
+    QSlider *m_chars = nullptr;
+    QLabel *m_charsValue = nullptr;
 };
 
 namespace {
@@ -164,6 +335,8 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
                  : defaultMode == QLatin1String("split") ? ViewMode::SourceVisual
                                                          : ViewMode::Visual;
     m_sourceZoom = m_visualZoom = Settings::instance().number(key::zoom);
+    m_readColumns = qBound(0, Settings::instance().number(key::readColumns), 4);
+    m_readChars = qBound(50, Settings::instance().number(key::readChars), 100);
     applySettings();
     connect(&Settings::instance(), &Settings::changed, this, &DocumentTab::onSettingChanged);
 
@@ -175,6 +348,7 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
         (m_viewMode == ViewMode::SourceVisual ? m_splitLocked : m_visualLocked) = locked;
         if (m_visual)
             m_visual->setReadOnly(locked);
+        updateReadMode();
     });
     connect(m_editor, &TextView::scrolled, this, [this] { syncScroll(m_editor, m_visual); });
     connect(m_editor, &TextView::selectionChanged, this, [this] { mirrorSelection(m_editor, m_visual); });
@@ -238,6 +412,8 @@ DocumentTab *DocumentTab::openAnotherView(QWidget *parent) const
     tab->setViewMode(m_viewMode);
     tab->m_sourceZoom = m_sourceZoom;
     tab->m_visualZoom = m_visualZoom;
+    tab->setReadColumns(m_readColumns);
+    tab->setReadChars(m_readChars);
     // The views take their fonts when the tab is shown, as after setZoom.
     tab->m_settingsStale = true;
     tab->editor()->setTextCursor(editor()->textCursor());
@@ -338,6 +514,18 @@ void DocumentTab::ensureVisualView()
         if (m_active == m_visual)
             Q_EMIT cursorPositionChanged();
     });
+    m_visual->setReadColumns(m_readColumns);
+    m_visual->setReadChars(m_readChars);
+    connect(m_visual, &VisualView::readChanged, this, [this] {
+        if (!m_readMode)
+            return;
+        updateReadBar();
+        // The hidden source view keeps the place too: the session saves it,
+        // and Source mode opens there.
+        if (const auto [first, last] = m_visual->readLineRange(); first >= 0)
+            m_editor->scrollToLine(first);
+        Q_EMIT readStateChanged();
+    });
 }
 
 void DocumentTab::syncScroll(TextView *from, TextView *to)
@@ -423,7 +611,76 @@ void DocumentTab::updateViews()
         mirrorSelection(active, active == m_editor ? static_cast<TextView *>(m_visual) : m_editor);
     updatePill();
     updateAccent();
+    updateReadMode();
     Q_EMIT zoomChanged();
+}
+
+bool DocumentTab::isReadMode() const
+{
+    return m_readMode;
+}
+
+std::pair<int, int> DocumentTab::readLineRange() const
+{
+    return m_readMode && m_visual ? m_visual->readLineRange() : std::pair<int, int>(-1, -1);
+}
+
+void DocumentTab::setReadColumns(int columns)
+{
+    m_readColumns = qBound(0, columns, 4);
+    if (m_visual)
+        m_visual->setReadColumns(m_readColumns);
+    updateReadBar();
+}
+
+void DocumentTab::setReadChars(int chars)
+{
+    m_readChars = qBound(50, chars, 100);
+    if (m_visual)
+        m_visual->setReadChars(m_readChars);
+    updateReadBar();
+}
+
+void DocumentTab::updateReadMode()
+{
+    const bool on = isReadOnly() && m_visual;
+    if (on && !m_readBar) {
+        m_readBar = new ReadBar(this);
+        m_readBar->onColumns = [this](int step) {
+            if (!m_visual)
+                return;
+            const int shown = m_visual->readColumnCount();
+            const int fit = m_visual->readMaxColumns();
+            if (step < 0)
+                setReadColumns(qMax(1, shown - 1));
+            else
+                setReadColumns(shown + 1 >= fit ? 0 : shown + 1); // The most that fit: Auto again.
+        };
+        m_readBar->onChars = [this](int chars) { setReadChars(chars); };
+        m_readBar->hide();
+    }
+    if (m_visual)
+        m_visual->setReadMode(on);
+    if (m_readBar) {
+        m_readBar->setVisible(on);
+        m_readBar->raise();
+        m_pill->raise();
+    }
+    updateReadBar();
+    placeOverlays();
+    if (on != m_readMode) {
+        m_readMode = on;
+        Q_EMIT readStateChanged();
+    }
+}
+
+void DocumentTab::updateReadBar()
+{
+    if (!m_readBar || !m_visual)
+        return;
+    m_readBar->setState(m_readColumns, m_visual->readColumnCount(), m_visual->readMaxColumns(), m_readChars);
+    m_readBar->adjustSize();
+    placeOverlays();
 }
 
 void DocumentTab::applyMarkdownState()
@@ -548,8 +805,13 @@ bool DocumentTab::eventFilter(QObject *watched, QEvent *event)
 void DocumentTab::placeOverlays()
 {
     m_pill->move(width() - m_pill->width() - pillMarginRight, pillMarginTop);
-    // The find bar hangs from the top edge, clear of the scroll bar and pill.
-    const int right = m_pill->isVisible() ? m_pill->width() + pillMarginRight * 2 : findBarMarginRight;
+    if (m_readBar && m_readBar->isVisible())
+        m_readBar->move(m_pill->x() - readBarGap - m_readBar->width(), pillMarginTop);
+    // The find bar hangs from the top edge, clear of the scroll bar, the pill
+    // and the read bar.
+    int right = m_pill->isVisible() ? m_pill->width() + pillMarginRight * 2 : findBarMarginRight;
+    if (m_readBar && m_readBar->isVisible())
+        right += m_readBar->width() + readBarGap;
     if (m_findBar) {
         m_findBar->adjustSize();
         m_findBar->move(qMax(0, width() - m_findBar->width() - right), 0);
@@ -754,9 +1016,12 @@ QWidget *DocumentTab::createGoToLine()
         const QTextBlock block = m_doc->findBlockByNumber(qBound(1, line, m_doc->blockCount()) - 1);
         QTextCursor cursor(block);
         cursor.setPosition(block.position() + qBound(0, column - 1, block.length() - 1));
-        m_editor->setTextCursor(cursor);
-        m_editor->centerCursor();
-        m_editor->setFocus();
+        // In the view in use, as goToLine() (in read mode, its screen).
+        TextView *view = editor();
+        view->setTextCursor(cursor);
+        view->revealCaret();
+        view->centerCursor();
+        view->setFocus();
     });
     edit->installEventFilter(this);
     edit->setObjectName(QStringLiteral("GoToLineEdit"));
@@ -786,7 +1051,7 @@ void DocumentTab::showGoToLine()
     if (!m_goToLine)
         m_goToLine = createGoToLine();
     QLineEdit *edit = m_goToLineEdit;
-    const QTextCursor cursor = m_editor->textCursor();
+    const QTextCursor cursor = editor()->textCursor();
     edit->clear();
     edit->setPlaceholderText(tr("Current line: %1. Type a line number between 1 and %2.")
                                  .arg(cursor.blockNumber() + 1)

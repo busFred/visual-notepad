@@ -99,8 +99,9 @@ public:
     // caret is scrolled into view when reveal is set.
     void mirrorCursorsFrom(const TextView *other, bool reveal);
 
-    void ensureCursorVisible();
-    void centerCursor();
+    // Virtual: a view that does not scroll (read mode) shows the caret its own way.
+    virtual void ensureCursorVisible();
+    virtual void centerCursor();
     // The caret was put where the user asked to go (find, go to line, the
     // outline): a view that hides text (collapsed blocks) shows it.
     virtual void revealCaret() {}
@@ -132,7 +133,7 @@ public:
     QString searchSeedText() const;
     // Scrolls by a viewport height without moving the carets (down when
     // forward).
-    void scrollPage(bool forward);
+    virtual void scrollPage(bool forward);
     // Inserts text at a document position and puts the only caret after it;
     // what a middle click does with the X11 primary selection.
     void pasteTextAt(int position, const QString &text);
@@ -295,6 +296,19 @@ protected:
 
     // The row at viewport y and its top, or -1 past the end.
     int rowAt(qreal y, qreal *top);
+    // The row under a viewport point, with where the row's top-left corner is
+    // in the viewport; -1 if none. The default: rowAt() and textLeft(). A view
+    // that lays its rows out otherwise (in columns) says where they are.
+    virtual int rowAtPoint(const QPointF &point, QPointF *origin);
+    // The document position at a viewport point (what a click or a drag
+    // selects); rendered rows through hitTestRenderedRow().
+    virtual int positionAt(const QPointF &point);
+    // The source line position (as topLinePosition() has it) at y from the
+    // top of a row, and the row and y where a line position is drawn.
+    qreal linePositionAt(int index, qreal y);
+    std::pair<int, qreal> placeOfLinePosition(qreal position);
+    // Hides the scroll bars whatever the document's length.
+    void setScrollBarsHidden(bool hidden);
     // Whether the blinking carets are drawn at the moment.
     bool caretBlinkOn() const { return m_caretOn; }
     // Called when an edit made through this view starts (once per undo step,
@@ -305,7 +319,9 @@ protected:
 
     // Left edge of text in viewport coordinates.
     qreal textLeft() const;
-    qreal textWidth() const;
+    // The width text wraps at; rendered rows are laid out at it. Virtual: a
+    // view showing columns makes it a column's.
+    virtual qreal textWidth() const;
     int lineHeight() const { return m_lineHeight; }
     // The viewport y range of the row holding a source line; false if that
     // row is not (even partly) in the viewport.
@@ -380,7 +396,6 @@ private:
     // Geometry. Returns false if the position is not in a visible row.
     bool rowTop(int row, qreal *top);
     QRectF caretRect(const QTextCursor &cursor);
-    int positionAt(const QPointF &point);
     qreal cursorX(const QTextCursor &cursor);
 
     // Editing helpers.
@@ -611,6 +626,7 @@ private:
     int m_zoomDelta = 0;
     qreal m_maxLineWidth = 0;
     bool m_updatingScrollBars = false;
+    bool m_scrollBarsHidden = false;
 
     // Mouse.
     bool m_dragging = false;

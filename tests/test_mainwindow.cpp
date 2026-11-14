@@ -33,8 +33,10 @@
 #include "vn_core_bridge/lib.h"
 
 #include <QElapsedTimer>
+#include <QScopeGuard>
 
 #include <functional>
+#include <memory>
 
 namespace {
 
@@ -132,12 +134,18 @@ private Q_SLOTS:
     void newTabStartsAtDefaultZoom();
     void adoptedTabKeepsItsZoom();
     void collapseCommands();
+    void readModeStatusAndPages();
+    void readBarIsPerTabAndStartsFromPreferences();
 
 private:
     // A Markdown tab in `mode`, in a shown window; the half given has focus.
     vn::DocumentTab *zoomTab(vn::MainWindow &window, vn::DocumentTab::ViewMode mode);
     static void focusView(vn::TextView *view);
     static QWidget *accentOf(vn::TextView *view);
+    // A Markdown file of many paragraphs in a tab of the window, in Visual
+    // mode, locked: read mode.
+    vn::DocumentTab *readingTab(vn::MainWindow &window, const QString &name);
+    static void setLocked(vn::DocumentTab *tab, bool locked);
     static void wheel(vn::TextView *over, int delta);
     QString write(const QString &name, const QByteArray &content);
 
@@ -1051,6 +1059,195 @@ void TestMainWindow::adoptedTabKeepsItsZoom()
     QCOMPARE(copy->sourceView()->font().pointSizeF(), vn::theme::editorFont().pointSizeF() * 1.5);
     QCOMPARE(copy->visualView()->font().pointSizeF(), vn::theme::editorFont().pointSizeF() * 0.75);
     QCOMPARE(tab->zoom(tab->sourceView()), 150);
+}
+
+vn::DocumentTab *TestMainWindow::readingTab(vn::MainWindow &window, const QString &name)
+{
+    QByteArray text = "# Reading\n\n";
+    for (int i = 1; i <= 120; ++i)
+        text += QByteArray("Paragraph ") + QByteArray::number(i)
+                + " has enough words in it to wrap over a line or two in a column of seventy characters.\n\n";
+    if (!window.openFile(write(name, text)))
+        return nullptr;
+    vn::DocumentTab *tab = window.currentTab();
+    tab->setViewMode(vn::DocumentTab::ViewMode::Visual);
+    setLocked(tab, true);
+    return tab;
+}
+
+void TestMainWindow::setLocked(vn::DocumentTab *tab, bool locked)
+{
+    for (QToolButton *button : tab->findChildren<QToolButton *>()) {
+        if (button->toolTip() == (locked ? QStringLiteral("Read-only") : QStringLiteral("Editing")))
+            button->click();
+    }
+}
+
+// The status bar in read mode: the lines on screen, the zoom and the
+// language; nothing about editing the file. Alt+PgDn turns a page.
+void TestMainWindow::readModeStatusAndPages()
+{
+    for (const char *k : {vn::key::readColumns, vn::key::readChars, vn::key::readKeptLines, vn::key::zoom})
+        vn::Settings::instance().reset(k);
+    vn::MainWindow window;
+    window.resize(1000, 600);
+    vn::DocumentTab *tab = readingTab(window, QStringLiteral("status.md"));
+    QVERIFY(tab);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    window.activateWindow();
+    QVERIFY(tab->isReadMode());
+    vn::VisualView *visual = tab->visualView();
+    QTRY_VERIFY(visual->showsReadColumns());
+    visual->grab();
+    auto *position = window.findChild<QLabel *>(QStringLiteral("PositionStatus"));
+    QVERIFY(position);
+    const auto lines = [tab] {
+        const auto [first, last] = tab->readLineRange();
+        return QStringLiteral("Lines %1–%2 of %3").arg(first + 1).arg(last + 1).arg(tab->document()->blockCount());
+    };
+    QCOMPARE(tab->readLineRange().first, 0);
+    QTRY_COMPARE(position->text(), lines());
+    for (const char *name : {"IndentationStatus", "LineEndingStatus", "EncodingStatus"})
+        QVERIFY2(!window.findChild<QLabel *>(QLatin1String(name))->isVisible(), name);
+    QVERIFY(window.findChild<QLabel *>(QStringLiteral("ZoomStatus"))->isVisible());
+    QCOMPARE(window.findChild<QLabel *>(QStringLiteral("ZoomStatus"))->toolTip(), QStringLiteral("Zoom"));
+    QVERIFY(window.findChild<QLabel *>(QStringLiteral("LanguageStatus"))->isVisible());
+    // (The cell grows to the text once the status bar is laid out again.)
+    QTRY_VERIFY(position->width() >= position->sizeHint().width());
+    if (const QString file = qEnvironmentVariable("VN_SCREENSHOT"); !file.isEmpty())
+        window.grab().save(QString(file).replace(QStringLiteral(".png"), QStringLiteral("-read.png")));
+
+    // The command (Alt+PgDn) turns a page, and the status follows.
+    focusView(visual);
+    const int before = tab->readLineRange().first;
+    actionFor(window, QStringLiteral("view.scrollPageDown"))->trigger();
+    const int after = tab->readLineRange().first;
+    QVERIFY(after > before);
+    QTRY_COMPARE(position->text(), lines());
+    actionFor(window, QStringLiteral("view.scrollPageUp"))->trigger();
+    QCOMPARE(tab->readLineRange().first, before);
+    QTest::keyClick(visual, Qt::Key_PageDown, Qt::AltModifier);
+    QCOMPARE(tab->readLineRange().first, after);
+    // The zoom cell works as in a single view, and zooming keeps the place.
+    actionFor(window, QStringLiteral("view.zoomIn"))->trigger();
+    QCOMPARE(tab->zoom(), 105);
+    visual->grab();
+    QCOMPARE(tab->readLineRange().first, after);
+    QTRY_COMPARE(position->text(), lines());
+    // The hidden source view keeps the place too (a saved session has it).
+    QTRY_COMPARE(tab->sourceView()->topLine(), after);
+
+    // Go to line and the outline turn to the line's screen.
+    actionFor(window, QStringLiteral("edit.goToLine"))->trigger();
+    auto *field = tab->findChild<QLineEdit *>(QStringLiteral("GoToLineEdit"));
+    QVERIFY(field && field->isVisible());
+    field->setText(QStringLiteral("201")); // Paragraph 100.
+    QTest::keyClick(field, Qt::Key_Return);
+    QCOMPARE(tab->readLineRange().first, 200);
+    QCOMPARE(tab->visualView()->textCursor().blockNumber(), 200);
+    auto *outline = window.findChild<QTreeWidget *>();
+    QVERIFY(outline);
+    QTRY_VERIFY(outline->topLevelItemCount() > 0);
+    Q_EMIT outline->itemActivated(outline->topLevelItem(0), 0);
+    QCOMPARE(tab->readLineRange().first, 0);
+    tab->visualView()->readPageForward();
+    QCOMPARE(tab->readLineRange().first, after);
+
+    // Unlocked: editing again, and every cell back.
+    setLocked(tab, false);
+    QVERIFY(!tab->isReadMode());
+    QVERIFY(!visual->showsReadColumns());
+    QTRY_VERIFY(position->text().startsWith(QLatin1String("Ln ")));
+    for (const char *name : {"IndentationStatus", "LineEndingStatus", "EncodingStatus"})
+        QVERIFY2(window.findChild<QLabel *>(QLatin1String(name))->isVisible(), name);
+    vn::Settings::instance().reset(vn::key::zoom);
+}
+
+// The bar over a tab in read mode changes that tab only, and nothing is
+// saved; Preferences give where a new tab starts.
+void TestMainWindow::readBarIsPerTabAndStartsFromPreferences()
+{
+    vn::Settings &settings = vn::Settings::instance();
+    settings.setValue(vn::key::readChars, 60);
+    settings.setValue(vn::key::readColumns, 1);
+    const auto restore = qScopeGuard([&settings] {
+        settings.reset(vn::key::readChars);
+        settings.reset(vn::key::readColumns);
+    });
+    vn::MainWindow window;
+    window.resize(1600, 600);
+    vn::DocumentTab *first = readingTab(window, QStringLiteral("bar1.md"));
+    vn::DocumentTab *second = readingTab(window, QStringLiteral("bar2.md"));
+    QVERIFY(first && second);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QCOMPARE(window.currentTab(), second);
+    for (vn::DocumentTab *tab : {first, second}) {
+        QCOMPARE(tab->readChars(), 60);
+        QCOMPARE(tab->readColumns(), 1);
+    }
+    second->visualView()->grab();
+    auto *bar = second->findChild<QWidget *>(QStringLiteral("ReadBar"));
+    QVERIFY(bar && bar->isVisible());
+    auto *slider = bar->findChild<QSlider *>(QStringLiteral("ReadCharsSlider"));
+    auto *count = bar->findChild<QLabel *>(QStringLiteral("ReadColumnCount"));
+    auto *fewer = bar->findChild<QToolButton *>(QStringLiteral("ReadFewerColumns"));
+    auto *more = bar->findChild<QToolButton *>(QStringLiteral("ReadMoreColumns"));
+    QVERIFY(slider && count && fewer && more);
+    QCOMPARE(slider->value(), 60);
+    QCOMPARE(bar->findChild<QLabel *>(QStringLiteral("ReadCharsValue"))->text(), QStringLiteral("60"));
+    QCOMPARE(count->text(), QStringLiteral("1"));
+    QVERIFY(!fewer->isEnabled());
+    // Left of the pill, at its height.
+    QToolButton *lock = nullptr;
+    for (QToolButton *button : second->findChildren<QToolButton *>())
+        if (button->toolTip() == QStringLiteral("Read-only"))
+            lock = button;
+    QVERIFY(lock);
+    const QRect pill = lock->parentWidget()->geometry();
+    QVERIFY(bar->geometry().right() < pill.left());
+    QCOMPARE(bar->geometry().top(), pill.top());
+    if (const QString file = qEnvironmentVariable("VN_SCREENSHOT"); !file.isEmpty())
+        window.grab().save(QString(file).replace(QStringLiteral(".png"), QStringLiteral("-readbar.png")));
+
+    // Wider columns; + goes up to the most that fit, which is Auto.
+    slider->setValue(70);
+    QCOMPARE(second->readChars(), 70);
+    QCOMPARE(second->visualView()->readChars(), 70);
+    const int fit = second->visualView()->readMaxColumns();
+    QVERIFY(fit >= 2);
+    while (more->isEnabled())
+        more->click();
+    QCOMPARE(second->readColumns(), 0);
+    QCOMPARE(second->visualView()->readColumnCount(), fit);
+    QCOMPARE(count->text(), QStringLiteral("%1 (auto)").arg(fit));
+    QVERIFY(fewer->isEnabled());
+    fewer->click();
+    QCOMPARE(second->readColumns(), fit - 1);
+    QCOMPARE(count->text(), QString::number(fit - 1));
+    // (Steps of 5.)
+    slider->setValue(72);
+    QCOMPARE(slider->value(), 70);
+    QCOMPARE(second->readChars(), 70);
+
+    // The other tab and the preferences are as they were.
+    QCOMPARE(first->readChars(), 60);
+    QCOMPARE(first->readColumns(), 1);
+    QCOMPARE(settings.number(vn::key::readChars), 60);
+    QCOMPARE(settings.number(vn::key::readColumns), 1);
+    // A copy of the tab takes its values; a new tab the preferences'.
+    std::unique_ptr<vn::DocumentTab> copy(second->openAnotherView());
+    QCOMPARE(copy->readChars(), 70);
+    QCOMPARE(copy->readColumns(), fit - 1);
+    settings.setValue(vn::key::readChars, 85);
+    QCOMPARE(second->readChars(), 70);
+    vn::DocumentTab *third = readingTab(window, QStringLiteral("bar3.md"));
+    QVERIFY(third);
+    QCOMPARE(third->readChars(), 85);
+    // Out of read mode the bar goes.
+    setLocked(second, false);
+    QVERIFY(!bar->isVisible());
 }
 
 QTEST_MAIN(TestMainWindow)

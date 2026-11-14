@@ -25,6 +25,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScopedValueRollback>
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QTimer>
@@ -644,6 +645,7 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
         updateHover(underMouse() ? viewport()->mapFromGlobal(QCursor::pos()) : QPoint(-1, -1));
     });
     connect(model, &MarkdownModel::optionsChanged, this, [this] {
+        ++m_readLayoutSerial; // (The text font may be another.)
         clearRenderCache();
         relayout();
     });
@@ -685,6 +687,11 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
         updateRemoteBanner();
     });
     connect(&Settings::instance(), &Settings::changed, this, [this](const QString &changedKey) {
+        if (changedKey == QLatin1String(key::readKeptLines)) {
+            if (m_readFlow)
+                m_readFlow->setKeptLines(Settings::instance().number(key::readKeptLines));
+            return;
+        }
         if (changedKey != QLatin1String(key::remoteImages))
             return;
         clearRenderCache();
@@ -815,6 +822,8 @@ void VisualView::noteEdit(int from, int, int added)
 
 void VisualView::rowsMayHaveChanged()
 {
+    // Heights may have changed: read mode fills its screen again.
+    m_readDirty = true;
     scheduleToolbarUpdate();
     // An edit ends the selection of cells, and moves what the mark pointed at.
     clearTableHover();
@@ -974,6 +983,7 @@ void VisualView::resizeEvent(QResizeEvent *event)
     TextView::resizeEvent(event);
     layoutBanner();
     scheduleToolbarUpdate();
+    placeReadControls();
     // Figures fit the height shown: only blocks with them render again.
     if (m_figuresRendered && figureBoxHeight() != m_rendersFigureHeight)
         relayout();
@@ -1318,6 +1328,7 @@ void VisualView::rebuildRows()
         if (m_standIn && int(m_lineToRow.size()) == lines)
             return;
         m_rows.clear();
+        ++m_readRevision;
         m_rows.reserve(lines);
         m_lineToRow.resize(lines);
         for (int line = 0; line < lines; ++line) {
@@ -1332,11 +1343,17 @@ void VisualView::rebuildRows()
         m_rowsExpanded.clear();
         m_rowsStale = false;
         m_rowsRevision = -1;
-        m_standIn = true;
+        const bool wasStandIn = std::exchange(m_standIn, true);
+        if (!wasStandIn && m_readMode) {
+            // Read mode waits for the parse, scrolling meanwhile.
+            setScrollBarsHidden(false);
+            placeReadControls();
+        }
         return;
     }
     // The rendered rows that replace the stand-in keep its place.
     std::optional<Place> keptPlace;
+    const bool standInEnds = m_standIn;
     if (m_standIn) {
         keptPlace = place();
         m_standIn = false;
@@ -1430,6 +1447,7 @@ void VisualView::rebuildRows()
         keptPlace = place();
 
     m_rows.clear();
+    ++m_readRevision;
     m_rows.reserve(spans.size() * 2 + 16);
     m_expandedBlocks.clear();
     m_partSpans.clear();
@@ -1611,12 +1629,20 @@ void VisualView::rebuildRows()
     m_rowsRevision = m_model->revision();
     m_rowsExpanded = std::move(expanded);
     m_rowsCaretGaps = std::move(caretGaps);
+    if (standInEnds && m_readMode) {
+        // The parse arrived: read mode shows its columns now.
+        setScrollBarsHidden(true);
+        placeReadControls();
+    }
     if (keptPlace)
         restorePlace(*keptPlace);
 }
 
 VisualView::Place VisualView::place()
 {
+    // Read mode keeps its place as a line position of its own.
+    if (readActive())
+        return {m_readLinePosition, false};
     qreal top = 0;
     const int bottom = rowAt(viewport()->height() - 1, &top);
     const int caret = textCursor().blockNumber();
@@ -1625,6 +1651,14 @@ VisualView::Place VisualView::place()
 
 void VisualView::restorePlace(const Place &place)
 {
+    if (readActive()) {
+        if (place.top != m_readLinePosition) {
+            m_readLinePosition = place.top;
+            m_readNeedsStart = true;
+            viewport()->update();
+        }
+        return;
+    }
     scrollToLinePosition(place.top);
     if (place.caretShown)
         ensureCursorVisible();
@@ -1867,14 +1901,15 @@ void VisualView::setHoverLine(int line)
 
 VisualView::FoldSpot VisualView::foldSpotAt(const QPointF &point)
 {
-    qreal top = 0;
-    const int index = rowAt(point.y(), &top);
+    QPointF origin;
+    const int index = rowAtPoint(point, &origin);
     if (index < 0 || index >= int(m_rows.size()) || !m_rows[index].row.rendered || m_rows[index].span < 0)
         return {};
     const RowInfo &info = m_rows[index];
     const MarkdownModel::Span &span = m_model->spans()[info.span];
     const int blockIndex = span.block >= 0 ? span.block : span.previous;
-    const qreal left = textLeft();
+    const qreal left = origin.x();
+    const qreal top = origin.y();
     const Render *render = memoized(info.row);
     if (!render || !render->block)
         return {};
@@ -1909,10 +1944,11 @@ VisualView::FoldSpot VisualView::foldSpotAt(const QPointF &point)
 
 QRect VisualView::foldSpotRect(int line)
 {
-    qreal top = 0;
-    qreal bottom = 0;
-    if (!lineBounds(line, &top, &bottom))
+    const std::optional<QPointF> origin = rowOrigin(line);
+    if (!origin)
         return {};
+    const qreal left = origin->x();
+    const qreal top = origin->y();
     const int index = rowOfLine(line);
     if (index >= int(m_rows.size()))
         return {};
@@ -1922,10 +1958,10 @@ QRect VisualView::foldSpotRect(int line)
         return {};
     const RenderedBlock *block = render->block.get();
     if (info.chip)
-        return block->chipRect().translated(textLeft(), top).toAlignedRect();
+        return block->chipRect().translated(left, top).toAlignedRect();
     if (block->stripHeight() > 0)
-        return QRectF(textLeft(), top, 2 * stripLabelPad, block->stripHeight()).toAlignedRect();
-    return QRectF(textLeft() - sideMargin, top, sideMargin, lineHeight()).toAlignedRect();
+        return QRectF(left, top, 2 * stripLabelPad, block->stripHeight()).toAlignedRect();
+    return QRectF(left - sideMargin, top, sideMargin, lineHeight()).toAlignedRect();
 }
 
 bool VisualView::foldPressed(QMouseEvent *event)
@@ -2608,7 +2644,8 @@ qreal VisualView::renderedRowHeight(const Row &r, qreal)
     // and rendered at the width the paint finds (see paintEvent).
     const int index = rowOfLine(r.firstLine);
     const int next = itemOfRow(index) ? neighbourItem(index, 1) : -1;
-    if (m_unpainted) {
+    // (Read mode lays a screen out before painting it: real heights.)
+    if (m_unpainted && !readActive()) {
         const Render *render = memoized(r);
         const Render *after = next >= 0 ? memoized(m_rows[next].row) : nullptr;
         if (render && (!itemOfRow(index) || next < 0 || after))
@@ -2717,7 +2754,10 @@ void VisualView::paintEvent(QPaintEvent *event)
             m_paintCarets.push_back(c.position());
         std::sort(m_paintCarets.begin(), m_paintCarets.end());
     }
-    TextView::paintEvent(event);
+    if (readActive())
+        paintRead(event);
+    else
+        TextView::paintEvent(event);
     m_paintCarets.clear();
     paintTableOverlay(event);
 }
@@ -2822,6 +2862,8 @@ QTextCursor VisualView::lineUnitAt(int position) const
 
 void VisualView::mouseReleaseEvent(QMouseEvent *event)
 {
+    // (In read mode the caret the pointer places is on screen: no page turns to it.)
+    const QScopedValueRollback<bool> pointing(m_readPointing, m_readPointing || readActive());
     if (m_tableDrag.active && event->button() == Qt::LeftButton) {
         // The selection of cells, rows or columns is made as it was dragged.
         m_tableDrag = {};
@@ -2959,7 +3001,7 @@ std::vector<TextView::LineAnchor> VisualView::rowLineAnchors(const Row &r, qreal
     if (!r.rendered || r.lastLine == r.firstLine)
         return anchors;
     // (Rough heights spread the lines evenly; see renderedRowHeight.)
-    if (m_unpainted && !memoized(r))
+    if (m_unpainted && !readActive() && !memoized(r))
         return anchors;
     if (const RenderedBlock *block = renderedForRow(r)) {
         for (const auto &[offset, y] : block->lineAnchors())
@@ -2988,6 +3030,8 @@ void VisualView::toggleTask(int line)
 
 void VisualView::mouseMoveEvent(QMouseEvent *event)
 {
+    // (In read mode the caret the pointer places is on screen: no page turns to it.)
+    const QScopedValueRollback<bool> pointing(m_readPointing, m_readPointing || readActive());
     if (m_tableDrag.active) {
         if (event->buttons() & Qt::LeftButton) {
             updateTableDrag(event->position());
@@ -3047,13 +3091,13 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
             return;
         }
         // Pointing hand and URL tooltip over links in rendered text.
-        qreal top = 0;
-        const int index = rowAt(event->position().y(), &top);
+        QPointF origin;
+        const int index = rowAtPoint(event->position(), &origin);
         QString anchor;
         bool zoomable = false;
         if (index >= 0 && row(index).rendered) {
             if (const RenderedBlock *block = renderedForRow(row(index))) {
-                const QPointF point(event->position().x() - textLeft(), event->position().y() - top);
+                const QPointF point = event->position() - origin;
                 anchor = block->anchorAt(point);
                 zoomable = anchor.isEmpty() && zoomClick(event) && block->pictureAt(point);
             }
@@ -3072,8 +3116,8 @@ void VisualView::updateHover(const QPoint &point)
     int line = -1;
     bool onFold = false;
     if (viewport()->rect().contains(point)) {
-        qreal top = 0;
-        const int index = rowAt(point.y(), &top);
+        QPointF origin;
+        const int index = rowAtPoint(point, &origin);
         if (index >= 0 && index < int(m_rows.size()) && m_rows[index].row.rendered && m_rows[index].span >= 0) {
             line = m_rows[index].row.firstLine;
             onFold = foldSpotAt(point).where != FoldSpot::None;
@@ -3102,7 +3146,9 @@ bool VisualView::viewportEvent(QEvent *event)
 
 qreal VisualView::figureBoxHeight() const
 {
-    const int steps = int(viewport()->height() * figureHeightPart) / figureHeightStep;
+    // (In read mode: of a column.)
+    const int shown = readActive() ? readLayout().height : viewport()->height();
+    const int steps = int(shown * figureHeightPart) / figureHeightStep;
     return qMax(1, steps) * qreal(figureHeightStep);
 }
 
@@ -3134,23 +3180,23 @@ void VisualView::updateFigureBar(const QPoint &point)
     // The pointer is on the bar: the figure under it is the one it is over.
     if (m_figureBar && m_figureBar->isVisible() && m_figureBar->geometry().contains(point))
         return;
-    qreal top = 0;
-    const int index = rowAt(point.y(), &top);
+    QPointF origin;
+    const int index = rowAtPoint(point, &origin);
     if (index < 0 || !row(index).rendered)
         return hideFigureBar();
     const Row r = row(index);
     const Render *render = memoized(r);
     if (!render || !render->block)
         return hideFigureBar();
-    const QPointF local(point.x() - textLeft(), point.y() - top);
+    const QPointF local = point - origin;
     for (const RenderedBlock::Figure &figure : render->block->figures()) {
         if (figure.rect.contains(local) && figure.fittedWidth >= minFigureBarWidth)
-            return placeFigureBar(r.firstLine, figure, top);
+            return placeFigureBar(r.firstLine, figure, origin);
     }
     hideFigureBar();
 }
 
-void VisualView::placeFigureBar(int line, const RenderedBlock::Figure &figure, qreal rowTop)
+void VisualView::placeFigureBar(int line, const RenderedBlock::Figure &figure, const QPointF &rowOrigin)
 {
     if (!m_figureBar) {
         m_figureBar = new FigureBar(viewport());
@@ -3166,8 +3212,8 @@ void VisualView::placeFigureBar(int line, const RenderedBlock::Figure &figure, q
     m_figureBar->adjustSize();
     const QSize size = m_figureBar->size();
     // At the figure's top right corner, within the view.
-    const int x = int(textLeft() + figure.rect.right()) - size.width() - figureBarInset;
-    const int y = int(rowTop + figure.rect.top()) + figureBarInset;
+    const int x = int(rowOrigin.x() + figure.rect.right()) - size.width() - figureBarInset;
+    const int y = int(rowOrigin.y() + figure.rect.top()) + figureBarInset;
     m_figureBar->move(qBound(0, x, qMax(0, viewport()->width() - size.width())),
                       qBound(2, y, qMax(2, viewport()->height() - size.height() - 2)));
     m_figureBar->show();
@@ -3206,15 +3252,14 @@ void VisualView::figureAction(int action)
     ++m_figureRevision;
     relayout();
     // The figure changed size; the bar follows its corner.
-    qreal top = 0;
-    qreal bottom = 0;
     const Row again = row(rowOfLine(line));
     const RenderedBlock *block = renderedForRow(again);
-    if (!block || !lineBounds(line, &top, &bottom))
+    const std::optional<QPointF> origin = block ? rowOrigin(line) : std::nullopt;
+    if (!origin)
         return hideFigureBar();
     for (const RenderedBlock::Figure &figure : block->figures()) {
         if (figure.index == number)
-            return placeFigureBar(line, figure, top);
+            return placeFigureBar(line, figure, *origin);
     }
     hideFigureBar();
 }
@@ -3363,6 +3408,8 @@ void VisualView::clearTableHover()
 
 void VisualView::mousePressEvent(QMouseEvent *event)
 {
+    // (In read mode the caret the pointer places is on screen: no page turns to it.)
+    const QScopedValueRollback<bool> pointing(m_readPointing, m_readPointing || readActive());
     if (event->button() == Qt::LeftButton && !isReadOnly() && markdownEditing()) {
         TableSpot spot = tableSpotAt(event->position());
         const bool shift = (event->modifiers() & ~Qt::KeypadModifier) == Qt::ShiftModifier;
@@ -3398,6 +3445,8 @@ void VisualView::mousePressEvent(QMouseEvent *event)
 
 void VisualView::mouseDoubleClickEvent(QMouseEvent *event)
 {
+    // (In read mode the caret the pointer places is on screen: no page turns to it.)
+    const QScopedValueRollback<bool> pointing(m_readPointing, m_readPointing || readActive());
     // The second click of a click on a fold is a click on it too: the first
     // changed what is under the pointer, and this one opens no source.
     if (event->button() == Qt::LeftButton && foldSpotAt(event->position()).where != FoldSpot::None) {
@@ -3694,6 +3743,8 @@ void VisualView::contextMenuEvent(QContextMenuEvent *event)
 
 void VisualView::keyPressEvent(QKeyEvent *event)
 {
+    if (readActive() && readKey(event))
+        return;
     if (m_tableSel.active) {
         const auto mods = event->modifiers() & ~Qt::KeypadModifier;
         switch (event->key()) {
@@ -3734,14 +3785,13 @@ QRect VisualView::tableCellViewRect(int line, int row, int col)
         return {};
     const Row r = this->row(index);
     const Render *render = r.rendered && r.firstLine == line ? memoized(r) : nullptr;
-    qreal top = 0;
-    qreal bottom = 0;
-    if (!render || !render->block || !lineBounds(line, &top, &bottom))
+    const std::optional<QPointF> origin = render && render->block ? rowOrigin(line) : std::nullopt;
+    if (!origin)
         return {};
     const auto rect = render->block->tableCellRect(row, col);
     if (!rect)
         return {};
-    return rect->translated(textLeft(), top).toAlignedRect();
+    return rect->translated(*origin).toAlignedRect();
 }
 
 void VisualView::paintTableOverlay(QPaintEvent *event)

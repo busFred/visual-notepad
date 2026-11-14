@@ -64,6 +64,7 @@ private Q_SLOTS:
     void spaceTogglesSwitch();
     void comboWritesValue();
     void blocksStartRow();
+    void readModeRows();
     void externalChangeUpdatesCombo();
     void tabWidthSpin();
     void pictureCacheSpin();
@@ -191,6 +192,69 @@ void TestPreferences::blocksStartRow()
     QVERIFY(Settings::instance().flag(key::blocksStartCollapsed));
     Settings::instance().setValue(key::blocksStartCollapsed, false);
     QCOMPARE(combo->currentText(), QStringLiteral("Expanded"));
+}
+
+// Markdown → Read mode: where a tab in read mode starts.
+void TestPreferences::readModeRows()
+{
+    for (const char *k : {key::readColumns, key::readChars, key::readKeptLines})
+        Settings::instance().reset(k);
+    const auto restore = qScopeGuard([] {
+        for (const char *k : {key::readColumns, key::readChars, key::readKeptLines})
+            Settings::instance().reset(k);
+    });
+    PreferencesDialog::showPage(nullptr, QStringLiteral("markdown"));
+    QWidget *window = prefsWindow();
+    QVERIFY(window);
+    QVERIFY(window->findChild<QLabel *>(QStringLiteral("PrefHeading"), Qt::FindChildrenRecursively));
+    bool heading = false;
+    for (const QLabel *label : window->findChildren<QLabel *>(QStringLiteral("PrefHeading")))
+        heading = heading || label->text() == QStringLiteral("Read mode");
+    QVERIFY(heading);
+
+    // Columns: Auto or 1 to 4, with a note under it.
+    auto *columns = find<QComboBox>(key::readColumns);
+    QVERIFY(columns);
+    QCOMPARE(columns->count(), 5);
+    QCOMPARE(columns->currentText(), QStringLiteral("Auto"));
+    QCOMPARE(columns->itemText(4), QStringLiteral("4"));
+    columns->setCurrentIndex(columns->findText(QStringLiteral("2")));
+    QCOMPARE(Settings::instance().number(key::readColumns), 2);
+    const QLabel *note = nullptr;
+    for (const QLabel *label : window->findChildren<QLabel *>(QStringLiteral("PrefMuted"))) {
+        if (label->text().startsWith(QLatin1String("Auto uses as many columns as fit")))
+            note = label;
+    }
+    QVERIFY(note);
+    QCOMPARE(note->text(),
+             QStringLiteral("Auto uses as many columns as fit at the current window width, font size and zoom."));
+    // Indented 14 px past the row's label.
+    const QLabel *label = columns->parentWidget()->findChild<QLabel *>(QString(), Qt::FindDirectChildrenOnly);
+    QVERIFY(label);
+    QCOMPARE(QString(label->text()).remove(u'&'), QStringLiteral("Columns")); // (A mnemonic is added.)
+    QCOMPARE(note->mapTo(window, note->contentsRect().topLeft()).x(),
+             label->mapTo(window, QPoint(0, 0)).x() + 14);
+
+    // Characters per column: 50 to 100 in steps of 5.
+    auto *chars = find<QSpinBox>(key::readChars);
+    QVERIFY(chars);
+    QCOMPARE(chars->value(), 70);
+    QCOMPARE(chars->minimum(), 50);
+    QCOMPARE(chars->maximum(), 100);
+    QCOMPARE(chars->singleStep(), 5);
+    chars->setValue(73);
+    QCOMPARE(Settings::instance().number(key::readChars), 75);
+    QCOMPARE(chars->value(), 75);
+    Settings::instance().setValue(key::readChars, 55);
+    QCOMPARE(chars->value(), 55);
+
+    // Lines kept from the previous page: 0 to 5, 2 by default.
+    auto *kept = find<QComboBox>(key::readKeptLines);
+    QVERIFY(kept);
+    QCOMPARE(kept->count(), 6);
+    QCOMPARE(kept->currentText(), QStringLiteral("2"));
+    kept->setCurrentIndex(kept->findText(QStringLiteral("0")));
+    QCOMPARE(Settings::instance().number(key::readKeptLines), 0);
 }
 
 void TestPreferences::externalChangeUpdatesCombo()

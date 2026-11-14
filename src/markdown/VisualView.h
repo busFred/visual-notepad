@@ -8,6 +8,7 @@
 #include "../editor/TextView.h"
 #include "BlockRenderer.h"
 #include "Folding.h"
+#include "ReadFlow.h"
 #include "TableCellEditor.h"
 
 #include <QCache>
@@ -24,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+class QAbstractButton;
 class QFrame;
 class QLabel;
 class QMenu;
@@ -130,9 +132,52 @@ public:
     // viewport coordinates; null if it is not shown as a table.
     QRect tableCellViewRect(int line, int row, int col);
 
+    // Read mode: what a locked Visual mode shows (DocumentTab turns it on).
+    // The document flows through columns of `chars` characters of body text
+    // (at the font and zoom of the moment), as many as fit or the number
+    // asked for if fewer, centred, a screen at a time (md::ReadFlow): page
+    // turns, nudges of a line, no scroll bar. Where the view is, is a source
+    // line, which every change of layout keeps, and so does leaving read mode.
+    // Before a large document's first parse (its source shows line by line)
+    // the view scrolls as usual until the parse arrives.
+    void setReadMode(bool on);
+    bool isReadMode() const { return m_readMode; }
+    // 0: as many columns as fit.
+    void setReadColumns(int columns);
+    int readColumns() const { return m_readColumns; }
+    void setReadChars(int chars);
+    int readChars() const { return m_readChars; }
+    // How many columns fit (what Auto uses), and how many show; 1 out of
+    // read mode.
+    int readMaxColumns();
+    int readColumnCount();
+    // The moves. Out of read mode they do nothing.
+    void readPageForward();
+    void readPageBack();
+    void readNudge(int lines); // Negative: up.
+    void readToStart();
+    void readToEnd();
+    // The source lines on screen (0-based, both included); (-1, -1) out of
+    // read mode or before the first parse.
+    std::pair<int, int> readLineRange();
+    // Read mode shows columns (not the source standing in for a parse).
+    bool showsReadColumns() const { return readActive(); }
+    // For tests: the screen shown, where a column is, and where a segment's
+    // part of its row is (without a repeated header), in the viewport.
+    const md::Screen &readScreen();
+    QRect readColumnRect(int column);
+    QRect readSegmentRect(int column, int index);
+    // The page turns follow the lock, a page back or on, and the nudges the
+    // keys and wheel do.
+    void ensureCursorVisible() override;
+    void centerCursor() override;
+    void scrollPage(bool forward) override;
+
 Q_SIGNALS:
     // A link was clicked in rendered text (not a task checkbox).
     void linkActivated(const QString &url);
+    // Read mode: the screen, or the number of columns that fit, changed.
+    void readChanged();
 
 protected:
     int rowCount() const override;
@@ -167,6 +212,10 @@ protected:
     void focusOutEvent(QFocusEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
+    void wheelEvent(QWheelEvent *event) override;
+    qreal textWidth() const override;
+    int rowAtPoint(const QPointF &point, QPointF *origin) override;
+    int positionAt(const QPointF &point) override;
 
 private:
     struct RowInfo
@@ -336,7 +385,7 @@ private:
     bool dropFigureRenders();
     // Shows the bar over the figure under the point (viewport coordinates), or hides it.
     void updateFigureBar(const QPoint &point);
-    void placeFigureBar(int line, const RenderedBlock::Figure &figure, qreal rowTop);
+    void placeFigureBar(int line, const RenderedBlock::Figure &figure, const QPointF &rowOrigin);
     void hideFigureBar();
     void figureAction(int action); // A FigureBar::Action.
 
@@ -678,6 +727,83 @@ private:
     QStringList m_remoteUrls;
     int m_remoteUrlsGeneration = -1;
     QHash<size_t, QStringList> m_remoteScans; // Addresses by hash of a block's HTML.
+
+    // Read mode (VisualViewRead.cpp).
+    class ReadRows; // m_rows as md::ReadFlow reads them.
+    // Where the columns go, for a viewport size, font and the column settings.
+    struct ReadLayout
+    {
+        QSize viewport;
+        qreal fontSize = 0;
+        int chars = 0;
+        int columns = 0; // Asked for.
+        int serial = -1; // m_readLayoutSerial.
+        int count = 1;   // Shown.
+        int fit = 1;     // That fit.
+        int width = 0;   // Of a column.
+        int height = 0;
+        int gap = 0;
+        int left = 0;    // Of the first column.
+        int top = 0;
+    };
+    bool readActive() const { return m_readMode && !m_standIn; }
+    const ReadLayout &readLayout() const;
+    qreal readLineHeight();
+    // The screen as the rows and layout are now (reflowed if they changed).
+    const md::Screen &ensureReadScreen();
+    // Shows a screen a move made: the place it keeps, the controls, the news.
+    void readMoved();
+    void noteReadScreen();
+    void placeReadControls();
+    void updateReadControls();
+    void paintRead(QPaintEvent *event);
+    // The segment under a viewport point (the nearest column, the nearest
+    // segment in it unless `exact`), with its top in the viewport; the
+    // repeated header above a part of a table counts as that part's.
+    struct ReadHit
+    {
+        int column = -1;
+        int index = -1;  // In the column.
+        qreal top = 0;   // Of the segment, its header included.
+        bool header = false; // The point is on the repeated header.
+    };
+    ReadHit readHitAt(const QPointF &point, bool exact);
+    // Where the row's top-left corner is for a hit (rowAtPoint's origin).
+    QPointF readOrigin(const ReadHit &hit);
+    bool readKey(QKeyEvent *event);
+    // The viewport origin of the row showing `line` (its first line), if on screen.
+    std::optional<QPointF> rowOrigin(int line);
+
+    bool m_readMode = false;
+    int m_readColumns = 0;
+    int m_readChars = 70;
+    std::unique_ptr<md::RowSource> m_readRows; // A ReadRows.
+    std::unique_ptr<md::ReadFlow> m_readFlow;
+    int m_readRevision = 0;     // Of m_rows, for md::Geometry.
+    bool m_readDirty = true;    // Rows or heights may have changed since the last fill.
+    bool m_readNeedsStart = true; // The flow starts at m_readLinePosition.
+    qreal m_readLinePosition = 0; // Where the screen starts, as a line position.
+    int m_readLayoutSerial = 0; // Bumped when the text font may have changed.
+    mutable ReadLayout m_readLayout;
+    int m_readWheel = 0;        // Wheel movement not yet worth a line (eighths of a degree or pixels).
+    bool m_readWheelPixels = false;
+    // A mouse event is being handled: the caret it places is on screen.
+    bool m_readPointing = false;
+    // What readChanged() last told: the screen's start and end, the lines, and the fit.
+    struct ReadNews
+    {
+        md::Position start;
+        md::Position end;
+        int first = -1;
+        int last = -1;
+        int fit = 0;
+        bool operator==(const ReadNews &) const = default;
+    } m_readNews;
+    bool m_readNewsPending = false;
+    QAbstractButton *m_readBack = nullptr;
+    QAbstractButton *m_readForward = nullptr;
+    QAbstractButton *m_readUp = nullptr;
+    QAbstractButton *m_readDown = nullptr;
 };
 
 } // namespace vn

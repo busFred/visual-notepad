@@ -168,7 +168,8 @@ public:
 
     // Fills again after the rows changed under the same geometry (a render
     // finished, an edit): from the same place if the revision is the same, else
-    // from the same source line.
+    // from the same source line. Lines kept by the page turn that made the
+    // screen stay marked when it is filled from the same place.
     const Screen &reflow();
     // The moves. Each returns the screen it shows; one that cannot move (page
     // forward at the end) shows the same screen again.
@@ -224,6 +225,9 @@ private:
     bool m_hasScreen = false;
     int m_startLine = 0;
     std::vector<Step> m_history;
+    // The end of the page turned from, while the screen is the one a page
+    // turn made (its kept lines are those before it).
+    std::optional<Position> m_keptUntil;
 };
 
 } // namespace vn::md

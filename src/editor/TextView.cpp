@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <tuple>
 
 namespace vn {
 
@@ -585,11 +586,15 @@ std::vector<TextView::LineAnchor> TextView::lineAnchors(int index, qreal height)
 
 qreal TextView::topLinePosition()
 {
-    const int rows = rowCount();
-    const int index = qBound(0, m_topRow, rows - 1);
+    return linePositionAt(m_topRow, m_topOffset);
+}
+
+qreal TextView::linePositionAt(int index, qreal y)
+{
+    index = qBound(0, index, rowCount() - 1);
     const qreal height = rowHeight(index);
     const std::vector<LineAnchor> anchors = lineAnchors(index, height);
-    const qreal y = qBound<qreal>(0, m_topOffset, height);
+    y = qBound<qreal>(0, y, height);
     // The first anchor below y and the one before it.
     for (size_t i = 1; i < anchors.size(); ++i) {
         const LineAnchor &a = anchors[i - 1];
@@ -611,14 +616,18 @@ qreal TextView::yOfLinePosition(const std::vector<LineAnchor> &anchors, qreal po
     return anchors.back().y;
 }
 
-void TextView::scrollToLinePosition(qreal position)
+std::pair<int, qreal> TextView::placeOfLinePosition(qreal position)
 {
     const int lines = m_doc->blockCount();
     position = qBound<qreal>(0, position, lines);
     const int index = qBound(0, rowOfLine(qMin(int(position), lines - 1)), qMax(0, rowCount() - 1));
     const qreal height = rowHeight(index);
-    m_topRow = index;
-    m_topOffset = yOfLinePosition(lineAnchors(index, height), position);
+    return {index, yOfLinePosition(lineAnchors(index, height), position)};
+}
+
+void TextView::scrollToLinePosition(qreal position)
+{
+    std::tie(m_topRow, m_topOffset) = placeOfLinePosition(position);
     normalizeScroll();
     updateScrollBars();
     viewport()->update();
@@ -674,6 +683,14 @@ qreal TextView::scrollPixels()
     for (int r = 0; r < m_topRow; ++r)
         y += rowHeight(r);
     return y;
+}
+
+int TextView::rowAtPoint(const QPointF &point, QPointF *origin)
+{
+    qreal top = 0;
+    const int index = rowAt(point.y(), &top);
+    *origin = QPointF(textLeft(), top);
+    return index;
 }
 
 int TextView::rowAt(qreal y, qreal *top)
@@ -782,7 +799,7 @@ void TextView::updateScrollBars()
         contentHeight += rowHeight(i);
         fits = contentHeight <= viewport()->height();
     }
-    const Qt::ScrollBarPolicy policy = fits ? Qt::ScrollBarAlwaysOff : Qt::ScrollBarAsNeeded;
+    const Qt::ScrollBarPolicy policy = fits || m_scrollBarsHidden ? Qt::ScrollBarAlwaysOff : Qt::ScrollBarAsNeeded;
     v->setRange(0, qMax(0, rows - 1));
     v->setPageStep(pageRows);
     v->setSingleStep(1);
@@ -800,6 +817,14 @@ void TextView::updateScrollBars()
     // Last: a policy change resizes the viewport, which re-enters here.
     if (verticalScrollBarPolicy() != policy)
         setVerticalScrollBarPolicy(policy);
+}
+
+void TextView::setScrollBarsHidden(bool hidden)
+{
+    if (m_scrollBarsHidden == hidden)
+        return;
+    m_scrollBarsHidden = hidden;
+    updateScrollBars();
 }
 
 // Tab and Shift+Tab indent and outdent; they never move focus out of the
@@ -1514,12 +1539,11 @@ void TextView::mousePressEvent(QMouseEvent *event)
         return;
     }
     setFocus(Qt::MouseFocusReason);
-    qreal top = 0;
-    const int pressedRow = rowAt(event->position().y(), &top);
+    QPointF origin;
+    const int pressedRow = rowAtPoint(event->position(), &origin);
     if (pressedRow >= 0) {
         const Row info = row(pressedRow);
-        if (info.rendered
-            && renderedRowPressed(info, QPointF(event->position().x() - textLeft(), event->position().y() - top), event))
+        if (info.rendered && renderedRowPressed(info, event->position() - origin, event))
             return;
     }
     // Third click in a row: select the line (the paragraph in rendered text).

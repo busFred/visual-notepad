@@ -345,6 +345,17 @@ QTreeWidget::item:selected, QTreeWidget::branch:selected { background: @selectio
 #Pill QToolButton:hover { background: @panelTitle; }
 #Pill QToolButton:checked { background: @accent; }
 
+/* Read mode's bar left of the pill: − n +, then a slider, the zoom popup's. */
+#ReadBar QLabel { color: @text; }
+#ReadBar QFrame#ReadBarSeparator { background: @divider; border: none; }
+#ReadBar QToolButton[readStep="true"] { background: @button; border: 1px solid @divider; border-radius: 3px; color: @text; padding: 0; }
+#ReadBar QToolButton[readStep="true"]:hover { background: @buttonHover; }
+#ReadBar QToolButton[readStep="true"]:pressed { background: @panelTitle; }
+#ReadBar QToolButton[readStep="true"]:disabled { color: @mutedText; }
+#ReadBar QSlider::groove:horizontal { height: 4px; border-radius: 2px; background: @divider; }
+#ReadBar QSlider::sub-page:horizontal { height: 4px; border-radius: 2px; background: @switchOn; }
+#ReadBar QSlider::handle:horizontal { width: 10px; margin: -6px 0; border-radius: 3px; background: @button; border: 1px solid @divider; }
+
 #FindBar { background: @sideBar; border: 1px solid @divider; border-top: none; }
 #FindInput { background: @editor; border: 1px solid @divider; border-radius: 2px; }
 #FindInput[focused="true"] { border-color: @switchOn; }

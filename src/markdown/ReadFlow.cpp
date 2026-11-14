@@ -511,6 +511,7 @@ Position ReadFlow::startingBefore(Position end, std::optional<Position> limit) c
 
 const Screen &ReadFlow::show(Screen screen)
 {
+    m_keptUntil.reset();
     m_screen = std::move(screen);
     m_screenKey = m_geometry.key();
     m_hasScreen = true;
@@ -534,6 +535,10 @@ const Screen &ReadFlow::reflow()
     m_screen = fill(from);
     m_screenKey = m_geometry.key();
     m_hasScreen = true;
+    if (same && m_keptUntil)
+        markKept(m_screen, *m_keptUntil);
+    else
+        m_keptUntil.reset();
     if (same)
         m_startLine = lineOf(m_screen.start);
     return m_screen;
@@ -584,9 +589,12 @@ const Screen &ReadFlow::pageForward()
             break;
     }
     Step step{m_geometry.key(), m_screen.start, start};
-    if (start < oldEnd)
+    const bool kept = start < oldEnd;
+    if (kept)
         markKept(next, oldEnd);
     show(std::move(next));
+    if (kept)
+        m_keptUntil = oldEnd;
     m_history.push_back(step);
     if (m_history.size() > maxHistory)
         m_history.erase(m_history.begin());

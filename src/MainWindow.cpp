@@ -802,9 +802,13 @@ void MainWindow::createStatusBar()
     const auto clickable = [](QLabel *label, std::function<void()> handler) {
         static_cast<StatusCell *>(label)->setClickHandler(std::move(handler));
     };
+    m_position->setObjectName(QStringLiteral("PositionStatus"));
     m_indentation->setObjectName(QStringLiteral("IndentationStatus"));
     clickable(m_indentation, [this] { showIndentationMenu(); });
     m_zoom->setObjectName(QStringLiteral("ZoomStatus"));
+    m_lineEnding->setObjectName(QStringLiteral("LineEndingStatus"));
+    m_encoding->setObjectName(QStringLiteral("EncodingStatus"));
+    m_language->setObjectName(QStringLiteral("LanguageStatus"));
     clickable(m_zoom, [this] { showZoomPopup(); });
     clickable(m_lineEnding, [this] { showLineEndingMenu(); });
     clickable(m_encoding, [this] { showEncodingMenu(); });
@@ -1479,6 +1483,10 @@ void MainWindow::addTab(DocumentTab *tab, EditorGroup *group, int index)
     updateTabTitle(tab);
     group->setCurrentIndex(at);
     connect(tab, &DocumentTab::zoomChanged, this, [this, tab] {
+        if (tab == currentTab())
+            updateStatus();
+    });
+    connect(tab, &DocumentTab::readStateChanged, this, [this, tab] {
         if (tab == currentTab())
             updateStatus();
     });
@@ -2395,6 +2403,14 @@ void MainWindow::updateStatus()
         position += u' ' + tr("(%1 selections)").arg(editor->cursorCount());
     else if (cursor.hasSelection())
         position += u' ' + tr("(%1 selected)").arg(cursor.selectionEnd() - cursor.selectionStart());
+    // Read mode: the source lines on screen instead (the caret's place
+    // until a large document's first parse shows the columns), and nothing
+    // about editing the file.
+    const bool reading = tab->isReadMode();
+    if (const auto [first, last] = tab->readLineRange(); reading && first >= 0)
+        position = tr("Lines %1–%2 of %3").arg(first + 1).arg(last + 1).arg(tab->document()->blockCount());
+    for (QLabel *label : {m_indentation, m_lineEnding, m_encoding})
+        label->setVisible(!reading);
     m_position->setText(position);
     m_indentation->setText(tab->indentation().insertSpaces ? tr("Spaces: %1").arg(tab->indentation().tabSize)
                                                            : tr("Tab Size: %1").arg(tab->indentation().tabSize));

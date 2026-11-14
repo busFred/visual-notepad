@@ -24,6 +24,7 @@ namespace vn {
 
 class EditorPill;
 class FindBar;
+class ReadBar;
 class TextView;
 class VisualView;
 
@@ -143,6 +144,20 @@ public:
     // Rewrites a Markdown document in canonical form as one undoable edit.
     void formatDocument();
 
+    // Read mode: a Markdown document in Visual mode, locked, shows in
+    // columns a screen at a time (VisualView::setReadMode), with a bar left
+    // of the pill for the number of columns and their width. Those are this
+    // tab's, not saved; Preferences give where a new tab starts.
+    bool isReadMode() const;
+    // The source lines on screen in read mode (0-based, both included), or
+    // (-1, -1) (also before a large document's first parse).
+    std::pair<int, int> readLineRange() const;
+    // 0: as many as fit.
+    int readColumns() const { return m_readColumns; }
+    int readChars() const { return m_readChars; }
+    void setReadColumns(int columns);
+    void setReadChars(int chars);
+
 Q_SIGNALS:
     void linkActivated(const QString &url);
     void filesDropped(const QStringList &files);
@@ -156,6 +171,8 @@ Q_SIGNALS:
     void formatChanged();
     // Tab size or spaces/tabs changed.
     void indentationChanged();
+    // Read mode came or went, or its screen changed.
+    void readStateChanged();
     // The file's name or its deleted / changed-on-disk state changed.
     void titleChanged();
 
@@ -185,6 +202,9 @@ private:
     void mirrorSelection(TextView *from, TextView *to);
     void setActiveView(TextView *view);
     void applyMarkdownState();
+    // Read mode follows the mode and the lock.
+    void updateReadMode();
+    void updateReadBar();
 
     std::shared_ptr<TextFile> m_file;
     QTextDocument *m_doc;
@@ -213,6 +233,10 @@ private:
     // a preview, on its own an editor.
     bool m_splitLocked = true;
     bool m_visualLocked = false;
+    ReadBar *m_readBar = nullptr; // Made when read mode first shows.
+    int m_readColumns = 0;
+    int m_readChars = 70;
+    bool m_readMode = false;
 };
 
 } // namespace vn
