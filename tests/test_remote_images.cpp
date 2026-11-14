@@ -21,6 +21,10 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QElapsedTimer>
+#include <QPainter>
+#include <QScopeGuard>
+#include <QDir>
 #include <QTest>
 #include <QTextDocument>
 
@@ -218,6 +222,9 @@ class TestRemoteImages : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
+    void missingPicturesAreNotReadFromTheWorkingFolder();
+    void dataPicturesShow();
+    void tinyFontSizesAreClamped();
     void initTestCase();
     void init();
     void cleanup();
@@ -965,6 +972,73 @@ static void useTestSettings()
     vn::Settings::instance().useFile(dir.filePath(QStringLiteral("settings.ini")));
 }
 Q_COREAPP_STARTUP_FUNCTION(useTestSettings)
+
+// A picture missing beside the document, or whose name differs once
+// decoded, is never looked for by Qt in the folder the app started in (where
+// a file of that name would be read past the SVG check).
+void TestRemoteImages::missingPicturesAreNotReadFromTheWorkingFolder()
+{
+    QTemporaryDir docs, work;
+    QVERIFY(docs.isValid() && work.isValid());
+    QImage red(30, 30, QImage::Format_RGB32);
+    red.fill(Qt::red);
+    QVERIFY(red.save(work.filePath(QStringLiteral("only-here.png"))));
+    QVERIFY(red.save(work.filePath(QStringLiteral("b%2541.png"))));
+    const QString before = QDir::currentPath();
+    QVERIFY(QDir::setCurrent(work.path()));
+    const auto restore = qScopeGuard([&] { QDir::setCurrent(before); });
+    RenderContext ctx = context(false);
+    ctx.baseDirectory = docs.path();
+    for (const QString &name : {QStringLiteral("only-here.png"), QStringLiteral("b%2541.png")}) {
+        const auto block = renderHtml(QStringLiteral("<p><img src=\"%1\"></p>").arg(name), ctx);
+        QImage image(QSize(int(ctx.width), int(block->height()) + 1), QImage::Format_RGB32);
+        image.fill(Qt::white);
+        {
+            QPainter painter(&image);
+            block->paint(painter, QPointF(0, 0), ctx.width);
+        }
+        int redPixels = 0;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x)
+                redPixels += QColor(image.pixel(x, y)) == QColor(Qt::red);
+        QVERIFY2(redPixels == 0, qPrintable(name));
+    }
+}
+
+// A picture carried in the document (data:) shows, decoded as files are.
+void TestRemoteImages::dataPicturesShow()
+{
+    QImage red(20, 20, QImage::Format_RGB32);
+    red.fill(Qt::red);
+    QByteArray png;
+    QBuffer buffer(&png);
+    buffer.open(QIODevice::WriteOnly);
+    QVERIFY(red.save(&buffer, "PNG"));
+    const RenderContext ctx = context(false);
+    const auto block = renderHtml(
+        QStringLiteral("<p><img src=\"data:image/png;base64,%1\"></p>").arg(QString::fromLatin1(png.toBase64())), ctx);
+    QImage image(QSize(int(ctx.width), int(block->height()) + 1), QImage::Format_RGB32);
+    image.fill(Qt::white);
+    {
+        QPainter painter(&image);
+        block->paint(painter, QPointF(0, 0), ctx.width);
+    }
+    int redPixels = 0;
+    for (int y = 0; y < image.height(); ++y)
+        for (int x = 0; x < image.width(); ++x)
+            redPixels += QColor(image.pixel(x, y)) == QColor(Qt::red);
+    QVERIFY(redPixels > 300);
+}
+
+// A tiny font size in raw HTML made Qt try every fallback font for seconds.
+void TestRemoteImages::tinyFontSizesAreClamped()
+{
+    QElapsedTimer timer;
+    timer.start();
+    const auto block = renderHtml(QStringLiteral("<p><span style=\"font-size:0.1pt\">t</span></p>"), context(false));
+    QVERIFY(block->height() > 0);
+    QVERIFY2(timer.elapsed() < 2000, qPrintable(QString::number(timer.elapsed())));
+}
 
 QTEST_MAIN(TestRemoteImages)
 #include "test_remote_images.moc"

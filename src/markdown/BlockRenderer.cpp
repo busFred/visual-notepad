@@ -773,6 +773,49 @@ bool mayLoadPictures(const QString &html)
 }
 
 // The picture Qt's image handler shows for one it cannot read.
+// Font sizes raw HTML can ask for, in points and pixels. A tiny size
+// (0.1pt) makes Qt load every fallback font looking for glyphs, which froze
+// the window for seconds; a huge one makes a layout as costly. Real text
+// stays well inside.
+constexpr qreal minFontPoints = 4;
+constexpr qreal maxFontPoints = 200;
+constexpr int minFontPixels = 5;
+constexpr int maxFontPixels = 270;
+
+// Brings every font size of a document set from HTML inside those bounds.
+// Only HTML that sets sizes is walked (the scan is cheap; most blocks never
+// mention one).
+void clampFontSizes(QTextDocument *doc, const QString &html)
+{
+    if (!html.contains(QLatin1String("size"), Qt::CaseInsensitive)
+        && !html.contains(QLatin1String("<big"), Qt::CaseInsensitive)
+        && !html.contains(QLatin1String("<small"), Qt::CaseInsensitive))
+        return;
+    for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+        for (auto it = block.begin(); !it.atEnd(); ++it) {
+            const QTextFragment fragment = it.fragment();
+            const QTextCharFormat format = fragment.charFormat();
+            QTextCharFormat fix;
+            if (format.hasProperty(QTextFormat::FontPointSize)) {
+                const qreal points = format.fontPointSize();
+                if (points < minFontPoints || points > maxFontPoints)
+                    fix.setFontPointSize(qBound(minFontPoints, points, maxFontPoints));
+            }
+            if (format.hasProperty(QTextFormat::FontPixelSize)) {
+                const int pixels = format.intProperty(QTextFormat::FontPixelSize);
+                if (pixels < minFontPixels || pixels > maxFontPixels)
+                    fix.setProperty(QTextFormat::FontPixelSize, qBound(minFontPixels, pixels, maxFontPixels));
+            }
+            if (fix.propertyCount() == 0)
+                continue;
+            QTextCursor cursor(doc);
+            cursor.setPosition(fragment.position());
+            cursor.setPosition(fragment.position() + fragment.length(), QTextCursor::KeepAnchor);
+            cursor.mergeCharFormat(fix);
+        }
+    }
+}
+
 QImage brokenPicture()
 {
     static const QImage image = [] {
@@ -1170,16 +1213,18 @@ protected:
         // drawn: a name left over is blank.
         if (url.toString().startsWith(QLatin1String("vn-math")))
             return standIn(type, url);
+        // From here on no picture is ever declined: declined, Qt's image
+        // handler opens the name itself, relative to the working folder and
+        // past the SVG check (a name that differs once decoded, a picture
+        // missing beside the document but present where the app started).
+        // What cannot be shown is shown broken, as Qt would show it.
+        if (url.scheme() == QLatin1String("data"))
+            return keep(type, url, dataPicture(url));
         const QString path = localPath(url);
         if (path.isEmpty())
-            return QVariant();
+            return keep(type, url, brokenPicture());
         const QImage image = cachedLocalImage(path, m_context.width, m_context.devicePixelRatio);
-        if (image.isNull()) {
-            // Declined, Qt's image handler would read the file itself (an SVG
-            // naming another machine included): show what it shows then.
-            return QFileInfo::exists(path) ? keep(type, url, brokenPicture()) : QVariant();
-        }
-        return keep(type, url, image);
+        return keep(type, url, image.isNull() ? brokenPicture() : image);
     }
 
     // Whether Qt may be given a picture name: those made here (math, the
@@ -1225,6 +1270,24 @@ private:
         return blank;
     }
 
+    // A picture carried in the document (data:), decoded as files are (an
+    // SVG naming another machine refused) and fitted to the column; broken
+    // if it cannot be read.
+    QImage dataPicture(const QUrl &url) const
+    {
+        // Big enough for any picture worth embedding in a text file.
+        constexpr qsizetype maxEncoded = 32 * 1024 * 1024;
+        const QByteArray encoded = url.toEncoded(QUrl::FullyEncoded);
+        const qsizetype comma = encoded.indexOf(',');
+        if (comma < 0 || encoded.size() > maxEncoded)
+            return brokenPicture();
+        const QByteArray header = encoded.mid(5, comma - 5).toLower(); // After "data:".
+        const QByteArray body = QByteArray::fromPercentEncoding(encoded.mid(comma + 1));
+        const QByteArray data = header.endsWith(";base64") ? QByteArray::fromBase64(body) : body;
+        const QImage image = decodePicture(data);
+        return image.isNull() ? brokenPicture() : fitToColumn(image, m_context.width, m_context.devicePixelRatio);
+    }
+
     // Without the user's agreement nothing is requested and the picture
     // stays missing; with it, the download starts now and this block is
     // pending until it ends.
@@ -1235,19 +1298,21 @@ private:
             m_remote.append(address);
         if (m_listing)
             return standIn(type, url);
+        // Never declined (see loadResource): missing is shown broken. Not
+        // kept, so a later render asks again.
         if (!m_context.allowRemoteImages)
-            return QVariant();
+            return brokenPicture();
         RemoteImages &remote = RemoteImages::instance();
         switch (remote.request(url)) {
         case RemoteImages::State::Loading:
             m_pending = true;
-            return QVariant();
+            return brokenPicture();
         case RemoteImages::State::Loaded: {
             const QImage image = cachedRemoteImage(url, m_context.width, m_context.devicePixelRatio);
-            return image.isNull() ? QVariant() : keep(type, url, image);
+            return image.isNull() ? QVariant(brokenPicture()) : keep(type, url, image);
         }
         default:
-            return QVariant();
+            return brokenPicture();
         }
     }
 
@@ -1899,6 +1964,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
         doc->setDefaultStyleSheet(styleSheet(context));
         const QString html = QString::fromUtf8(block.html.data(), block.html.size());
         doc->setHtml(html);
+        clampFontSizes(doc.get(), html);
         doc->dropNetworkImages();
         doc->placeMath();
         doc->sizeFigures(context.figureScales.value(figureId(source)));
@@ -1909,6 +1975,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
             const qsizetype li = html.indexOf(QLatin1String("<li>"));
             if (li >= 0) {
                 doc->setHtml(QString(html).insert(li + 4, u'x'));
+                clampFontSizes(doc.get(), html);
                 QTextCursor text(doc.get());
                 text.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
                 text.removeSelectedText();
@@ -1984,6 +2051,7 @@ QStringList RenderedBlock::remoteImages(const core::Block &block, const RenderCo
     doc.setDocumentMargin(0);
     doc.setDefaultFont(context.font);
     doc.setHtml(html);
+    clampFontSizes(&doc, html);
     // As in create(): Qt's image handler looks for "@2x" files by name first.
     doc.dropNetworkImages();
     doc.setTextWidth(context.width);
