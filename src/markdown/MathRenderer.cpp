@@ -13,6 +13,7 @@
 #include <QFont>
 #include <QFontMetricsF>
 #include <QGuiApplication>
+#include <QLibraryInfo>
 #include <QPaintDevice>
 #include <QPaintEngine>
 #include <QPainter>
@@ -26,6 +27,7 @@
 #include <QtMath>
 #include <QtGlobal>
 
+#include <algorithm>
 #include <atomic>
 #include <climits>
 #include <chrono>
@@ -45,7 +47,6 @@
 #include <unistd.h>
 #endif
 #ifdef Q_OS_LINUX
-#include <QLibraryInfo>
 #include <QStandardPaths>
 
 #include <cstddef>
@@ -69,6 +70,12 @@
 // After MicroTeX's headers: the names Windows' headers define as macros
 // ("small", and "min" and "max" in <windows.h> itself) are names in them.
 #include <qt_windows.h>
+
+#include <aclapi.h>
+#include <objbase.h>
+#include <psapi.h>
+#include <sddl.h>
+#include <userenv.h>
 #endif
 
 // A process of its own for every formula, where a running process can be
@@ -447,9 +454,9 @@ public:
     void drawChar(wchar_t c, float x, float y) override { drawText(std::wstring(1, c), x, y); }
 };
 
-QString findResources()
+// MicroTeX's resources for the program in the folder `app`.
+QString findResources(const QString &app = QCoreApplication::applicationDirPath())
 {
-    const QString app = QCoreApplication::applicationDirPath();
     QStringList candidates = {
         app + QStringLiteral("/microtex/res"),
         app + QStringLiteral("/../microtex/res"),
@@ -613,6 +620,40 @@ LONG WINAPI endOnFault(EXCEPTION_POINTERS *)
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+// The limits of the worker's job: its memory, and with `locked`, no
+// process but itself.
+JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobLimits(bool locked)
+{
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+    limits.ProcessMemoryLimit = SIZE_T(workerMemoryBytes);
+    if (locked) {
+        limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        limits.BasicLimitInformation.ActiveProcessLimit = 1;
+    }
+    return limits;
+}
+
+// The worker's job, made and joined on first use. Open until the lock-down
+// closes it: the job and its limits stay as long as the worker is in it,
+// and with no handle left nothing can change them.
+HANDLE &workerJob()
+{
+    static HANDLE job = [] {
+        HANDLE made = CreateJobObjectW(nullptr, nullptr);
+        if (made) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = jobLimits(false);
+            if (!SetInformationJobObject(made, JobObjectExtendedLimitInformation, &limits, sizeof limits)
+                || !AssignProcessToJobObject(made, GetCurrentProcess())) {
+                CloseHandle(made);
+                made = nullptr;
+            }
+        }
+        return made;
+    }();
+    return job;
+}
+
 void confineWorker()
 {
     workerIn = GetStdHandle(STD_INPUT_HANDLE);
@@ -620,15 +661,9 @@ void confineWorker()
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     SetUnhandledExceptionFilter(endOnFault);
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-    // A job of its own holds the memory limit.
-    if (HANDLE job = CreateJobObjectW(nullptr, nullptr)) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY;
-        limits.ProcessMemoryLimit = SIZE_T(workerMemoryBytes);
-        if (SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits))
-            AssignProcessToJobObject(job, GetCurrentProcess());
-        // The handle stays open for as long as the worker runs.
-    }
+    // A job of its own holds the memory limit (and, once locked down, the
+    // ban on new processes).
+    workerJob();
 }
 
 [[noreturn]] void endWorker(int code)
@@ -751,6 +786,10 @@ QString &workerProgram()
 
 bool fellBack = false;
 int starts = 0;
+// The last process confineWorkerProcess() was for started in the
+// AppContainer, and so did the last worker.
+bool confinedStart = false;
+bool contained = false;
 
 // MicroTeX keeps what a formula defines or sets (commands, colours, sizes,
 // column types, fonts) for every formula after it: a document could change
@@ -925,11 +964,15 @@ private:
         // (documents, connections).
         m_process->setUnixProcessParameters(QProcess::UnixProcessFlag::CloseFileDescriptors);
 #endif
+        confinedStart = false;
+        if (m_contain)
+            confineWorkerProcess(*m_process);
         if (starts++ == 0) {
             // Ended with the application, before it deletes the process.
             qAddPostRoutine([] { Worker::instance().stop(); });
         }
         startWithFewDescriptorsToClose();
+        contained = confinedStart; // (Started by now: CreateProcess() is done.)
         m_awaitingHello = true;
         return true;
     }
@@ -967,26 +1010,39 @@ private:
     {
         if (m_process && !m_awaitingHello && m_process->state() == QProcess::Running)
             return true;
-        if (!(m_process && m_awaitingHello) && !launch())
-            return false;
-        qint32 hello[2] = {};
-        const QDeadlineTimer deadline(workerStartMs);
-        if (!m_process->waitForStarted(workerStartMs) || !read(reinterpret_cast<char *>(hello), sizeof hello, deadline)
-            || quint32(hello[0]) != answerMagic) {
+        for (;;) {
+            if (!(m_process && m_awaitingHello) && !launch())
+                return false;
+            qint32 hello[2] = {};
+            const QDeadlineTimer deadline(workerStartMs);
+            const bool greeted = m_process->waitForStarted(workerStartMs)
+                && read(reinterpret_cast<char *>(hello), sizeof hello, deadline) && quint32(hello[0]) == answerMagic;
+            if (greeted && hello[1] == 1) {
+                m_awaitingHello = false;
+                return true;
+            }
+            // An AppContainer can keep the worker from starting, or from
+            // finding MicroTeX's resources: where the app is on a network
+            // drive, say. Then it runs without one (locked down as far as
+            // it can lock itself). Not after a timeout: a busy machine is
+            // no reason to.
+            if (contained && (m_process->state() == QProcess::NotRunning || greeted)) {
+                qWarning("The math worker could not run in an AppContainer; it runs without one");
+                stop();
+                m_contain = false;
+                continue;
+            }
+            stop();
+            if (greeted) { // It runs, but MicroTeX has no resources.
+                m_unavailable = true;
+                return false;
+            }
             // Not there, not a worker, or the machine is too busy: not
             // tried for every formula, but again after a while.
-            stop();
             m_failuresInARow = maxFailuresInARow;
             m_paused.start();
             return false;
         }
-        m_awaitingHello = false;
-        if (hello[1] != 1) { // It runs, but MicroTeX has no resources.
-            stop();
-            m_unavailable = true;
-            return false;
-        }
-        return true;
     }
 
     bool flush(const QDeadlineTimer &deadline)
@@ -1019,6 +1075,7 @@ private:
     QPointer<QProcess> m_process;
     bool m_awaitingHello = false; // Started (by launch()), its greeting not yet read.
     bool m_unavailable = false; // No worker program, or it cannot draw at all.
+    bool m_contain = true; // Started in an AppContainer (Windows), unless that failed.
     int m_timeouts = 0;
     int m_failuresInARow = 0;
     QElapsedTimer m_paused;
@@ -1133,6 +1190,11 @@ bool lastRenderFellBack()
 int workerStarts()
 {
     return starts;
+}
+
+bool workerContained()
+{
+    return contained;
 }
 
 #ifdef Q_OS_LINUX
@@ -1277,11 +1339,267 @@ bool noSockets()
 } // namespace
 #endif
 
+#ifdef Q_OS_WIN
+namespace {
+
+// Windows has no way for a running process to give up reading the user's
+// files or the network, so the app starts the worker in an AppContainer
+// (see "AppContainer isolation" in Microsoft's documentation): it can
+// read only what all AppContainers may (Windows' folders, the fonts,
+// Program Files) and what it was let read, write nowhere, reach no
+// network (it has no capabilities) and start no process. The worker then
+// locks what it can itself (lockDownWorker): low integrity, which writes
+// nowhere but in the few places made for it, and a job of one process.
+// Started some other way (scripts/check_math_worker.py, or where the
+// AppContainer failed it), the worker has these and can still read the
+// user's files and reach the network.
+
+// The worker's AppContainer. Named, not made afresh: what it was let read
+// stays readable to the next worker. Windows starts no process in one that
+// has no profile (a folder, Packagesisualnotepad.mathworker in the local
+// app data, and registry keys), so the first worker makes it; the folder
+// is then taken from it (takeContainerFolder).
+PSID containerSid()
+{
+    static const PSID sid = [] {
+        const wchar_t *const name = L"VisualNotepad.MathWorker";
+        PSID made = nullptr;
+        if (SUCCEEDED(CreateAppContainerProfile(name, L"Visual Notepad math", L"Draws formulas for Visual Notepad",
+                                                nullptr, 0, &made)))
+            return made;
+        // Made by an earlier worker.
+        return SUCCEEDED(DeriveAppContainerSidFromAppContainerName(name, &made)) ? made : PSID(nullptr);
+    }();
+    return sid;
+}
+
+// Whether `dacl` lets the worker's AppContainer, or every AppContainer,
+// read and run (with `contents`, also all that is in a folder).
+bool containerMayRead(PACL dacl, PSID container, bool contents)
+{
+    if (!dacl)
+        return true; // No access control (FAT): anyone may.
+    BYTE any[SECURITY_MAX_SID_SIZE];
+    DWORD size = sizeof any;
+    if (!CreateWellKnownSid(WinBuiltinAnyPackageSid, nullptr, any, &size))
+        return false;
+    constexpr ACCESS_MASK needed = FILE_READ_DATA | FILE_EXECUTE;
+    constexpr BYTE handedDown = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+    for (DWORD i = 0; i < dacl->AceCount; ++i) {
+        ACCESS_ALLOWED_ACE *ace = nullptr;
+        if (!GetAce(dacl, i, reinterpret_cast<void **>(&ace)) || ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE
+            || (ace->Header.AceFlags & INHERIT_ONLY_ACE) || (ace->Mask & needed) != needed
+            || (contents && (ace->Header.AceFlags & handedDown) != handedDown))
+            continue;
+        const PSID sid = &ace->SidStart;
+        if (EqualSid(sid, any) || EqualSid(sid, container))
+            return true;
+    }
+    return false;
+}
+
+// Lets the worker's AppContainer read (and run) the file or folder `path`:
+// a folder's own entry and names, or with `contents`, all that is in it.
+// The grant stays: each is changed once.
+void letContainerRead(const QString &path, bool contents)
+{
+    const PSID container = containerSid();
+    std::wstring name = QDir::toNativeSeparators(path).toStdWString();
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (GetNamedSecurityInfoW(name.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl,
+                              nullptr, &descriptor)
+        != ERROR_SUCCESS)
+        return;
+    EXPLICIT_ACCESSW access = {};
+    access.grfAccessPermissions = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+    access.grfAccessMode = GRANT_ACCESS;
+    access.grfInheritance = contents ? SUB_CONTAINERS_AND_OBJECTS_INHERIT : NO_INHERITANCE;
+    access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    access.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    access.Trustee.ptstrName = static_cast<LPWSTR>(container);
+    PACL granted = nullptr;
+    if (!containerMayRead(dacl, container, contents)
+        && SetEntriesInAclW(1, &access, dacl, &granted) == ERROR_SUCCESS) {
+        if (contents) {
+            // Handed down to all that is in the folder.
+            SetNamedSecurityInfoW(name.data(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, granted,
+                                  nullptr);
+        } else {
+            // The folder's own entry, and nothing in it (a build's folder
+            // has thousands of files).
+            SECURITY_DESCRIPTOR_CONTROL control = 0;
+            DWORD revision = 0;
+            GetSecurityDescriptorControl(descriptor, &control, &revision);
+            SECURITY_DESCRIPTOR updated;
+            InitializeSecurityDescriptor(&updated, SECURITY_DESCRIPTOR_REVISION);
+            SetSecurityDescriptorDacl(&updated, TRUE, granted, FALSE);
+            constexpr SECURITY_DESCRIPTOR_CONTROL kept = SE_DACL_AUTO_INHERITED | SE_DACL_PROTECTED;
+            SetSecurityDescriptorControl(&updated, kept, control & kept);
+            SetFileSecurityW(name.c_str(), DACL_SECURITY_INFORMATION, &updated);
+        }
+        LocalFree(granted);
+    }
+    LocalFree(descriptor);
+}
+
+// An AppContainer may write to the folder of its profile (and Temp in it):
+// the worker's is taken from it, with all in it.
+void takeContainerFolder()
+{
+    LPWSTR sid = nullptr;
+    if (!ConvertSidToStringSidW(containerSid(), &sid))
+        return;
+    PWSTR folder = nullptr;
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (SUCCEEDED(GetAppContainerFolderPath(sid, &folder))
+        && GetNamedSecurityInfoW(folder, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl, nullptr,
+                                 &descriptor)
+            == ERROR_SUCCESS) {
+        bool granted = false;
+        for (DWORD i = 0; dacl && i < dacl->AceCount; ++i) {
+            ACCESS_ALLOWED_ACE *ace = nullptr;
+            if (GetAce(dacl, i, reinterpret_cast<void **>(&ace)) && ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE
+                && !(ace->Header.AceFlags & INHERITED_ACE) && EqualSid(&ace->SidStart, containerSid()))
+                granted = true;
+        }
+        EXPLICIT_ACCESSW revoke = {};
+        revoke.grfAccessMode = REVOKE_ACCESS;
+        revoke.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        revoke.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+        revoke.Trustee.ptstrName = static_cast<LPWSTR>(containerSid());
+        PACL revoked = nullptr;
+        if (granted && SetEntriesInAclW(1, &revoke, dacl, &revoked) == ERROR_SUCCESS) {
+            SetNamedSecurityInfoW(folder, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, revoked, nullptr);
+            LocalFree(revoked);
+        }
+    }
+    LocalFree(descriptor);
+    CoTaskMemFree(folder);
+    LocalFree(sid);
+}
+
+// Lets the worker's AppContainer read what it needs to start and draw: the
+// program, the libraries this process has loaded (the worker is the same
+// program, and loads no others), the folders they are in (Qt lists its
+// plugin folders, and looks for the program's) and MicroTeX's resources.
+// Windows' own files and the fonts every AppContainer may read already.
+void letWorkerRead(const QString &program)
+{
+    takeContainerFolder();
+    wchar_t windows[MAX_PATH] = {};
+    const UINT length = GetSystemWindowsDirectoryW(windows, MAX_PATH);
+    const QString system = QDir::fromNativeSeparators(QString::fromWCharArray(windows, int(length))) + u'/';
+    QSet<QString> files = {QFileInfo(program).absoluteFilePath()};
+    HMODULE modules[1024];
+    DWORD bytes = 0;
+    if (EnumProcessModules(GetCurrentProcess(), modules, sizeof modules, &bytes)) {
+        std::wstring name(32768, L'\0');
+        for (DWORD i = 0; i < qMin<DWORD>(bytes / sizeof(HMODULE), DWORD(std::size(modules))); ++i) {
+            const DWORD n = GetModuleFileNameW(modules[i], name.data(), DWORD(name.size()));
+            const QString path = QDir::fromNativeSeparators(QString::fromWCharArray(name.data(), int(n)));
+            if (n > 0 && n < name.size() && !path.startsWith(system, Qt::CaseInsensitive))
+                files.insert(path);
+        }
+    }
+    QSet<QString> folders;
+    for (const QString &file : std::as_const(files)) {
+        letContainerRead(file, false);
+        folders.insert(QFileInfo(file).absolutePath());
+    }
+    for (const QString &folder : std::as_const(folders))
+        letContainerRead(folder, false);
+    const QString resources = findResources(QFileInfo(program).absolutePath());
+    if (!resources.isEmpty())
+        letContainerRead(resources, true);
+    // Qt's plugins, where they are not in the program's folder (as in a
+    // build): Qt checks the folder before it looks in it.
+    const QString plugins = QLibraryInfo::path(QLibraryInfo::PluginsPath);
+    if (QFileInfo(plugins).isDir())
+        letContainerRead(plugins, true);
+}
+
+// 1 and 2 of lockDownWorker() for a process in an AppContainer: it reads
+// only what it was let read, and it has no capabilities (the network is
+// one of them).
+int containerLocks()
+{
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        return 0;
+    int locks = 0;
+    DWORD isContainer = 0;
+    DWORD got = 0;
+    if (GetTokenInformation(token, TokenIsAppContainer, &isContainer, sizeof isContainer, &got) && isContainer) {
+        locks |= 1;
+        // Too small for even one capability.
+        TOKEN_GROUPS capabilities = {};
+        if (GetTokenInformation(token, TokenCapabilities, &capabilities, sizeof capabilities, &got)
+            && capabilities.GroupCount == 0)
+            locks |= 2;
+    }
+    CloseHandle(token);
+    return locks;
+}
+
+// Low integrity (an AppContainer has it from the start): nothing can be
+// written but the few places made for it (in an AppContainer not even
+// those), whatever their access lists say.
+bool lowIntegrity()
+{
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, &token)
+        && !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        return false;
+    BYTE low[SECURITY_MAX_SID_SIZE];
+    DWORD size = sizeof low;
+    if (CreateWellKnownSid(WinLowLabelSid, nullptr, low, &size)) {
+        TOKEN_MANDATORY_LABEL label = {{low, SE_GROUP_INTEGRITY}};
+        SetTokenInformation(token, TokenIntegrityLevel, &label, sizeof label + GetLengthSid(low));
+    }
+    DWORD level = SECURITY_MANDATORY_SYSTEM_RID;
+    alignas(TOKEN_MANDATORY_LABEL) BYTE buffer[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
+    DWORD got = 0;
+    if (GetTokenInformation(token, TokenIntegrityLevel, buffer, sizeof buffer, &got)) {
+        const PSID sid = reinterpret_cast<TOKEN_MANDATORY_LABEL *>(buffer)->Label.Sid;
+        level = *GetSidSubAuthority(sid, *GetSidSubAuthorityCount(sid) - 1);
+    }
+    CloseHandle(token);
+    return level <= SECURITY_MANDATORY_LOW_RID;
+}
+
+// No process in the worker's job but the worker, for good: the job's one
+// handle is closed, and no other can be had (it has no name). Nor the
+// clipboard, other programs' windows or the system's settings.
+bool noNewProcesses()
+{
+    HANDLE &job = workerJob();
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = jobLimits(true);
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits);
+        JOBOBJECT_BASIC_UI_RESTRICTIONS ui = {
+            JOB_OBJECT_UILIMIT_READCLIPBOARD | JOB_OBJECT_UILIMIT_WRITECLIPBOARD | JOB_OBJECT_UILIMIT_HANDLES
+            | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS | JOB_OBJECT_UILIMIT_DESKTOP
+            | JOB_OBJECT_UILIMIT_EXITWINDOWS};
+        SetInformationJobObject(job, JobObjectBasicUIRestrictions, &ui, sizeof ui);
+        CloseHandle(job);
+        job = nullptr;
+    }
+    // The job the process is in, if any.
+    JOBOBJECT_BASIC_LIMIT_INFORMATION now = {};
+    return QueryInformationJobObject(nullptr, JobObjectBasicLimitInformation, &now, sizeof now, nullptr)
+        && (now.LimitFlags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS) && now.ActiveProcessLimit == 1;
+}
+
+} // namespace
+#endif
+
 // MicroTeX is not to be trusted with what it reads (see the top of the
 // header): once it has started, the worker can no longer open the user's
 // files, write anywhere or reach the network, so a formula that takes it
 // over gets nothing. Best effort: an older kernel without Landlock still
-// gets the socket ban.
+// gets the socket ban; on Windows, see above.
 int lockDownWorker()
 {
     int locks = 0;
@@ -1292,8 +1610,86 @@ int lockDownWorker()
         locks |= 1;
     if (noSockets())
         locks |= 2;
+#elif defined(Q_OS_WIN)
+    locks |= containerLocks();
+    if (lowIntegrity())
+        locks |= 4;
+    if (noNewProcesses())
+        locks |= 8;
 #endif
     return locks;
+}
+
+void confineWorkerProcess(QProcess &process)
+{
+#ifdef Q_OS_WIN
+    const PSID container = containerSid();
+    if (!container)
+        return;
+    letWorkerRead(process.program());
+    // What CreateProcess() is handed: kept with the process until it is
+    // started again or deleted.
+    struct Start
+    {
+        SECURITY_CAPABILITIES capabilities = {}; // None.
+        DWORD childProcesses = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
+        HANDLE inherited[3] = {};
+        std::unique_ptr<char[]> attributes;
+        STARTUPINFOEXW startup = {};
+        wchar_t folder[MAX_PATH] = {};
+
+        ~Start()
+        {
+            if (startup.lpAttributeList)
+                DeleteProcThreadAttributeList(startup.lpAttributeList);
+        }
+    };
+    auto start = std::make_shared<Start>();
+    start->capabilities.AppContainerSid = container;
+    process.setCreateProcessArgumentsModifier([start](QProcess::CreateProcessArguments *args) {
+        Start &s = *start;
+        if (s.startup.lpAttributeList) {
+            DeleteProcThreadAttributeList(s.startup.lpAttributeList);
+            s.startup.lpAttributeList = nullptr;
+        }
+        s.startup.StartupInfo = *args->startupInfo;
+        s.startup.StartupInfo.cb = sizeof s.startup;
+        // It gets the pipes and nothing else the app has open, as on Unix.
+        DWORD handles = 0;
+        for (HANDLE handle : {s.startup.StartupInfo.hStdInput, s.startup.StartupInfo.hStdOutput,
+                              s.startup.StartupInfo.hStdError}) {
+            if (handle && handle != INVALID_HANDLE_VALUE
+                && std::find(s.inherited, s.inherited + handles, handle) == s.inherited + handles)
+                s.inherited[handles++] = handle;
+        }
+        SIZE_T size = 0;
+        InitializeProcThreadAttributeList(nullptr, 3, 0, &size);
+        s.attributes.reset(new char[size]);
+        const auto list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(s.attributes.get());
+        if (!InitializeProcThreadAttributeList(list, 3, 0, &size))
+            return;
+        s.startup.lpAttributeList = list;
+        if (!UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &s.capabilities,
+                                       sizeof s.capabilities, nullptr, nullptr)
+            || !UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, &s.childProcesses,
+                                          sizeof s.childProcesses, nullptr, nullptr)
+            || (handles > 0
+                && !UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, s.inherited,
+                                              handles * sizeof(HANDLE), nullptr, nullptr)))
+            return; // Started as before, and not reported contained.
+        // A folder it may open: the app's working folder may be out of its
+        // reach.
+        GetSystemDirectoryW(s.folder, MAX_PATH);
+        args->currentDirectory = s.folder;
+        args->startupInfo = &s.startup.StartupInfo;
+        // No console (it needs none): a console program fails to start in
+        // an AppContainer with one, its libraries unable to start.
+        args->flags = (args->flags & ~DWORD(CREATE_NO_WINDOW)) | DETACHED_PROCESS | EXTENDED_STARTUPINFO_PRESENT;
+        confinedStart = true;
+    });
+#else
+    Q_UNUSED(process);
+#endif
 }
 
 void runWorker(int &argc, char **argv)
