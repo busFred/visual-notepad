@@ -723,6 +723,7 @@ void VisualView::clearRenderCache()
 void VisualView::resetRenders()
 {
     m_renders.clear();
+    m_renderKeys.clear();
     m_renderOrder.clear();
     m_renderKiB = 0;
 }
@@ -2526,6 +2527,17 @@ const VisualView::Render *VisualView::rendered(const Row &r)
     const core::Block &block = m_model->parsedBlock(blockIndex);
     // A part of a long code box: the lines of the row, and where it sits in the box.
     const bool inParts = !chip && m_partSpans.contains(index);
+    // Rendered before in this revision and context, and let go since (see
+    // below): the cache may still have it, found without reading the
+    // source (a block can be megabytes: a picture carried in the text).
+    const Render *known = nullptr;
+    if (const auto it = m_renderKeys.find(r.firstLine);
+        it != m_renderKeys.end() && span.block >= 0 && it->second.lastLine == r.lastLine
+        && it->second.blockIndex == blockIndex && it->second.chip == chip && it->second.inParts == inParts)
+        known = m_cache.object(it->second.key);
+    if (known) {
+        memo = *known;
+    } else {
     RenderedBlock::Part part;
     QString source;
     if (inParts) {
@@ -2575,6 +2587,9 @@ const VisualView::Render *VisualView::rendered(const Row &r)
         if (created->isPending())
             m_pendingKeys.insert(key);
         m_cache.insert(key, new Render(memo), cost);
+    }
+    if (span.block >= 0)
+        m_renderKeys[r.firstLine] = {key, r.lastLine, blockIndex, chip, inParts};
     }
     }
     memo.used = m_frame;
@@ -3279,6 +3294,7 @@ bool VisualView::dropFigureRenders()
         return true;
     });
     // (The items' memos are keyed by the context, which has changed.)
+    m_renderKeys.clear();
     return dropped;
 }
 

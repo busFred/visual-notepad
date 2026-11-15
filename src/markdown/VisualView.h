@@ -728,6 +728,17 @@ private:
     // m_cache, within its budget, or gone.
     std::unordered_map<int, Render> m_renders;
     std::deque<int> m_renderOrder; // First lines in the order they were set.
+    // The cache keys of the blocks rendered since the renders were reset, by
+    // first line, with what else made the key (see rendered()).
+    struct RenderKey
+    {
+        QString key;
+        int lastLine = -1;
+        int blockIndex = -1;
+        bool chip = false;
+        bool inParts = false;
+    };
+    std::unordered_map<int, RenderKey> m_renderKeys;
     qint64 m_renderKiB = 0;
     int m_rendersRevision = -1;
     qreal m_rendersWidth = -1;
