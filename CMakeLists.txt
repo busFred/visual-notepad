@@ -102,6 +102,8 @@ add_library(vn_app STATIC
     src/markdown/ReadFlow.h
     src/markdown/RemoteImages.cpp
     src/markdown/RemoteImages.h
+    src/markdown/TableLayout.cpp
+    src/markdown/TableLayout.h
     src/markdown/TableCellEditor.cpp
     src/markdown/TableCellEditor.h
     src/markdown/TableToolbar.cpp

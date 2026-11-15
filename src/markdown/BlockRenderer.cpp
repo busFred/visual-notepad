@@ -7,6 +7,7 @@
 #include "MathRenderer.h"
 #include "ReadFlow.h"
 #include "RemoteImages.h"
+#include "TableLayout.h"
 
 #include <KSyntaxHighlighting/Definition>
 #include <KSyntaxHighlighting/Format>
@@ -1977,8 +1978,15 @@ qreal fitTable(QTextDocument &doc, QTextTable &table, qreal width)
     option.setWrapMode(QTextOption::WordWrap);
     doc.setDefaultTextOption(option);
 
-    doc.setTextWidth(unboundedWidth);
-    const qreal ideal = doc.idealWidth();
+    // A table laid out by TableLayout tells what its widest layout would
+    // be without being laid out so, from what it keeps of its cells.
+    TableLayout *own = qobject_cast<TableLayout *>(doc.documentLayout());
+    TableLayout::Columns widestColumns;
+    if (own)
+        widestColumns = own->columnsAt(unboundedWidth);
+    else
+        doc.setTextWidth(unboundedWidth);
+    const qreal ideal = own ? widestColumns.idealWidth : doc.idealWidth();
     const qreal widest = std::ceil(ideal);
     if (widest <= width) {
         doc.setTextWidth(width);
@@ -1997,8 +2005,12 @@ qreal fitTable(QTextDocument &doc, QTextTable &table, qreal width)
     QAbstractTextDocumentLayout *layout = doc.documentLayout();
     const auto texts = [&] {
         QList<QRectF> rects;
-        for (int col = 0; col < columns; ++col)
-            rects.push_back(layout->blockBoundingRect(table.cellAt(0, col).firstCursorPosition().block()));
+        for (int col = 0; col < columns; ++col) {
+            if (own)
+                rects.push_back(QRectF(widestColumns.textLeft[size_t(col)], 0, widestColumns.textWidth[size_t(col)], 0));
+            else
+                rects.push_back(layout->blockBoundingRect(table.cellAt(0, col).firstCursorPosition().block()));
+        }
         return rects;
     };
     // The widest layout gives each column its widest width (its text on
@@ -2033,8 +2045,11 @@ qreal fitTable(QTextDocument &doc, QTextTable &table, qreal width)
         for (int row = 0; row < table.rows() && known; ++row) {
             const QTextTableCell cell = table.cellAt(row, col);
             int cellMin = objects.value(row * columns + col);
-            for (QTextBlock b = cell.firstCursorPosition().block(); b.isValid() && b.position() <= cell.lastPosition();
-                 b = b.next()) {
+            // (TableLayout's cells have no margins, lists or objects.)
+            if (own)
+                cellMin = own->leastWidth(row, col);
+            for (QTextBlock b = own ? QTextBlock() : cell.firstCursorPosition().block();
+                 b.isValid() && b.position() <= cell.lastPosition(); b = b.next()) {
                 const QTextBlockFormat format = b.blockFormat();
                 if (b.textList() || format.leftMargin() != 0 || format.rightMargin() != 0 || format.indent() != 0
                     || format.textIndent() != 0) {
@@ -3041,6 +3056,11 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
         QTextTable *single = item ? nullptr : onlyTable(*doc);
         if (single)
             r.m_ownGrid = OwnGrid::take(*doc, *single);
+        // A table of plain text keeps its cells' layouts from one width to
+        // the next (see TableLayout); one with pictures or formulas, which
+        // fit the column, is made again at each width anyway.
+        if (r.m_ownGrid && block.inline_math.empty() && !mayLoadPictures(html) && TableLayout::suits(*doc, *single))
+            doc->setDocumentLayout(new TableLayout(doc.get(), single));
         QTextTable *only = context.overflow ? single : nullptr;
         r.m_fitsTable = only != nullptr;
         if (only)
@@ -3831,6 +3851,10 @@ int RenderedBlock::cost() const
     if (m_doc) {
         const int characters = m_doc->characterCount();
         kib += m_kind == Kind::Code ? 20 + characters / 10 : 40 + characters / 16;
+        // A table that keeps its cells' shaped text (see TableLayout): some
+        // 40 bytes a character more.
+        if (qobject_cast<const TableLayout *>(m_doc->documentLayout()))
+            kib += characters / 25;
     }
     return kib;
 }
