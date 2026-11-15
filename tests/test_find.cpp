@@ -1,5 +1,6 @@
 // Find/replace engine and the find bar.
 #include "Settings.h"
+#include "ThreadCpuTime.h"
 #include "editor/DocumentLayout.h"
 #include "editor/FindBar.h"
 #include "editor/Search.h"
@@ -18,31 +19,7 @@
 
 #include <atomic>
 
-#ifdef Q_OS_WIN
-#include <windows.h>
-#else
-#include <time.h>
-#endif
-
 using namespace vn;
-
-// Milliseconds of processor time the calling thread has used. What the GUI
-// thread does itself is told from the time a busy machine does not let it run
-// at all: a stretch where it is held up by others costs the clock, not this.
-static double threadCpuMs()
-{
-#ifdef Q_OS_WIN
-    FILETIME created, exited, kernel, user;
-    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user))
-        return 0;
-    const auto ticks = [](const FILETIME &t) { return double((quint64(t.dwHighDateTime) << 32) | t.dwLowDateTime); };
-    return (ticks(kernel) + ticks(user)) / 10'000.0; // In 100 ns.
-#else
-    timespec now{};
-    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
-    return now.tv_sec * 1000.0 + now.tv_nsec / 1e6;
-#endif
-}
 
 class TestFind : public QObject
 {

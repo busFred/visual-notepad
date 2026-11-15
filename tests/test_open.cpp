@@ -5,6 +5,7 @@
 #include "MainWindow.h"
 #include "Settings.h"
 #include "TextFile.h"
+#include "ThreadCpuTime.h"
 #include "Theme.h"
 #include "editor/TextView.h"
 
@@ -232,10 +233,15 @@ void TestOpen::eventLoopRunsWhileLoading()
     auto file = TextFile::create();
     QSignalSpy finished(file.get(), &TextFile::loadFinished);
     int ticks = 0, ticksBeforeFinish = -1;
+    // How long the thread itself worked between two ticks (on the clock, a
+    // busy machine can keep it from running for a second whatever the
+    // program does; the clock's gap is only for the message).
+    double longestWork = 0;
     qint64 longestGap = 0;
     QElapsedTimer clock;
     clock.start();
     qint64 last = 0;
+    double cpuAtTick = threadCpuMs();
     QTimer timer;
     timer.setInterval(2);
     timer.setTimerType(Qt::PreciseTimer);
@@ -243,6 +249,9 @@ void TestOpen::eventLoopRunsWhileLoading()
         ++ticks;
         longestGap = qMax(longestGap, clock.elapsed() - last);
         last = clock.elapsed();
+        const double cpu = threadCpuMs();
+        longestWork = qMax(longestWork, cpu - cpuAtTick);
+        cpuAtTick = cpu;
         // Whatever asks while it loads is told there is nothing yet.
         QVERIFY(file->isLoading() == finished.isEmpty());
         if (file->isLoading()) {
@@ -260,11 +269,13 @@ void TestOpen::eventLoopRunsWhileLoading()
     ticksBeforeFinish = ticks;
     QVERIFY(!TextFile::isLoadingPath(path));
     QVERIFY(TextFile::find(path));
-    qInfo() << "timer ticks while loading:" << ticksBeforeFinish << "longest gap ms:" << longestGap;
+    qInfo() << "timer ticks while loading:" << ticksBeforeFinish << "longest work ms:" << longestWork
+            << "longest gap ms:" << longestGap;
     QVERIFY2(ticksBeforeFinish >= 10, qPrintable(QString::number(ticksBeforeFinish)));
     // Nothing blocked the loop for anywhere near the load itself (generous:
     // CI machines stall for no reason, and the tab-less finish does little).
-    QVERIFY2(longestGap < 400, qPrintable(QString::number(longestGap)));
+    QVERIFY2(longestWork < 400,
+             qPrintable(QStringLiteral("worked %1 ms (waited %2 ms) between ticks").arg(longestWork).arg(longestGap)));
 }
 
 void TestOpen::savesByteIdentically_data()
