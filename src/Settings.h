@@ -130,6 +130,10 @@ public:
 
     // For tests: use a separate file.
     void useFile(const QString &path);
+    // The file the settings are kept in, and writing it now (QSettings
+    // otherwise writes when it sees fit).
+    QString fileName() const;
+    void sync();
 
 Q_SIGNALS:
     // key is a settings key, or "shortcuts/<id>" for shortcut changes
@@ -143,6 +147,7 @@ private:
     int m_batchDepth = 0;
     QStringList m_batched;
     // Renames values written by older versions.
+    void makePrivate();
     void migrate();
     QSettings *m_store;
 };

@@ -1,6 +1,9 @@
 #include "Settings.h"
 
 #include <QHash>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QSettings>
 
 #include <algorithm>
@@ -86,6 +89,7 @@ Settings::Settings()
     : m_store(new QSettings(QSettings::IniFormat, QSettings::UserScope, QStringLiteral("visnotepad"),
                             QStringLiteral("settings"), this))
 {
+    makePrivate();
     migrate();
 }
 
@@ -93,7 +97,35 @@ void Settings::useFile(const QString &path)
 {
     delete m_store;
     m_store = new QSettings(path, QSettings::IniFormat, this);
+    makePrivate();
     migrate();
+}
+
+QString Settings::fileName() const
+{
+    return m_store->fileName();
+}
+
+void Settings::sync()
+{
+    m_store->sync();
+}
+
+// The settings hold the recent files and folders, as the session does:
+// readable by the user alone, like the session files (0600). The file is
+// made now if missing; QSettings writes it again through a temporary file
+// that takes over the permissions of the file it replaces.
+void Settings::makePrivate()
+{
+    const QString path = m_store->fileName();
+    if (path.isEmpty())
+        return;
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile file(path);
+    if (!file.exists() && !file.open(QIODevice::WriteOnly | QIODevice::Append))
+        return;
+    file.close();
+    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
 }
 
 void Settings::migrate()

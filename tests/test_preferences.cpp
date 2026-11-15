@@ -54,6 +54,7 @@ class TestPreferences : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
+    void settingsFileIsPrivate();
     void initTestCase();
     void init();
     void cleanup();
@@ -781,6 +782,31 @@ static void useTestSettings()
     vn::Settings::instance().useFile(dir.filePath(QStringLiteral("settings.ini")));
 }
 Q_COREAPP_STARTUP_FUNCTION(useTestSettings)
+
+// Recent files are in the settings: readable by the user alone, also after
+// QSettings has written the file again.
+void TestPreferences::settingsFileIsPrivate()
+{
+#ifdef Q_OS_UNIX
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("settings.ini"));
+    const QString before = Settings::instance().fileName();
+    Settings::instance().useFile(path);
+    const auto restore = qScopeGuard([&] { Settings::instance().useFile(before); });
+    const auto owner = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
+    const auto group = QFileDevice::ReadGroup | QFileDevice::WriteGroup | QFileDevice::ReadOther | QFileDevice::WriteOther;
+    QVERIFY(QFileInfo::exists(path));
+    QCOMPARE(QFile::permissions(path) & group, QFileDevice::Permissions());
+    Settings::instance().addRecentFile(QStringLiteral("/tmp/a.md"));
+    Settings::instance().setValue(key::zoom, 125);
+    Settings::instance().sync();
+    QVERIFY(QFile::permissions(path) & owner);
+    QCOMPARE(QFile::permissions(path) & group, QFileDevice::Permissions());
+#else
+    QSKIP("POSIX permissions");
+#endif
+}
 
 QTEST_MAIN(TestPreferences)
 #include "test_preferences.moc"
