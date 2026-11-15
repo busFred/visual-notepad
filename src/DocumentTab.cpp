@@ -414,6 +414,8 @@ DocumentTab::~DocumentTab()
 
 DocumentTab *DocumentTab::openAnotherView(QWidget *parent) const
 {
+    // The copy takes this tab's caret, view state and text.
+    const_cast<DocumentTab *>(this)->ensureLoaded();
     auto *tab = new DocumentTab(m_file, parent);
     tab->m_splitLocked = m_splitLocked;
     tab->m_visualLocked = m_visualLocked;
@@ -447,6 +449,27 @@ QList<DocumentTab *> DocumentTab::otherViews() const
     QList<DocumentTab *> views = m_file->views();
     views.removeAll(const_cast<DocumentTab *>(this));
     return views;
+}
+
+void DocumentTab::setDeferred(const QJsonObject &entry, std::function<void(DocumentTab *)> afterLoad)
+{
+    m_deferred = true;
+    m_sessionEntry = entry;
+    m_afterLoad = std::move(afterLoad);
+}
+
+bool DocumentTab::ensureLoaded()
+{
+    const bool ok = m_file->ensureLoaded();
+    if (m_deferred) {
+        m_deferred = false;
+        auto afterLoad = std::move(m_afterLoad);
+        m_afterLoad = nullptr;
+        m_sessionEntry = {};
+        if (afterLoad)
+            afterLoad(this);
+    }
+    return ok;
 }
 
 bool DocumentTab::load(const QString &path)

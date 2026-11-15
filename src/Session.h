@@ -11,6 +11,9 @@
 #include <QObject>
 #include <QString>
 
+#include <functional>
+#include <memory>
+
 class QSessionManager;
 class QTimer;
 
@@ -18,6 +21,8 @@ namespace vn {
 
 class DocumentTab;
 class MainWindow;
+class TextFile;
+struct BackupJob;
 
 class SessionManager : public QObject
 {
@@ -60,6 +65,11 @@ public:
 
     // Something a session stores changed; backs up again soon.
     void markDirty();
+    // True while the timer's backup is being written on its helper thread.
+    bool isBackingUp() const { return m_backup != nullptr; }
+    // Tests only: called on the helper thread before each backup file is
+    // written, so a test can hold a write in flight.
+    static void setBackupHook(std::function<void()> hook);
     // Writes the session now, e.g. after a tab was closed so its discarded
     // backup cannot be recovered. Within a SyncBatch, once when it ends.
     void sync();
@@ -76,17 +86,34 @@ public:
 
 private:
     SessionManager();
+    ~SessionManager() override;
     void onCommitData(QSessionManager &manager);
     // A forced close that cannot ask: back up and exit.
     void terminate();
     void backupIfDirty();
-    QString writeBackup(DocumentTab *tab);
+    // `writeBackups` false (while a write finished and the session file is
+    // updated, see completeBackup) keeps the backups as they are, old ones
+    // included; saveSession() writes them.
+    QList<DocumentTab *> writeSession(const QList<DocumentTab *> &skipBackup, bool writeBackups);
+    QString writeBackup(DocumentTab *tab, bool write);
+    // The backup `file` already has is of its current text and still there.
+    bool backupCurrent(const TextFile *file) const;
+    // Copies the text of the documents whose backup is out of date and hands
+    // the writing to a helper thread. False when none needs one.
+    bool startBackup();
+    // Waits for the helper (if any) and takes over what it wrote.
+    void finishBackup();
+    // The helper is done: updates the session file to point at its backups.
+    void completeBackup();
     void removeStaleBackups(const QJsonArray &windows);
     bool enabled() const;
 
     QList<MainWindow *> m_windows;
     QJsonArray m_carried;
     QTimer *m_timer = nullptr;
+    std::unique_ptr<BackupJob> m_backup;
+    // A backup out of date or missing was left to the next round.
+    bool m_backupStale = false;
     bool m_quitting = false;
     bool m_dirty = false;
     bool m_started = false;

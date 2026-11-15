@@ -37,6 +37,8 @@ struct OutlineHeading
     int level;
     int line;
     QString text;
+
+    bool operator==(const OutlineHeading &) const = default;
 };
 
 // The outline of a file's text as it was at TextFile::changeSerial() `serial`.
@@ -83,6 +85,10 @@ public:
         QJsonObject entry;
     };
     QList<PendingSessionTab> pendingSessionTabs() const;
+    // While a restore places its tabs, the tab that happens to be current in
+    // a group is not read (a deferred one, DocumentTab::setDeferred); when
+    // this is turned off again the current tab of each group is.
+    void setHoldLoads(bool hold);
 
     // Editor groups, in a grid of nested splitters like VS Code's editor
     // part. groups() lists them in reading order (GroupsOrder.GRID_APPEARANCE);
@@ -256,6 +262,7 @@ private:
     // This window only; also remembered for windows opened later.
     void setOutlineShown(bool on);
     void showOutline(TextFile *file, const OutlineSnapshot &snapshot);
+    void clearOutline();
     void startOutlineJob(DocumentTab *tab);
     void finishOutlineJob();
     // The headings of `tab`'s text: from the cache while the text is
@@ -276,6 +283,7 @@ private:
     // Most recently active first (GroupsOrder.MOST_RECENTLY_ACTIVE).
     QList<EditorGroup *> m_groupHistory;
     bool m_removingTab = false;
+    bool m_holdLoads = false;
 
     QDockWidget *m_outlineDock;
     QTreeWidget *m_outline;
@@ -283,6 +291,11 @@ private:
     // What the outline shows: the file and its TextFile::changeSerial().
     QPointer<TextFile> m_outlineFile;
     quint64 m_outlineSerial = 0;
+    // The headings the tree was built from, to leave it alone when the next
+    // outline has the same.
+    QList<OutlineHeading> m_outlineShown;
+    // A branch was collapsed since the tree was built.
+    bool m_outlineCollapsed = false;
     // The last outline of every file, so that switching tabs, or rebuilding
     // for text that did not change, parses nothing.
     // Entries of closed files are dropped when the next one is added.

@@ -415,6 +415,32 @@ std::shared_ptr<TextFile> TextFile::create()
     return std::shared_ptr<TextFile>(new TextFile);
 }
 
+std::shared_ptr<TextFile> TextFile::createDeferred(const QString &path)
+{
+    auto file = create();
+    file->m_deferred = true;
+    // Registered under its path, as a loaded file is, so opening it finds it.
+    file->setPath(path);
+    return file;
+}
+
+bool TextFile::ensureLoaded() const
+{
+    return !m_deferred || const_cast<TextFile *>(this)->loadDeferred();
+}
+
+bool TextFile::loadDeferred()
+{
+    m_deferred = false;
+    const QString path = m_path;
+    if (load(path))
+        return true;
+    // Gone or unreadable since it was listed: the file stays empty, and
+    // shows as deleted when it is.
+    setOrphaned(!QFileInfo::exists(path));
+    return false;
+}
+
 std::shared_ptr<TextFile> TextFile::find(const QString &path)
 {
     TextFile *file = TextFileRegistry::instance().find(path);
@@ -532,6 +558,7 @@ QString TextFile::notRegularFileError()
 
 bool TextFile::load(const QString &path)
 {
+    m_deferred = false;
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
         m_error = file.errorString();
@@ -550,6 +577,7 @@ bool TextFile::load(const QString &path)
 
 bool TextFile::reopenWithEncoding(const Encoding &encoding)
 {
+    ensureLoaded();
     if (m_path.isEmpty() || isModified()) {
         m_error = tr("Only a saved file without changes can be reopened.");
         return false;
@@ -678,6 +706,7 @@ void TextFile::finishLoad()
 
 void TextFile::loadBackup(const QString &path, const QString &content, const Encoding &encoding, LineEnding lineEnding)
 {
+    m_deferred = false;
     m_encoding = encoding;
     m_lineEnding = lineEnding;
     setPath(path);
@@ -762,6 +791,7 @@ void TextFile::setDiskBaseline(const DiskState &state)
 
 bool TextFile::save(const QString &path, bool overwrite)
 {
+    ensureLoaded();
     m_saveConflict = false;
     QString content = text();
     if (m_lineEnding == LineEnding::CRLF)
@@ -821,6 +851,7 @@ bool TextFile::save(const QString &path, bool overwrite)
 
 bool TextFile::revert()
 {
+    ensureLoaded();
     if (m_path.isEmpty()) {
         m_error = tr("An untitled file has nothing to revert to.");
         return false;
@@ -942,6 +973,7 @@ void TextFile::setChangedOnDisk(bool changed)
 
 void TextFile::setLineEnding(LineEnding lineEnding)
 {
+    ensureLoaded();
     if (m_lineEnding == lineEnding)
         return;
     m_lineEnding = lineEnding;
@@ -951,6 +983,7 @@ void TextFile::setLineEnding(LineEnding lineEnding)
 
 void TextFile::setEncoding(const Encoding &encoding)
 {
+    ensureLoaded();
     if (m_encoding == encoding)
         return;
     m_encoding = encoding;
@@ -991,12 +1024,14 @@ void TextFile::refreshIndentation()
 
 void TextFile::setIndentation(const indentation::Settings &indentation)
 {
+    ensureLoaded();
     m_indentationOverridden = true;
     setEffectiveIndentation({std::max(1, indentation.tabSize), indentation.insertSpaces});
 }
 
 void TextFile::detectIndentation()
 {
+    ensureLoaded();
     m_indentationOverridden = false;
     const indentation::Settings defaults = defaultIndentation();
     setEffectiveIndentation(indentation::guess(m_doc, defaults.tabSize, defaults.insertSpaces));
@@ -1004,6 +1039,7 @@ void TextFile::detectIndentation()
 
 void TextFile::convertIndentation(bool toSpaces)
 {
+    ensureLoaded();
     indentation::convert(m_doc, m_indentation.tabSize, toSpaces);
     setIndentation({m_indentation.tabSize, toSpaces});
 }
@@ -1016,6 +1052,7 @@ QString TextFile::definitionName() const
 
 void TextFile::setLanguage(const QString &definitionName)
 {
+    ensureLoaded();
     m_languageOverridden = true;
     m_languageOverride = definitionName;
     updateDefinition();
@@ -1044,12 +1081,18 @@ QString TextFile::languageName() const
 
 QString TextFile::text() const
 {
+    QString text = rawText();
+    text.replace(QChar::ParagraphSeparator, u'\n');
+    return text;
+}
+
+QString TextFile::rawText() const
+{
+    ensureLoaded();
     if (isLoading())
         return {};
     // toPlainText() would turn non-breaking spaces into spaces.
-    QString text = m_doc->toRawText();
-    text.replace(QChar::ParagraphSeparator, u'\n');
-    return text;
+    return m_doc->toRawText();
 }
 
 MarkdownModel *TextFile::markdownModel()

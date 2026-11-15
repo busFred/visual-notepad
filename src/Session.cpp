@@ -21,12 +21,14 @@
 #include <QSessionManager>
 #include <QSet>
 #include <QStandardPaths>
+#include <QThread>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTimer>
 #include <QUuid>
 
 #include <algorithm>
+#include <utility>
 
 #ifdef Q_OS_UNIX
 #include <QSocketNotifier>
@@ -141,6 +143,68 @@ void restoreView(DocumentTab *tab, const QJsonObject &entry)
     });
 }
 
+} // namespace
+
+// The backup files one round writes, on a helper thread. The text of each
+// document was copied on the window thread; the helper encodes and writes it
+// and the window thread takes the result over once the helper is done.
+struct BackupItem
+{
+    QPointer<TextFile> file;
+    QString name;
+    // TextFile::changeSerial() of the copied text.
+    quint64 serial = 0;
+    QString text;
+    bool written = false;
+};
+
+struct BackupJob
+{
+    ~BackupJob()
+    {
+        if (thread) {
+            thread->wait();
+            delete thread;
+        }
+    }
+
+    quint64 id = 0;
+    QString dataDir;
+    QString backupsDir;
+    std::function<void()> hook;
+    QList<BackupItem> items;
+    QThread *thread = nullptr;
+};
+
+namespace {
+
+std::function<void()> &backupHook()
+{
+    static std::function<void()> hook;
+    return hook;
+}
+
+// Only values and files: runs on the helper thread. Each file is written as
+// writeBackup() always did: in the private folders, to a temporary file
+// (0600) that replaces the backup in one step once complete.
+void runBackupJob(BackupJob &job)
+{
+    if (!makePrivateDir(job.dataDir) || !makePrivateDir(job.backupsDir))
+        return;
+    for (BackupItem &item : job.items) {
+        if (job.hook)
+            job.hook();
+        QSaveFile file(job.backupsDir + u'/' + item.name);
+        if (!file.open(QIODevice::WriteOnly))
+            continue;
+        makePrivate(file);
+        // As TextFile::text() would give it.
+        item.text.replace(QChar::ParagraphSeparator, u'\n');
+        const QByteArray bytes = std::exchange(item.text, QString()).toUtf8();
+        item.written = file.write(bytes) == bytes.size() && file.commit();
+    }
+}
+
 #ifdef Q_OS_UNIX
 int signalPipe[2] = {-1, -1};
 
@@ -154,6 +218,9 @@ void onSignal(int)
 } // namespace
 
 SessionManager::SessionManager() = default;
+
+// Waits for a write still running (a static is destroyed after main).
+SessionManager::~SessionManager() = default;
 
 SessionManager &SessionManager::instance()
 {
@@ -231,6 +298,11 @@ void SessionManager::start()
 #endif
 }
 
+void SessionManager::setBackupHook(std::function<void()> hook)
+{
+    backupHook() = std::move(hook);
+}
+
 void SessionManager::markDirty()
 {
     m_dirty = true;
@@ -279,7 +351,12 @@ void SessionManager::backupIfDirty()
 {
     if (!m_dirty || m_quitting || m_windows.isEmpty() || !enabled())
         return;
-    saveSession();
+    // A write is running. When it is done the session file is written (see
+    // completeBackup) and what changed meanwhile is left to the next round.
+    if (m_backup)
+        return;
+    if (!startBackup())
+        saveSession();
 }
 
 void SessionManager::onCommitData(QSessionManager &)
@@ -293,7 +370,93 @@ void SessionManager::onCommitData(QSessionManager &)
         m_quitting = true;
 }
 
-QString SessionManager::writeBackup(DocumentTab *tab)
+bool SessionManager::backupCurrent(const TextFile *file) const
+{
+    const QString name = file->backupName();
+    return !name.isEmpty() && file->backupSerial() == file->changeSerial() && QFileInfo::exists(backupsDir() + u'/' + name);
+}
+
+bool SessionManager::startBackup()
+{
+    if (!hotExit())
+        return false;
+    auto job = std::make_unique<BackupJob>();
+    QSet<const TextFile *> seen;
+    for (MainWindow *window : std::as_const(m_windows)) {
+        for (DocumentTab *tab : window->tabs()) {
+            const bool untitled = tab->path().isEmpty();
+            const bool unsaved = tab->isModified() || (untitled && !tab->document()->isEmpty());
+            TextFile *file = tab->file();
+            // One backup per document, however many tabs show it.
+            if (!unsaved || seen.contains(file))
+                continue;
+            seen.insert(file);
+            if (backupCurrent(file))
+                continue;
+            BackupItem item;
+            item.file = file;
+            item.name = file->backupName();
+            if (item.name.isEmpty())
+                item.name = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            item.serial = file->changeSerial();
+            // The copy is all the window thread does: the newlines, encoding
+            // and writing are the helper's.
+            item.text = file->rawText();
+            job->items.append(std::move(item));
+        }
+    }
+    if (job->items.isEmpty())
+        return false;
+
+    static quint64 lastId = 0;
+    job->id = ++lastId;
+    job->dataDir = dataDir();
+    job->backupsDir = backupsDir();
+    job->hook = backupHook();
+    BackupJob *raw = job.get();
+    job->thread = QThread::create([raw] { runBackupJob(*raw); });
+    connect(
+        job->thread, &QThread::finished, this,
+        [this, id = job->id] {
+            if (m_backup && m_backup->id == id)
+                completeBackup();
+        },
+        Qt::QueuedConnection);
+    m_backup = std::move(job);
+    m_backup->thread->start();
+    return true;
+}
+
+void SessionManager::finishBackup()
+{
+    if (!m_backup)
+        return;
+    const std::unique_ptr<BackupJob> job = std::move(m_backup);
+    job->thread->wait();
+    for (const BackupItem &item : std::as_const(job->items)) {
+        // A document closed meanwhile: its file is not listed in the session
+        // and removeStaleBackups() takes it away.
+        if (!item.written || !item.file)
+            continue;
+        item.file->setBackupName(item.name);
+        item.file->setBackupSerial(item.serial);
+    }
+}
+
+void SessionManager::completeBackup()
+{
+    finishBackup();
+    if (m_quitting || m_windows.isEmpty() || !enabled())
+        return;
+    // The backups the helper wrote are complete; the session file may now
+    // point at them. Text changed meanwhile is written next round, and until
+    // then the session keeps the older backup of it.
+    writeSession({}, false);
+    if (m_backupStale && m_timer && !m_timer->isActive())
+        m_timer->start();
+}
+
+QString SessionManager::writeBackup(DocumentTab *tab, bool write)
 {
     // One backup per document, however many tabs show it.
     TextFile *document = tab->file();
@@ -303,8 +466,13 @@ QString SessionManager::writeBackup(DocumentTab *tab)
     // and fsync the whole text again. It may have been removed meanwhile as
     // stale, while the document was unmodified.
     const quint64 serial = document->changeSerial();
-    if (!name.isEmpty() && document->backupSerial() == serial && QFileInfo::exists(backupsDir() + u'/' + name))
+    if (backupCurrent(document))
         return name;
+    if (!write) {
+        // Not written here: the older backup, a complete one, still stands.
+        m_backupStale = true;
+        return !name.isEmpty() && QFileInfo::exists(backupsDir() + u'/' + name) ? name : QString();
+    }
     if (name.isEmpty())
         name = QUuid::createUuid().toString(QUuid::WithoutBraces);
     if (!makePrivateDir(dataDir()) || !makePrivateDir(backupsDir()))
@@ -323,9 +491,18 @@ QString SessionManager::writeBackup(DocumentTab *tab)
 
 QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &skipBackup)
 {
+    // A write still running would put its file back after removeStaleBackups()
+    // took it away, and an older text over a newer one: let it finish first.
+    finishBackup();
+    return writeSession(skipBackup, true);
+}
+
+QList<DocumentTab *> SessionManager::writeSession(const QList<DocumentTab *> &skipBackup, bool writeBackups)
+{
     if (!enabled())
         return {};
 
+    m_backupStale = false;
     QList<DocumentTab *> failed;
     QJsonArray windows;
     // Tabs sharing a document share its backup, written once.
@@ -337,12 +514,24 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
         QHash<DocumentTab *, int> ids;
         const QList<DocumentTab *> windowTabs = window->tabs();
         for (DocumentTab *tab : windowTabs) {
+            // (Unless another tab on its file has changed it: then it is
+            // backed up with that one.)
+            if (tab->isDeferred() && !tab->isModified()) {
+                // Not read since the restore: it has no caret or scroll
+                // position of its own, and nothing to back up. What the
+                // session stored of it stays, as it was.
+                if (tab == windowTabs.value(window->currentTabIndex()))
+                    current = int(tabs.size());
+                ids.insert(tab, int(tabs.size()));
+                tabs.append(tab->sessionEntry());
+                continue;
+            }
             const bool untitled = tab->path().isEmpty();
             const bool unsaved = tab->isModified() || (untitled && !tab->document()->isEmpty());
             QString backup;
             if (unsaved && hotExit() && !skipBackup.contains(tab)) {
                 const auto it = written.constFind(tab->file());
-                backup = it != written.constEnd() ? *it : writeBackup(tab);
+                backup = it != written.constEnd() ? *it : writeBackup(tab, writeBackups);
                 if (backup.isEmpty())
                     failed.append(tab);
                 else
@@ -423,7 +612,7 @@ QList<DocumentTab *> SessionManager::saveSession(const QList<DocumentTab *> &ski
         return failed;
     }
     removeStaleBackups(windows);
-    m_dirty = !failed.isEmpty();
+    m_dirty = !failed.isEmpty() || m_backupStale;
     return failed;
 }
 
@@ -508,6 +697,9 @@ bool SessionManager::restore()
         const QJsonObject windowObject = windowValue.toObject();
         auto *window = new MainWindow;
         window->setAttribute(Qt::WA_DeleteOnClose);
+        // Tabs without their text yet are read when they show, not as they
+        // are placed (the first of each group is current for a moment).
+        window->setHoldLoads(true);
 
         // Tabs by their index in "tabs", placed in the grid once all exist.
         QMap<int, DocumentTab *> restored;
@@ -527,6 +719,8 @@ bool SessionManager::restore()
             std::shared_ptr<TextFile> shared = !backupName.isEmpty() ? restoredBackups.value(backupName) : nullptr;
             if (!shared && !path.isEmpty() && (!backupName.isEmpty() || wholeSession))
                 shared = TextFile::find(path);
+            // Which file this tab is the first of, if its reading is put off.
+            bool createdHere = false;
             if (!shared && backupName.isEmpty() && wholeSession && !path.isEmpty()) {
                 // A big file would hold up the window (and every other file
                 // of the session) while it is read and set up: it loads off
@@ -547,7 +741,28 @@ bool SessionManager::restore()
                     continue;
                 }
             }
+            // A file of the session that is there: not read until its tab shows
+            // (the current tab of each group does, before the window). The
+            // rest of 60 tabs would cost seconds of reading and colouring.
+            if (!shared && backupName.isEmpty() && wholeSession && !path.isEmpty()) {
+                const QFileInfo info(path);
+                if (info.isFile() && info.isReadable()) {
+                    shared = TextFile::createDeferred(path);
+                    createdHere = true;
+                }
+            }
             DocumentTab *tab = nullptr;
+            if (shared && shared->isDeferred()) {
+                tab = new DocumentTab(shared);
+                tab->setDeferred(entry, [entry, createdHere](DocumentTab *loaded) {
+                    if (createdHere)
+                        applyFileSettings(loaded, entry);
+                    loaded->setViewMode(modeFromString(entry.value(QStringLiteral("mode")).toString()));
+                    restoreView(loaded, entry);
+                });
+                restored.insert(id, tab);
+                continue;
+            }
             if (shared) {
                 tab = new DocumentTab(shared);
             } else {
@@ -590,8 +805,10 @@ bool SessionManager::restore()
         const QJsonObject grid = windowObject.value(QStringLiteral("grid")).toObject();
         window->restoreGrid(grid, restored);
 
-        for (DocumentTab *tab : std::as_const(restored))
-            restoreView(tab, entries.value(tab));
+        for (DocumentTab *tab : std::as_const(restored)) {
+            if (!tab->isDeferred())
+                restoreView(tab, entries.value(tab));
+        }
 
         if (window->tabCount() == 0 && !window->isOpening()) {
             delete window;
@@ -602,6 +819,8 @@ bool SessionManager::restore()
             if (DocumentTab *current = restored.value(windowObject.value(QStringLiteral("current")).toInt()))
                 window->setCurrentTabIndex(int(window->tabs().indexOf(current)));
         }
+        // The current tab of each group is read now, before the window shows.
+        window->setHoldLoads(false);
         const QByteArray geometry = QByteArray::fromBase64(windowObject.value(QStringLiteral("geometry")).toString().toLatin1());
         if (!geometry.isEmpty())
             window->restoreGeometry(geometry);
