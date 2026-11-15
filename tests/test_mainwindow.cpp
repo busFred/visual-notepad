@@ -121,6 +121,7 @@ private Q_SLOTS:
     void textFileHidesOutline();
     void outlineMatchesCore();
     void outlineIsKeptPerTab();
+    void unchangedHeadingsLeaveTheOutlineAlone();
     void outlineCloseButtonHides();
     void outlineToggleIsPerWindow();
     void largeOutlineIsParsedOffThread();
@@ -335,6 +336,48 @@ void TestMainWindow::outlineIsKeptPerTab()
     QVERIFY(window.closeTabs(window.currentTabIndex(), vn::MainWindow::CloseScope::This));
     QVERIFY(window.openFile(write(QStringLiteral("keep-c.md"), "# Gamma\n")));
     QCOMPARE(outline->topLevelItem(0)->text(0), QStringLiteral("Gamma"));
+}
+
+// An edit that leaves the headings as they are does not rebuild the tree (its
+// items stay), unless the user's selection or a collapsed branch is there:
+// then the rebuild clears it, as it always did.
+void TestMainWindow::unchangedHeadingsLeaveTheOutlineAlone()
+{
+    vn::MainWindow window;
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *outline = window.findChild<QTreeWidget *>();
+    QVERIFY(window.openFile(write(QStringLiteral("same.md"), "# A\n\n## B\n\ntext\n\n## C\n")));
+    vn::DocumentTab *tab = window.currentTab();
+    const QTreeWidgetItem *first = outline->topLevelItem(0);
+    QVERIFY(first);
+    const int parses = window.outlineParses();
+
+    QTextCursor end(tab->document());
+    end.movePosition(QTextCursor::End);
+    end.insertText(QStringLiteral("more text\n"));
+    QTRY_COMPARE(window.outlineParses(), parses + 1);
+    QCOMPARE(outline->topLevelItem(0), first); // not rebuilt
+    QCOMPARE(dumpOutline(outline), referenceOutline(tab->text()));
+
+    // A changed heading is rebuilt.
+    end.insertText(QStringLiteral("## D\n"));
+    QTRY_COMPARE(outline->topLevelItem(0)->child(0)->parent()->childCount(), 3);
+    QVERIFY(outline->topLevelItem(0) != first);
+    QCOMPARE(dumpOutline(outline), referenceOutline(tab->text()));
+
+    // A selected item, or a collapsed branch, is gone after the next one.
+    outline->setCurrentItem(outline->topLevelItem(0)->child(1));
+    QVERIFY(outline->currentItem());
+    end.insertText(QStringLiteral("typing\n"));
+    QTRY_COMPARE(window.outlineParses(), parses + 3);
+    QVERIFY(!outline->currentItem());
+    QVERIFY(outline->topLevelItem(0)->isExpanded());
+    outline->topLevelItem(0)->setExpanded(false);
+    end.insertText(QStringLiteral("typing\n"));
+    QTRY_COMPARE(window.outlineParses(), parses + 4);
+    QVERIFY(outline->topLevelItem(0)->isExpanded());
+    QCOMPARE(dumpOutline(outline), referenceOutline(tab->text()));
 }
 
 // The close button in the outline's title hides it, like View > Outline.

@@ -37,6 +37,8 @@ struct OutlineHeading
     int level;
     int line;
     QString text;
+
+    bool operator==(const OutlineHeading &) const = default;
 };
 
 // The outline of a file's text as it was at TextFile::changeSerial() `serial`.
@@ -256,6 +258,7 @@ private:
     // This window only; also remembered for windows opened later.
     void setOutlineShown(bool on);
     void showOutline(TextFile *file, const OutlineSnapshot &snapshot);
+    void clearOutline();
     void startOutlineJob(DocumentTab *tab);
     void finishOutlineJob();
     // The headings of `tab`'s text: from the cache while the text is
@@ -283,6 +286,11 @@ private:
     // What the outline shows: the file and its TextFile::changeSerial().
     QPointer<TextFile> m_outlineFile;
     quint64 m_outlineSerial = 0;
+    // The headings the tree was built from, to leave it alone when the next
+    // outline has the same.
+    QList<OutlineHeading> m_outlineShown;
+    // A branch was collapsed since the tree was built.
+    bool m_outlineCollapsed = false;
     // The last outline of every file, so that switching tabs, or rebuilding
     // for text that did not change, parses nothing.
     // Entries of closed files are dropped when the next one is added.

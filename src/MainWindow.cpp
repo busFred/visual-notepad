@@ -39,6 +39,7 @@
 #include <QMimeDatabase>
 #include <QPushButton>
 #include <QScopedValueRollback>
+#include <QScrollBar>
 #include <QSet>
 #include <QUrl>
 #include <QFileDialog>
@@ -774,6 +775,7 @@ void MainWindow::createOutline()
             tab->goToLine(item->data(0, outlineLineRole).toInt());
     });
     connect(m_outline, &QTreeWidget::itemClicked, m_outline, &QTreeWidget::itemActivated);
+    connect(m_outline, &QTreeWidget::itemCollapsed, this, [this] { m_outlineCollapsed = true; });
 
     auto *title = new QWidget(this);
     title->setObjectName(QStringLiteral("OutlineTitle"));
@@ -2526,8 +2528,7 @@ void MainWindow::updateOutline()
     DocumentTab *tab = currentTab();
     TextFile *file = tab && tab->isMarkdown() ? tab->file() : nullptr;
     if (!file) {
-        m_outline->clear();
-        m_outlineFile = nullptr;
+        clearOutline();
         return;
     }
     // Hidden: built when shown (updateOutlineVisibility). Unchanged, as
@@ -2541,10 +2542,8 @@ void MainWindow::updateOutline()
     if (file->document()->characterCount() > outlineThreadChars) {
         // The old outline stays while the same file is parsed again; another
         // file's does not.
-        if (m_outlineFile != file) {
-            m_outline->clear();
-            m_outlineFile = nullptr;
-        }
+        if (m_outlineFile != file)
+            clearOutline();
         startOutlineJob(tab);
         return;
     }
@@ -2587,7 +2586,18 @@ void MainWindow::showOutline(TextFile *file, const OutlineSnapshot &snapshot)
 {
     m_outlineFile = file;
     m_outlineSerial = snapshot.serial;
+    // Same headings, and the tree as a rebuild leaves it (every branch open,
+    // nothing current or selected): it already is what a rebuild would make,
+    // but for the scroll position, which a rebuild puts at the top.
+    if (snapshot.headings == m_outlineShown && !m_outlineCollapsed && !m_outline->currentItem()
+        && m_outline->selectedItems().isEmpty()) {
+        m_outline->verticalScrollBar()->setValue(0);
+        m_outline->horizontalScrollBar()->setValue(0);
+        return;
+    }
     m_outline->clear();
+    m_outlineShown = snapshot.headings;
+    m_outlineCollapsed = false;
 
     // Nest each heading under the nearest previous heading of lower level.
     QList<QPair<int, QTreeWidgetItem *>> stack;
@@ -2602,6 +2612,14 @@ void MainWindow::showOutline(TextFile *file, const OutlineSnapshot &snapshot)
     m_outline->expandAll();
 }
 
+void MainWindow::clearOutline()
+{
+    m_outline->clear();
+    m_outlineShown.clear();
+    m_outlineCollapsed = false;
+    m_outlineFile = nullptr;
+}
+
 void MainWindow::startOutlineJob(DocumentTab *tab)
 {
     if (m_outlineJobRunning) {
@@ -2612,12 +2630,14 @@ void MainWindow::startOutlineJob(DocumentTab *tab)
     m_outlineJobSkipped = false;
     m_outlineJobFile = tab->file();
     ++m_outlineParses;
-    // The text is read here; QPromise is not copyable, the pool function must be.
+    // The text is copied here, no more; QPromise is not copyable, the pool
+    // function must be.
     auto promise = std::make_shared<QPromise<OutlineSnapshot>>();
     promise->start();
     m_outlineWatcher->setFuture(promise->future());
     QThreadPool::globalInstance()->start(
-        [promise, serial = tab->file()->changeSerial(), text = tab->text()] {
+        [promise, serial = tab->file()->changeSerial(), text = tab->file()->rawText()]() mutable {
+            text.replace(QChar::ParagraphSeparator, u'\n');
             promise->addResult(OutlineSnapshot{serial, parseHeadings(text)});
             promise->finish();
         });
