@@ -17,6 +17,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
+#ifdef Q_OS_WIN
+#include <QProcess>
+#include <QTcpServer>
+#include <QTcpSocket>
+#endif
 
 using namespace vn;
 
@@ -463,10 +468,112 @@ void TestMath::lockedDownWorkerReadsNoUserFiles()
         qWarning("Landlock is not available on this kernel: only the socket ban was checked");
     QCOMPARE(code & ~16, 0);
     QVERIFY(!QFile::exists(QFile::decodeName(written)));
+#elif defined(Q_OS_WIN)
+    // This program again, started as the worker is (lockDownCheck below
+    // does the checking): no fork() here.
+    QTemporaryDir home(QDir::homePath() + QStringLiteral("/.vn-lock-test-XXXXXX"));
+    QVERIFY(home.isValid());
+    const QString secret = home.filePath(QStringLiteral("secret.txt"));
+    {
+        QFile file(secret);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("secret");
+    }
+    const QString written = home.filePath(QStringLiteral("new.txt"));
+    const QString fonts = qEnvironmentVariable("SystemRoot") + QStringLiteral("/Fonts/");
+    const QStringList font = QDir(fonts).entryList({QStringLiteral("*.ttf")}, QDir::Files);
+    QVERIFY(!font.isEmpty());
+    QTcpServer server;
+    QVERIFY(server.listen(QHostAddress::LocalHost));
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(QStringLiteral("VN_LOCK_CHECK_SECRET"), QDir::toNativeSeparators(secret));
+    environment.insert(QStringLiteral("VN_LOCK_CHECK_WRITTEN"), QDir::toNativeSeparators(written));
+    environment.insert(QStringLiteral("VN_LOCK_CHECK_FONT"), QDir::toNativeSeparators(fonts + font.first()));
+    environment.insert(QStringLiteral("VN_LOCK_CHECK_PORT"), QString::number(server.serverPort()));
+    QProcess child;
+    child.setProgram(QCoreApplication::applicationFilePath());
+    child.setProcessEnvironment(environment);
+    math::confineWorkerProcess(child);
+    child.start();
+    QVERIFY2(child.waitForFinished(60'000), qPrintable(child.errorString()));
+    const uint code = uint(child.exitCode());
+    QVERIFY2(child.exitStatus() == QProcess::NormalExit, qPrintable(QString::number(code, 16)));
+    QCOMPARE(code, 0u);
+    QVERIFY(!QFile::exists(written));
 #else
-    QSKIP("The lock down is Linux only for now");
+    QSKIP("No lock down on this system");
 #endif
 }
+
+#ifdef Q_OS_WIN
+// Here, not at the top: Windows' headers make "small", a name above, a macro.
+#include <qt_windows.h>
+
+#include <sddl.h>
+#include <userenv.h>
+
+// The child of lockedDownWorkerReadsNoUserFiles: locks itself down as the
+// worker does and ends with what it could still do, a bit for each (0:
+// nothing it should not).
+static void lockDownCheck()
+{
+    const QString secret = qEnvironmentVariable("VN_LOCK_CHECK_SECRET");
+    if (secret.isEmpty())
+        return;
+    const int locks = math::lockDownWorker();
+    int code = 0;
+    if ((locks & 15) != 15)
+        code |= 1 | (locks << 8); // a lock did not take (and which did)
+    const HANDLE read = CreateFileW(reinterpret_cast<const wchar_t *>(secret.utf16()), GENERIC_READ, FILE_SHARE_READ,
+                                    nullptr, OPEN_EXISTING, 0, nullptr);
+    if (read != INVALID_HANDLE_VALUE || GetLastError() != ERROR_ACCESS_DENIED)
+        code |= 2; // a user file could be read
+    // Nothing written: not in the user's folders, the temporary folder, or
+    // the folder (with Temp in it) an AppContainer has of its own.
+    QStringList written = {qEnvironmentVariable("VN_LOCK_CHECK_WRITTEN"),
+                           QDir::tempPath() + QStringLiteral("/vn-lock-test.txt")};
+    HANDLE token = nullptr;
+    alignas(TOKEN_APPCONTAINER_INFORMATION)
+        BYTE container[sizeof(TOKEN_APPCONTAINER_INFORMATION) + SECURITY_MAX_SID_SIZE];
+    DWORD got = 0;
+    LPWSTR sid = nullptr;
+    PWSTR own = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)
+        && GetTokenInformation(token, TokenAppContainerSid, container, sizeof container, &got)
+        && reinterpret_cast<TOKEN_APPCONTAINER_INFORMATION *>(container)->TokenAppContainer
+        && ConvertSidToStringSidW(reinterpret_cast<TOKEN_APPCONTAINER_INFORMATION *>(container)->TokenAppContainer, &sid)
+        && SUCCEEDED(GetAppContainerFolderPath(sid, &own))) {
+        written << QString::fromWCharArray(own) + QStringLiteral("/vn-lock-test.txt")
+                << QString::fromWCharArray(own) + QStringLiteral("/Temp/vn-lock-test.txt");
+    }
+    for (const QString &file : std::as_const(written)) {
+        const QString name = QDir::toNativeSeparators(file);
+        if (CreateFileW(reinterpret_cast<const wchar_t *>(name.utf16()), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                        FILE_FLAG_DELETE_ON_CLOSE, nullptr)
+            != INVALID_HANDLE_VALUE)
+            code |= 4; // a file could be written
+    }
+    const QString font = qEnvironmentVariable("VN_LOCK_CHECK_FONT");
+    if (CreateFileW(reinterpret_cast<const wchar_t *>(font.utf16()), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                    OPEN_EXISTING, 0, nullptr)
+        == INVALID_HANDLE_VALUE)
+        code |= 8; // fonts could not be read
+    QTcpSocket socket;
+    socket.connectToHost(QHostAddress::LocalHost, quint16(qEnvironmentVariableIntValue("VN_LOCK_CHECK_PORT")));
+    if (socket.waitForConnected(3000))
+        code |= 32; // a connection was made
+    wchar_t command[] = L"cmd.exe /c exit 0";
+    STARTUPINFOW startup = {sizeof startup};
+    PROCESS_INFORMATION started = {};
+    if (CreateProcessW(nullptr, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup,
+                       &started)) {
+        TerminateProcess(started.hProcess, 0);
+        code |= 64; // a process could be started
+    }
+    TerminateProcess(GetCurrentProcess(), UINT(code));
+}
+Q_COREAPP_STARTUP_FUNCTION(lockDownCheck)
+#endif
 
 // The worker locks itself down after MicroTeX starts; fonts MicroTeX or Qt
 // load only when a formula first needs them must still be readable.
@@ -479,6 +586,9 @@ void TestMath::lockedDownWorkerStillDrawsEveryFont()
         QVERIFY(!math::render(tex, displayStyle()).isNull());
         QVERIFY2(!math::lastRenderFellBack(), qPrintable(tex));
     }
+#ifdef Q_OS_WIN
+    QVERIFY(math::workerContained()); // Not a worker that could do more.
+#endif
 }
 
 QTEST_MAIN(TestMath)

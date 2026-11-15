@@ -134,8 +134,9 @@ target_link_libraries(vn_app PUBLIC
 )
 
 if(WIN32)
-    # SHOpenFolderAndSelectItems and friends (Reveal in File Explorer).
-    target_link_libraries(vn_app PRIVATE shell32 ole32)
+    # SHOpenFolderAndSelectItems and friends (Reveal in File Explorer);
+    # the math worker's AppContainer (DeriveAppContainerSidFromAppContainerName).
+    target_link_libraries(vn_app PRIVATE shell32 ole32 userenv)
 endif()
 
 if(ICU_FOUND)

@@ -58,6 +58,10 @@ set_tests_properties(remote_images PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_
 
 qt_add_executable(test_math test_math.cpp)
 target_link_libraries(test_math PRIVATE vn_app Qt6::Test)
+if(WIN32)
+    # The lock-down check finds the folder of its AppContainer.
+    target_link_libraries(test_math PRIVATE userenv)
+endif()
 add_test(NAME math COMMAND test_math)
 set_tests_properties(math PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
 

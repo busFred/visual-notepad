@@ -22,6 +22,7 @@
 #include <memory>
 
 class QPainter;
+class QProcess;
 
 namespace vn::math {
 
@@ -97,13 +98,27 @@ void setWorkerProgram(const QString &program);
 
 // Takes the user's files, writing and the network from the calling
 // process, for good (the worker does this once MicroTeX has started).
-// Returns which locks took: 1 the file system (Linux Landlock), 2 sockets
-// (seccomp); 0 on systems without them. For tests and the worker.
+// Returns which locks hold: 1 the file system (Linux Landlock; on Windows
+// the AppContainer of confineWorkerProcess(): only fonts, Windows' and the
+// app's own files can be read), 2 sockets (seccomp) or, on Windows, the
+// network (that AppContainer, which is given none), 4 writing (Windows:
+// low integrity, also outside the AppContainer), 8 new processes (Windows:
+// a job of one process); 0 on systems without them. For tests and the
+// worker.
 int lockDownWorker();
 
-// Whether the last layout() had to show source text, and how many times a
-// worker was started; for tests.
+// Has `process` (the worker, or a test standing in for it) start the way
+// the worker does: on Windows in an AppContainer that can read nothing of
+// the user's, reach no network and start no process, which is let read
+// the program, the libraries this process has loaded and MicroTeX's
+// resources. Nothing elsewhere. For tests and the worker.
+void confineWorkerProcess(QProcess &process);
+
+// Whether the last layout() had to show source text, how many times a
+// worker was started, and whether the last one started in its
+// AppContainer (Windows); for tests.
 bool lastRenderFellBack();
 int workerStarts();
+bool workerContained();
 
 } // namespace vn::math
