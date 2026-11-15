@@ -863,14 +863,17 @@ void TestTextView::otherViewsCaretsMoveAsLiveCursors()
     m_view->setCommentMarker(QStringLiteral("//"));
     auto *other = new TextView(m_doc);
     other->resize(300, 200);
-    QStringList lines;
-    for (int i = 0; i < 40; ++i) {
-        QString line = QString(random.bounded(0, 3) * 2, u' ');
-        for (int w = random.bounded(0, 5); w > 0; --w)
-            line += QStringLiteral("word%1 ").arg(random.bounded(100));
-        lines << line;
-    }
-    setText(lines.join(u'\n'));
+    const auto makeText = [&](int count) {
+        QStringList lines;
+        for (int i = 0; i < count; ++i) {
+            QString line = QString(random.bounded(0, 3) * 2, u' ');
+            for (int w = random.bounded(0, 5); w > 0; --w)
+                line += QStringLiteral("word%1 ").arg(random.bounded(100));
+            lines << line;
+        }
+        setText(lines.join(u'\n'));
+    };
+    makeText(40);
     const std::vector<std::function<void()>> edits = {
         [this] { QTest::keyClicks(m_view, QStringLiteral("ab")); },
         [this] { QTest::keyClick(m_view, Qt::Key_Backspace); },
@@ -915,7 +918,13 @@ void TestTextView::otherViewsCaretsMoveAsLiveCursors()
             edit.endEditBlock();
         },
     };
-    for (int round = 0; round < 160; ++round) {
+    // A few carets there (undo puts cursors in for them), then hundreds
+    // (undo tells the views the changes it undoes, as they were made).
+    for (int round = 0; round < 320; ++round) {
+        const bool many = round >= 160;
+        // (The edits remove more than they add.)
+        if (m_doc->characterCount() < (many ? 4000 : 300))
+            makeText(many ? 400 : 40);
         const int length = m_doc->characterCount() - 1;
         // This view's carets.
         QList<QTextCursor> mine;
@@ -929,11 +938,13 @@ void TestTextView::otherViewsCaretsMoveAsLiveCursors()
         m_view->setCursors(mine, 0);
         // The other view's, and live cursors where they are.
         QList<QTextCursor> theirs;
-        for (int k = random.bounded(1, 30); k > 0; --k) {
+        for (int k = many ? random.bounded(300, 400) : random.bounded(1, 30); k > 0; --k) {
             QTextCursor c(m_doc);
             c.setPosition(random.bounded(0, length + 1));
-            if (random.bounded(0, 2) == 0)
+            if (!many && random.bounded(0, 2) == 0)
                 c.setPosition(random.bounded(0, length + 1), QTextCursor::KeepAnchor);
+            else if (many && random.bounded(0, 4) == 0)
+                c.setPosition(qBound(0, c.position() + random.bounded(-6, 7), length), QTextCursor::KeepAnchor);
             theirs.append(c);
         }
         other->setCursors(theirs, 0);
@@ -944,7 +955,9 @@ void TestTextView::otherViewsCaretsMoveAsLiveCursors()
             c.setPosition(range.position, QTextCursor::KeepAnchor);
             live.append(c);
         }
-        const int which = random.bounded(int(edits.size()));
+        // (Not the edit made otherwise among many: the undo steps before it
+        // are not known as changes after it.)
+        const int which = random.bounded(int(edits.size()) - (many ? 1 : 0));
         edits[which]();
         QStringList carets;
         QStringList expected;
@@ -958,6 +971,43 @@ void TestTextView::otherViewsCaretsMoveAsLiveCursors()
             continue;
         QVERIFY2(carets == expected, qPrintable(QStringLiteral("round %1, edit %2: carets %3 against %4")
                                                     .arg(round).arg(which).arg(carets.join(u' '), expected.join(u' '))));
+    }
+
+    // Where Backspace and Delete took text away, undo puts it back after a
+    // cursor (Backspace) or before it (Delete), many carets there or few.
+    for (const int count : {3, 400}) {
+        for (const auto key : {Qt::Key_Backspace, Qt::Key_Delete}) {
+            makeText(500);
+            QList<QTextCursor> mine;
+            for (int k = 1; k <= 3; ++k) {
+                QTextCursor c(m_doc);
+                c.setPosition(k * 1000);
+                mine.append(c);
+            }
+            m_view->setCursors(mine, 0);
+            QTest::keyClick(m_view, key);
+            QList<QTextCursor> theirs = m_view->cursors();
+            for (int k = int(theirs.size()); k < count; ++k) {
+                QTextCursor c(m_doc);
+                c.setPosition(k * 7 % (m_doc->characterCount() - 1));
+                theirs.append(c);
+            }
+            other->setCursors(theirs, 0);
+            QList<QTextCursor> live;
+            for (const TextView::CaretRange &range : other->caretRanges()) {
+                QTextCursor c(m_doc);
+                c.setPosition(range.position);
+                live.append(c);
+            }
+            m_view->undo();
+            QStringList carets;
+            QStringList expected;
+            for (const TextView::CaretRange &range : other->caretRanges())
+                carets << QString::number(range.position);
+            for (const QTextCursor &c : std::as_const(live))
+                expected << QString::number(c.position());
+            QCOMPARE(carets, expected);
+        }
     }
     delete other;
 }

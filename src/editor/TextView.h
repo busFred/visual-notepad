@@ -854,17 +854,19 @@ private:
     // change made through insertText() and removeSelectedText() as it is
     // made, so that each moves its positions as Qt moves cursors. The
     // document tells of a whole edit block as one change, after it: a
-    // position inside it cannot be placed from that. The views' undo has
-    // cursors put in for the positions while it runs (Journal::runLive). A
-    // block with changes made otherwise (by other code) shows as reports that
-    // do not add up to the change: the views go back to their positions from
-    // before it and move them by the change as a whole.
+    // position inside it cannot be placed from that. The views' undo is told
+    // the same way (see Journal::undoRedo()). A block with changes made
+    // otherwise (by other code) shows as reports that do not add up to the
+    // change: the views go back to their positions from before it and move
+    // them by the change as a whole.
     class Journal;
     QPointer<Journal> m_journal;
     bool m_reported = false; // Changes were reported since the document last told of one.
-    // Moves every kept position as Qt moves a cursor (MoveCursor) when
-    // `removed` characters at `at` go and then `added` come there.
-    void adjustPositions(int at, int removed, int added);
+    // Moves every kept position as Qt moves a cursor when `removed`
+    // characters at `at` go and then `added` come there (keepAtInsert: as an
+    // undo puts back what a cursor removed with its position before its
+    // anchor, a cursor at `at` stays before them).
+    void adjustPositions(int at, int removed, int added, bool keepAtInsert = false);
     // The positions as they were before the edit block being reported.
     struct KeptPositions
     {

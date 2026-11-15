@@ -129,35 +129,70 @@ public:
 
     std::vector<TextView *> views;
 
-    // A change made through insertText() or removeSelectedText(), within an
-    // edit block (the document tells of the block once it ends).
-    void report(int at, int removed, int added)
+    // A change through insertText() or removeSelectedText() is about to be
+    // made.
+    void starting()
     {
-        if (removed > 0)
-            merge(at, -removed);
-        if (added > 0)
-            merge(at, added);
-        for (TextView *view : views) {
-            // A view not editing goes back to these if the reports do not add
-            // up; one editing places its carets itself.
-            if (view->m_editDepth == 0 && !view->m_keptBefore)
-                view->m_keptBefore = view->keptPositions();
-            view->m_reported = true;
-            view->adjustPositions(at, removed, added);
+        if (!m_inBlock)
+            m_stepsBefore = static_cast<QTextDocument *>(parent())->availableUndoSteps();
+        m_inBlock = true;
+    }
+
+    // A change made through insertText() or removeSelectedText(), within an
+    // edit block (the document tells of the block once it ends): `removed`
+    // characters at `at` went (through a cursor whose position was before its
+    // anchor if keepAtUndo: put back, they come after a cursor there), then
+    // `added` came there.
+    void report(int at, int removed, int added, bool keepAtUndo)
+    {
+        if (!m_undoing)
+            m_block.push_back({at, removed, added, keepAtUndo});
+        tell(at, removed, added, false);
+    }
+
+    // The views' undo (or redo), as TextView::undoRedo() asks for it: the
+    // other positions kept go along with its changes, which the document
+    // makes without reports. For a few, cursors are put in (runLive());
+    // else the changes the undo step was made of, if they were all reported
+    // (and none was made since without a report), are told again backwards.
+    void undoRedo(const TextView *except, bool undo)
+    {
+        auto *document = static_cast<QTextDocument *>(parent());
+        m_undoing = true;
+        if (!runLive(except, [document, undo] { undo ? document->undo() : document->redo(); })) {
+            const int before = document->availableUndoSteps();
+            QTextCursor block(document);
+            block.beginEditBlock();
+            undo ? document->undo() : document->redo();
+            const auto found = m_steps.find(undo ? before : document->availableUndoSteps());
+            if (found != m_steps.end()) {
+                const std::vector<Change> &changes = found->second;
+                if (undo) {
+                    for (auto it = changes.crbegin(); it != changes.crend(); ++it) {
+                        tell(it->at, it->added, 0, false);
+                        tell(it->at, 0, it->removed, it->keepAtUndo);
+                    }
+                } else {
+                    for (const Change &c : changes)
+                        tell(c.at, c.removed, c.added, false);
+                }
+            }
+            block.endEditBlock();
         }
+        m_undoing = false;
     }
 
     // Whether the change the document told of last was the reported ones.
     bool matched() const { return m_matched; }
 
+private:
     // Runs `edit`, which changes the document some other way (its undo),
     // with a cursor in it for every position the views keep but the carets
     // of `except` (it puts its own), so that they move as cursors do, and
-    // reads them back. Not with very many: a document that has held
-    // thousands of cursors at once stays slower to edit (Qt goes through a
-    // set as large as it once was at every change), and those are moved by
-    // the change as a whole instead.
-    void runLive(const TextView *except, const std::function<void()> &edit)
+    // reads them back. Not with very many (false, nothing done): a document
+    // that has held thousands of cursors at once stays slower to edit (Qt
+    // goes through a set as large as it once was at every change).
+    bool runLive(const TextView *except, const std::function<void()> &edit)
     {
         constexpr qsizetype mostCursors = 256;
         qsizetype count = 0;
@@ -166,10 +201,8 @@ public:
             for (const CaretState &state : view->m_expandHistory)
                 count += state.ranges.size();
         }
-        if (count > mostCursors) {
-            edit();
-            return;
-        }
+        if (count > mostCursors)
+            return false;
         auto *document = static_cast<QTextDocument *>(parent());
         const int end = document->characterCount() - 1;
         // (Placed inside an edit block, where Qt works out no x for them.)
@@ -215,14 +248,47 @@ public:
         m_live = true;
         block.endEditBlock();
         m_live = false;
+        return true;
     }
 
-private:
+    // Moves the views' positions by a change.
+    void tell(int at, int removed, int added, bool keepAtInsert)
+    {
+        if (removed > 0)
+            merge(at, -removed);
+        if (added > 0)
+            merge(at, added);
+        for (TextView *view : views) {
+            // A view not editing goes back to these if the reports do not add
+            // up; one editing places its carets itself.
+            if (view->m_editDepth == 0 && !view->m_keptBefore)
+                view->m_keptBefore = view->keptPositions();
+            view->m_reported = true;
+            view->adjustPositions(at, removed, added, keepAtInsert);
+        }
+    }
+
     explicit Journal(QTextDocument *document)
         : QObject(document)
     {
-        connect(document, &QTextDocument::contentsChange, this, [this](int from, int removed, int added) {
+        connect(document, &QTextDocument::contentsChange, this, [this, document](int from, int removed, int added) {
             m_matched = m_live || (from == m_from && removed == m_removed && added == m_added);
+            if (!m_undoing) {
+                // The reports make an undo step, keyed as TextView::
+                // m_undoEntries are; a change not reported, one made in
+                // ways unknown: the steps recorded are not those any more.
+                const int steps = document->availableUndoSteps();
+                if (!m_matched) {
+                    m_steps.clear();
+                } else if (steps > m_stepsBefore) {
+                    m_steps.erase(m_steps.upper_bound(m_stepsBefore), m_steps.end());
+                    m_steps[steps] = std::move(m_block);
+                } else {
+                    m_steps.erase(m_steps.lower_bound(steps), m_steps.end());
+                }
+            }
+            m_block.clear();
+            m_inBlock = false;
             m_from = -1;
             m_removed = 0;
             m_added = 0;
@@ -260,6 +326,20 @@ private:
     int m_added = 0;
     bool m_matched = false;
     bool m_live = false;
+    bool m_undoing = false;
+
+    // The changes reported, by undo step.
+    struct Change
+    {
+        int at;
+        int removed;
+        int added;
+        bool keepAtUndo;
+    };
+    std::map<int, std::vector<Change>> m_steps;
+    std::vector<Change> m_block; // This edit block's so far.
+    int m_stepsBefore = 0;
+    bool m_inBlock = false;
 };
 
 // The carets while an edit goes through all of them in turn (see
@@ -476,25 +556,30 @@ void TextView::setReadOnly(bool on)
 
 void TextView::insertText(QTextCursor &cursor, const QString &text)
 {
+    Journal *journal = Journal::of(cursor.document(), false);
+    if (journal)
+        journal->starting();
     const int at = cursor.selectionStart();
     const int removed = cursor.selectionEnd() - at;
+    // (As QTextCursorPrivate::remove() tells the document to undo it.)
+    const bool keepAtUndo = cursor.position() < cursor.anchor();
     cursor.insertText(text);
     const int added = cursor.position() - at;
-    if (removed == 0 && added == 0)
-        return;
-    if (Journal *journal = Journal::of(cursor.document(), false))
-        journal->report(at, removed, added);
+    if (journal && (removed > 0 || added > 0))
+        journal->report(at, removed, added, keepAtUndo);
 }
 
 void TextView::removeSelectedText(QTextCursor &cursor)
 {
+    Journal *journal = Journal::of(cursor.document(), false);
+    if (journal)
+        journal->starting();
     const int at = cursor.selectionStart();
     const int removed = cursor.selectionEnd() - at;
+    const bool keepAtUndo = cursor.position() < cursor.anchor();
     cursor.removeSelectedText();
-    if (removed == 0)
-        return;
-    if (Journal *journal = Journal::of(cursor.document(), false))
-        journal->report(at, removed, 0);
+    if (journal && removed > 0)
+        journal->report(at, removed, 0, keepAtUndo);
 }
 
 TextView::KeptPositions TextView::keptPositions() const
@@ -502,10 +587,11 @@ TextView::KeptPositions TextView::keptPositions() const
     return {m_carets, m_autoClosed, m_expandHistory, m_dragOrigin, m_tablePosition};
 }
 
-void TextView::adjustPositions(int at, int removed, int added)
+void TextView::adjustPositions(int at, int removed, int added, bool keepAtInsert)
 {
-    const auto move = [&](int &p) { p = moved(p, at, removed, added); };
+    const auto move = [&](int &p) { p = moved(p, at, removed, added, keepAtInsert); };
     if (m_spans) {
+        Q_ASSERT(!keepAtInsert);
         m_spans->change(at, removed, added);
     } else {
         for (Caret &caret : m_carets) {
@@ -4108,10 +4194,9 @@ void TextView::undoRedo(bool undo)
             }
             positions.append(from + added);
         });
-    // The undo is no report of the changes it makes (see Journal): the other
-    // positions kept go along as cursors for it. This view's carets are put
-    // where they go below.
-    m_journal->runLive(this, [this, undo] { undo ? m_doc->undo() : m_doc->redo(); });
+    // The other positions kept go along with the undo (see Journal); this
+    // view's carets are put where they go below.
+    m_journal->undoRedo(this, undo);
     disconnect(connection);
     m_syncedRevision = m_doc->revision();
     if (!undo) {
