@@ -118,7 +118,9 @@ constexpr QRgb textColorMark = 0xFF010203;
 // fonts and MicroTeX's tables), and to draw one formula; an ordinary formula
 // takes 20 ms. Every formula that ran out of time halves the time the next
 // may take, down to the least: a page full of them costs seconds, not
-// minutes.
+// minutes. Every formula drawn in its time doubles it again, up to the
+// whole: a machine that was busy for a while does not show ordinary
+// formulas as source for the rest of the session.
 constexpr int workerStartMs = 20'000;
 constexpr int formulaMs = 3000;
 constexpr int leastFormulaMs = 250;
@@ -886,7 +888,9 @@ public:
             if (!crashed) {
                 // Not deadline.hasExpired(): a wait can end a little before
                 // its deadline (Windows wakes waiting threads every 15.6 ms).
-                if (spent.elapsed() >= allowed - 50)
+                // Not counted past the least: it would take as many formulas
+                // drawn to have the whole time back.
+                if (spent.elapsed() >= allowed - 50 && allowed > leastFormulaMs)
                     ++m_timeouts;
                 stop();
             }
@@ -897,6 +901,10 @@ public:
             return false;
         }
         m_failuresInARow = 0;
+        // Drawn in its time: the machine is not (or no longer) too busy.
+        // (Not a formula refused as not TeX, which is quick to refuse.)
+        if (drawn && m_timeouts > 0)
+            --m_timeouts;
         if (usedUp)
             stop();
         return drawn;

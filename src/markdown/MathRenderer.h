@@ -121,7 +121,8 @@ bool lastRenderFellBack();
 int workerStarts();
 bool workerContained();
 // How long, in milliseconds, the worker may take for the next formula: less
-// after each formula that ran out of time. For tests.
+// after each formula that ran out of time, more again after each drawn in
+// its time. For tests.
 int formulaTimeLimitMs();
 // Forgets the formulas the worker failed on and the time they cost: the next
 // gets the whole time a formula may take, and is tried again. For tests,

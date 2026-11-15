@@ -82,6 +82,7 @@ private Q_SLOTS:
     void formulasThatBreakMicroTeXAreShownAsSource_data();
     void formulasThatBreakMicroTeXAreShownAsSource();
     void aFormulaThatNeverEndsIsGivenUp();
+    void theTimeComesBackOnceFormulasAreDrawnAgain();
     void longSourceIsNotDrawnInFull();
     void aFormulaLeavesNothingBehind_data();
     void aFormulaLeavesNothingBehind();
@@ -334,6 +335,68 @@ void TestMath::aFormulaThatNeverEndsIsGivenUp()
     QVERIFY(!math::lastRenderFellBack());
     math::render(QStringLiteral("x^2"), inlineStyle());
     QVERIFY(!math::lastRenderFellBack());
+}
+
+// A formula that never ends, named after `n` so that each is a new one (one
+// that ran out of time is not tried again).
+static QString endlessFormula(int n)
+{
+    const QString name = QStringLiteral("\\endless") + QChar(u'a' + n % 26) + QChar(u'a' + n / 26);
+    return QStringLiteral("\\newcommand{%1}{%1}%1").arg(name);
+}
+
+void TestMath::theTimeComesBackOnceFormulasAreDrawnAgain()
+{
+    // A machine busy for a while: formula after formula ran out of time, and
+    // the time the next may take is down to the least. (Formulas that never
+    // end stand in for the busy machine; what is checked is the time limit
+    // the renderer reports, not how long anything took.)
+    const int fullTime = math::formulaTimeLimitMs();
+    int least = fullTime;
+    for (int n = 0; n < 6; ++n) {
+        math::render(endlessFormula(n), inlineStyle());
+        QVERIFY(math::lastRenderFellBack());
+        const int now = math::formulaTimeLimitMs();
+        QVERIFY2(now <= least, qPrintable(QString::number(now)));
+        if (now == least && n > 0)
+            break; // Down to the least.
+        least = now;
+    }
+    QVERIFY2(least < fullTime / 4, qPrintable(QString::number(least)));
+
+    // Ordinary formulas are drawn again, and each drawn in its time gives the
+    // next more, until it has the whole time again. (One that a busy machine
+    // still keeps from being drawn in the least time gives none back: more
+    // formulas are drawn than are needed.)
+    int before = math::formulaTimeLimitMs();
+    int drawn = 0;
+    for (int n = 0; n < 40 && math::formulaTimeLimitMs() < fullTime; ++n) {
+        math::render(QStringLiteral("x_{%1}+\\frac{a}{b}").arg(n), inlineStyle());
+        const int now = math::formulaTimeLimitMs();
+        if (!math::lastRenderFellBack()) {
+            ++drawn;
+            QVERIFY2(now > before, qPrintable(QStringLiteral("%1 after %2").arg(now).arg(before)));
+        }
+        before = now;
+    }
+    QVERIFY(drawn > 0);
+    QCOMPARE(math::formulaTimeLimitMs(), fullTime);
+
+    // A formula that never ends is still cut off, with the whole time again,
+    // and is not tried again.
+    const QString endless = endlessFormula(100);
+    QElapsedTimer timer;
+    timer.start();
+    math::render(endless, inlineStyle());
+    QVERIFY(math::lastRenderFellBack());
+    QVERIFY2(timer.elapsed() < 2 * fullTime, qPrintable(QString::number(timer.elapsed())));
+    const int lessTime = math::formulaTimeLimitMs();
+    QVERIFY2(lessTime < fullTime, qPrintable(QString::number(lessTime)));
+    const int starts = math::workerStarts();
+    math::render(endless, inlineStyle());
+    QVERIFY(math::lastRenderFellBack());
+    QCOMPARE(math::workerStarts(), starts);
+    QCOMPARE(math::formulaTimeLimitMs(), lessTime);
 }
 
 void TestMath::longSourceIsNotDrawnInFull()
