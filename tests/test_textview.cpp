@@ -154,6 +154,7 @@ private Q_SLOTS:
     void longLineWrapsInPieces();
     void longLineSelectionAndMatchesSpanAJoin();
     void longLineComposes();
+    void emptyInputMethodEventKeepsTheScroll();
     void longLineInColumns();
     void longLineTypingIsFast();
 
@@ -2645,6 +2646,32 @@ void TestTextView::longLineComposes()
     m_view->grab();
     QCOMPARE(m_doc->firstBlock().text(), QString(line).insert(join, QStringLiteral("\u4EEE")));
     compareWithFreshView(0);
+}
+
+void TestTextView::emptyInputMethodEventKeepsTheScroll()
+{
+    // An input method that reports nothing composed (as it does when focus
+    // comes and goes) leaves the view where it was scrolled, away from the
+    // caret; composing and committing still bring the caret into view.
+    QStringList lines;
+    for (int i = 0; i < 400; ++i)
+        lines << QStringLiteral("line %1").arg(i + 1);
+    setText(lines.join(u'\n'));
+    m_view->grab();
+    m_view->scrollToLine(300);
+    QCOMPARE(m_view->topLine(), 300);
+    QInputMethodEvent nothing;
+    QApplication::sendEvent(m_view, &nothing);
+    QCOMPARE(m_view->topLine(), 300);
+
+    QInputMethodEvent compose(QStringLiteral("かな"), {});
+    QApplication::sendEvent(m_view, &compose);
+    QVERIFY(m_view->topLine() < 300);
+    // Taking the composition back is a change, so it is handled.
+    m_view->scrollToLine(300);
+    QInputMethodEvent cleared;
+    QApplication::sendEvent(m_view, &cleared);
+    QVERIFY(m_view->topLine() < 300);
 }
 
 void TestTextView::longLineInColumns()
