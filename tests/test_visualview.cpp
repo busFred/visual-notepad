@@ -11,6 +11,7 @@
 #include "markdown/BlockViewer.h"
 #include "markdown/ImageViewer.h"
 #include "markdown/MarkdownModel.h"
+#include "markdown/TableLayout.h"
 #include "markdown/VisualView.h"
 #include "editor/TextView.h"
 
@@ -35,6 +36,7 @@
 #include <QMenu>
 #include <QPainter>
 #include <QPlainTextEdit>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSlider>
@@ -507,6 +509,8 @@ private Q_SLOTS:
     void tableViewerIsTheRealTable();
     void tableGridLooksAsQtDrawsIt();
     void reflowedBlocksAreMadeBlocks();
+    void tableLayoutIsQtsLayout();
+    void tableLayoutBreaksOnlyChangedColumns();
     void equationViewerIsDrawnAsShapes();
     void readModeWaitsForTheFirstParse();
     void figureBarKeepsClicksAndPictureClickStillZooms();
@@ -6601,6 +6605,231 @@ void TestVisualView::reflowedBlocksAreMadeBlocks()
         auto [block, ctx] = make(markdown, 548, false);
         ctx.width = 300;
         QVERIFY(!block->reflow(ctx));
+    }
+}
+
+// Tables to compare TableLayout with Qt's layout on: alignment, inline
+// formats, links, long cells, empty cells, right-to-left text, line breaks
+// in cells, a wide table, a word too long for its column, front matter and
+// an HTML table.
+static QStringList layoutTables()
+{
+    const QStringList words = QStringLiteral("lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod "
+                                             "tempor incididunt ut labore et dolore magna aliqua")
+                                  .split(u' ');
+    QString longCells = QStringLiteral("| H0 | H1 | H2 | H3 | H4 | H5 |\n|---|:---:|---|---:|---|---|\n");
+    for (int row = 0; row < 9; ++row) {
+        longCells += u'|';
+        for (int col = 0; col < 6; ++col) {
+            QStringList cell;
+            for (int i = 0; i < ((row * 7 + col * 5) % 13) + 1; ++i)
+                cell << words[(row * 3 + col * 11 + i * 5) % words.size()];
+            longCells += u' ' + cell.join(u' ') + QStringLiteral(" |");
+        }
+        longCells += u'\n';
+    }
+    QString wide = QStringLiteral("|");
+    QString rule = QStringLiteral("|");
+    QString values = QStringLiteral("|");
+    for (int col = 0; col < 30; ++col) {
+        wide += QStringLiteral(" H%1 |").arg(col);
+        rule += QStringLiteral("---|");
+        values += QStringLiteral(" v%1 %2 |").arg(col).arg(words[col % words.size()]);
+    }
+    wide += u'\n' + rule + u'\n' + values + u'\n' + values + u'\n';
+    return {
+        QStringLiteral("| Left | Centre | Right |\n|:---|:---:|---:|\n| ipsum elit | **ipsum** | 0 |\n"
+                       "| `x1` | do [a link](https://example.com) | 137 |\n"),
+        QStringLiteral("---\ntitle: Tables\ntags: [a, b]\n---\n"),
+        QStringLiteral("| one column |\n|---|\n| x |\n"),
+        QStringLiteral("| a | b |\n|---|---|\n|  |  |\n| x |  |\n"),
+        QStringLiteral("| עברית | العربية |\n|---|---|\n"
+                       "| שלום עולם וכל אשר בו "
+                       "| مرحبا بالعالم كله |\n"
+                       "| mixed עברית text | 12 |\n"),
+        QStringLiteral("| a | b |\n|---|---|\n| line one<br>line two | `code` and *em* ~~del~~ |\n"),
+        longCells,
+        wide,
+        QStringLiteral("| x | supercalifragilisticexpialidocious_and_some_more_unbreakable_text |\n|---|---|\n| y | z |\n"),
+        QStringLiteral("<table><tr><th>A</th><th>B</th></tr><tr><td><p>one</p><p>two</p></td><td>x</td></tr></table>\n"),
+    };
+}
+
+static std::unique_ptr<RenderedBlock> layoutTable(const QString &markdown, qreal width, bool overflow, qreal zoom = 1)
+{
+    const QByteArray utf8 = markdown.toUtf8();
+    const rust::Vec<core::Block> blocks = core::blocks(rust::Str(utf8.constData(), utf8.size()),
+                                                       core::RenderOptions{false, true, true, true, 2});
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.font.setPointSizeF(ctx.font.pointSizeF() * zoom);
+    ctx.codeFont = theme::editorFont();
+    ctx.codeFont.setPointSizeF(ctx.codeFont.pointSizeF() * zoom);
+    ctx.width = width;
+    ctx.overflow = overflow;
+    return RenderedBlock::create(blocks.at(0), markdown, ctx);
+}
+
+// The first way two renderings of a table differ (empty if none): what they
+// measure, where their lines and cells are, what points and positions give
+// and their pixels.
+static QString tableDifference(const RenderedBlock &actual, const RenderedBlock &expected)
+{
+    const auto same = [](const QRectF &a, const QRectF &b) {
+        return a.x() == b.x() && a.y() == b.y() && a.width() == b.width() && a.height() == b.height();
+    };
+    const auto sameOptional = [&](const std::optional<QRectF> &a, const std::optional<QRectF> &b) {
+        return a.has_value() == b.has_value() && (!a || same(*a, *b));
+    };
+    if (actual.height() != expected.height() || actual.contentWidth() != expected.contentWidth())
+        return QStringLiteral("size %1x%2, expected %3x%4")
+            .arg(actual.contentWidth()).arg(actual.height()).arg(expected.contentWidth()).arg(expected.height());
+    if (actual.tableCells() != expected.tableCells() || actual.renderedText() != expected.renderedText())
+        return QStringLiteral("cells or text");
+    if (actual.lineAnchors() != expected.lineAnchors())
+        return QStringLiteral("line anchors");
+    const RenderedBlock::Breaks &a = actual.breaks(), &e = expected.breaks();
+    if (a.cuts != e.cuts || a.lineTops != e.lineTops || a.table != e.table || a.headerTop != e.headerTop
+        || a.headerHeight != e.headerHeight)
+        return QStringLiteral("breaks");
+    if (bool(actual.tableGrid()) != bool(expected.tableGrid())
+        || (actual.tableGrid() && (actual.tableGrid()->xs != expected.tableGrid()->xs
+                                   || actual.tableGrid()->ys != expected.tableGrid()->ys)))
+        return QStringLiteral("grid");
+    if (!sameOptional(actual.lastLineRect(), expected.lastLineRect()))
+        return QStringLiteral("last line");
+    for (int position = 0; position <= expected.renderedText().size() + 1; ++position) {
+        if (!sameOptional(actual.caretRect(position), expected.caretRect(position)))
+            return QStringLiteral("caret at %1").arg(position);
+        if (actual.lineAt(position) != expected.lineAt(position))
+            return QStringLiteral("line at %1").arg(position);
+    }
+    const qreal stepX = qMax(3.3, expected.contentWidth() / 70), stepY = qMax(2.9, expected.height() / 50);
+    for (qreal y = -4; y < expected.height() + 4; y += stepY) {
+        for (qreal x = -4; x < expected.contentWidth() + 4; x += stepX) {
+            const QPointF point(x, y);
+            if (actual.hitTest(point) != expected.hitTest(point))
+                return QStringLiteral("hit at %1,%2: %3, expected %4").arg(x).arg(y).arg(actual.hitTest(point)).arg(expected.hitTest(point));
+            if (actual.anchorAt(point) != expected.anchorAt(point) || actual.textAt(point) != expected.textAt(point))
+                return QStringLiteral("anchor or text at %1,%2").arg(x).arg(y);
+            const auto ac = actual.tableCellAt(point), ec = expected.tableCellAt(point);
+            if (ac.has_value() != ec.has_value()
+                || (ac && (ac->row != ec->row || ac->col != ec->col || !same(ac->rect, ec->rect))))
+                return QStringLiteral("cell at %1,%2").arg(x).arg(y);
+        }
+    }
+    struct Paint
+    {
+        qreal scale;
+        bool antialiased;
+        QRectF clip;
+        QPair<int, int> selected;
+    };
+    const QList<Paint> paints = {{1, false, {}, {0, 0}},        {1.5, true, {}, {0, 0}},
+                                 {1, false, {}, {0, 100000}},   {1.25, false, {}, {3, 40}},
+                                 {2, true, {}, {7, 19}},        {1, false, {0, 40.3, 2000, 61.6}, {0, 0}},
+                                 {0.75, true, {20, 0, 300, 2000}, {2, 9}}, {1, false, {0, 33, 4000, 90}, {1, 70}}};
+    const auto paint = [](const RenderedBlock &block, const Paint &p) {
+        QImage image(QSize(int((block.contentWidth() + 20) * p.scale), int((block.height() + 20) * p.scale)),
+                     QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::white);
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing, p.antialiased);
+        painter.scale(p.scale, p.scale);
+        if (!p.clip.isNull())
+            painter.setClipRect(p.clip);
+        RenderedSelection selection;
+        if (p.selected.second > 0)
+            selection.ranges.append(p.selected);
+        block.paint(painter, QPointF(7, 5), block.contentWidth(), selection);
+        return image;
+    };
+    for (const Paint &p : paints) {
+        const QImage a = paint(actual, p), e = paint(expected, p);
+        if (a != e)
+            return QStringLiteral("pixels at scale %1, selection %2-%3: %4")
+                .arg(p.scale).arg(p.selected.first).arg(p.selected.second).arg(imageDifference(a, e));
+    }
+    return {};
+}
+
+// A table laid out by TableLayout is the table Qt lays out: its measures,
+// lines, cells, hit tests, carets and pixels, made at a width and laid out
+// again at others, in the scrolling view and in read mode, at three zooms.
+void TestVisualView::tableLayoutIsQtsLayout()
+{
+    const QStringList documents = layoutTables();
+    QRandomGenerator random(20261114);
+    for (int i = 0; i < documents.size(); ++i) {
+        const QString &markdown = documents[i];
+        for (const qreal zoom : {1.0, 0.75, 1.75}) {
+            for (const bool overflow : {false, true}) {
+                const qreal first = zoom == 1 ? 548 : 400;
+                const int before = TableLayout::cellsBroken();
+                auto own = layoutTable(markdown, first, overflow, zoom);
+                // Every pipe table and front matter takes the layout.
+                if (i != documents.size() - 1)
+                    QVERIFY2(TableLayout::cellsBroken() > before, qPrintable(markdown.left(20)));
+                // Widths at random, some again, and the extremes.
+                QList<qreal> widths = {first, 200, 731.5, 120};
+                for (int n = 0; n < (zoom == 1 ? 6 : 2); ++n)
+                    widths << (random.bounded(2) ? widths[random.bounded(widths.size())] : 60 + random.bounded(1200) / 1.5);
+                for (int w = 0; w < widths.size(); ++w) {
+                    const qreal width = widths[w];
+                    const QString what = QStringLiteral("%1 at %2%3, zoom %4: ").arg(markdown.left(20)).arg(width)
+                                             .arg(overflow ? QStringLiteral(" (read)") : QString()).arg(zoom);
+                    RenderContext ctx;
+                    ctx.font = theme::textFont();
+                    ctx.font.setPointSizeF(ctx.font.pointSizeF() * zoom);
+                    ctx.codeFont = theme::editorFont();
+                    ctx.codeFont.setPointSizeF(ctx.codeFont.pointSizeF() * zoom);
+                    ctx.width = width;
+                    ctx.overflow = overflow;
+                    QVERIFY2(own->reflow(ctx), qPrintable(what));
+                    TableLayout::setEnabled(false);
+                    const auto qt = layoutTable(markdown, width, overflow, zoom);
+                    TableLayout::setEnabled(true);
+                    const QString difference = tableDifference(*own, *qt);
+                    QVERIFY2(difference.isEmpty(), qPrintable(what + difference));
+                    // And made at that width (the first time it is seen).
+                    if (widths.indexOf(width) == w) {
+                        const auto made = layoutTable(markdown, width, overflow, zoom);
+                        const QString madeDifference = tableDifference(*made, *qt);
+                        QVERIFY2(madeDifference.isEmpty(), qPrintable(what + QStringLiteral("made: ") + madeDifference));
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A new width breaks the lines of a table again only in the columns whose
+// width changed, and the same width breaks none.
+void TestVisualView::tableLayoutBreaksOnlyChangedColumns()
+{
+    QString markdown = QStringLiteral("| # | Name | Description |\n|---|---|---|\n");
+    for (int i = 0; i < 20; ++i)
+        markdown += QStringLiteral("| %1 | ipsum | %2 |\n").arg(i).arg(QStringLiteral("dolor sit amet ").repeated(i % 5 + 2));
+    auto block = layoutTable(markdown, 900, false);
+    RenderContext ctx;
+    ctx.font = theme::textFont();
+    ctx.codeFont = theme::editorFont();
+    ctx.overflow = false;
+    for (const qreal width : {500.0, 480.0, 480.0, 300.0}) {
+        const QSize cells = block->tableCells();
+        const auto *grid = block->tableGrid();
+        QVERIFY(grid);
+        std::vector<qreal> xs = grid->xs;
+        ctx.width = width;
+        const int before = TableLayout::cellsBroken();
+        QVERIFY(block->reflow(ctx));
+        int changed = 0;
+        for (int col = 0; col < cells.width(); ++col) {
+            if (block->tableGrid()->xs[col + 1] - block->tableGrid()->xs[col] != xs[col + 1] - xs[col])
+                ++changed;
+        }
+        QCOMPARE(TableLayout::cellsBroken() - before, changed * cells.height());
+        QVERIFY(changed < cells.width()); // (The first two columns keep their widths.)
     }
 }
 
