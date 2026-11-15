@@ -85,6 +85,10 @@ public:
         QJsonObject entry;
     };
     QList<PendingSessionTab> pendingSessionTabs() const;
+    // While a restore places its tabs, the tab that happens to be current in
+    // a group is not read (a deferred one, DocumentTab::setDeferred); when
+    // this is turned off again the current tab of each group is.
+    void setHoldLoads(bool hold);
 
     // Editor groups, in a grid of nested splitters like VS Code's editor
     // part. groups() lists them in reading order (GroupsOrder.GRID_APPEARANCE);
@@ -279,6 +283,7 @@ private:
     // Most recently active first (GroupsOrder.MOST_RECENTLY_ACTIVE).
     QList<EditorGroup *> m_groupHistory;
     bool m_removingTab = false;
+    bool m_holdLoads = false;
 
     QDockWidget *m_outlineDock;
     QTreeWidget *m_outline;

@@ -51,6 +51,12 @@ public:
 
     // A new untitled file, not in the registry.
     static std::shared_ptr<TextFile> create();
+    // A file of `path` whose reading is put off, for a session restore with
+    // many tabs: it has its path (and is registered under it) but no text
+    // until ensureLoaded(), which everything that reads or changes the text
+    // calls first (a tab calls it when it is shown). Not for a file that
+    // is missing: the caller looks first.
+    static std::shared_ptr<TextFile> createDeferred(const QString &path);
     // The registered file for `path` (any spelling of it), or null.
     static std::shared_ptr<TextFile> find(const QString &path);
     // Every live file, registered or not.
@@ -72,6 +78,11 @@ public:
     void loadAsync(const QString &path);
     // Whether loadAsync() is still running.
     bool isLoading() const;
+    // Whether the text is still to be read (createDeferred()).
+    bool isDeferred() const { return m_deferred; }
+    // Reads a deferred file now. False when that failed (errorString() says
+    // why; the file stays empty). True for any other file.
+    bool ensureLoaded() const;
     // Stops loadAsync() and waits for the worker (a few ms); no loadFinished()
     // follows and the file stays empty. Also what destroying the file does.
     void cancelLoad();
@@ -209,6 +220,7 @@ Q_SIGNALS:
 
 private:
     TextFile();
+    bool loadDeferred();
     bool applyBytes(const QString &path, const QByteArray &bytes, const Encoding &encoding);
     // The part of loading that follows decoding, with the text already in the
     // document (loadAsync) or still to be set.
@@ -241,6 +253,7 @@ private:
     QList<TextView::Diagnostic> m_diagnostics;
     QList<DocumentTab *> m_views;
     std::unique_ptr<load::Job> m_load;
+    bool m_deferred = false;
     bool m_indentationStale = false;
     QString m_path;
     QString m_error;

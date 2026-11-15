@@ -8,6 +8,7 @@
 
 #include <QByteArray>
 #include <QFont>
+#include <QJsonObject>
 #include <QString>
 #include <QWidget>
 
@@ -62,6 +63,19 @@ public:
     void setClosing();
     // Other tabs showing this tab's file.
     QList<DocumentTab *> otherViews() const;
+
+    // A restored tab whose file is not read yet (TextFile::createDeferred):
+    // `entry` is what the session stored of it, kept as it was until the tab
+    // is loaded, and `afterLoad` puts its view state back then.
+    void setDeferred(const QJsonObject &entry, std::function<void(DocumentTab *)> afterLoad);
+    // Not loaded since the restore: it was never shown, nor was its text
+    // needed.
+    bool isDeferred() const { return m_deferred; }
+    const QJsonObject &sessionEntry() const { return m_sessionEntry; }
+    // Reads the file if that is still to do and restores the view state; a
+    // group calls it when the tab becomes its current one. False if the file
+    // could not be read.
+    bool ensureLoaded();
 
     // Returns false and sets errorString() on failure.
     bool load(const QString &path);
@@ -240,6 +254,9 @@ private:
     QWidget *m_visualAccent = nullptr;
     // Font, zoom and view settings changed while hidden; applied on show.
     bool m_settingsStale = false;
+    bool m_deferred = false;
+    QJsonObject m_sessionEntry;
+    std::function<void(DocumentTab *)> m_afterLoad;
     // The source half's font, to skip a font change that is already applied.
     QFont m_appliedFont;
     ViewMode m_viewMode = ViewMode::Source;

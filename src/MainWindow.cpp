@@ -730,9 +730,27 @@ QAction *MainWindow::modeAction(DocumentTab::ViewMode mode) const
     return m_modeSource;
 }
 
+void MainWindow::setHoldLoads(bool hold)
+{
+    if (m_holdLoads == hold)
+        return;
+    m_holdLoads = hold;
+    if (hold)
+        return;
+    for (EditorGroup *group : groups()) {
+        if (DocumentTab *current = group->currentTab())
+            current->ensureLoaded();
+    }
+    onCurrentTabChanged();
+}
+
 void MainWindow::wireGroup(EditorGroup *group)
 {
     connect(group, &EditorGroup::currentChanged, this, [this, group] {
+        // A tab restored without its text (a session of many files) is read
+        // when it comes to show.
+        if (DocumentTab *current = group->currentTab(); current && !m_holdLoads)
+            current->ensureLoaded();
         if (group == m_activeGroup)
             onCurrentTabChanged();
         else

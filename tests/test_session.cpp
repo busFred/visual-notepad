@@ -13,6 +13,7 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -53,6 +54,11 @@ private Q_SLOTS:
     void discardedTabIsNotRecovered();
     void closeOthersDropsBackupsAtOnce();
     void unchangedBackupIsNotRewritten();
+    void restoredTabsAreReadWhenShown();
+    void neverShownTabsKeepTheirSession();
+    void needingATabsTextReadsIt();
+    void deferredTabsMoveAndCopy();
+    void fileGoneBeforeItsTabIsShown();
     void backupIsWrittenOffTheWindowThread();
     void editDuringBackupIsBackedUpNext();
     void saveSessionWaitsForBackup();
@@ -145,6 +151,9 @@ void TestSession::closeWindows()
     for (const QPointer<MainWindow> &window : std::as_const(m_made))
         delete window.data();
     m_made.clear();
+    // Windows closed by quit() are deleted from the event loop; their files
+    // stay registered until then.
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 }
 
 MainWindow *TestSession::makeWindow()
@@ -281,13 +290,17 @@ void TestSession::roundTrip()
     QCOMPARE(first.size(), 2);
     QCOMPARE(first.at(0)->path(), a);
     QCOMPARE(first.at(1)->path(), b);
+    QCOMPARE(windows.at(0)->currentTabIndex(), 0);
     QCOMPARE(first.at(0)->viewMode(), Mode::Source);
     QCOMPARE(cursorLine(first.at(0)), 2);
+    // The second tab is read when it is shown.
+    QVERIFY(first.at(1)->isDeferred());
+    windows.at(0)->setCurrentTabIndex(1);
+    QVERIFY(!first.at(1)->isDeferred());
     QCOMPARE(cursorLine(first.at(1)), 1);
     QVERIFY(first.at(1)->languageOverridden());
     QCOMPARE(first.at(1)->definitionName(), QStringLiteral("Markdown"));
     QVERIFY(!first.at(0)->languageOverridden());
-    QCOMPARE(windows.at(0)->currentTabIndex(), 0);
     const QList<DocumentTab *> second = windows.at(1)->tabs();
     QCOMPARE(second.size(), 1);
     QCOMPARE(second.at(0)->path(), c);
@@ -556,6 +569,225 @@ void TestSession::quitDuringBackupLeavesNoBackup()
     QTest::qWait(300);
     QCOMPARE(backupCount(), 0);
     QCOMPARE(QDir(SessionManager::dataDir() + QStringLiteral("/backups")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 0);
+}
+
+// A restored session reads only the tab each group shows: the others have
+// their path, title and registry entry, and read their file when shown, with
+// the view state the session stored.
+void TestSession::restoredTabsAreReadWhenShown()
+{
+    Settings::instance().setValue(key::restoreSession, true);
+    const QString a = write("a.md", "one\ntwo\nthree\n");
+    const QString b = write("b.txt", "x\ny\nz\nw\n");
+    const QString c = write("c.md", "# c\n\nlast\nlines\n");
+    MainWindow *w = makeWindow();
+    QVERIFY(w->openFile(a));
+    QVERIFY(w->openFile(b));
+    QVERIFY(w->openFile(c));
+    w->tabs().at(1)->goToLine(3);
+    w->tabs().at(2)->setViewMode(Mode::SourceVisual);
+    w->tabs().at(2)->goToLine(2);
+    w->setCurrentTabIndex(0);
+    QVERIFY(SessionManager::instance().quit());
+    closeWindows();
+
+    QVERIFY(SessionManager::instance().restore());
+    MainWindow *restored = SessionManager::instance().windows().at(0);
+    const QList<DocumentTab *> tabs = restored->tabs();
+    QCOMPARE(tabs.size(), 3);
+    QVERIFY(!tabs.at(0)->isDeferred());
+    QVERIFY(!tabs.at(0)->file()->isDeferred());
+    for (int i : {1, 2}) {
+        QVERIFY(tabs.at(i)->isDeferred());
+        QVERIFY(tabs.at(i)->file()->isDeferred());
+        QVERIFY(tabs.at(i)->document()->isEmpty()); // not read
+        QVERIFY(!tabs.at(i)->isModified());
+    }
+    QCOMPARE(tabs.at(1)->path(), b);
+    QCOMPARE(tabs.at(2)->displayName(), QFileInfo(c).fileName());
+    // Registered, so opening the file finds the tab.
+    QCOMPARE(TextFile::find(c).get(), tabs.at(2)->file());
+    QVERIFY(restored->openFile(c));
+    QCOMPARE(restored->currentTabIndex(), 2);
+    QVERIFY(!tabs.at(2)->isDeferred());
+    QCOMPARE(restored->tabs().size(), 3);
+    QCOMPARE(tabs.at(2)->text(), QStringLiteral("# c\n\nlast\nlines\n"));
+    QCOMPARE(tabs.at(2)->viewMode(), Mode::SourceVisual);
+    QCOMPARE(cursorLine(tabs.at(2)), 1);
+    QVERIFY(tabs.at(2)->isMarkdown());
+    QVERIFY(tabs.at(1)->isDeferred());
+    restored->setCurrentTabIndex(1);
+    QCOMPARE(tabs.at(1)->text(), QStringLiteral("x\ny\nz\nw\n"));
+    QCOMPARE(cursorLine(tabs.at(1)), 2);
+    QVERIFY(!tabs.at(1)->isModified());
+    QCOMPARE(m_prompts, 0);
+}
+
+// Quitting, or a crash, with tabs never shown keeps them in the session as
+// they were: their view state, language and place in the grid.
+void TestSession::neverShownTabsKeepTheirSession()
+{
+    Settings::instance().setValue(key::restoreSession, true);
+    const QString a = write("a.md", "one\ntwo\nthree\nfour\n");
+    const QString b = write("b.txt", "x\ny\nz\n");
+    const QString c = write("c.md", "# c\n\nlast\n");
+    MainWindow *w = makeWindow();
+    QVERIFY(w->openFile(a));
+    QVERIFY(w->openFile(b));
+    QVERIFY(w->openFile(c));
+    w->tabs().at(1)->goToLine(2);
+    w->tabs().at(1)->setLanguage(QStringLiteral("Markdown"));
+    w->tabs().at(1)->setViewMode(Mode::Visual);
+    w->tabs().at(2)->goToLine(3);
+    w->tabs().at(2)->setViewMode(Mode::Source);
+    w->setCurrentTabIndex(0);
+    QVERIFY(SessionManager::instance().quit());
+    closeWindows();
+    const QByteArray stored = read(SessionManager::dataDir() + QStringLiteral("/session.json"));
+
+    // Restored and saved again (as a crash would) without showing anything.
+    QVERIFY(SessionManager::instance().restore());
+    MainWindow *restored = SessionManager::instance().windows().at(0);
+    QVERIFY(restored->tabs().at(1)->isDeferred() && restored->tabs().at(2)->isDeferred());
+    QVERIFY(SessionManager::instance().saveSession().isEmpty());
+    const auto entries = [](const QByteArray &json) {
+        return QJsonDocument::fromJson(json)
+            .object()
+            .value(QStringLiteral("windows"))
+            .toArray()
+            .at(0)
+            .toObject()
+            .value(QStringLiteral("tabs"))
+            .toArray();
+    };
+    const QJsonArray before = entries(stored);
+    const QJsonArray after = entries(read(SessionManager::dataDir() + QStringLiteral("/session.json")));
+    QCOMPARE(after.size(), 3);
+    for (int i : {1, 2})
+        QCOMPARE(after.at(i).toObject(), before.at(i).toObject());
+    QVERIFY(restored->tabs().at(1)->isDeferred() && restored->tabs().at(2)->isDeferred());
+    // Quitting the same way.
+    QVERIFY(SessionManager::instance().quit());
+    closeWindows();
+    QCOMPARE(entries(read(SessionManager::dataDir() + QStringLiteral("/session.json"))).at(1).toObject(),
+             before.at(1).toObject());
+
+    QVERIFY(SessionManager::instance().restore());
+    const QList<DocumentTab *> tabs = SessionManager::instance().windows().at(0)->tabs();
+    QCOMPARE(tabs.size(), 3);
+    SessionManager::instance().windows().at(0)->setCurrentTabIndex(1);
+    QCOMPARE(cursorLine(tabs.at(1)), 1);
+    QCOMPARE(tabs.at(1)->viewMode(), Mode::Visual);
+    QVERIFY(tabs.at(1)->languageOverridden());
+    SessionManager::instance().windows().at(0)->setCurrentTabIndex(2);
+    QCOMPARE(cursorLine(tabs.at(2)), 2);
+    QCOMPARE(tabs.at(2)->viewMode(), Mode::Source);
+}
+
+// Whatever needs the text of a tab not shown yet reads it first: the text,
+// saving, a change of line ending (which marks it modified and backs it up).
+void TestSession::needingATabsTextReadsIt()
+{
+    Settings::instance().setValue(key::restoreSession, true);
+    const QString a = write("a.txt", "a\n");
+    const QString b = write("b.txt", "bee\r\nsea\r\n");
+    const QString c = write("c.txt", "see\n");
+    MainWindow *w = makeWindow();
+    QVERIFY(w->openFile(a));
+    QVERIFY(w->openFile(b));
+    QVERIFY(w->openFile(c));
+    w->setCurrentTabIndex(0);
+    QVERIFY(SessionManager::instance().quit());
+    closeWindows();
+
+    QVERIFY(SessionManager::instance().restore());
+    MainWindow *restored = SessionManager::instance().windows().at(0);
+    const QList<DocumentTab *> tabs = restored->tabs();
+    QVERIFY(tabs.at(1)->isDeferred() && tabs.at(2)->isDeferred());
+    QCOMPARE(tabs.at(1)->text(), QStringLiteral("bee\nsea\n"));
+    QVERIFY(!tabs.at(1)->file()->isDeferred());
+    QVERIFY(tabs.at(2)->file()->isDeferred());
+    // Changing a tab's line ending reads it first, so the file keeps what it has.
+    tabs.at(2)->setLineEnding(DocumentTab::LineEnding::CRLF);
+    QVERIFY(tabs.at(2)->isModified());
+    QCOMPARE(tabs.at(2)->text(), QStringLiteral("see\n"));
+    QCOMPARE(m_prompts, 0);
+    // Saved from the session's side: the deferred tab of an unchanged file
+    // is no work to lose, the changed one is backed up.
+    QVERIFY(SessionManager::instance().saveSession().isEmpty());
+    QCOMPARE(backupCount(), 1);
+    QCOMPARE(read(c), QByteArray("see\n"));
+    QVERIFY(tabs.at(2)->save(c));
+    QCOMPARE(read(c), QByteArray("see\r\n"));
+}
+
+// Tabs dragged to another window, moved or copied, are read when they show;
+// a copy has the state the session stored.
+void TestSession::deferredTabsMoveAndCopy()
+{
+    Settings::instance().setValue(key::restoreSession, true);
+    const QString a = write("a.md", "one\ntwo\n");
+    const QString b = write("b.md", "# b\n\nx\ny\nz\n");
+    const QString c = write("c.txt", "see\n");
+    MainWindow *w = makeWindow();
+    QVERIFY(w->openFile(a));
+    QVERIFY(w->openFile(b));
+    QVERIFY(w->openFile(c));
+    w->tabs().at(1)->setViewMode(Mode::SourceVisual);
+    w->tabs().at(1)->goToLine(4);
+    w->setCurrentTabIndex(0);
+    QVERIFY(SessionManager::instance().quit());
+    closeWindows();
+
+    QVERIFY(SessionManager::instance().restore());
+    MainWindow *restored = SessionManager::instance().windows().at(0);
+    const QList<DocumentTab *> tabs = restored->tabs();
+    QVERIFY(tabs.at(1)->isDeferred() && tabs.at(2)->isDeferred());
+    // Copy to New Window: a second tab with the first's state and text.
+    MainWindow *copyWindow = restored->moveTabsToNewWindow({tabs.at(1)}, std::nullopt, false, true);
+    m_made.append(copyWindow);
+    QCOMPARE(restored->tabs().size(), 3);
+    QCOMPARE(copyWindow->tabs().size(), 1);
+    DocumentTab *copy = copyWindow->tabs().at(0);
+    QCOMPARE(copy->path(), b);
+    QCOMPARE(copy->text(), QStringLiteral("# b\n\nx\ny\nz\n"));
+    QCOMPARE(copy->viewMode(), Mode::SourceVisual);
+    QCOMPARE(cursorLine(copy), 3);
+    // Move to New Window: the tab goes as it is and reads when shown there.
+    MainWindow *moved = restored->moveTabsToNewWindow({tabs.at(2)});
+    m_made.append(moved);
+    QCOMPARE(moved->tabs().size(), 1);
+    QCOMPARE(moved->tabs().at(0), tabs.at(2));
+    QVERIFY(!tabs.at(2)->isDeferred());
+    QCOMPARE(tabs.at(2)->text(), QStringLiteral("see\n"));
+    QCOMPARE(m_prompts, 0);
+}
+
+// A file that went away between the restore and its tab being shown leaves
+// an empty tab marked as deleted, not a crash or a prompt.
+void TestSession::fileGoneBeforeItsTabIsShown()
+{
+    Settings::instance().setValue(key::restoreSession, true);
+    const QString a = write("a.txt", "a\n");
+    const QString b = write("b.txt", "bee\n");
+    MainWindow *w = makeWindow();
+    QVERIFY(w->openFile(a));
+    QVERIFY(w->openFile(b));
+    w->setCurrentTabIndex(0);
+    QVERIFY(SessionManager::instance().quit());
+    closeWindows();
+
+    QVERIFY(SessionManager::instance().restore());
+    MainWindow *restored = SessionManager::instance().windows().at(0);
+    QVERIFY(restored->tabs().at(1)->isDeferred());
+    QVERIFY(QFile::remove(b));
+    restored->setCurrentTabIndex(1);
+    DocumentTab *tab = restored->tabs().at(1);
+    QVERIFY(!tab->isDeferred());
+    QVERIFY(tab->document()->isEmpty());
+    QVERIFY(tab->file()->isOrphaned());
+    QVERIFY(!tab->isModified());
+    QCOMPARE(m_prompts, 0);
 }
 
 void TestSession::quitPrompts()

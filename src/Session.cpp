@@ -514,6 +514,18 @@ QList<DocumentTab *> SessionManager::writeSession(const QList<DocumentTab *> &sk
         QHash<DocumentTab *, int> ids;
         const QList<DocumentTab *> windowTabs = window->tabs();
         for (DocumentTab *tab : windowTabs) {
+            // (Unless another tab on its file has changed it: then it is
+            // backed up with that one.)
+            if (tab->isDeferred() && !tab->isModified()) {
+                // Not read since the restore: it has no caret or scroll
+                // position of its own, and nothing to back up. What the
+                // session stored of it stays, as it was.
+                if (tab == windowTabs.value(window->currentTabIndex()))
+                    current = int(tabs.size());
+                ids.insert(tab, int(tabs.size()));
+                tabs.append(tab->sessionEntry());
+                continue;
+            }
             const bool untitled = tab->path().isEmpty();
             const bool unsaved = tab->isModified() || (untitled && !tab->document()->isEmpty());
             QString backup;
@@ -685,6 +697,9 @@ bool SessionManager::restore()
         const QJsonObject windowObject = windowValue.toObject();
         auto *window = new MainWindow;
         window->setAttribute(Qt::WA_DeleteOnClose);
+        // Tabs without their text yet are read when they show, not as they
+        // are placed (the first of each group is current for a moment).
+        window->setHoldLoads(true);
 
         // Tabs by their index in "tabs", placed in the grid once all exist.
         QMap<int, DocumentTab *> restored;
@@ -704,6 +719,8 @@ bool SessionManager::restore()
             std::shared_ptr<TextFile> shared = !backupName.isEmpty() ? restoredBackups.value(backupName) : nullptr;
             if (!shared && !path.isEmpty() && (!backupName.isEmpty() || wholeSession))
                 shared = TextFile::find(path);
+            // Which file this tab is the first of, if its reading is put off.
+            bool createdHere = false;
             if (!shared && backupName.isEmpty() && wholeSession && !path.isEmpty()) {
                 // A big file would hold up the window (and every other file
                 // of the session) while it is read and set up: it loads off
@@ -724,7 +741,28 @@ bool SessionManager::restore()
                     continue;
                 }
             }
+            // A file of the session that is there: not read until its tab shows
+            // (the current tab of each group does, before the window). The
+            // rest of 60 tabs would cost seconds of reading and colouring.
+            if (!shared && backupName.isEmpty() && wholeSession && !path.isEmpty()) {
+                const QFileInfo info(path);
+                if (info.isFile() && info.isReadable()) {
+                    shared = TextFile::createDeferred(path);
+                    createdHere = true;
+                }
+            }
             DocumentTab *tab = nullptr;
+            if (shared && shared->isDeferred()) {
+                tab = new DocumentTab(shared);
+                tab->setDeferred(entry, [entry, createdHere](DocumentTab *loaded) {
+                    if (createdHere)
+                        applyFileSettings(loaded, entry);
+                    loaded->setViewMode(modeFromString(entry.value(QStringLiteral("mode")).toString()));
+                    restoreView(loaded, entry);
+                });
+                restored.insert(id, tab);
+                continue;
+            }
             if (shared) {
                 tab = new DocumentTab(shared);
             } else {
@@ -767,8 +805,10 @@ bool SessionManager::restore()
         const QJsonObject grid = windowObject.value(QStringLiteral("grid")).toObject();
         window->restoreGrid(grid, restored);
 
-        for (DocumentTab *tab : std::as_const(restored))
-            restoreView(tab, entries.value(tab));
+        for (DocumentTab *tab : std::as_const(restored)) {
+            if (!tab->isDeferred())
+                restoreView(tab, entries.value(tab));
+        }
 
         if (window->tabCount() == 0 && !window->isOpening()) {
             delete window;
@@ -779,6 +819,8 @@ bool SessionManager::restore()
             if (DocumentTab *current = restored.value(windowObject.value(QStringLiteral("current")).toInt()))
                 window->setCurrentTabIndex(int(window->tabs().indexOf(current)));
         }
+        // The current tab of each group is read now, before the window shows.
+        window->setHoldLoads(false);
         const QByteArray geometry = QByteArray::fromBase64(windowObject.value(QStringLiteral("geometry")).toString().toLatin1());
         if (!geometry.isEmpty())
             window->restoreGeometry(geometry);
