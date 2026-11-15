@@ -734,6 +734,10 @@ void TestVisualView::caretBlinkRepaintsOnlyTheCaretsRow()
 {
     // A blink repaints the row the caret is drawn in, not the whole view, and
     // the view painted there is what a whole repaint gives.
+    // (The sample's diagram is drawn on a worker; when its picture arrives,
+    // which on a busy machine is seconds in, the whole view is repainted, and
+    // that is no blink.)
+    QTRY_VERIFY_WITH_TIMEOUT(!m_view->hasPendingDiagrams(), 60000);
     QWidget *viewport = m_view->viewport();
     PaintSpy spy;
     viewport->installEventFilter(&spy);
