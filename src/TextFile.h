@@ -63,6 +63,8 @@ public:
     static QList<TextFile *> all();
     // Looks at every file on disk again soon; for window activation.
     static void checkAllOnDisk();
+    // For tests: whether any file waits for its turn to be looked at again.
+    static bool hasDiskChecksPending();
 
     ~TextFile() override;
 

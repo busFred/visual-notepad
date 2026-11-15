@@ -255,6 +255,8 @@ public:
         armCheckTimer();
     }
 
+    bool hasChecksPending() const { return !m_pendingChecks.isEmpty(); }
+
     void cancelCheck(TextFile *file)
     {
         if (m_pendingChecks.remove(file))
@@ -458,6 +460,11 @@ void TextFile::checkAllOnDisk()
         if (!file->path().isEmpty())
             file->scheduleDiskCheck();
     }
+}
+
+bool TextFile::hasDiskChecksPending()
+{
+    return TextFileRegistry::instance().hasChecksPending();
 }
 
 TextFile::TextFile()
