@@ -1743,17 +1743,12 @@ qreal fitTable(QTextDocument &doc, QTextTable &table, qreal width)
     doc.setDefaultTextOption(option);
 
     doc.setTextWidth(unboundedWidth);
-    const qreal widest = std::ceil(doc.idealWidth());
+    const qreal ideal = doc.idealWidth();
+    const qreal widest = std::ceil(ideal);
     if (widest <= width) {
         doc.setTextWidth(width);
         return 0;
     }
-    // Every column as narrow as it goes.
-    doc.setTextWidth(1);
-    const qreal narrowest = std::ceil(doc.idealWidth());
-    if (narrowest > width)
-        return widest;
-
     const int columns = table.columns();
     bool plain = columns > 0;
     for (int row = 0; plain && row < table.rows(); ++row) {
@@ -1763,10 +1758,6 @@ qreal fitTable(QTextDocument &doc, QTextTable &table, qreal width)
                 plain = false;
         }
     }
-    if (!plain) {
-        doc.setTextWidth(width);
-        return 0;
-    }
     // The text of each column (as wide in every row): from the first row.
     QAbstractTextDocumentLayout *layout = doc.documentLayout();
     const auto texts = [&] {
@@ -1775,23 +1766,90 @@ qreal fitTable(QTextDocument &doc, QTextTable &table, qreal width)
             rects.push_back(layout->blockBoundingRect(table.cellAt(0, col).firstCursorPosition().block()));
         return rects;
     };
-    const QList<QRectF> least = texts();
-    doc.setTextWidth(unboundedWidth);
-    const QList<QRectF> most = texts();
+    // The widest layout gives each column its widest width (its text on
+    // one line).
+    const QList<QRectF> most = plain ? texts() : QList<QRectF>();
     // What a column takes around its text: the padding and border between
     // one column's text and the next one's.
-    const qreal around = columns > 1 ? most[1].left() - most[0].right() : 2 * table.format().cellPadding() + 1;
+    const qreal around = columns > 1 && plain ? most[1].left() - most[0].right() : 2 * table.format().cellPadding() + 1;
+    // The narrowest layout gives each column its least width: Qt makes it
+    // the widest of its cells' longest unbreakable pieces (their
+    // QTextLayout::minimumWidth, the same at any width) and their padding,
+    // in whole pixels (at least one), in its fixed point (1/64 px). Those
+    // are known from the widest layout, unless a paragraph in a cell has
+    // margins of its own or a cell holds a frame (then the table is laid out
+    // narrowest to see).
+    QList<qreal> least;
+    bool known = plain;
+    // Formulas are objects in the text, each in a frame of its own that Qt
+    // counts in its cell's least width as well.
+    QHash<int, int> objects; // Widest object by cell (row * columns + column), in 1/64 px.
+    for (QTextFrame *frame : table.childFrames()) {
+        if (frame->firstPosition() <= frame->lastPosition()) {
+            known = false; // A frame in the text (a table in a table).
+            break;
+        }
+        const QTextTableCell cell = table.cellAt(frame->firstPosition());
+        int &widest = objects[cell.row() * columns + cell.column()];
+        widest = qMax(widest, int(layout->frameBoundingRect(frame).width() * 64));
+    }
+    for (int col = 0; known && col < columns; ++col) {
+        int columnMin = 64;
+        for (int row = 0; row < table.rows() && known; ++row) {
+            const QTextTableCell cell = table.cellAt(row, col);
+            int cellMin = objects.value(row * columns + col);
+            for (QTextBlock b = cell.firstCursorPosition().block(); b.isValid() && b.position() <= cell.lastPosition();
+                 b = b.next()) {
+                const QTextBlockFormat format = b.blockFormat();
+                if (b.textList() || format.leftMargin() != 0 || format.rightMargin() != 0 || format.indent() != 0
+                    || format.textIndent() != 0) {
+                    known = false;
+                    break;
+                }
+                cellMin = qMax(cellMin, int(b.layout()->minimumWidth() * 64));
+            }
+            const int padded = cellMin + int(around * 64);
+            columnMin = qMax(columnMin, (padded + 63) & -64);
+        }
+        least.push_back(columnMin / 64.0 - around);
+    }
+    qreal narrowest = 0;
+    if (known) {
+        // The table as wide as its columns' least widths, and as much around
+        // them as now.
+        qreal mostSum = 0, leastSum = 0;
+        for (int col = 0; col < columns; ++col) {
+            mostSum += most[col].width();
+            leastSum += least[col];
+        }
+        narrowest = std::ceil(ideal - mostSum + leastSum);
+    } else {
+        // Every column as narrow as it goes.
+        doc.setTextWidth(1);
+        narrowest = std::ceil(doc.idealWidth());
+        least.clear();
+        if (plain) {
+            for (const QRectF &text : texts())
+                least.push_back(text.width());
+        }
+    }
+    if (narrowest > width)
+        return widest;
+    if (!plain) {
+        // Cells that span columns or rows: left to Qt.
+        doc.setTextWidth(width);
+        return 0;
+    }
     qreal wanted = 0;
     for (int col = 0; col < columns; ++col)
-        wanted += most[col].width() - least[col].width();
+        wanted += most[col].width() - least[col];
     // What is left of the column past the narrowest layout, in Qt's fixed
     // point (1/64 px; the shares rounded down so that they never add up to more).
     const qreal spare = std::floor((width - narrowest) * 64) / 64;
     QList<QTextLength> lengths;
     for (int col = 0; col < columns; ++col) {
-        const qreal share =
-            wanted > 0 ? std::floor(spare * (most[col].width() - least[col].width()) / wanted * 64) / 64 : 0;
-        lengths.push_back(QTextLength(QTextLength::FixedLength, least[col].width() + around + share));
+        const qreal share = wanted > 0 ? std::floor(spare * (most[col].width() - least[col]) / wanted * 64) / 64 : 0;
+        lengths.push_back(QTextLength(QTextLength::FixedLength, least[col] + around + share));
     }
     QTextTableFormat format = table.format();
     format.setColumnWidthConstraints(lengths);
