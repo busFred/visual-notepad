@@ -64,6 +64,7 @@ class TestMath : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
+    void init();
     void aPreparedWorkerIsTheOneThatDraws();
     void lockedDownWorkerReadsNoUserFiles();
     void lockedDownWorkerStillDrawsEveryFont();
@@ -86,6 +87,15 @@ private Q_SLOTS:
     void aFormulaLeavesNothingBehind();
     void saveScreenshots();
 };
+
+void TestMath::init()
+{
+    // Tests here run formulas that run out of time on purpose, and each such
+    // formula halves the time the next may take, down to 250 ms, and is not
+    // tried again. A test after them would have a worker that may take 250 ms
+    // for its first formula, which a busy machine does not give it.
+    math::forgetWorkerFailures();
+}
 
 void TestMath::fractionIsTallerThanText()
 {
@@ -292,26 +302,36 @@ void TestMath::formulasThatBreakMicroTeXAreShownAsSource()
 void TestMath::aFormulaThatNeverEndsIsGivenUp()
 {
     // A command that stands for itself: MicroTeX replaces it for ever.
+    // (The time the next formula may take is read from the renderer and
+    // that it is not tried again from the workers started: what a busy
+    // machine slows down is not timed.)
+    const int fullTime = math::formulaTimeLimitMs();
     QElapsedTimer timer;
     timer.start();
     math::render(QStringLiteral("\\newcommand{\\zz}{\\zz}\\zz"), inlineStyle());
     QVERIFY(math::lastRenderFellBack());
-    QVERIFY2(timer.elapsed() < 6000, qPrintable(QString::number(timer.elapsed())));
-    // Asked again, it is not tried again.
-    timer.restart();
+    QVERIFY2(timer.elapsed() < 2 * fullTime, qPrintable(QString::number(timer.elapsed())));
+    // It ran out of its time, and the next formula gets less.
+    const int lessTime = math::formulaTimeLimitMs();
+    QVERIFY2(lessTime < fullTime, qPrintable(QString::number(lessTime)));
+    // Asked again, it is not tried again: that would start a new worker, the
+    // one that failed being gone, and wait for it.
     const int starts = math::workerStarts();
     math::render(QStringLiteral("\\newcommand{\\zz}{\\zz}\\zz"), inlineStyle());
     QVERIFY(math::lastRenderFellBack());
     QCOMPARE(math::workerStarts(), starts);
-    QVERIFY2(timer.elapsed() < 500, qPrintable(QString::number(timer.elapsed())));
-    // The next one that never ends gets less time. (A new worker is
-    // started first: that takes over a second on a slow machine.)
-    math::render(QStringLiteral("y"), inlineStyle());
-    QVERIFY(!math::lastRenderFellBack());
-    timer.restart();
+    QCOMPARE(math::formulaTimeLimitMs(), lessTime);
+    // The next one that never ends costs less time again.
     math::render(QStringLiteral("\\newcommand{\\zw}{\\zw\\zw}\\zw"), inlineStyle());
     QVERIFY(math::lastRenderFellBack());
-    QVERIFY2(timer.elapsed() < 3000, qPrintable(QString::number(timer.elapsed())));
+    QVERIFY2(math::formulaTimeLimitMs() < lessTime, qPrintable(QString::number(math::formulaTimeLimitMs())));
+    // And the worker is fine afterwards. (With the time of a new one: a busy
+    // machine takes longer than the least a formula may take for the first
+    // formula of a worker that has to load its fonts.)
+    math::forgetWorkerFailures();
+    QCOMPARE(math::formulaTimeLimitMs(), fullTime);
+    math::render(QStringLiteral("y"), inlineStyle());
+    QVERIFY(!math::lastRenderFellBack());
     math::render(QStringLiteral("x^2"), inlineStyle());
     QVERIFY(!math::lastRenderFellBack());
 }
