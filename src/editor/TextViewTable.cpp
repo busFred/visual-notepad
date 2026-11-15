@@ -291,14 +291,15 @@ md::TableInfo TextView::caretTableInfo()
 {
     if (!m_markdown || m_carets.empty())
         return {};
-    const QTextCursor c = textCursor();
+    const int position = m_carets[m_primary].position;
     // (Asked after every caret move, and the same several times. A line that
     // is no pipe row costs a look at its block once per document revision.)
     const int revision = m_doc->revision();
-    if (m_tableInfoRevision != revision || m_tableInfoPosition != c.position()) {
-        m_tableInfo = tableInfoAt(c.blockNumber(), c.positionInBlock());
+    if (m_tableInfoRevision != revision || m_tableInfoPosition != position) {
+        const QTextBlock block = m_doc->findBlock(position);
+        m_tableInfo = tableInfoAt(block.blockNumber(), position - block.position());
         m_tableInfoRevision = revision;
-        m_tableInfoPosition = c.position();
+        m_tableInfoPosition = position;
     }
     return m_tableInfo;
 }
@@ -315,7 +316,7 @@ bool TextView::editTable(md::TableOp op, const QString &arg)
     const md::TableInfo info = tableAtCaret();
     if (!info.found)
         return false;
-    return editTableAt(textCursor().blockNumber(), op, info.row, info.col, arg);
+    return editTableAt(blockNumberOf(m_carets[m_primary].position), op, info.row, info.col, arg);
 }
 
 bool TextView::editTableAt(int line, md::TableOp op, int row, int col, const QString &arg, bool moveCaret, int rows,
@@ -359,9 +360,8 @@ bool TextView::editTableAt(int line, md::TableOp op, int row, int col, const QSt
     QTextBlock target = m_doc->findBlockByNumber(edit.caretLine);
     if (!target.isValid())
         target = m_doc->lastBlock();
-    QTextCursor cursor(m_doc);
-    cursor.setPosition(target.position() + qMin(edit.caretColumn, target.length() - 1));
-    setTextCursor(cursor);
+    const int caret = target.position() + qMin(edit.caretColumn, target.length() - 1);
+    setCaretRanges({{caret, caret}}, 0);
     ensureCursorVisible();
     return true;
 }
@@ -378,9 +378,9 @@ void TextView::realignLeftTable()
         return;
     const md::TableInfo now = caretTableInfo();
     if (m_tableTracked) {
-        const int line = m_tableCursor.blockNumber();
+        const int line = blockNumberOf(m_tablePosition);
         if (now.found && line >= now.firstLine && line <= now.lastLine) {
-            m_tableCursor = textCursor();
+            m_tablePosition = m_carets[m_primary].position;
             return; // Still in it.
         }
         m_tableTracked = false;
@@ -389,7 +389,7 @@ void TextView::realignLeftTable()
             editTableAt(line, md::TableOp::Realign, 0, 0, {}, false);
     }
     if (now.found) {
-        m_tableCursor = textCursor();
+        m_tablePosition = m_carets[m_primary].position;
         m_tableTracked = true;
         m_tableEnterRevision = m_doc->revision();
     }
@@ -421,19 +421,19 @@ bool TextView::moveToTableCell(int line, int row, int col)
 }
 
 // One caret, with no selection or one inside a line (a cell Tab selected).
-static bool onOneLine(const QTextCursor &c)
+static bool onOneLine(const QTextDocument *document, const TextView::CaretRange &c)
 {
-    return c.document()->findBlock(c.selectionStart()) == c.document()->findBlock(c.selectionEnd());
+    return document->findBlock(c.start()) == document->findBlock(c.end());
 }
 
 bool TextView::tableTab(bool forward)
 {
-    if (!m_markdown || !canEdit() || m_carets.size() != 1 || !onOneLine(textCursor()))
+    if (!m_markdown || !canEdit() || m_carets.size() != 1 || !onOneLine(m_doc, m_carets[m_primary]))
         return false;
     const md::TableInfo info = caretTableInfo();
     if (!info.found || info.html)
         return false;
-    const int line = textCursor().blockNumber();
+    const int line = blockNumberOf(m_carets[m_primary].position);
     int row = info.row;
     int col = info.col;
     if (forward) {
@@ -461,12 +461,12 @@ bool TextView::tableTab(bool forward)
 
 bool TextView::tableEnter()
 {
-    if (!m_markdown || !canEdit() || m_carets.size() != 1 || !onOneLine(textCursor()))
+    if (!m_markdown || !canEdit() || m_carets.size() != 1 || !onOneLine(m_doc, m_carets[m_primary]))
         return false;
     const md::TableInfo info = caretTableInfo();
     if (!info.found || info.html)
         return false;
-    return editTableAt(textCursor().blockNumber(), md::TableOp::RowBelow, info.row, info.col);
+    return editTableAt(blockNumberOf(m_carets[m_primary].position), md::TableOp::RowBelow, info.row, info.col);
 }
 
 void TextView::insertTable(int rows, int cols)
@@ -513,7 +513,7 @@ int TextView::insertTableLines(int rows, int cols, bool roomAfter)
         lines << line(blank);
 
     beginEdit();
-    QTextCursor c = textCursor();
+    QTextCursor c = cursorAt(m_carets[m_primary]);
     const QTextBlock block = c.block();
     QString text = lines.join(u'\n');
     int start;
@@ -532,7 +532,7 @@ int TextView::insertTableLines(int rows, int cols, bool roomAfter)
         text.append(u'\n');
     else if (!next.isValid() && roomAfter)
         text.append(QStringLiteral("\n\n")); // A blank line, then one to type on.
-    c.insertText(text);
+    insertText(c, text);
     endEdit();
     return m_doc->findBlock(start).blockNumber();
 }

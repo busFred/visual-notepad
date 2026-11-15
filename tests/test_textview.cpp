@@ -98,6 +98,9 @@ private Q_SLOTS:
     void tabAndOutdent();
     void undoRevertsMultiCaretEditAtOnce();
     void manyCaretsEditAsLiveCursorsDo();
+    void moreManyCaretEditsAsLiveCursorsDo();
+    void autoClosedPairsAtManyCarets();
+    void otherViewsCaretsMoveAsLiveCursors();
     void manyCaretsUndoAndRedoInOneStep();
     void undoRestoresCaretAtEdit();
     void toggleLineComment();
@@ -639,6 +642,324 @@ void TestTextView::manyCaretsEditAsLiveCursorsDo()
         QVERIFY2(carets == expectedCarets, qPrintable(what + QStringLiteral(": carets %1 against %2")
                                                           .arg(carets.join(u' '), expectedCarets.join(u' '))));
     }
+}
+
+void TestTextView::moreManyCaretEditsAsLiveCursorsDo()
+{
+    // The other edits at every caret, against a model with a live cursor for
+    // each caret, made as the view made them when its carets were cursors.
+    QRandomGenerator random(20261115);
+    vn::Settings::instance().setValue(vn::key::autoClose, true);
+    vn::Settings::instance().setValue(vn::key::autoSurround, true);
+    const auto leading = [](const QString &text) {
+        int i = 0;
+        while (i < text.size() && (text.at(i) == u' ' || text.at(i) == u'\t'))
+            ++i;
+        return i;
+    };
+    struct Edit
+    {
+        QString name;
+        bool selections; // Some carets select, else none does.
+        bool markdown;
+        std::function<void()> act;
+        std::function<void(QList<QTextCursor> &)> model;
+    };
+    QStringList parts;
+    const std::vector<Edit> edits = {
+        {QStringLiteral("enter"), true, false, [this] { QTest::keyClick(m_view, Qt::Key_Return); },
+         [&](QList<QTextCursor> &live) {
+             for (QTextCursor &c : live) {
+                 const QString text = c.block().text();
+                 c.insertText(u'\n' + text.left(qMin(leading(text), c.positionInBlock())));
+             }
+         }},
+        {QStringLiteral("enter in lists"), true, true, [this] { QTest::keyClick(m_view, Qt::Key_Return); },
+         [&](QList<QTextCursor> &live) {
+             for (QTextCursor &c : live) {
+                 const QString text = c.block().text();
+                 const vn::md::ListLine item = vn::md::parseListLine(text);
+                 if (!c.hasSelection() && item.valid && c.positionInBlock() >= item.contentStart
+                     && (!item.empty || c.positionInBlock() == text.size())) {
+                     if (item.empty) {
+                         c.setPosition(c.block().position());
+                         c.setPosition(c.block().position() + text.size(), QTextCursor::KeepAnchor);
+                         c.insertText(!item.isQuote && item.lead.contains(u'>') ? item.lead : QString());
+                     } else {
+                         c.insertText(u'\n' + item.nextPrefix());
+                     }
+                     continue;
+                 }
+                 c.insertText(u'\n' + text.left(qMin(leading(text), c.positionInBlock())));
+             }
+         }},
+        {QStringLiteral("tab"), false, true, [this] { QTest::keyClick(m_view, Qt::Key_Tab); },
+         [&](QList<QTextCursor> &live) {
+             QSet<int> items;
+             for (QTextCursor &c : live) {
+                 const vn::md::ListLine item = vn::md::parseListLine(c.block().text());
+                 if (item.valid && !item.isQuote) {
+                     if (items.contains(c.blockNumber()))
+                         continue;
+                     items.insert(c.blockNumber());
+                     const int anchor = c.anchor() + 4;
+                     const int position = c.position() + 4;
+                     QTextCursor(c.block()).insertText(QStringLiteral("    "));
+                     c.setPosition(anchor);
+                     c.setPosition(position, QTextCursor::KeepAnchor);
+                     continue;
+                 }
+                 c.insertText(QString(4 - c.positionInBlock() % 4, u' '));
+             }
+         }},
+        {QStringLiteral("surround"), true, false, [this] { QTest::keyClicks(m_view, QStringLiteral("(")); },
+         [&](QList<QTextCursor> &live) {
+             const bool all = std::all_of(live.cbegin(), live.cend(), [](const QTextCursor &c) {
+                 return c.hasSelection() && !c.selectedText().trimmed().isEmpty();
+             });
+             for (QTextCursor &c : live) {
+                 if (!all) {
+                     c.insertText(QStringLiteral("("));
+                     continue;
+                 }
+                 const bool forward = c.position() > c.anchor();
+                 const int start = c.selectionStart();
+                 const int end = c.selectionEnd();
+                 QTextCursor edit(c.document());
+                 edit.setPosition(end);
+                 edit.insertText(QStringLiteral(")"));
+                 edit.setPosition(start);
+                 edit.insertText(QStringLiteral("("));
+                 c.setPosition(forward ? start + 1 : end + 1);
+                 c.setPosition(forward ? end + 1 : start + 1, QTextCursor::KeepAnchor);
+             }
+         }},
+        {QStringLiteral("paste a line each"), true, false, [this] { m_view->paste(); },
+         [&](QList<QTextCursor> &live) {
+             for (int k = 0; k < live.size(); ++k)
+                 live[k].insertText(parts.at(k));
+         }},
+        {QStringLiteral("cut"), true, false, [this] { m_view->cut(); },
+         [&](QList<QTextCursor> &live) {
+             if (std::none_of(live.cbegin(), live.cend(), [](const QTextCursor &c) { return c.hasSelection(); }))
+                 return; // (Whole lines then: not this test's.)
+             for (QTextCursor &c : live)
+                 c.removeSelectedText();
+         }},
+        {QStringLiteral("input method"), true, false,
+         [this] {
+             QInputMethodEvent event;
+             event.setCommitString(QStringLiteral("é"));
+             QApplication::sendEvent(m_view, &event);
+         },
+         [&](QList<QTextCursor> &live) {
+             for (QTextCursor &c : live)
+                 c.insertText(QStringLiteral("é"));
+         }},
+    };
+    for (int round = 0; round < 140; ++round) {
+        const Edit &edit = edits[round % edits.size()];
+        m_view->setMarkdownEditing(edit.markdown);
+        QStringList lines;
+        for (int i = 0; i < 30; ++i) {
+            QString line = QString(random.bounded(0, 3) * 2, u' ');
+            if (edit.markdown && random.bounded(0, 2) == 0)
+                line += random.bounded(0, 2) ? QStringLiteral("- ") : QStringLiteral("1. ");
+            for (int w = random.bounded(0, 5); w > 0; --w)
+                line += QStringLiteral("word%1 ").arg(random.bounded(100));
+            lines << line;
+        }
+        setText(lines.join(u'\n'));
+        const int length = m_doc->characterCount() - 1;
+        QList<QTextCursor> chosen;
+        for (int pos = random.bounded(0, 6); pos < length;) {
+            QTextCursor c(m_doc);
+            const int width = edit.selections && random.bounded(0, 3) == 0 ? random.bounded(1, 12) : 0;
+            c.setPosition(pos);
+            c.setPosition(qMin(length, pos + width), QTextCursor::KeepAnchor);
+            if (random.bounded(0, 2) == 0) { // Backwards.
+                const int anchor = c.anchor();
+                c.setPosition(c.position());
+                c.setPosition(anchor, QTextCursor::KeepAnchor);
+            }
+            chosen.append(c);
+            pos += width + random.bounded(0, 3) * random.bounded(1, 9);
+        }
+        if (chosen.isEmpty())
+            continue;
+        m_view->setCursors(chosen, chosen.size() / 2);
+        // The model starts from the carets as the view keeps them (merged).
+        QTextDocument reference;
+        reference.setPlainText(text());
+        QList<QTextCursor> live;
+        for (const TextView::CaretRange &range : m_view->caretRanges()) {
+            QTextCursor c(&reference);
+            c.setPosition(range.anchor);
+            c.setPosition(range.position, QTextCursor::KeepAnchor);
+            live.append(c);
+        }
+        parts.clear();
+        for (int k = 0; k < live.size(); ++k)
+            parts << QStringLiteral("p%1").arg(k);
+        QApplication::clipboard()->setText(parts.join(u'\n'));
+        edit.model(live);
+        edit.act();
+        std::vector<std::pair<int, int>> expected;
+        for (const QTextCursor &c : std::as_const(live))
+            expected.emplace_back(c.anchor(), c.position());
+        std::sort(expected.begin(), expected.end(), [](const auto &a, const auto &b) {
+            return std::min(a.first, a.second) < std::min(b.first, b.second);
+        });
+        expected.erase(std::unique(expected.begin(), expected.end()), expected.end());
+        QStringList carets;
+        QStringList expectedCarets;
+        for (const TextView::CaretRange &range : m_view->caretRanges())
+            carets << QStringLiteral("%1>%2").arg(range.anchor).arg(range.position);
+        for (const auto &[anchor, position] : expected)
+            expectedCarets << QStringLiteral("%1>%2").arg(anchor).arg(position);
+        const QString what = QStringLiteral("round %1, %2").arg(round).arg(edit.name);
+        QVERIFY2(text() == reference.toPlainText(), qPrintable(what + QStringLiteral(": text")));
+        QVERIFY2(carets == expectedCarets, qPrintable(what + QStringLiteral(": carets %1 against %2")
+                                                          .arg(carets.join(u' '), expectedCarets.join(u' '))));
+    }
+}
+
+void TestTextView::autoClosedPairsAtManyCarets()
+{
+    // Each caret's pair is deleted with Backspace, and typed over, as one
+    // pair would be.
+    vn::Settings::instance().setValue(vn::key::autoClose, true);
+    m_view->setCodeEditing(true);
+    QStringList lines;
+    for (int i = 0; i < 300; ++i)
+        lines << QStringLiteral("call %1 x").arg(i);
+    const QString original = lines.join(u'\n');
+    setText(original);
+    QList<QTextCursor> carets;
+    for (int i = 0; i < 300; ++i) {
+        QTextCursor c(m_doc->findBlockByNumber(i));
+        c.movePosition(QTextCursor::EndOfBlock);
+        c.movePosition(QTextCursor::Left, QTextCursor::MoveAnchor, 2);
+        carets.append(c);
+    }
+    m_view->setCursors(carets, 0);
+    QTest::keyClicks(m_view, QStringLiteral("("));
+    QVERIFY(text().startsWith(QStringLiteral("call 0() x\ncall 1() x")));
+    QTest::keyClick(m_view, Qt::Key_Backspace);
+    QCOMPARE(text(), original);
+    QCOMPARE(m_view->cursorCount(), 300);
+    QTest::keyClicks(m_view, QStringLiteral("(a)"));
+    QVERIFY(text().startsWith(QStringLiteral("call 0(a) x\ncall 1(a) x")));
+    QCOMPARE(m_view->primaryCaret().position, 9); // After the closer typed over.
+    m_view->setCodeEditing(false);
+}
+
+void TestTextView::otherViewsCaretsMoveAsLiveCursors()
+{
+    // A second view on the document keeps its carets where cursors in the
+    // document would be, whatever this view does to the text: its own edits
+    // (told as they are made), undo and redo, and edits made otherwise.
+    QRandomGenerator random(20261116);
+    m_view->setCommentMarker(QStringLiteral("//"));
+    auto *other = new TextView(m_doc);
+    other->resize(300, 200);
+    QStringList lines;
+    for (int i = 0; i < 40; ++i) {
+        QString line = QString(random.bounded(0, 3) * 2, u' ');
+        for (int w = random.bounded(0, 5); w > 0; --w)
+            line += QStringLiteral("word%1 ").arg(random.bounded(100));
+        lines << line;
+    }
+    setText(lines.join(u'\n'));
+    const std::vector<std::function<void()>> edits = {
+        [this] { QTest::keyClicks(m_view, QStringLiteral("ab")); },
+        [this] { QTest::keyClick(m_view, Qt::Key_Backspace); },
+        [this] { QTest::keyClick(m_view, Qt::Key_Delete, Qt::ControlModifier); },
+        [this] { QTest::keyClick(m_view, Qt::Key_Return); },
+        [this] { QTest::keyClick(m_view, Qt::Key_Tab); },
+        [this] { m_view->outdent(); },
+        [this] { m_view->toggleLineComment(); },
+        [this] { m_view->moveLinesDown(); },
+        [this] { m_view->moveLinesUp(); },
+        [this] { m_view->copyLinesDown(); },
+        [this] { m_view->deleteLines(); },
+        [this] { m_view->insertLineBelow(); },
+        [this] { m_view->insertLineAbove(); },
+        [this] { m_view->trimTrailingWhitespace(); },
+        [this] {
+            QApplication::clipboard()->setText(QStringLiteral("one\ntwo"));
+            m_view->paste();
+        },
+        [this] { m_view->undo(); },
+        [this] { m_view->undo(); },
+        [this] { m_view->redo(); },
+        [this] {
+            // As the find bar replaces: one block, back to front.
+            QTextCursor edit(m_doc);
+            edit.beginEditBlock();
+            for (int at = m_doc->characterCount() - 9; at > 0; at -= 23) {
+                edit.setPosition(at);
+                edit.setPosition(at + 3, QTextCursor::KeepAnchor);
+                TextView::insertText(edit, QStringLiteral("R"));
+            }
+            edit.endEditBlock();
+        },
+        [this] {
+            // An edit block the views are not told of, as a whole.
+            QTextCursor edit(m_doc);
+            edit.beginEditBlock();
+            edit.setPosition(m_doc->characterCount() / 2);
+            edit.insertText(QStringLiteral("xyz"));
+            edit.setPosition(2);
+            edit.insertText(QStringLiteral("q"));
+            edit.endEditBlock();
+        },
+    };
+    for (int round = 0; round < 160; ++round) {
+        const int length = m_doc->characterCount() - 1;
+        // This view's carets.
+        QList<QTextCursor> mine;
+        for (int k = random.bounded(1, 6); k > 0; --k) {
+            QTextCursor c(m_doc);
+            c.setPosition(random.bounded(0, length + 1));
+            if (random.bounded(0, 3) == 0)
+                c.setPosition(random.bounded(0, length + 1), QTextCursor::KeepAnchor);
+            mine.append(c);
+        }
+        m_view->setCursors(mine, 0);
+        // The other view's, and live cursors where they are.
+        QList<QTextCursor> theirs;
+        for (int k = random.bounded(1, 30); k > 0; --k) {
+            QTextCursor c(m_doc);
+            c.setPosition(random.bounded(0, length + 1));
+            if (random.bounded(0, 2) == 0)
+                c.setPosition(random.bounded(0, length + 1), QTextCursor::KeepAnchor);
+            theirs.append(c);
+        }
+        other->setCursors(theirs, 0);
+        QList<QTextCursor> live;
+        for (const TextView::CaretRange &range : other->caretRanges()) {
+            QTextCursor c(m_doc);
+            c.setPosition(range.anchor);
+            c.setPosition(range.position, QTextCursor::KeepAnchor);
+            live.append(c);
+        }
+        const int which = random.bounded(int(edits.size()));
+        edits[which]();
+        QStringList carets;
+        QStringList expected;
+        for (const TextView::CaretRange &range : other->caretRanges())
+            carets << QStringLiteral("%1>%2").arg(range.anchor).arg(range.position);
+        for (const QTextCursor &c : std::as_const(live))
+            expected << QStringLiteral("%1>%2").arg(c.anchor()).arg(c.position());
+        // (Changes not told of are only known as a whole: those carets are
+        // checked against cursors only where the whole change misses them.)
+        if (which == int(edits.size()) - 1)
+            continue;
+        QVERIFY2(carets == expected, qPrintable(QStringLiteral("round %1, edit %2: carets %3 against %4")
+                                                    .arg(round).arg(which).arg(carets.join(u' '), expected.join(u' '))));
+    }
+    delete other;
 }
 
 void TestTextView::manyCaretsUndoAndRedoInOneStep()
