@@ -29,6 +29,7 @@
 #include <QScopedValueRollback>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QTextStream>
 #include <QTimer>
 #include <QToolTip>
 
@@ -1493,23 +1494,9 @@ void VisualView::rebuildRows()
         && expanded == m_rowsExpanded && caretGaps == m_rowsCaretGaps && foldCarets == m_rowsFoldCarets && !revealing)
         return;
 
-    // Rows that matched the document and now open or close for editing
-    // (a caret moved into a table, a selection ended in it) change height and
-    // count: the top of the view stays at the same source line, or a click
-    // among the last rows of a long table would scroll to its first row.
-    if (!keptPlace && !m_rows.empty() && !m_rowsStale && m_rowsRevision == m_model->revision()
-        && int(m_lineToRow.size()) == lines)
-        keptPlace = place();
-
-    m_rows.clear();
+    // The rows an edit left alone stay as they are (see patchRows).
     ++m_readRevision;
-    m_rows.reserve(spans.size() * 2 + 16);
-    m_expandedBlocks.clear();
-    m_partSpans.clear();
-    m_itemSpans.clear();
-    m_itemLists.clear();
-    m_itemRows.clear();
-    m_lineToRow.assign(lines, 0);
+    m_rowsPatched = false;
     // Queries come in ascending line order, so one pass over the ranges.
     size_t next = 0;
     const auto touched = [&](int first, int last) {
@@ -1523,11 +1510,7 @@ void VisualView::rebuildRows()
     // Folds by their first line; each is kept if its block is still there, of
     // its kind, and nothing opens it.
     std::unordered_map<int, size_t> foldAt;
-    std::vector<bool> keepFold(m_folds.size(), false);
-    for (size_t i = 0; i < m_folds.size(); ++i) {
-        if (!m_folds[i].anchor.isNull())
-            foldAt.emplace(m_folds[i].anchor.blockNumber(), i);
-    }
+    std::vector<bool> keepFold;
     // Whether a caret is in lines [first, last] (not at the start of `first`
     // unless the user asked to go there).
     const auto caretIn = [&](int first, int last) {
@@ -1547,128 +1530,160 @@ void VisualView::rebuildRows()
         m_lineToRow[l] = int(m_rows.size());
         m_rows.push_back({{l, l, !touched(l, l) && !std::binary_search(caretGaps.begin(), caretGaps.end(), l)}, -1});
     };
-    size_t s = 0;
-    int line = 0;
-    while (line < lines) {
-        while (s < spans.size() && spans[s].first < line)
-            ++s;
-        if (s < spans.size() && spans[s].first == line) {
-            const MarkdownModel::Span &span = spans[s];
-            const int last = qMin(span.last, lines - 1);
-            const bool open = touched(line, last);
-            if (open)
-                m_expandedBlocks.insert(int(s));
-            // A fold on this block: a chip instead of it, or the section under
-            // a heading hidden (the heading's rows below run on over it).
-            int hiddenLast = -1;
-            QString hint;
-            size_t after = s + 1;
-            if (const auto fold = foldAt.find(line); fold != foldAt.end()) {
-                const int blockIndex = span.block >= 0 ? span.block : span.previous;
-                // Edited with nothing parsed to say what it is: nothing
-                // changes until the reparse.
-                if (blockIndex < 0) {
-                    keepFold[fold->second] = true;
-                } else if (blockClass(blockIndex).kind == m_folds[fold->second].kind) {
-                    if (m_folds[fold->second].kind != FoldKind::Heading) {
-                        if (!caretIn(line, last)) {
-                            keepFold[fold->second] = true;
-                            for (int l = line; l <= last; ++l)
-                                m_lineToRow[l] = int(m_rows.size());
-                            RowInfo chip{{line, last, true}, int(s)};
-                            chip.chip = true;
-                            m_rows.push_back(chip);
-                            line = last + 1;
-                            ++s;
-                            continue;
-                        }
-                    } else {
-                        // The spans of the blocks under the heading.
-                        const Section &section = sectionOf(blockIndex);
-                        size_t t = s + 1;
-                        for (; t < spans.size(); ++t) {
-                            const int under = spans[t].block >= 0 ? spans[t].block : spans[t].previous;
-                            if (under >= section.end)
-                                break;
-                            hiddenLast = qMin(spans[t].last, lines - 1);
-                        }
-                        if (hiddenLast < 0) {
-                            keepFold[fold->second] = true; // Nothing under it (yet).
-                        } else if (!caretIn(last + 1, hiddenLast)) {
-                            keepFold[fold->second] = true;
-                            hint = section.hint;
-                            after = t; // The loop goes on past the hidden spans.
-                            // What is folded inside stays folded, for when it shows.
-                            for (size_t u = s + 1; u < t; ++u) {
-                                if (const auto inner = foldAt.find(spans[u].first); inner != foldAt.end())
-                                    keepFold[inner->second] = true;
+    // The rows of lines [line, end] from span s on (the lines of the spans from
+    // s, and the gaps between them); false if they did not end at `end`.
+    const auto build = [&](int line, const int end, size_t s) {
+        while (line <= end) {
+            while (s < spans.size() && spans[s].first < line)
+                ++s;
+            if (s < spans.size() && spans[s].first == line) {
+                const MarkdownModel::Span &span = spans[s];
+                const int last = qMin(span.last, lines - 1);
+                const bool open = touched(line, last);
+                if (open)
+                    m_expandedBlocks.insert(int(s));
+                // A fold on this block: a chip instead of it, or the section under
+                // a heading hidden (the heading's rows below run on over it).
+                int hiddenLast = -1;
+                QString hint;
+                size_t after = s + 1;
+                if (const auto fold = foldAt.find(line); fold != foldAt.end()) {
+                    const int blockIndex = span.block >= 0 ? span.block : span.previous;
+                    // Edited with nothing parsed to say what it is: nothing
+                    // changes until the reparse.
+                    if (blockIndex < 0) {
+                        keepFold[fold->second] = true;
+                    } else if (blockClass(blockIndex).kind == m_folds[fold->second].kind) {
+                        if (m_folds[fold->second].kind != FoldKind::Heading) {
+                            if (!caretIn(line, last)) {
+                                keepFold[fold->second] = true;
+                                for (int l = line; l <= last; ++l)
+                                    m_lineToRow[l] = int(m_rows.size());
+                                RowInfo chip{{line, last, true}, int(s)};
+                                chip.chip = true;
+                                m_rows.push_back(chip);
+                                line = last + 1;
+                                ++s;
+                                continue;
                             }
                         } else {
-                            hiddenLast = -1; // A caret opens it.
+                            // The spans of the blocks under the heading.
+                            const Section &section = sectionOf(blockIndex);
+                            size_t t = s + 1;
+                            for (; t < spans.size(); ++t) {
+                                const int under = spans[t].block >= 0 ? spans[t].block : spans[t].previous;
+                                if (under >= section.end)
+                                    break;
+                                hiddenLast = qMin(spans[t].last, lines - 1);
+                            }
+                            if (hiddenLast < 0) {
+                                keepFold[fold->second] = true; // Nothing under it (yet).
+                            } else if (!caretIn(last + 1, hiddenLast)) {
+                                keepFold[fold->second] = true;
+                                hint = section.hint;
+                                after = t; // The loop goes on past the hidden spans.
+                                // What is folded inside stays folded, for when it shows.
+                                for (size_t u = s + 1; u < t; ++u) {
+                                    if (const auto inner = foldAt.find(spans[u].first); inner != foldAt.end())
+                                        keepFold[inner->second] = true;
+                                }
+                            } else {
+                                hiddenLast = -1; // A caret opens it.
+                            }
                         }
                     }
                 }
-            }
-            if (!open && (span.block >= 0 || span.previous >= 0) && itemRows(int(s), line, last)) {
-                // A long list: a row an item.
-            } else if (!open && span.block < 0 && line <= liveLast && last >= liveFirst) {
-                // Lines edited in rendered text show the blocks a parse of
-                // their own source makes, with blank lines between them.
-                const rust::Vec<core::Block> &blocks = liveBlocks(m_model->sourceText(line, last));
-                int l = line;
-                for (const core::Block &b : blocks) {
-                    const int first = line + int(b.first_line);
-                    const int end = qMin(last, line + int(b.last_line));
-                    if (first < l || end < first)
-                        continue;
-                    while (l < first)
+                if (!open && (span.block >= 0 || span.previous >= 0) && itemRows(int(s), line, last)) {
+                    // A long list: a row an item.
+                } else if (!open && span.block < 0 && line <= liveLast && last >= liveFirst) {
+                    // Lines edited in rendered text show the blocks a parse of
+                    // their own source makes, with blank lines between them.
+                    const rust::Vec<core::Block> &blocks = liveBlocks(m_model->sourceText(line, last));
+                    int l = line;
+                    for (const core::Block &b : blocks) {
+                        const int first = line + int(b.first_line);
+                        const int end = qMin(last, line + int(b.last_line));
+                        if (first < l || end < first)
+                            continue;
+                        while (l < first)
+                            gapRow(l++);
+                        for (; l <= end; ++l)
+                            m_lineToRow[l] = int(m_rows.size());
+                        m_rows.push_back({{first, end, true}, int(s)});
+                    }
+                    while (l <= last)
                         gapRow(l++);
-                    for (; l <= end; ++l)
+                } else if (open || (span.block < 0 && span.previous < 0)) {
+                    // Edited lines with nothing parsed to stand in show as
+                    // source until the reparse.
+                    for (int l = line; l <= last; ++l) {
                         m_lineToRow[l] = int(m_rows.size());
-                    m_rows.push_back({{first, end, true}, int(s)});
-                }
-                while (l <= last)
-                    gapRow(l++);
-            } else if (open || (span.block < 0 && span.previous < 0)) {
-                // Edited lines with nothing parsed to stand in show as
-                // source until the reparse.
-                for (int l = line; l <= last; ++l) {
-                    m_lineToRow[l] = int(m_rows.size());
-                    m_rows.push_back({{l, l, false}, int(s)});
-                }
-            } else if (madeInParts(int(s))) {
-                // A row a part, so that only the parts on screen are laid out.
-                m_partSpans.insert(int(s));
-                for (int from = line; from <= last; from += RenderedBlock::partLines) {
-                    const int to = qMin(last, from + RenderedBlock::partLines - 1);
-                    for (int l = from; l <= to; ++l)
+                        m_rows.push_back({{l, l, false}, int(s)});
+                    }
+                } else if (madeInParts(int(s))) {
+                    // A row a part, so that only the parts on screen are laid out.
+                    m_partSpans.insert(int(s));
+                    for (int from = line; from <= last; from += RenderedBlock::partLines) {
+                        const int to = qMin(last, from + RenderedBlock::partLines - 1);
+                        for (int l = from; l <= to; ++l)
+                            m_lineToRow[l] = int(m_rows.size());
+                        m_rows.push_back({{from, to, true}, int(s)});
+                    }
+                } else {
+                    for (int l = line; l <= last; ++l)
                         m_lineToRow[l] = int(m_rows.size());
-                    m_rows.push_back({{from, to, true}, int(s)});
+                    m_rows.push_back({{line, last, true}, int(s)});
                 }
-            } else {
-                for (int l = line; l <= last; ++l)
-                    m_lineToRow[l] = int(m_rows.size());
-                m_rows.push_back({{line, last, true}, int(s)});
-            }
-            line = last + 1;
-            if (hiddenLast >= 0) {
-                // The heading's last row runs on over what is hidden; the
-                // hint shows after the heading.
-                for (int l = line; l <= hiddenLast; ++l)
-                    m_lineToRow[l] = int(m_rows.size()) - 1;
-                RowInfo &heading = m_rows.back();
-                if (heading.row.rendered && heading.span == int(s)) {
-                    heading.row.lastLine = hiddenLast;
-                    heading.folded = true;
-                    heading.hint = hint;
+                line = last + 1;
+                if (hiddenLast >= 0) {
+                    // The heading's last row runs on over what is hidden; the
+                    // hint shows after the heading.
+                    for (int l = line; l <= hiddenLast; ++l)
+                        m_lineToRow[l] = int(m_rows.size()) - 1;
+                    RowInfo &heading = m_rows.back();
+                    if (heading.row.rendered && heading.span == int(s)) {
+                        heading.row.lastLine = hiddenLast;
+                        heading.folded = true;
+                        heading.hint = hint;
+                    }
+                    line = hiddenLast + 1;
                 }
-                line = hiddenLast + 1;
+                s = after;
+                continue;
             }
-            s = after;
-            continue;
+            // A line outside every block (blank): a small gap unless edited.
+            gapRow(line++);
         }
-        // A line outside every block (blank): a small gap unless edited.
-        gapRow(line++);
+        return line == end + 1;
+    };
+    if (patchRows(expanded, caretGaps, foldCarets, revealing, foldAt, keepFold, build)) {
+        m_rowsPatched = true;
+    } else {
+        // Rows that matched the document and now open or close for editing
+        // (a caret moved into a table, a selection ended in it) change height and
+        // count: the top of the view stays at the same source line, or a click
+        // among the last rows of a long table would scroll to its first row.
+        if (!keptPlace && !m_rows.empty() && !m_rowsStale && m_rowsRevision == m_model->revision()
+            && int(m_lineToRow.size()) == lines)
+            keptPlace = place();
+
+        m_rows.clear();
+        m_rows.reserve(spans.size() * 2 + 16);
+        m_expandedBlocks.clear();
+        m_partSpans.clear();
+        m_itemSpans.clear();
+        m_itemLists.clear();
+        m_itemRows.clear();
+        m_itemGarbage = 0;
+        m_lineToRow.assign(lines, 0);
+        next = 0;
+        keepFold.assign(m_folds.size(), false);
+        foldAt.clear();
+        for (size_t i = 0; i < m_folds.size(); ++i) {
+            if (!m_folds[i].anchor.isNull())
+                foldAt.emplace(m_folds[i].anchor.blockNumber(), i);
+        }
+        build(0, lines - 1, 0);
     }
     // Folds whose block is gone, or is not what it was, are dropped.
     if (std::count(keepFold.begin(), keepFold.end(), false) > 0) {
@@ -1679,6 +1694,9 @@ void VisualView::rebuildRows()
         }
         m_folds = std::move(kept);
     }
+    m_rowsFoldCaretLines.clear();
+    for (const int position : foldCarets)
+        m_rowsFoldCaretLines.push_back(document()->findBlock(position).blockNumber());
     m_rowsFoldCarets = std::move(foldCarets);
     m_rowsStale = false;
     m_rowsRevision = m_model->revision();
@@ -1691,6 +1709,217 @@ void VisualView::rebuildRows()
     }
     if (keptPlace)
         restorePlace(*keptPlace);
+}
+
+// An edit leaves the spans before it, and after it, as they were (the model
+// moved the later ones by the lines it added): only the edited span and the
+// gaps around it need rows again, and typing in a large document does not
+// build a row for every block of it on every key. Everything the rows of the
+// other spans are made from must be as it was; anything else builds them all.
+bool VisualView::patchRows(const std::vector<std::pair<int, int>> &expanded, const std::vector<int> &caretGaps,
+                           const std::vector<int> &foldCarets, bool revealing,
+                           std::unordered_map<int, size_t> &foldAt, std::vector<bool> &keepFold,
+                           const std::function<bool(int, int, size_t)> &build)
+{
+    if (!m_patchRows || revealing || m_rowsStale || m_standIn || m_rows.empty())
+        return false;
+    const MarkdownModel::SpanEdit edit = m_model->lastSpanEdit();
+    // Rows of the revision just before the edit, and nothing else edited
+    // since the parse that the rows of other spans could show differently
+    // (they are all parsed blocks: see itemRows).
+    if (edit.revisionBefore < 0 || edit.revisionBefore != m_rowsRevision
+        || m_model->revision() != edit.revisionBefore + 1 || m_model->unparsedSpans() != 1)
+        return false;
+    const auto &spans = m_model->spans();
+    const int lines = document()->blockCount();
+    const int delta = edit.lineDelta;
+    const int rows = int(m_rows.size());
+    const int s0 = edit.first;
+    if (int(m_lineToRow.size()) != lines - delta || s0 < 0 || s0 >= int(spans.size()) || spans[s0].block >= 0)
+        return false;
+    // The lines of the window: the edited span and the gaps either side, in
+    // the lines now (to) and before the edit (oldTo).
+    const int from = s0 > 0 ? spans[s0 - 1].last + 1 : 0;
+    const int to = s0 + 1 < int(spans.size()) ? spans[s0 + 1].first - 1 : lines - 1;
+    const int oldTo = to - delta;
+    if (from > oldTo || spans[s0].first < from || qMin(spans[s0].last, lines - 1) > to || to >= lines)
+        return false;
+    // The rows that covered it.
+    const int firstRow = m_lineToRow[from];
+    const int lastRow = m_lineToRow[oldTo];
+    if (firstRow < 0 || lastRow < firstRow || lastRow >= rows || m_rows[firstRow].row.firstLine != from
+        || m_rows[lastRow].row.lastLine != oldTo || (firstRow > 0 && m_rows[firstRow - 1].row.lastLine != from - 1)
+        || (firstRow == 0 && from != 0) || (lastRow + 1 < rows && m_rows[lastRow + 1].row.firstLine != oldTo + 1)
+        || (lastRow + 1 == rows && oldTo != lines - delta - 1))
+        return false;
+    int garbage = 0;
+    for (int r = firstRow; r <= lastRow; ++r) {
+        if (m_rows[r].folded)
+            return false;
+        garbage += m_rows[r].item >= 0;
+    }
+    // Lists are rows an item only where their lines are those of the parse
+    // (see itemRows): the first line count that differs from the parse's, or
+    // the one that matches it again, changes the rows of the lists after.
+    if (delta != 0) {
+        const auto after = std::find_if(spans.begin() + s0 + 1, spans.end(), [](const auto &s) { return s.block >= 0; });
+        if (after != spans.end()) {
+            const int shift = after->first - int(m_model->parsedBlock(after->block).first_line);
+            if ((shift == 0) != (shift - delta == 0))
+                return false;
+        }
+    }
+    // Carets, open blocks and blank lines shown as source: those outside the
+    // window are as they were (but for the lines the edit moved).
+    const auto inside = [&](const auto &ranges, int lo, int hi) {
+        return std::all_of(ranges.begin(), ranges.end(), [&](const auto &r) { return r.first >= lo && r.second <= hi; });
+    };
+    if (!inside(m_rowsExpanded, from, oldTo) || !inside(expanded, from, to))
+        return false;
+    std::vector<int> gapsBefore;
+    std::vector<int> gapsNow;
+    for (const int l : m_rowsCaretGaps) {
+        if (l < from)
+            gapsBefore.push_back(l);
+        else if (l > oldTo)
+            gapsBefore.push_back(l + delta);
+    }
+    for (const int l : caretGaps) {
+        if (l < from || l > to)
+            gapsNow.push_back(l);
+    }
+    if (gapsBefore != gapsNow)
+        return false;
+    if (!foldCarets.empty() || !m_rowsFoldCaretLines.empty()) {
+        for (const int l : m_rowsFoldCaretLines) {
+            if (l < from || l > oldTo)
+                return false;
+        }
+        for (const int position : foldCarets) {
+            const int l = document()->findBlock(position).blockNumber();
+            if (l < from || l > to)
+                return false;
+        }
+    }
+    // Folds: those after the window stay (their rows move with it), those
+    // in it are looked at again. Sections hide blocks after them: a heading
+    // folded before the window, or in it, may reach over it.
+    keepFold.assign(m_folds.size(), true);
+    foldAt.clear();
+    if (m_folds.size() > 256)
+        return false;
+    for (size_t i = 0; i < m_folds.size(); ++i) {
+        if (m_folds[i].anchor.isNull())
+            return false;
+        const int l = m_folds[i].anchor.blockNumber();
+        if (m_folds[i].kind == FoldKind::Heading && l <= to)
+            return false;
+        if (l >= from && l <= to) {
+            keepFold[i] = false;
+            foldAt.emplace(l, i);
+        }
+    }
+    // Rows no longer pointed to pile up in the item lists: a lot of them
+    // are built again from nothing.
+    if (m_itemRows.size() > 4096 && size_t(m_itemGarbage + garbage) * 2 > m_itemRows.size())
+        return false;
+
+    // Past the checks: the span numbers of the sets, the lines to rows, and
+    // the rows of the window.
+    const int spanDelta = 1 - edit.replaced;
+    const auto moveSpans = [&](QSet<int> &set) {
+        if (set.isEmpty())
+            return;
+        QSet<int> moved;
+        for (const int x : std::as_const(set)) {
+            if (x < s0)
+                moved.insert(x);
+            else if (x >= s0 + edit.replaced)
+                moved.insert(x + spanDelta);
+        }
+        set = std::move(moved);
+    };
+    moveSpans(m_expandedBlocks);
+    moveSpans(m_partSpans);
+    moveSpans(m_itemSpans);
+    const int oldLength = oldTo - from + 1;
+    const int length = to - from + 1;
+    if (length > oldLength)
+        m_lineToRow.insert(m_lineToRow.begin() + oldTo + 1, length - oldLength, 0);
+    else if (length < oldLength)
+        m_lineToRow.erase(m_lineToRow.begin() + from + length, m_lineToRow.begin() + from + oldLength);
+    std::vector<RowInfo> all;
+    all.swap(m_rows);
+    if (!build(from, to, size_t(s0))) {
+        m_rows.clear(); // (Nothing is left to go on from.)
+        return false;
+    }
+    const int oldCount = lastRow - firstRow + 1;
+    const int count = int(m_rows.size());
+    for (int l = from; l <= to; ++l)
+        m_lineToRow[l] += firstRow;
+    if (count != oldCount) {
+        for (size_t l = size_t(to) + 1; l < m_lineToRow.size(); ++l)
+            m_lineToRow[l] += count - oldCount;
+    }
+    if (count == oldCount) {
+        std::move(m_rows.begin(), m_rows.end(), all.begin() + firstRow);
+    } else {
+        all.erase(all.begin() + firstRow, all.begin() + lastRow + 1);
+        all.insert(all.begin() + firstRow, std::make_move_iterator(m_rows.begin()),
+                   std::make_move_iterator(m_rows.end()));
+    }
+    m_rows.swap(all);
+    if (delta != 0 || spanDelta != 0) {
+        for (size_t r = size_t(firstRow + count); r < m_rows.size(); ++r) {
+            RowInfo &info = m_rows[r];
+            info.row.firstLine += delta;
+            info.row.lastLine += delta;
+            if (info.span >= 0)
+                info.span += spanDelta;
+        }
+    }
+    m_itemGarbage += garbage;
+    return true;
+}
+
+QString VisualView::rowsDigest()
+{
+    QString text;
+    QTextStream out(&text);
+    for (size_t i = 0; i < m_rows.size(); ++i) {
+        const RowInfo &r = m_rows[i];
+        out << "row " << i << ": " << r.row.firstLine << '-' << r.row.lastLine << ' ' << r.row.rendered << " span "
+            << r.span << " item " << (r.item >= 0) << " chip " << r.chip << " folded " << r.folded << " hint " << r.hint;
+        if (r.item >= 0) {
+            const ItemRow &item = m_itemRows[r.item];
+            const ItemList &list = m_itemLists[item.list];
+            out << " | list " << list.ordered << list.markers << list.start << ' ' << list.block << " live "
+                << list.live.size();
+            for (const ItemList::Live &live : list.live)
+                out << " [" << live.html << ' ' << live.math.size() << ']';
+            out << " | " << item.index << ' ' << item.from << ' ' << item.to << ' ' << item.line << ' ' << item.taskBase
+                << ' ' << item.live << ' ' << item.parsed;
+        }
+        out << '\n';
+    }
+    out << "lines:";
+    for (const int row : m_lineToRow)
+        out << ' ' << row;
+    const auto sorted = [&](const char *name, const QSet<int> &set) {
+        QList<int> values(set.begin(), set.end());
+        std::sort(values.begin(), values.end());
+        out << '\n' << name << ':';
+        for (const int v : values)
+            out << ' ' << v;
+    };
+    sorted("expanded", m_expandedBlocks);
+    sorted("parts", m_partSpans);
+    sorted("items", m_itemSpans);
+    out << "\nfolds:" << m_folds.size();
+    for (const Fold &fold : m_folds)
+        out << ' ' << fold.anchor.blockNumber() << ':' << int(fold.kind);
+    return text;
 }
 
 VisualView::Place VisualView::place()

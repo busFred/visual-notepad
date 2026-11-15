@@ -19,6 +19,7 @@
 #include <QTextCursor>
 
 #include <deque>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -81,6 +82,21 @@ public:
     std::vector<RenderedBlock::Figure> figuresAtLine(int line);
     // For tests: off, long lists render whole as short ones do (see itemRows).
     static void setItemRowsEnabled(bool on);
+    // For tests: off, an edit builds all the rows again, as it did before
+    // they were patched (see patchRows).
+    void setRowPatching(bool on) { m_patchRows = on; }
+    // For tests: the rows built again from nothing, as they are after any
+    // other change than an edit.
+    void rebuildRowsFully()
+    {
+        m_rowsStale = true;
+        rebuildRows();
+    }
+    // For tests: every row and what the rows hold (spans, item lists, lines
+    // to rows) as text, to compare a patched build with a whole one.
+    QString rowsDigest();
+    // For tests: whether the last edit patched the rows.
+    bool lastEditPatchedRows() const { return m_rowsPatched; }
     // For tests: the marker drawn for the long list's item that starts on
     // `line` ("12." or a bullet), or null if none is (not such an item, a
     // list of tasks).
@@ -309,6 +325,13 @@ private:
     Place place();
     void restorePlace(const Place &place);
     void rebuildRows();
+    // The rows of the one span an edit made, and the gaps around it, built
+    // again in place of those they replace; the rows after move by the
+    // lines and spans the edit added. False (nothing changed) when what the
+    // rows are made from is not all at hand (see rebuildRows).
+    bool patchRows(const std::vector<std::pair<int, int>> &expanded, const std::vector<int> &caretGaps,
+                   const std::vector<int> &foldCarets, bool revealing, std::unordered_map<int, size_t> &foldAt,
+                   std::vector<bool> &keepFold, const std::function<bool(int, int, size_t)> &build);
     // The kind of a block of the last parse, and the section a heading of it
     // heads: up to (not including) the block `end`, and what it holds as the
     // hint after the heading. Kept for one parse.
@@ -723,6 +746,11 @@ private:
     int m_rowsRevision = -1;
     std::vector<std::pair<int, int>> m_rowsExpanded; // Line ranges shown as source.
     std::vector<int> m_rowsCaretGaps; // Blank lines shown as source for a caret.
+    std::vector<int> m_rowsFoldCaretLines; // The lines of m_rowsFoldCarets.
+    // Item rows and lists that no row points to since patches (see patchRows).
+    int m_itemGarbage = 0;
+    bool m_rowsPatched = false;
+    bool m_patchRows = true;
 
     // Renders by size, fonts and source; bounded by cost (KiB).
     QCache<QString, Render> m_cache;
