@@ -73,7 +73,7 @@ int TextView::ColumnRows::count()
 
 int TextView::ColumnRows::height(int row)
 {
-    QTextLayout *layout = m_view->layoutForLine(row);
+    LineLayout *layout = m_view->layoutForLine(row);
     return (layout ? qMax(1, layout->lineCount()) : 1) * m_view->m_lineHeight;
 }
 
@@ -84,7 +84,7 @@ int TextView::ColumnRows::rowForLine(int line)
 
 QList<int> TextView::ColumnRows::lineTops(int row)
 {
-    QTextLayout *layout = m_view->layoutForLine(row);
+    LineLayout *layout = m_view->layoutForLine(row);
     const int lines = layout ? qMax(1, layout->lineCount()) : 1;
     QList<int> tops;
     tops.reserve(lines);
@@ -431,8 +431,8 @@ void TextView::columnsEnsureCursorVisible()
     Columns &c = *m_columns;
     const QTextCursor caret = textCursor();
     if (columnsCaretRect(caret).isNull()) {
-        QTextLayout *layout = layoutForLine(caret.blockNumber());
-        const QTextLine line = layout ? layout->lineForTextPosition(caret.positionInBlock()) : QTextLine();
+        LineLayout *layout = layoutForLine(caret.blockNumber());
+        const LineLayout::Line line = layout ? layout->lineForTextPosition(caret.positionInBlock()) : LineLayout::Line();
         const md::Position place{caret.blockNumber(), line.isValid() ? line.lineNumber() * m_lineHeight : 0};
         const md::Screen &screen = c.flow.screen();
         bool shifted = false;
@@ -638,7 +638,7 @@ qreal TextView::columnContentWidth(int column)
         return 0;
     qreal widest = 0;
     for (const md::Segment &s : screen.columns[column].segments) {
-        QTextLayout *layout = layoutForLine(s.row);
+        LineLayout *layout = layoutForLine(s.row);
         if (layout && layout->lineCount() > 0)
             widest = qMax(widest, layout->lineAt(0).naturalTextWidth());
     }
@@ -727,8 +727,8 @@ int TextView::columnsPositionAt(const QPointF &point)
     // Off the text (above or below it): the nearest place the column shows.
     const qreal y = s.yFrom + qBound<qreal>(0, point.y() - hit.top, qMax(0, s.yTo - s.yFrom - 1));
     const QTextBlock block = m_doc->findBlockByNumber(s.row);
-    QTextLayout *layout = layoutForLine(s.row);
-    const QTextLine line = layout->lineAt(qBound(0, int(y / m_lineHeight), layout->lineCount() - 1));
+    LineLayout *layout = layoutForLine(s.row);
+    const LineLayout::Line line = layout->lineAt(qBound(0, int(y / m_lineHeight), layout->lineCount() - 1));
     const qreal x = point.x() - (l.columnLeft(column) + l.textLeft) + columnOffset(column);
     return block.position() + line.xToCursor(x);
 }
@@ -757,11 +757,11 @@ QRectF TextView::columnsCaretRect(const QTextCursor &cursor, int *column)
     if (screen.empty())
         return {};
     const int lineNo = cursor.blockNumber();
-    QTextLayout *layout = layoutForLine(lineNo);
+    LineLayout *layout = layoutForLine(lineNo);
     if (!layout)
         return {};
     const int pos = cursor.positionInBlock();
-    const QTextLine line = layout->lineForTextPosition(pos);
+    const LineLayout::Line line = layout->lineForTextPosition(pos);
     const int top = line.isValid() ? line.lineNumber() * m_lineHeight : 0;
     const ColumnLayout &l = columnLayout();
     for (int c = 0; c < int(screen.columns.size()); ++c) {

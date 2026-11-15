@@ -2,6 +2,7 @@
 #include "Theme.h"
 #include "Settings.h"
 #include "editor/DocumentLayout.h"
+#include "editor/LineLayout.h"
 #include "editor/TableSizePicker.h"
 #include "editor/TextView.h"
 
@@ -21,10 +22,14 @@
 #include <QWheelEvent>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QTextBoundaryFinder>
+#include <QTextLayout>
 #include <QRandomGenerator>
 
 #include <algorithm>
+#include <climits>
 #include <functional>
+#include <memory>
 #include <tuple>
 
 using vn::TextView;
@@ -37,6 +42,12 @@ public:
     qreal left() const { return textLeft(); }
     int rowHeight() const { return lineHeight(); }
     int positionAtPoint(const QPointF &point) { return positionAt(point); }
+    bool bounds(int line, qreal *top, qreal *bottom) { return lineBounds(line, top, bottom); }
+    // The caret's rectangle in the viewport, as input methods get it.
+    QRect caretRectangle() const
+    {
+        return inputMethodQuery(Qt::ImCursorRectangle).toRect().translated(-viewport()->pos());
+    }
 };
 
 // Counts what the view's viewport is asked to paint.
@@ -134,6 +145,18 @@ private Q_SLOTS:
     void searchSeedText();
     void scrollPageKeepsCarets();
 
+    void longLineJoinsAreSafe_data();
+    void longLineJoinsAreSafe();
+    void longLineHitTestingMatchesTheWholeLine_data();
+    void longLineHitTestingMatchesTheWholeLine();
+    void longLineCaretMovesAsQtDoes();
+    void longLineEditsLookAsLaidOutAfresh();
+    void longLineWrapsInPieces();
+    void longLineSelectionAndMatchesSpanAJoin();
+    void longLineComposes();
+    void longLineInColumns();
+    void longLineTypingIsFast();
+
 private:
     void setText(const QString &text);
     QString text() const;
@@ -160,9 +183,123 @@ private:
     void repeatKey(Qt::Key key);
     void dragTo(const QPointF &point);
 
+    // The view's long first line laid out whole by Qt, as the view lays
+    // out a short one (Word Wrap off).
+    std::unique_ptr<QTextLayout> wholeLine() const;
+    // Where the pieces of a block start (they are cut from the text alone).
+    QList<int> joinsOf(const QTextBlock &block) const;
+    // The view against a new one on the same text, carets and scroll,
+    // neither focused: the same pixels.
+    void compareWithFreshView(int line);
+
     QTextDocument *m_doc = nullptr;
     TextView *m_view = nullptr;
 };
+
+namespace {
+
+// A line long enough to be laid out in pieces (vn::LineLayout).
+QString longLine(const QString &unit, int length = 40000)
+{
+    QString line;
+    while (line.size() < length)
+        line += unit;
+    return line;
+}
+
+// Texts whose joins land in the awkward places: inside words, next to
+// surrogate pairs and combining marks, around right-to-left runs, between
+// tabs.
+const QList<std::pair<const char *, QString>> &longLines()
+{
+    static const QList<std::pair<const char *, QString>> lines = {
+        {"words", longLine(QStringLiteral("lorem ipsum dolor sit amet, consectetur "))},
+        {"no spaces", longLine(QStringLiteral("abcdefghijklmnopqrstuvwxyz0123456789"))},
+        {"json", longLine(QStringLiteral("{\"id\":12345,\"name\":\"value\",\"list\":[1,2,3]},"))},
+        {"tabs", longLine(QStringLiteral("ab\tcde\t\tf ghi jk\t") + QString(3000, u'a') + QStringLiteral(" b\tc ")
+                          + QString(1500, u'd') + QStringLiteral("x\t"))},
+        {"right-to-left", longLine(QStringLiteral("abc \u05E9\u05DC\u05D5\u05DD \u05E2\u05D5\u05DC\u05DD def 123 ghi ")
+                                   + QStringLiteral("start ") + longLine(QStringLiteral("\u05E9\u05DC\u05D5\u05DD "), 6000)
+                                   + QStringLiteral("end 42 "))},
+        {"combining", longLine(QStringLiteral("xe\u0301ye\u0301\u0302z"))},
+        {"surrogates", longLine(QStringLiteral("ab\U0001F600c\U0001F44D\U0001F3FDd"))},
+    };
+    return lines;
+}
+
+QChar::Direction directionAt(const QString &text, int i)
+{
+    char32_t c = text.at(i).unicode();
+    if (QChar::isLowSurrogate(c) && i > 0)
+        c = QChar::surrogateToUcs4(text.at(i - 1), text.at(i));
+    else if (QChar::isHighSurrogate(c) && i + 1 < text.size())
+        c = QChar::surrogateToUcs4(text.at(i), text.at(i + 1));
+    return QChar::direction(c);
+}
+
+bool rightToLeft(QChar::Direction d)
+{
+    return d == QChar::DirR || d == QChar::DirAL || d == QChar::DirAN;
+}
+
+} // namespace
+
+std::unique_ptr<QTextLayout> TestTextView::wholeLine() const
+{
+    auto layout = std::make_unique<QTextLayout>(m_doc->firstBlock().text(), m_view->font());
+    QTextOption option;
+    option.setWrapMode(QTextOption::NoWrap);
+    option.setTabStopDistance(QFontMetricsF(m_view->font()).horizontalAdvance(QLatin1Char(' ')) * 4);
+    layout->setTextOption(option);
+    layout->beginLayout();
+    QTextLine line = layout->createLine();
+    line.setLineWidth(1e7);
+    layout->endLayout();
+    return layout;
+}
+
+QList<int> TestTextView::joinsOf(const QTextBlock &block) const
+{
+    vn::LineLayout layout;
+    vn::LineLayout::Setup setup;
+    setup.font = m_view->font();
+    setup.wrapWidth = 1e7;
+    setup.lineHeight = 20;
+    if (!layout.build(block, setup))
+        return {};
+    QList<int> joins = layout.pieceStarts();
+    joins.removeFirst(); // (0)
+    return joins;
+}
+
+void TestTextView::compareWithFreshView(int line)
+{
+    QTextDocument doc;
+    doc.setDocumentLayout(new vn::DocumentLayout(&doc));
+    doc.setPlainText(m_doc->toPlainText());
+    ProbeView fresh(&doc);
+    fresh.resize(m_view->size());
+    fresh.setWordWrap(m_view->wordWrap());
+    fresh.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&fresh));
+    QList<QTextCursor> carets;
+    for (const QTextCursor &c : m_view->cursors()) {
+        QTextCursor copy(&doc);
+        copy.setPosition(c.anchor());
+        copy.setPosition(c.position(), QTextCursor::KeepAnchor);
+        carets.append(copy);
+    }
+    fresh.setCursors(carets, 0);
+    m_view->clearFocus();
+    fresh.clearFocus();
+    m_view->scrollToLine(line);
+    fresh.scrollToLine(line);
+    fresh.grab();
+    fresh.horizontalScrollBar()->setValue(m_view->horizontalScrollBar()->value());
+    QCOMPARE(fresh.horizontalScrollBar()->value(), m_view->horizontalScrollBar()->value());
+    QCOMPARE(fresh.viewport()->grab().toImage(), m_view->viewport()->grab().toImage());
+    m_view->setFocus();
+}
 
 void TestTextView::selectRange(int from, int to)
 {
@@ -2166,6 +2303,415 @@ void TestTextView::columnsStayFastOnABigFile()
     QCOMPARE(m_view->columnLineRange().first, 0);
     // (A walk over every line would take seconds here; this is about 25 screens.)
     QVERIFY2(timer.elapsed() < 5000, qPrintable(QString::number(timer.elapsed())));
+}
+
+// ---------------------------------------------------------------------------
+// Very long lines, laid out in pieces (vn::LineLayout)
+
+void TestTextView::longLineJoinsAreSafe_data()
+{
+    QTest::addColumn<QString>("line");
+    for (const auto &[name, line] : longLines())
+        QTest::newRow(name) << line;
+}
+
+void TestTextView::longLineJoinsAreSafe()
+{
+    QFETCH(QString, line);
+    setText(line + QStringLiteral("\nshort"));
+    const QList<int> joins = joinsOf(m_doc->firstBlock());
+    QVERIFY(joins.size() >= 3);
+    const QTextBlock block = m_doc->firstBlock();
+    for (int join : joins) {
+        // Never inside a grapheme: a surrogate pair, a combining sequence,
+        // an emoji with its modifier.
+        QTextBoundaryFinder graphemes(QTextBoundaryFinder::Grapheme, line);
+        graphemes.setPosition(join);
+        QVERIFY2(graphemes.isAtBoundary(), qPrintable(QString::number(join)));
+        // Never where a right-to-left run could reach across: the nearest
+        // strong characters each side are left-to-right.
+        for (int step : {-1, 1}) {
+            for (int i = step < 0 ? join - 1 : join; i >= 0 && i < line.size(); i += step) {
+                const QChar::Direction d = directionAt(line, i);
+                QVERIFY2(!rightToLeft(d), qPrintable(QStringLiteral("join %1, %2 at %3").arg(join).arg(int(d)).arg(i)));
+                if (d == QChar::DirL)
+                    break;
+            }
+        }
+        // A piece that does not start right after a tab holds a tab only last.
+        if (line.at(join - 1) != u'\t') {
+            const int next = joins.indexOf(join) + 1 < joins.size() ? joins.at(joins.indexOf(join) + 1) : line.size();
+            const qsizetype tab = line.indexOf(u'\t', join);
+            QVERIFY(tab < 0 || tab >= next - 1);
+        }
+    }
+    // In text with no space or punctuation for thousands of characters,
+    // joins land inside words.
+    if (!line.contains(u' ') && !line.contains(u',')) {
+        for (int join : joins)
+            QVERIFY(line.at(join - 1).isLetterOrNumber() || line.at(join).isLetterOrNumber());
+    }
+    Q_UNUSED(block);
+}
+
+void TestTextView::longLineHitTestingMatchesTheWholeLine_data()
+{
+    longLineJoinsAreSafe_data();
+}
+
+void TestTextView::longLineHitTestingMatchesTheWholeLine()
+{
+    // Word Wrap off, the pieces sit side by side where the whole line has
+    // its characters: carets and clicks land as they would on it.
+    QFETCH(QString, line);
+    auto *probe = static_cast<ProbeView *>(m_view);
+    m_view->setWordWrap(false);
+    setText(line + QStringLiteral("\nshort"));
+    m_view->grab();
+    const std::unique_ptr<QTextLayout> whole = wholeLine();
+    const QTextLine wholeRow = whole->lineAt(0);
+    QList<int> positions;
+    for (int join : joinsOf(m_doc->firstBlock())) {
+        for (int d = -6; d <= 6; ++d)
+            positions.append(join + d);
+    }
+    for (int i = 0; i < 100; ++i)
+        positions.append(QRandomGenerator::global()->bounded(int(line.size())));
+    positions.append(int(line.size()));
+    const qreal y = probe->rowHeight() / 2.0;
+    for (int p : std::as_const(positions)) {
+        const qreal x = wholeRow.cursorToX(p);
+        // A click just right of where the whole line has the position.
+        const qreal at = probe->left() + x + 0.4 - m_view->horizontalScrollBar()->value();
+        QCOMPARE(probe->positionAtPoint(QPointF(at, y)), wholeRow.xToCursor(x + 0.4));
+        // The caret.
+        QTextCursor c(m_doc);
+        c.setPosition(p);
+        m_view->setTextCursor(c);
+        const QRect caret = probe->caretRectangle();
+        const qreal expected = probe->left() + x - m_view->horizontalScrollBar()->value();
+        QVERIFY2(qAbs(caret.x() - expected) <= 1, qPrintable(QStringLiteral("%1: %2 vs %3").arg(p).arg(caret.x()).arg(expected)));
+    }
+    // Scrolled to the far end, the row is as wide as the whole line.
+    QVERIFY(m_view->horizontalScrollBar()->maximum() >= int(wholeRow.naturalTextWidth() - m_view->viewport()->width()));
+}
+
+void TestTextView::longLineCaretMovesAsQtDoes()
+{
+    // Left, Right, Ctrl+Left and Ctrl+Right look only at the text around
+    // the caret in a long line; they go where Qt's own moves go, word
+    // longer than what they look at first included.
+    QString line = longLine(QStringLiteral("lorem ipsum, e\u0301te\u0301 ab\U0001F600c\U0001F44D\U0001F3FDd dolor "), 20000)
+                   + QString(5000, u'w') + QStringLiteral(" tail ") + longLine(QStringLiteral("xyz"), 3000);
+    setText(line + QStringLiteral("\nshort"));
+    QTextDocument reference;
+    reference.setPlainText(m_doc->toPlainText());
+    QList<int> positions{0, 1, int(line.size()) - 1, int(line.size()), 20000, 20001, 22500, 25005};
+    for (int join : joinsOf(m_doc->firstBlock())) {
+        for (int d = -3; d <= 3; ++d)
+            positions.append(join + d);
+    }
+    for (int i = 0; i < 60; ++i)
+        positions.append(QRandomGenerator::global()->bounded(int(line.size())));
+    const QList<std::pair<Qt::KeyboardModifiers, std::pair<Qt::Key, QTextCursor::MoveOperation>>> moves = {
+        {Qt::NoModifier, {Qt::Key_Left, QTextCursor::PreviousCharacter}},
+        {Qt::NoModifier, {Qt::Key_Right, QTextCursor::NextCharacter}},
+        {Qt::ControlModifier, {Qt::Key_Left, QTextCursor::PreviousWord}},
+        {Qt::ControlModifier, {Qt::Key_Right, QTextCursor::NextWord}},
+    };
+    for (int p : std::as_const(positions)) {
+        QTextCursor ref(&reference);
+        ref.setPosition(p);
+        if (ref.position() != p) // (Inside a surrogate pair.)
+            continue;
+        for (const auto &[mods, move] : moves) {
+            QTextCursor c(m_doc);
+            c.setPosition(p);
+            m_view->setTextCursor(c);
+            QTest::keyClick(m_view, move.first, mods);
+            QTextCursor expected(&reference);
+            expected.setPosition(p);
+            expected.movePosition(move.second);
+            QVERIFY2(m_view->textCursor().position() == expected.position(),
+                     qPrintable(QStringLiteral("%1 from %2: %3, Qt %4")
+                                    .arg(int(move.second)).arg(p).arg(m_view->textCursor().position()).arg(expected.position())));
+        }
+    }
+    // Backspace and Delete take what Qt's moves would.
+    for (int p : {1, 20001, 25005, int(line.size()) - 2}) {
+        for (const auto &[key, op] : {std::pair{Qt::Key_Backspace, QTextCursor::PreviousCharacter},
+                                      std::pair{Qt::Key_Delete, QTextCursor::NextCharacter}}) {
+            setText(line + QStringLiteral("\nshort"));
+            QTextCursor c(m_doc);
+            c.setPosition(p);
+            m_view->setTextCursor(c);
+            QTest::keyClick(m_view, key);
+            reference.setPlainText(line + QStringLiteral("\nshort"));
+            QTextCursor r(&reference);
+            r.setPosition(p);
+            r.movePosition(op, QTextCursor::KeepAnchor);
+            r.removeSelectedText();
+            QCOMPARE(text(), reference.toPlainText());
+        }
+    }
+}
+
+void TestTextView::longLineEditsLookAsLaidOutAfresh()
+{
+    // Edits lay out again only the pieces they reach; the line looks as a
+    // new view lays it out, at the joins too: typing, deleting, Enter and
+    // Backspace across lines, pastes, undo and redo.
+    m_view->setWordWrap(false);
+    const QString line = longLines().at(0).second + longLines().at(3).second;
+    setText(QStringLiteral("first\n") + line + QStringLiteral("\nlast"));
+    m_view->grab();
+    QRandomGenerator random(7);
+    for (int step = 0; step < 40; ++step) {
+        const QTextBlock block = m_doc->findBlockByNumber(1);
+        const QList<int> joins = joinsOf(block);
+        const int length = block.length() - 1;
+        int at = joins.isEmpty() ? length / 2 : joins.at(random.bounded(int(joins.size()))) + random.bounded(-4, 5);
+        at = qBound(1, at, length - 1);
+        QTextCursor c(m_doc);
+        c.setPosition(block.position() + at);
+        m_view->setTextCursor(c);
+        switch (step % 8) {
+        case 0:
+            type(QStringLiteral("abc"));
+            break;
+        case 1:
+            QTest::keyClick(m_view, Qt::Key_Backspace);
+            QTest::keyClick(m_view, Qt::Key_Backspace);
+            break;
+        case 2:
+            QTest::keyClick(m_view, Qt::Key_Delete);
+            break;
+        case 3:
+            type(QStringLiteral("\t\t"));
+            break;
+        case 4:
+            m_view->pasteTextAt(c.position(), longLine(QStringLiteral("pasted words "), 9000));
+            break;
+        case 5:
+            QTest::keyClick(m_view, Qt::Key_Z, Qt::ControlModifier);
+            break;
+        case 6:
+            QTest::keyClick(m_view, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+            break;
+        case 7:
+            // Split the line and join it again.
+            QTest::keyClick(m_view, Qt::Key_Return);
+            m_view->grab();
+            QTest::keyClick(m_view, Qt::Key_Backspace);
+            break;
+        }
+        m_view->grab();
+        if (step % 4 == 3) {
+            compareWithFreshView(1);
+            if (QTest::currentTestFailed())
+                return;
+        }
+    }
+    // Enter in the middle leaves two long lines, each as laid out afresh.
+    const QTextBlock block = m_doc->findBlockByNumber(1);
+    QTextCursor c(m_doc);
+    c.setPosition(block.position() + (block.length() - 1) / 2);
+    m_view->setTextCursor(c);
+    QTest::keyClick(m_view, Qt::Key_Return);
+    m_view->grab();
+    compareWithFreshView(1);
+    QTextCursor end(m_doc->findBlockByNumber(1));
+    end.movePosition(QTextCursor::EndOfBlock);
+    m_view->setTextCursor(end);
+    compareWithFreshView(1);
+    compareWithFreshView(2);
+}
+
+void TestTextView::longLineWrapsInPieces()
+{
+    // With Word Wrap on, each piece wraps on its own: about as many rows as
+    // the whole line, every row reached by Down and back by Up.
+    auto *probe = static_cast<ProbeView *>(m_view);
+    m_view->setWordWrap(true);
+    const QString line = longLines().at(0).second;
+    setText(line + QStringLiteral("\nshort"));
+    m_view->resize(600, 30000);
+    m_view->grab();
+    qreal top = 0;
+    qreal bottom = 0;
+    QVERIFY(probe->bounds(0, &top, &bottom));
+    const int rows = qRound((bottom - top) / probe->rowHeight());
+    QTextLayout whole(line, m_view->font());
+    QTextOption option;
+    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    whole.setTextOption(option);
+    whole.beginLayout();
+    int wholeRows = 0;
+    for (QTextLine l = whole.createLine(); l.isValid(); l = whole.createLine())
+        l.setLineWidth(m_view->viewport()->width() - probe->left()), ++wholeRows;
+    whole.endLayout();
+    const int pieces = int(joinsOf(m_doc->firstBlock()).size()) + 1;
+    QVERIFY2(rows >= wholeRows && rows <= wholeRows + pieces, qPrintable(QStringLiteral("%1 %2").arg(rows).arg(wholeRows)));
+    // Each row starts where a click at its left edge lands, after the last.
+    int last = -1;
+    for (int r = 0; r < rows; ++r) {
+        const int p = probe->positionAtPoint(QPointF(probe->left(), top + r * probe->rowHeight() + 2));
+        QVERIFY(p > last);
+        last = p;
+    }
+    m_view->resize(600, 400);
+    m_view->setTextCursor(QTextCursor(m_doc));
+    int previous = 0;
+    QList<int> visited{0};
+    for (int r = 1; r < rows; ++r) {
+        QTest::keyClick(m_view, Qt::Key_Down);
+        QVERIFY(m_view->textCursor().position() > previous);
+        previous = m_view->textCursor().position();
+        visited.append(previous);
+    }
+    for (int r = rows - 2; r >= 0; --r) {
+        QTest::keyClick(m_view, Qt::Key_Up);
+        QCOMPARE(m_view->textCursor().position(), visited.at(r));
+    }
+    // Typing at a join keeps the rows in order.
+    const int join = joinsOf(m_doc->firstBlock()).at(2);
+    QTextCursor c(m_doc);
+    c.setPosition(join);
+    m_view->setTextCursor(c);
+    type(QStringLiteral("inserted words "));
+    m_view->grab();
+    QCOMPARE(m_doc->firstBlock().text(), QString(line).insert(join, QStringLiteral("inserted words ")));
+}
+
+void TestTextView::longLineSelectionAndMatchesSpanAJoin()
+{
+    // A selection and a find match across a join are filled without a gap.
+    auto *probe = static_cast<ProbeView *>(m_view);
+    m_view->setWordWrap(false);
+    setText(longLines().at(1).second + QStringLiteral("\nshort"));
+    const int join = joinsOf(m_doc->firstBlock()).at(3);
+    const std::unique_ptr<QTextLayout> whole = wholeLine();
+    const auto filled = [&](const QColor &color, int from, int to) {
+        const QImage image = m_view->viewport()->grab().toImage();
+        const int hscroll = m_view->horizontalScrollBar()->value();
+        const int x1 = int(std::ceil(probe->left() + whole->lineAt(0).cursorToX(from) - hscroll)) + 1;
+        const int x2 = int(probe->left() + whole->lineAt(0).cursorToX(to) - hscroll) - 1;
+        if (x1 >= x2)
+            return false;
+        for (int x = x1; x <= x2; ++x) {
+            if (image.pixelColor(x, 1) != color)
+                return false;
+        }
+        return true;
+    };
+    selectRange(join - 20, join + 20);
+    m_view->clearFocus();
+    QVERIFY(filled(vn::theme::color(vn::theme::Role::selection), join - 20, join + 20));
+    QTextCursor c(m_doc);
+    c.setPosition(join + 30);
+    m_view->setTextCursor(c);
+    m_view->setSearchHighlights({{join - 5, join + 5}, {join + 6, join + 9}}, 0);
+    QVERIFY(filled(QColor(0xE8, 0xC2, 0x5C), join - 5, join + 5));
+    QVERIFY(filled(QColor(0xF2, 0xDF, 0xA6), join + 6, join + 9));
+    // The whole line selected: the selection colour wherever the view is.
+    m_view->selectAll();
+    for (int value : {0, m_view->horizontalScrollBar()->maximum() / 2, m_view->horizontalScrollBar()->maximum()}) {
+        m_view->horizontalScrollBar()->setValue(value);
+        const QImage image = m_view->viewport()->grab().toImage();
+        QCOMPARE(image.pixelColor(int(probe->left()) + 40, 1), vn::theme::color(vn::theme::Role::selection));
+    }
+}
+
+void TestTextView::longLineComposes()
+{
+    // Text being composed in a long line shows in its piece, moving the
+    // rest along; committed, it is typed.
+    m_view->setWordWrap(false);
+    const QString line = longLines().at(0).second;
+    setText(line + QStringLiteral("\nshort"));
+    const int join = joinsOf(m_doc->firstBlock()).at(1);
+    QTextCursor c(m_doc);
+    c.setPosition(join);
+    m_view->setTextCursor(c);
+    m_view->grab();
+    const int before = m_view->horizontalScrollBar()->maximum();
+    QInputMethodEvent compose(QStringLiteral("\u304B\u306A"), {});
+    QApplication::sendEvent(m_view, &compose);
+    m_view->grab();
+    QVERIFY(m_view->horizontalScrollBar()->maximum() > before);
+    QInputMethodEvent commit;
+    commit.setCommitString(QStringLiteral("\u4EEE"));
+    QApplication::sendEvent(m_view, &commit);
+    m_view->grab();
+    QCOMPARE(m_doc->firstBlock().text(), QString(line).insert(join, QStringLiteral("\u4EEE")));
+    compareWithFreshView(0);
+}
+
+void TestTextView::longLineInColumns()
+{
+    // Columns show a long line's rows like any other's; typing in it there
+    // keeps the caret in sight.
+    QStringList lines;
+    for (int i = 0; i < 30; ++i)
+        lines << QStringLiteral("line %1").arg(i + 1);
+    lines.insert(10, longLines().at(0).second);
+    setText(lines.join(u'\n'));
+    m_view->resize(1400, 500);
+    m_view->setColumnChars(50);
+    for (bool wrap : {true, false}) {
+        m_view->setWordWrap(wrap);
+        m_view->setColumnsShown(true, 0);
+        m_view->grab();
+        QVERIFY(m_view->shownColumnCount() >= 2);
+        const int join = joinsOf(m_doc->findBlockByNumber(10)).at(1);
+        QTextCursor c(m_doc->findBlockByNumber(10));
+        c.setPosition(c.position() + join);
+        m_view->setTextCursor(c);
+        m_view->grab();
+        type(QStringLiteral("xy"));
+        m_view->grab();
+        QVERIFY(m_view->isLineShown(10));
+        QCOMPARE(m_doc->findBlockByNumber(10).text().mid(join, 2), QStringLiteral("xy"));
+        for (int i = 0; i < 5; ++i) {
+            m_view->columnsPageForward();
+            m_view->grab();
+        }
+        m_view->columnsToStart();
+        m_view->setColumnsShown(false);
+        QTest::keyClick(m_view, Qt::Key_Z, Qt::ControlModifier);
+    }
+}
+
+void TestTextView::longLineTypingIsFast()
+{
+    // A key in a line of a megabyte lays out a piece or two, not the line
+    // (a fifth of a second a key before; a few milliseconds now).
+    m_view->setWordWrap(false);
+    const QString line = longLine(QStringLiteral("{\"id\":12345,\"name\":\"value\",\"list\":[1,2,3]},"), 1'000'000);
+    setText(line);
+    QTextCursor c(m_doc);
+    c.setPosition(500'000);
+    m_view->setTextCursor(c);
+    m_view->grab();
+    for (bool wrap : {false, true}) {
+        m_view->setWordWrap(wrap);
+        m_view->grab();
+        // The fastest of three tries: a loaded machine stalls now and then.
+        qint64 fastest = LLONG_MAX;
+        for (int attempt = 0; attempt < 3 && fastest >= 20 * 60; ++attempt) {
+            QElapsedTimer timer;
+            timer.start();
+            for (int i = 0; i < 10; ++i) {
+                QTest::keyClick(m_view, Qt::Key_A);
+                m_view->grab();
+                QTest::keyClick(m_view, Qt::Key_Backspace);
+                m_view->grab();
+            }
+            fastest = qMin(fastest, timer.elapsed());
+        }
+        QVERIFY2(fastest < 20 * 60, qPrintable(QString::number(fastest)));
+    }
+    QCOMPARE(m_doc->firstBlock().text(), line);
 }
 
 QTEST_MAIN(TestTextView)

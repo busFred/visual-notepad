@@ -1,13 +1,15 @@
 // Text editor view over a QTextDocument with multiple cursors.
 //
 // The view lays out each line itself (QTextLayout per block, using the
-// highlighter's formats from the document) and scrolls by "rows". In this
-// class a row is one source line. Subclasses can merge runs of lines into a
-// single rendered row (the visual Markdown view does this for blocks without
-// a caret) by overriding the row hooks.
+// highlighter's formats from the document; a very long line in pieces, see
+// LineLayout) and scrolls by "rows". In this class a row is one source line.
+// Subclasses can merge runs of lines into a single rendered row (the visual
+// Markdown view does this for blocks without a caret) by overriding the row
+// hooks.
 #pragma once
 
 #include "../markdown/MarkdownEditing.h"
+#include "LineLayout.h"
 #include "Search.h"
 
 #include <QAbstractScrollArea>
@@ -469,7 +471,7 @@ private:
     };
     struct LineCache
     {
-        std::unique_ptr<QTextLayout> layout;
+        std::unique_ptr<LineLayout> layout;
         qreal wrapWidth = -1;
     };
     enum class Unit { Char, Word, Line };
@@ -480,7 +482,11 @@ private:
     // Drops cached layouts far from [firstLine, lastLine] once too many are live.
     void trimLayouts(int firstLine, int lastLine);
     void shiftSearchRanges(int from, int charsRemoved, int charsAdded);
-    QTextLayout *layoutForLine(int line);
+    // Lines laid out in pieces before an edit (old[i] was line first + i)
+    // pass the pieces it did not reach on to the lines now there.
+    void keepPieces(int first, int newAffected, std::vector<std::unique_ptr<LineLayout>> old);
+    LineLayout *layoutForLine(int line);
+    LineLayout::Setup layoutSetup(qreal wrapWidth) const;
     QTextOption textOption() const;
     qreal rowHeight(int row);
     int gutterWidth() const;
@@ -596,6 +602,11 @@ private:
 
     // Caret helpers.
     void moveCarets(QTextCursor::MoveOperation op, bool select);
+    // QTextCursor::movePosition(); a character or word move in a very long
+    // line looks only at the text around the cursor (Qt works out the
+    // whole line's character attributes first: a tenth of a second on a
+    // 3 MB line, again after every edit).
+    void moveCursor(QTextCursor &cursor, QTextCursor::MoveOperation op, QTextCursor::MoveMode mode) const;
     void moveCaretsVertically(int lines, bool select);
     bool moveVertically(Caret &caret, int direction, QTextCursor::MoveMode mode);
     void moveCaretsHome(bool select);

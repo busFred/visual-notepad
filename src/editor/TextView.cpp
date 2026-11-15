@@ -397,10 +397,21 @@ void TextView::onDocumentChanged(int from, int charsRemoved, int charsAdded)
     if (oldAffected < 0 || first + oldAffected > oldCount) {
         m_lines.clear();
         m_lines.resize(newCount);
+        m_liveLayouts = 0;
         m_fenceMarksValid = false;
         m_tableRun = {};
         m_htmlRun = {};
     } else {
+        // Lines laid out in pieces keep the ones the edit did not reach.
+        std::vector<std::unique_ptr<LineLayout>> pieced;
+        for (int i = first; i < first + oldAffected; ++i) {
+            LineCache &line = m_lines[i];
+            if (line.layout && line.layout->inPieces() && line.wrapWidth == (m_wordWrap ? textWidth() : hugeWidth)) {
+                pieced.resize(oldAffected);
+                pieced[i - first] = std::move(line.layout);
+                --m_liveLayouts;
+            }
+        }
         if (newAffected == oldAffected) {
             // The lines keep their places: reset them where they are rather
             // than shifting everything after them down and up again.
@@ -414,12 +425,69 @@ void TextView::onDocumentChanged(int from, int charsRemoved, int charsAdded)
         }
         spliceFenceMarks(first, oldAffected, newAffected);
         spliceTableRun(first, oldAffected, newAffected);
+        if (!pieced.empty())
+            keepPieces(first, newAffected, std::move(pieced));
     }
     m_topRow = qBound(0, m_topRow, qMax(0, rowCount() - 1));
     columnsRowsChanged(true);
     rowsMayHaveChanged();
     updateScrollBars();
     viewport()->update();
+}
+
+void TextView::keepPieces(int first, int newAffected, std::vector<std::unique_ptr<LineLayout>> old)
+{
+    // A line that starts before the edit has the start of the line that
+    // was there; one that ends after it, the end of the line that was where
+    // it is now, lines added or removed apart.
+    const DocumentLayout::Change edit = static_cast<DocumentLayout *>(m_doc->documentLayout())->textChange();
+    const int oldAffected = int(old.size());
+    const int delta = newAffected - oldAffected;
+    const qreal wrapWidth = m_wordWrap ? textWidth() : hugeWidth;
+    QTextBlock block = m_doc->findBlockByNumber(first);
+    for (int line = first; line < first + newAffected && block.isValid(); ++line, block = block.next()) {
+        const int length = block.length() - 1;
+        if (length <= LineLayout::piecesFrom)
+            continue;
+        const int i = line - first;
+        const int j = line - delta - first;
+        LineLayout *before = i < oldAffected ? old[i].get() : nullptr;
+        LineLayout *after = j >= 0 && j < oldAffected ? old[j].get() : nullptr;
+        int prefix = 0;
+        int suffix = 0;
+        if (edit.from >= 0) {
+            const int start = block.position();
+            if (before && start <= edit.from)
+                prefix = std::min({edit.from - start, length, before->length()});
+            else
+                before = nullptr;
+            if (after && start + length >= edit.from + edit.charsAdded) {
+                suffix = std::min({start + length - (edit.from + edit.charsAdded), length - prefix, after->length()});
+                if (after == before)
+                    suffix = qMin(suffix, after->length() - prefix);
+            } else {
+                after = nullptr;
+            }
+        } else if (delta == 0 && before) {
+            // Not known what changed (only colours, most likely): compared.
+            after = before;
+            std::tie(prefix, suffix) = before->common(block.text());
+        } else {
+            continue;
+        }
+        if (!before && !after)
+            continue;
+        auto layout = std::make_unique<LineLayout>();
+        if (!layout->rebuild(block, layoutSetup(wrapWidth), before, prefix, after, suffix))
+            continue;
+        if (!m_wordWrap)
+            m_maxLineWidth = qMax(m_maxLineWidth, layout->width());
+        LineCache &cache = m_lines[line];
+        if (!cache.layout)
+            ++m_liveLayouts;
+        cache.layout = std::move(layout);
+        cache.wrapWidth = wrapWidth;
+    }
 }
 
 void TextView::updateMetrics()
@@ -512,11 +580,17 @@ void TextView::formatsChanged(int firstLine, int lastLine)
     lastLine = qMin(lastLine, int(m_lines.size()) - 1);
     bool laidOut = false;
     for (int i = firstLine; i <= lastLine; ++i) {
-        if (m_lines[i].layout) {
-            m_lines[i].layout.reset();
-            --m_liveLayouts;
-            laidOut = true;
+        LineCache &line = m_lines[i];
+        if (!line.layout)
+            continue;
+        laidOut = true;
+        if (line.layout->inPieces()) {
+            // (Colours reach only the start of a long line: see Highlighter.)
+            line.layout->formatsChanged(m_doc->findBlockByNumber(i));
+            continue;
         }
+        line.layout.reset();
+        --m_liveLayouts;
     }
     if (!laidOut)
         return;
@@ -533,6 +607,11 @@ QTextOption TextView::textOption() const
     if (m_showWhitespace)
         option.setFlags(QTextOption::ShowTabsAndSpaces);
     return option;
+}
+
+LineLayout::Setup TextView::layoutSetup(qreal wrapWidth) const
+{
+    return {font(), textOption(), m_wordWrap, wrapWidth, qreal(m_lineHeight), m_linePad};
 }
 
 qreal TextView::textLeft() const
@@ -748,7 +827,7 @@ bool TextView::renderedRowPressed(const Row &, const QPointF &, QMouseEvent *)
     return false;
 }
 
-QTextLayout *TextView::layoutForLine(int line)
+LineLayout *TextView::layoutForLine(int line)
 {
     if (line < 0 || line >= int(m_lines.size()))
         return nullptr;
@@ -756,14 +835,44 @@ QTextLayout *TextView::layoutForLine(int line)
     const qreal wrapWidth = m_wordWrap ? textWidth() : hugeWidth;
     const QTextBlock block = m_doc->findBlockByNumber(line);
     const bool hasPreedit = !m_preedit.isEmpty() && textCursor().block() == block;
+    const auto preeditFormats = [&] {
+        QList<QTextLayout::FormatRange> formats;
+        for (const QInputMethodEvent::Attribute &a : std::as_const(m_preeditAttributes)) {
+            if (a.type != QInputMethodEvent::TextFormat)
+                continue;
+            const QTextCharFormat f = qvariant_cast<QTextFormat>(a.value).toCharFormat();
+            if (f.isValid())
+                formats.append({textCursor().positionInBlock() + a.start, a.length, f});
+        }
+        return formats;
+    };
+    if (cache.layout && cache.layout->inPieces() && cache.wrapWidth == wrapWidth) {
+        // In pieces: only the piece being composed in is laid out again.
+        if (hasPreedit || cache.layout->hasPreedit()) {
+            cache.layout->setPreedit(textCursor().positionInBlock(), hasPreedit ? m_preedit : QString(),
+                                     hasPreedit ? preeditFormats() : QList<QTextLayout::FormatRange>());
+            if (!m_wordWrap)
+                m_maxLineWidth = qMax(m_maxLineWidth, cache.layout->width());
+        }
+        return cache.layout.get();
+    }
     if (cache.layout && cache.wrapWidth == wrapWidth && !hasPreedit)
         return cache.layout.get();
 
     if (!cache.layout) {
-        cache.layout = std::make_unique<QTextLayout>();
+        cache.layout = std::make_unique<LineLayout>();
         ++m_liveLayouts;
     }
-    QTextLayout *layout = cache.layout.get();
+    if (block.length() - 1 > LineLayout::piecesFrom && cache.layout->build(block, layoutSetup(wrapWidth))) {
+        LineLayout *layout = cache.layout.get();
+        if (hasPreedit)
+            layout->setPreedit(textCursor().positionInBlock(), m_preedit, preeditFormats());
+        if (!m_wordWrap)
+            m_maxLineWidth = qMax(m_maxLineWidth, layout->width());
+        cache.wrapWidth = wrapWidth;
+        return layout;
+    }
+    QTextLayout *layout = cache.layout->whole();
     layout->clearLayout();
     layout->setText(block.text());
     layout->setFont(font());
@@ -772,15 +881,7 @@ QTextLayout *TextView::layoutForLine(int line)
     layout->setFormats(block.layout()->formats());
     if (hasPreedit) {
         layout->setPreeditArea(textCursor().positionInBlock(), m_preedit);
-        QList<QTextLayout::FormatRange> formats = layout->formats();
-        for (const QInputMethodEvent::Attribute &a : std::as_const(m_preeditAttributes)) {
-            if (a.type != QInputMethodEvent::TextFormat)
-                continue;
-            const QTextCharFormat f = qvariant_cast<QTextFormat>(a.value).toCharFormat();
-            if (f.isValid())
-                formats.append({textCursor().positionInBlock() + a.start, a.length, f});
-        }
-        layout->setFormats(formats);
+        layout->setFormats(layout->formats() + preeditFormats());
     } else {
         layout->setPreeditArea(-1, QString());
     }
@@ -796,7 +897,7 @@ QTextLayout *TextView::layoutForLine(int line)
     }
     layout->endLayout();
     cache.wrapWidth = hasPreedit ? -1 : wrapWidth; // Preedit layouts are rebuilt each time.
-    return layout;
+    return cache.layout.get();
 }
 
 qreal TextView::rowHeight(int index)
@@ -804,7 +905,7 @@ qreal TextView::rowHeight(int index)
     const Row r = row(index);
     if (r.rendered)
         return renderedRowHeight(r, textWidth());
-    QTextLayout *layout = layoutForLine(r.firstLine);
+    LineLayout *layout = layoutForLine(r.firstLine);
     return layout ? qMax(1, layout->lineCount()) * m_lineHeight : m_lineHeight;
 }
 
@@ -965,9 +1066,9 @@ QRectF TextView::caretRect(const QTextCursor &cursor)
     const Row r = row(rowIndex);
     if (r.rendered)
         return QRectF(textLeft(), top, 2, rowHeight(rowIndex));
-    QTextLayout *layout = layoutForLine(block.blockNumber());
+    LineLayout *layout = layoutForLine(block.blockNumber());
     const int pos = cursor.positionInBlock();
-    const QTextLine line = layout->lineForTextPosition(pos);
+    const LineLayout::Line line = layout->lineForTextPosition(pos);
     if (!line.isValid())
         return QRectF(textLeft(), top, 2, m_lineHeight);
     const qreal x = line.cursorToX(pos) + textLeft() - horizontalScrollBar()->value();
@@ -976,8 +1077,8 @@ QRectF TextView::caretRect(const QTextCursor &cursor)
 
 qreal TextView::cursorX(const QTextCursor &cursor)
 {
-    QTextLayout *layout = layoutForLine(cursor.blockNumber());
-    const QTextLine line = layout ? layout->lineForTextPosition(cursor.positionInBlock()) : QTextLine();
+    LineLayout *layout = layoutForLine(cursor.blockNumber());
+    const LineLayout::Line line = layout ? layout->lineForTextPosition(cursor.positionInBlock()) : LineLayout::Line();
     return line.isValid() ? line.cursorToX(cursor.positionInBlock()) : 0;
 }
 
@@ -1008,10 +1109,10 @@ int TextView::positionAt(const QPointF &point)
         return hitTestRenderedRow(info, QPointF(point.x() - textLeft(), point.y() - y));
 
     const QTextBlock block = m_doc->findBlockByNumber(info.firstLine);
-    QTextLayout *layout = layoutForLine(info.firstLine);
+    LineLayout *layout = layoutForLine(info.firstLine);
     const qreal localY = qMax<qreal>(0, point.y() - y);
     const int lineIndex = qBound(0, int(localY / m_lineHeight), layout->lineCount() - 1);
-    const QTextLine line = layout->lineAt(lineIndex);
+    const LineLayout::Line line = layout->lineAt(lineIndex);
     const qreal x = point.x() - textLeft() + horizontalScrollBar()->value();
     return block.position() + line.xToCursor(x);
 }
@@ -1030,8 +1131,8 @@ void TextView::ensureCursorVisible()
     qreal caretTop = 0;
     qreal caretBottom = m_lineHeight;
     if (!r.rendered) {
-        QTextLayout *layout = layoutForLine(line);
-        const QTextLine textLine = layout->lineForTextPosition(cursor.positionInBlock());
+        LineLayout *layout = layoutForLine(line);
+        const LineLayout::Line textLine = layout->lineForTextPosition(cursor.positionInBlock());
         if (textLine.isValid())
             caretTop = textLine.y() - m_linePad;
         caretBottom = caretTop + m_lineHeight;
@@ -1148,7 +1249,7 @@ void TextView::paintSourceLine(QPainter &painter, int lineNo, const QPointF &ori
                                const QRectF &visible, const LinePaintState &state)
 {
     const QTextBlock block = m_doc->findBlockByNumber(lineNo);
-    QTextLayout *layout = layoutForLine(lineNo);
+    LineLayout *layout = layoutForLine(lineNo);
     const qreal y = origin.y();
     paintLineBackground(painter, lineNo, shade);
     if (m_highlightCurrentLine && state.currentLines.contains(lineNo))
@@ -1165,12 +1266,16 @@ void TextView::paintSourceLine(QPainter &painter, int lineNo, const QPointF &ori
     const int rowCount = layout->lineCount();
     const int shownFirst = qBound(0, int(std::floor((visible.top() - y) / m_lineHeight)) - 1, rowCount);
     const int shownEnd = qBound(0, int(std::ceil((visible.bottom() - y) / m_lineHeight)) + 2, rowCount);
+    // A line in pieces narrows that to the pieces in sight (with Word Wrap
+    // off, its row is the whole line); a line laid out whole does not.
+    const auto [shownStart, shownStop] =
+        layout->visibleRange(shownFirst, shownEnd, visible.left() - origin.x(), visible.right() - origin.x());
 
     // Backgrounds are filled by hand so they span the full line height
     // (QTextLayout's own selection only covers the font height).
     const auto fillRange = [&](int start, int end, const QColor &color, bool newline) {
         for (int i = shownFirst; i < shownEnd; ++i) {
-            const QTextLine textLine = layout->lineAt(i);
+            const LineLayout::Line textLine = layout->lineAt(i);
             const int ls = textLine.textStart();
             const int le = ls + textLine.textLength();
             const bool last = i == rowCount - 1;
@@ -1178,21 +1283,28 @@ void TextView::paintSourceLine(QPainter &painter, int lineNo, const QPointF &ori
             const int e = qMin(end, le);
             if (s > e || (s == e && !(newline && last && e == le)))
                 continue;
-            qreal x1 = textLine.cursorToX(s);
-            qreal x2 = textLine.cursorToX(e);
+            const int vs = qMax(s, shownStart);
+            const int ve = qMin(e, shownStop);
+            if (vs > ve)
+                continue;
+            qreal x1 = textLine.cursorToX(vs);
+            qreal x2 = textLine.cursorToX(ve);
             if (x1 > x2)
                 std::swap(x1, x2);
-            if (newline && last && end > le)
+            if (newline && last && end > le && ve == e)
                 x2 += m_charWidth; // Show the selected line break.
             painter.fillRect(QRectF(origin.x() + x1, y + textLine.y() - m_linePad, x2 - x1, m_lineHeight), color);
         }
     };
-    // The ranges are sorted, so start at the first one reaching this line.
-    const auto firstMatch = std::lower_bound(m_searchRanges.cbegin(), m_searchRanges.cend(), blockStart,
+    // The ranges are sorted, so start at the first one reaching this line
+    // (or the part of it in sight).
+    const int matchesFrom = blockStart + shownStart;
+    const int matchesTo = shownStop == INT_MAX ? blockEnd : qMin(blockEnd, blockStart + shownStop + 1);
+    const auto firstMatch = std::lower_bound(m_searchRanges.cbegin(), m_searchRanges.cend(), matchesFrom,
                                              [](const search::Range &r, int pos) { return r.end <= pos; });
     for (int i = int(firstMatch - m_searchRanges.cbegin()); i < m_searchRanges.size(); ++i) {
         const search::Range &match = m_searchRanges.at(i);
-        if (match.start >= blockEnd)
+        if (match.start >= matchesTo)
             break;
         fillRange(match.start - blockStart, match.end - blockStart,
                   i == m_searchCurrent ? searchCurrentColor() : searchColor(), false);
@@ -1234,10 +1346,10 @@ void TextView::paintSourceLine(QPainter &painter, int lineNo, const QPointF &ori
         painter.save();
         painter.setPen(QPen(diagnosticColor(), 1));
         painter.setRenderHint(QPainter::Antialiasing, true);
-        const int ds = qMax(rangeStart, blockStart) - blockStart;
-        const int de = qMin(rangeEnd, blockEnd - 1) - blockStart;
+        const int ds = qMax(qMax(rangeStart, blockStart) - blockStart, shownStart);
+        const int de = qMin(qMin(rangeEnd, blockEnd - 1) - blockStart, shownStop);
         for (int i = shownFirst; i < shownEnd; ++i) {
-            const QTextLine textLine = layout->lineAt(i);
+            const LineLayout::Line textLine = layout->lineAt(i);
             const int s = qMax(ds, textLine.textStart());
             const int e = qMin(de, textLine.textStart() + textLine.textLength());
             if (s >= e)
@@ -1653,8 +1765,8 @@ void TextView::mousePressEvent(QMouseEvent *event)
         if (!(m_columnAnchorValid && captureCarets() == m_columnResult)) {
             QTextCursor anchor(m_doc);
             anchor.setPosition(primary.anchor());
-            QTextLayout *layout = layoutForLine(anchor.blockNumber());
-            const QTextLine line = layout->lineForTextPosition(anchor.positionInBlock());
+            LineLayout *layout = layoutForLine(anchor.blockNumber());
+            const LineLayout::Line line = layout->lineForTextPosition(anchor.positionInBlock());
             m_columnAnchor = {anchor.blockNumber(), line.isValid() ? line.lineNumber() : 0, cursorX(anchor)};
             m_columnAnchorValid = true;
         }
@@ -1769,7 +1881,7 @@ bool TextView::sourceLineAt(const QPointF &point, int *block, int *subLine)
     const Row info = row(r);
     if (info.rendered)
         return false;
-    QTextLayout *layout = layoutForLine(info.firstLine);
+    LineLayout *layout = layoutForLine(info.firstLine);
     *block = info.firstLine;
     *subLine = qBound(0, int(qMax<qreal>(0, point.y() - y) / m_lineHeight), layout->lineCount() - 1);
     return true;
@@ -1803,12 +1915,12 @@ bool TextView::columnSelectTo(const QPointF &point)
         const QTextBlock block = m_doc->findBlockByNumber(b);
         if (!block.isValid())
             break;
-        QTextLayout *layout = layoutForLine(b);
+        LineLayout *layout = layoutForLine(b);
         // The ends of the box sit on the wrapped lines they were made on.
         const int fromLine = b == fromBlock ? qMin(m_columnAnchor.subLine, layout->lineCount() - 1) : 0;
         const int toLine = b == toBlock ? qMin(toSubLine, layout->lineCount() - 1) : 0;
-        const QTextLine startLine = layout->lineAt(fromLine);
-        const QTextLine endLine = layout->lineAt(toLine);
+        const LineLayout::Line startLine = layout->lineAt(fromLine);
+        const LineLayout::Line endLine = layout->lineAt(toLine);
         const int start = startLine.xToCursor(fromX);
         const int end = endLine.xToCursor(toX);
         const qreal visibleStart = startLine.cursorToX(start);
@@ -2057,10 +2169,52 @@ void TextView::contextMenuEvent(QContextMenuEvent *event)
 void TextView::moveCarets(QTextCursor::MoveOperation op, bool select)
 {
     for (Caret &caret : m_carets) {
-        caret.cursor.movePosition(op, select ? QTextCursor::KeepAnchor : QTextCursor::MoveAnchor);
+        moveCursor(caret.cursor, op, select ? QTextCursor::KeepAnchor : QTextCursor::MoveAnchor);
         caret.desiredX = -1;
     }
     caretsChanged();
+}
+
+void TextView::moveCursor(QTextCursor &cursor, QTextCursor::MoveOperation op, QTextCursor::MoveMode mode) const
+{
+    const bool back = op == QTextCursor::PreviousCharacter || op == QTextCursor::PreviousWord;
+    const bool words = op == QTextCursor::PreviousWord || op == QTextCursor::NextWord;
+    const QTextBlock block = cursor.block();
+    const int length = block.length() - 1;
+    if (!(back || words || op == QTextCursor::NextCharacter) || length <= LineLayout::piecesFrom) {
+        cursor.movePosition(op, mode);
+        return;
+    }
+    // As QTextDocumentPrivate::previous/nextCursorPosition(): across the
+    // line break at either end, else the block layout's answer, here a
+    // layout of the text around. One that lands on an end of that text
+    // (a long word) asks again with more around.
+    const int pos = cursor.positionInBlock();
+    int target = pos;
+    if (back && pos == 0) {
+        target = -1;
+    } else if (!back && pos == length) {
+        target = length + 1;
+    } else {
+        const auto mode = words ? QTextLayout::SkipWords : QTextLayout::SkipCharacters;
+        for (int reach = 1024;; reach *= 4) {
+            const int from = qMax(0, pos - reach);
+            const int to = qMin(length, pos + reach);
+            QString text(to - from, Qt::Uninitialized);
+            for (int i = from; i < to; ++i)
+                text[i - from] = m_doc->characterAt(block.position() + i);
+            QTextLayout around(text);
+            const int found = from + (back ? around.previousCursorPosition(pos - from, mode)
+                                           : around.nextCursorPosition(pos - from, mode));
+            if ((found > from || from == 0) && (found < to || to == length)) {
+                target = found;
+                break;
+            }
+        }
+    }
+    const int position = qBound(0, block.position() + target, m_doc->characterCount() - 1);
+    if (position != cursor.position())
+        cursor.setPosition(position, mode);
 }
 
 void TextView::moveCaretsHome(bool select)
@@ -2079,9 +2233,9 @@ bool TextView::moveVertically(Caret &caret, int direction, QTextCursor::MoveMode
 {
     QTextCursor &cursor = caret.cursor;
     QTextBlock block = cursor.block();
-    QTextLayout *layout = layoutForLine(block.blockNumber());
+    LineLayout *layout = layoutForLine(block.blockNumber());
     const int pos = cursor.positionInBlock();
-    QTextLine line = layout->lineForTextPosition(pos);
+    LineLayout::Line line = layout->lineForTextPosition(pos);
     if (caret.desiredX < 0)
         caret.desiredX = line.isValid() ? line.cursorToX(pos) : 0;
 
@@ -2096,7 +2250,7 @@ bool TextView::moveVertically(Caret &caret, int direction, QTextCursor::MoveMode
         return false;
     }
     layout = layoutForLine(block.blockNumber());
-    const QTextLine next = layout->lineAt(direction < 0 ? layout->lineCount() - 1 : 0);
+    const LineLayout::Line next = layout->lineAt(direction < 0 ? layout->lineCount() - 1 : 0);
     cursor.setPosition(block.position() + next.xToCursor(caret.desiredX), mode);
     return true;
 }
@@ -2686,12 +2840,12 @@ void TextView::deleteAtCarets(QTextCursor::MoveOperation op)
                 const int pos = c.positionInBlock();
                 if (leadingWhitespace(text) >= pos && text.left(pos).count(u' ') == pos) {
                     const int remove = ((pos - 1) % m_tabWidth) + 1;
-                    c.movePosition(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor, remove);
+                    c.setPosition(c.position() - remove, QTextCursor::KeepAnchor); // (Spaces.)
                     c.removeSelectedText();
                     return removedAt();
                 }
             }
-            c.movePosition(op, QTextCursor::KeepAnchor);
+            moveCursor(c, op, QTextCursor::KeepAnchor);
         }
         c.removeSelectedText();
         caret.desiredX = -1;
@@ -2960,7 +3114,7 @@ bool TextView::autoCloseBrackets(QChar open)
     for (Caret &caret : m_carets) {
         QTextCursor &c = caret.cursor;
         c.insertText(QString(open) + close);
-        c.movePosition(QTextCursor::PreviousCharacter);
+        c.setPosition(c.position() - 1); // Before the closer.
         AutoClosed entry;
         entry.inner = QTextCursor(m_doc);
         entry.inner.setPosition(c.position());
@@ -3094,7 +3248,7 @@ void TextView::outdent()
         if (remove == 0)
             continue;
         QTextCursor c(block);
-        c.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor, remove);
+        c.setPosition(c.position() + remove, QTextCursor::KeepAnchor); // (Spaces or a tab.)
         c.removeSelectedText();
     }
     endEdit();

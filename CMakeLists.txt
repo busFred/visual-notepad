@@ -65,6 +65,8 @@ add_library(vn_app STATIC
     src/editor/Highlighter.h
     src/editor/Indentation.cpp
     src/editor/Indentation.h
+    src/editor/LineLayout.cpp
+    src/editor/LineLayout.h
     src/editor/FindBar.h
     src/editor/ReadControls.cpp
     src/editor/ReadControls.h
