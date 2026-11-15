@@ -130,6 +130,8 @@ struct LineLayout::Piece
     int rows = 1;
     Scan scan;
     bool measured = false;
+    // The highlighter's colours it was laid out with (positions in it).
+    QList<QTextLayout::FormatRange> formats;
     std::unique_ptr<QTextLayout> layout; // Dropped when not used for a while.
     quint64 used = 0;
 };
@@ -507,14 +509,15 @@ bool LineLayout::rebuild(const QTextBlock &block, const Setup &setup, LineLayout
     }
     m_pieces = std::move(pieces);
 
-    // Laid out (measured) where new or coloured anew; a whole line only
-    // measured, the view lays out what it shows.
+    // Laid out (measured) where new or coloured otherwise (the highlighter
+    // colours the start of a long line again at every edit, mostly the
+    // same); a whole line only measured, the view lays out what it shows.
     const bool all = kept.empty();
     for (int k = 0; k < int(m_pieces.size()); ++k) {
         Piece &p = m_pieces[k];
         m_clock = qMax(m_clock, p.used);
         const bool had = p.layout != nullptr;
-        if (p.measured && p.start >= formatsReach) {
+        if (p.measured && (p.start >= formatsReach || formatsFor(p.start, int(p.text.size())) == p.formats)) {
             if (had)
                 ++m_live;
             continue;
@@ -588,8 +591,10 @@ void LineLayout::formatsChanged(const QTextBlock &block)
     reach = qMax(reach, m_formatsEnd);
     bool changed = false;
     for (int k = 0; k < int(m_pieces.size()) && m_pieces[k].start < reach; ++k) {
-        const bool kept = m_pieces[k].layout != nullptr;
-        changed = layOut(k, kept) || changed;
+        Piece &p = m_pieces[k];
+        if (p.measured && formatsFor(p.start, int(p.text.size())) == p.formats)
+            continue;
+        changed = layOut(k, p.layout != nullptr) || changed;
     }
     if (changed)
         place(0);
@@ -705,7 +710,8 @@ bool LineLayout::layOut(int piece, bool keep)
     option.setTextDirection(Qt::LeftToRight);
     layout->setTextOption(option);
     layout->setCacheEnabled(true);
-    QList<QTextLayout::FormatRange> formats = formatsFor(p.start, int(p.text.size()));
+    p.formats = formatsFor(p.start, int(p.text.size()));
+    QList<QTextLayout::FormatRange> formats = p.formats;
     if (piece == m_preeditPiece) {
         layout->setPreeditArea(m_preeditPosition, m_preedit);
         formats += m_preeditFormats;
