@@ -451,6 +451,8 @@ private Q_SLOTS:
     void modeSwitchDuringBackgroundParse();
     void wideImagesShrinkToColumn();
     void decodedPicturesServeEveryWidth();
+    void bigPicturesArriveInTheirRoom();
+    void pictureCachesCanBeReleased();
     void pictureCacheSettingResizesTheCache();
     void codeBlocksArePaintedAsTheStockHighlighterDoes_data();
     void codeBlocksArePaintedAsTheStockHighlighterDoes();
@@ -2943,6 +2945,85 @@ void TestVisualView::pictureCacheSettingResizesTheCache()
     paintHtml(html, dir.path(), 900);
     QCOMPARE(RenderedBlock::pictureFileReads(), start + 1);
     settings.reset(key::pictureCacheMiB);
+}
+
+// A big picture file is read on a worker thread when the context allows
+// it: the block keeps its room blank meanwhile and is pending, and once the
+// picture is in, the block made again is as tall and shows it. Small ones
+// are read at once.
+void TestVisualView::bigPicturesArriveInTheirRoom()
+{
+    QTemporaryDir dir;
+    QImage big(1500, 900, QImage::Format_RGB32);
+    big.fill(Qt::red);
+    QVERIFY(big.save(dir.filePath(QStringLiteral("big.png"))));
+    QImage small(60, 40, QImage::Format_RGB32);
+    small.fill(Qt::red);
+    QVERIFY(small.save(dir.filePath(QStringLiteral("small.png"))));
+    const auto make = [&](const QString &name, qreal dpr) {
+        RenderContext ctx;
+        ctx.font = theme::textFont();
+        ctx.codeFont = theme::editorFont();
+        ctx.width = 500;
+        ctx.devicePixelRatio = dpr;
+        ctx.baseDirectory = dir.path();
+        ctx.picturesLater = true;
+        const QString html = QStringLiteral("<p>Before</p><p><img src=\"%1\"></p><p>after</p>").arg(name);
+        core::Block block;
+        block.kind = core::BlockKind::Html;
+        const QByteArray utf8 = html.toUtf8();
+        block.html = rust::String(utf8.constData(), utf8.size());
+        return RenderedBlock::create(block, html, ctx);
+    };
+    const auto redPixels = [](const RenderedBlock &block, qreal dpr) {
+        QImage image(QSize(int(500 * dpr), int(block.height() * dpr) + 1), QImage::Format_RGB32);
+        image.setDevicePixelRatio(dpr);
+        image.fill(Qt::white);
+        {
+            QPainter painter(&image);
+            block.paint(painter, QPointF(0, 0), 500);
+        }
+        int count = 0;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x)
+                count += QColor(image.pixel(x, y)) == QColor(Qt::red);
+        return count;
+    };
+    for (const qreal dpr : {1.0, 1.5}) {
+        RenderedBlock::releasePictureCaches();
+        QSignalSpy ready(&DiagramNotifier::instance(), &DiagramNotifier::ready);
+        const int reads = RenderedBlock::pictureFileReads();
+        const auto waiting = make(QStringLiteral("big.png"), dpr);
+        QVERIFY(waiting->isPending());
+        QCOMPARE(redPixels(*waiting, dpr), 0);
+        // (Other work may say it is ready too.)
+        QTRY_VERIFY_WITH_TIMEOUT(!make(QStringLiteral("big.png"), dpr)->isPending(), 10000);
+        QVERIFY(ready.count() > 0);
+        const auto shown = make(QStringLiteral("big.png"), dpr);
+        QCOMPARE(shown->height(), waiting->height());
+        QVERIFY(redPixels(*shown, dpr) > 1000);
+        QCOMPARE(RenderedBlock::pictureFileReads(), reads + 1);
+    }
+    const auto at = make(QStringLiteral("small.png"), 1);
+    QVERIFY(!at->isPending());
+    QCOMPARE(redPixels(*at, 1), 60 * 40);
+}
+
+// Forgotten, the pictures kept for later renders are read again.
+void TestVisualView::pictureCachesCanBeReleased()
+{
+    QTemporaryDir dir;
+    QImage picture(300, 200, QImage::Format_RGB32);
+    picture.fill(Qt::blue);
+    QVERIFY(picture.save(dir.filePath(QStringLiteral("p.png"))));
+    const QString html = QStringLiteral("<p><img src=\"p.png\"></p>");
+    const int start = RenderedBlock::pictureFileReads();
+    const QImage first = paintHtml(html, dir.path(), 400);
+    paintHtml(html, dir.path(), 500);
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 1);
+    RenderedBlock::releasePictureCaches();
+    QCOMPARE(paintHtml(html, dir.path(), 400), first);
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 2);
 }
 
 void TestVisualView::decodedPicturesServeEveryWidth()

@@ -62,6 +62,11 @@ struct RenderContext
     // RenderedBlock::contentWidth); the view scrolls those sideways.
     // Everywhere else they are fitted to the width.
     bool overflow = false;
+    // Big picture files (a million pixels or more) are read on a worker
+    // thread: until one is in, the block keeps its room blank and is pending
+    // (RenderedBlock::isPending), and DiagramNotifier::ready says when it is
+    // in. Otherwise they are read when the block is made.
+    bool picturesLater = false;
 };
 
 // What to highlight in a block: ranges of rendered-text characters (for code,
@@ -86,6 +91,8 @@ struct RenderedSelection
 // Mermaid diagrams render on a worker thread (they can take a while);
 // ready is emitted on the GUI thread when one has finished, after which
 // RenderedBlock::create returns it. Blocks created before show the source.
+// Big picture files read on a worker thread (RenderContext::picturesLater)
+// say they are in by the same signal.
 class DiagramNotifier : public QObject
 {
     Q_OBJECT
@@ -301,6 +308,9 @@ public:
 
     // For tests: picture files read (and decoded) from disk so far.
     static int pictureFileReads();
+    // Forgets the pictures kept for later renders (decoded, scaled, their
+    // sizes), for when no document shows any.
+    static void releasePictureCaches();
     // For tests: pictures carried in documents (data:) decoded so far.
     static int dataPictureDecodes();
     // How many KiB of decoded picture files are kept for later widths (and

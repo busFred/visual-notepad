@@ -43,6 +43,7 @@
 #include <functional>
 #include <atomic>
 #include <deque>
+#include <tuple>
 
 namespace vn {
 
@@ -476,6 +477,9 @@ public:
         clear();
     }
 
+    // Whether find() would find it (without counting as a request).
+    bool contains(const QString &version) const { return m_entries.contains(version); }
+
     QImage find(const QString &version)
     {
         ++m_requests;
@@ -486,34 +490,39 @@ public:
         return it->compact ? it->image.convertToFormat(QImage::Format_RGB32) : it->image;
     }
 
-    // `image` was just read because find() had nothing.
-    void insert(const QString &version, const QImage &image)
+    // `image` was just read because find() had nothing. False if it is not
+    // kept.
+    bool insert(const QString &version, const QImage &image)
     {
         const bool compact = image.format() == QImage::Format_RGB32;
-        const qsizetype kib = compact ? imageCost(image) * 3 / 4 : imageCost(image);
-        if (kib > m_limit)
-            return; // Does not fit at all.
-        bool again = false;
-        for (auto it = m_reads.begin(); it != m_reads.end(); ++it) {
-            if (it->first == version) {
-                again = m_requests - it->second <= qMax<quint64>(4, m_entries.size());
-                m_reads.erase(it);
-                break;
-            }
-        }
-        m_reads.push_back({version, m_requests});
-        if (m_reads.size() > 64)
-            m_reads.pop_front();
-        if (m_kib + kib > m_limit && !again)
-            return; // Full, and not shown to be wanted again soon.
-        evictFor(kib);
-        Entry entry;
-        entry.compact = compact;
-        entry.image = compact ? image.convertToFormat(QImage::Format_RGB888) : image;
-        entry.kib = imageCost(entry.image);
-        entry.used = ++m_clock;
-        m_kib += entry.kib;
-        m_entries.insert(version, entry);
+        if (!admit(version, compact ? imageCost(image) * 3 / 4 : imageCost(image), false))
+            return false;
+        store(version, compactForm(image), compact);
+        return true;
+    }
+
+    // As insert(), for a picture read on a worker thread for a render to
+    // come (so wanted again soon), given in the form kept (`kept`, see
+    // compactForm; `compact`: it was 32 bit RGB) and what it costs so (`kib`).
+    bool insertRead(const QString &version, const QImage &kept, bool compact, qsizetype kib)
+    {
+        if (!admit(version, kib, true))
+            return false;
+        store(version, kept, compact);
+        return true;
+    }
+
+    // What insert() takes from a picture: whether it is kept 24 bit, and its cost.
+    static std::pair<bool, qsizetype> costOf(const QImage &image)
+    {
+        const bool compact = image.format() == QImage::Format_RGB32;
+        return {compact, compact ? imageCost(image) * 3 / 4 : imageCost(image)};
+    }
+
+    // The form a picture is kept in (any thread).
+    static QImage compactForm(const QImage &image)
+    {
+        return image.format() == QImage::Format_RGB32 ? image.convertToFormat(QImage::Format_RGB888) : image;
     }
 
     void clear()
@@ -524,6 +533,40 @@ public:
     }
 
 private:
+    // Whether a picture of `kib` decoded is to be kept (see above), with
+    // room made for it.
+    bool admit(const QString &version, qsizetype kib, bool wanted)
+    {
+        if (kib > m_limit)
+            return false; // Does not fit at all.
+        bool again = wanted;
+        for (auto it = m_reads.begin(); it != m_reads.end(); ++it) {
+            if (it->first == version) {
+                again = again || m_requests - it->second <= qMax<quint64>(4, m_entries.size());
+                m_reads.erase(it);
+                break;
+            }
+        }
+        m_reads.push_back({version, m_requests});
+        if (m_reads.size() > 64)
+            m_reads.pop_front();
+        if (m_kib + kib > m_limit && !again)
+            return false; // Full, and not shown to be wanted again soon.
+        evictFor(kib);
+        return true;
+    }
+
+    void store(const QString &version, const QImage &kept, bool compact)
+    {
+        Entry entry;
+        entry.compact = compact;
+        entry.image = kept;
+        entry.kib = imageCost(entry.image);
+        entry.used = ++m_clock;
+        m_kib += entry.kib;
+        m_entries.insert(version, entry);
+    }
+
     struct Entry
     {
         QImage image;
@@ -619,16 +662,168 @@ QImage decodedLocalImage(const QString &path)
     return image;
 }
 
+// Local pictures scaled to a column (see cachedLocalImage), by scaledKey().
+QCache<QString, QImage> &scaledLocalImages()
+{
+    static QCache<QString, QImage> cache(64 * 1024); // KiB
+    return cache;
+}
+
+QString scaledKey(const QString &version, qreal width, qreal dpr)
+{
+    return QStringLiteral("%1|%2|").arg(width).arg(dpr) + version;
+}
+
+// Picture files at least this big are read on the thread pool when the
+// context allows it (RenderContext::picturesLater): reading one of 12
+// million pixels takes 0.1 s.
+constexpr qint64 bigPicturePixels = 1000 * 1000;
+
+// Big picture files on their way (by file version): asked for (waiting or
+// being read), or to be read on the GUI thread as small ones are
+// (unreadable, or too big for the decoded pictures to keep, which is where
+// a read one goes). Two are read at a time, the latest asked for first: a
+// page turned past should not hold up the one shown, and each takes its
+// size in memory while it is read. Of those waiting only the latest few
+// are kept (asked for again, the others wait again). GUI thread only.
+struct LaterPictures
+{
+    struct Request
+    {
+        QString path;
+        QString version;
+        QString key; // Of the scaled pictures.
+        qreal width = 0;
+        qreal dpr = 1;
+    };
+    QSet<QString> reading;
+    QSet<QString> now;
+    std::deque<Request> waiting;
+    int running = 0;
+    static constexpr int runningMax = 2;
+    static constexpr size_t waitingMax = 4;
+    // Bumped by releasePictureCaches(): what is being read is not wanted.
+    std::atomic<int> generation{0};
+};
+
+LaterPictures &laterPictures()
+{
+    static LaterPictures pictures;
+    return pictures;
+}
+
+bool isBig(const QSize &size)
+{
+    return size.isValid() && qint64(size.width()) * size.height() >= bigPicturePixels;
+}
+
+// The size of a picture file as readImage() turns it, from its header; null
+// for an SVG (read on the GUI thread, checked first) or when unknown.
+QSize headerSize(const QString &path)
+{
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    if (reader.format().startsWith("svg"))
+        return {};
+    QSize size = reader.size();
+    if (size.isValid() && (reader.transformation() & QImageIOHandler::TransformationRotate90))
+        size.transpose();
+    return size;
+}
+
+// Starts reading the latest pictures asked for, as many as may be read at a
+// time: each is read and fitted to the column it was asked for at on the
+// thread pool; when it is in (with the decoded and the scaled pictures),
+// DiagramNotifier::ready tells the views.
+void readWaiting()
+{
+    LaterPictures &later = laterPictures();
+    while (later.running < LaterPictures::runningMax && !later.waiting.empty()) {
+        const LaterPictures::Request request = later.waiting.back();
+        later.waiting.pop_back();
+        ++later.running;
+        // Made here, on the GUI thread, so the result is delivered there.
+        DiagramNotifier *notifier = &DiagramNotifier::instance();
+        const int generation = later.generation;
+        QThreadPool::globalInstance()->start([request, notifier, generation] {
+            QImage fitted, kept;
+            bool compact = false;
+            qsizetype kib = 0;
+            if (laterPictures().generation == generation) {
+                const QImage image = readImage(request.path);
+                if (!image.isNull()) {
+                    fitted = fitToColumn(image, request.width, request.dpr);
+                    std::tie(compact, kib) = DecodedPictures::costOf(image);
+                    kept = DecodedPictures::compactForm(image);
+                }
+            }
+            QMetaObject::invokeMethod(notifier, [request, fitted, kept, compact, kib, generation]() {
+                LaterPictures &later = laterPictures();
+                --later.running;
+                if (later.generation == generation && later.reading.remove(request.version)) {
+                    if (kept.isNull() || !decodedPictures().insertRead(request.version, kept, compact, kib))
+                        later.now.insert(request.version);
+                    if (!fitted.isNull())
+                        scaledLocalImages().insert(request.key, new QImage(fitted), imageCost(fitted));
+                    Q_EMIT DiagramNotifier::instance().ready();
+                }
+                readWaiting();
+            });
+        });
+    }
+}
+
+// Asks for a big picture file to be read (once), for a column `width` wide.
+void readLater(const QString &path, const QString &version, const QString &key, qreal width, qreal dpr)
+{
+    LaterPictures &later = laterPictures();
+    if (later.reading.contains(version))
+        return;
+    later.reading.insert(version);
+    later.waiting.push_back({path, version, key, width, dpr});
+    while (later.waiting.size() > LaterPictures::waitingMax) {
+        later.reading.remove(later.waiting.front().version);
+        later.waiting.pop_front();
+    }
+    readWaiting();
+}
+
+// Whether a big picture file is to be read later, and starts that (for a
+// column `width` wide): when the context allows it, it is not decoded
+// already, and it is big.
+bool readsLater(const QString &path, const QString &version, const QSize &size, bool later, qreal width, qreal dpr)
+{
+    if (!later || laterPictures().now.contains(version) || decodedPictures().contains(version) || !isBig(size))
+        return false;
+    readLater(path, version, scaledKey(version, width, dpr), width, dpr);
+    return true;
+}
+
 // The size a local picture has (null if unreadable), without keeping or
 // asking for the decoded picture when it is known: a figure's size depends
 // on it. `decoded` gets the picture if it had to be read, for the caller to
-// scale (read once, even if the cache does not keep it).
-QSize localPictureSize(const QString &path, QImage *decoded)
+// scale (read once, even if the cache does not keep it). A big one read
+// later (see readsLater) has the size its file's header says until it is in.
+QCache<QString, QSize> &pictureSizes()
 {
     static QCache<QString, QSize> sizes(4096);
+    return sizes;
+}
+
+QSize localPictureSize(const QString &path, QImage *decoded, bool later = false)
+{
+    QCache<QString, QSize> &sizes = pictureSizes();
     const QString version = fileVersion(path);
     if (const QSize *known = sizes.object(version))
         return *known;
+    // (Read for its size only: started by cachedLocalImage, at the width
+    // the figure gets.)
+    if (later && laterPictures().reading.contains(version))
+        return headerSize(path);
+    if (later && !laterPictures().now.contains(version) && !decodedPictures().contains(version)) {
+        if (const QSize header = headerSize(path); isBig(header))
+            return header;
+    }
     *decoded = decodedLocalImage(path);
     if (decoded->isNull())
         return {};
@@ -639,15 +834,33 @@ QSize localPictureSize(const QString &path, QImage *decoded)
 // Local pictures, read and scaled to the column, by file version and size.
 // The decoded files are kept too (see above). SVGs are kept as decoded as
 // well: they are read at their own size, never at the column's, so a bigger
-// or smaller column scales the same pixels either way.
-QImage cachedLocalImage(const QString &path, qreal width, qreal dpr, QImage decoded = {})
+// or smaller column scales the same pixels either way. A big picture read
+// later (see readsLater; `size` is its own) is blank until it is in, as big
+// as it will be, and `waiting` is set.
+
+QImage cachedLocalImage(const QString &path, qreal width, qreal dpr, QImage decoded = {}, bool later = false,
+                        const QSize &size = {}, bool *waiting = nullptr)
 {
-    static QCache<QString, QImage> cache(64 * 1024); // KiB
-    const QFileInfo info(path);
-    const QString version = QStringLiteral("%1|%2|").arg(info.lastModified().toMSecsSinceEpoch()).arg(info.size()) + path;
-    const QString key = QStringLiteral("%1|%2|").arg(width).arg(dpr) + version;
+    QCache<QString, QImage> &cache = scaledLocalImages();
+    const QString version = fileVersion(path);
+    const QString key = scaledKey(version, width, dpr);
     if (const QImage *hit = cache.object(key))
         return *hit;
+    if (decoded.isNull() && readsLater(path, version, size, later, width, dpr)) {
+        *waiting = true;
+        // As fitToColumn() would size it (and QImage::scaledToWidth).
+        QSize blankSize = size;
+        const bool scaled = size.width() > width;
+        if (scaled) {
+            const int w = int(width * dpr);
+            blankSize = QSize(w, qRound(qreal(w) / size.width() * size.height()));
+        }
+        QImage blank(blankSize, QImage::Format_ARGB32_Premultiplied);
+        blank.fill(Qt::transparent);
+        if (scaled)
+            blank.setDevicePixelRatio(dpr);
+        return blank;
+    }
     QImage image = decoded.isNull() ? decodedLocalImage(path) : decoded;
     if (image.isNull())
         return image; // Not cached: the file may appear later.
@@ -660,9 +873,15 @@ QImage cachedLocalImage(const QString &path, qreal width, qreal dpr, QImage deco
 // downloaded). Their decoded full-size form is RemoteImages' to keep, as
 // DecodedPictures keeps the files': decoded once on a worker thread when they
 // arrive, in a bounded cache of its own (shared with the zoom viewer).
-QImage cachedRemoteImage(const QUrl &url, qreal width, qreal dpr)
+QCache<QString, QImage> &scaledRemoteImages()
 {
     static QCache<QString, QImage> cache(32 * 1024); // KiB
+    return cache;
+}
+
+QImage cachedRemoteImage(const QUrl &url, qreal width, qreal dpr)
+{
+    QCache<QString, QImage> &cache = scaledRemoteImages();
     RemoteImages &remote = RemoteImages::instance();
     const QString key = QStringLiteral("%1|%2|%3|").arg(remote.generation()).arg(width).arg(dpr)
                         + url.toString(QUrl::FullyEncoded);
@@ -694,10 +913,22 @@ QString dataPictureKey(const QString &address)
 
 QImage decodeDataAddress(const QString &address); // Below decodePicture().
 
+struct DataPictures
+{
+    QCache<QString, DataPicture> decoded{64 * 1024}; // KiB
+    QCache<QString, DataPicture> fitted{32 * 1024};  // KiB
+};
+
+DataPictures &dataPictures()
+{
+    static DataPictures pictures;
+    return pictures;
+}
+
 QImage cachedDataPicture(const QString &address, qreal width, qreal dpr)
 {
-    static QCache<QString, DataPicture> decoded(64 * 1024); // KiB
-    static QCache<QString, DataPicture> fitted(32 * 1024);  // KiB
+    QCache<QString, DataPicture> &decoded = dataPictures().decoded;
+    QCache<QString, DataPicture> &fitted = dataPictures().fitted;
     const auto cost = [&](const QImage &image) { return imageCost(image) + address.size() / 512 + 1; };
     const QString key = dataPictureKey(address);
     const QString sized = QStringLiteral("%1|%2|").arg(width).arg(dpr) + key;
@@ -969,8 +1200,9 @@ public:
                 path = localPath(url);
                 if (path.isEmpty())
                     continue;
-                own = localPictureSize(path, &decoded);
+                own = localPictureSize(path, &decoded, m_context.picturesLater);
             }
+            const QSize natural = own.toSize(); // The picture's own, before the HTML's.
             if (own.isEmpty())
                 continue;
             const qreal aspect = own.height() / own.width();
@@ -982,8 +1214,11 @@ public:
                 own = QSizeF(format.height() / aspect, format.height());
             const FigureFit fit = fitFigure(own, m_context, int(index) < factors.size() ? factors[int(index)] : 1);
             const qreal width = qMax<qreal>(1, fit.size.width());
+            bool waiting = false;
             const QImage image = path.isEmpty() ? cachedRemoteImage(url, width, dpr)
-                                                : cachedLocalImage(path, width, dpr, decoded);
+                                                : cachedLocalImage(path, width, dpr, decoded, m_context.picturesLater,
+                                                                   natural, &waiting);
+            m_pending = m_pending || waiting;
             if (image.isNull())
                 continue;
             // The picture's own pixels, unless it is made for another size
@@ -2152,6 +2387,21 @@ QImage decodeDataAddress(const QString &address)
 int RenderedBlock::dataPictureDecodes()
 {
     return vn::dataPictureDecodes;
+}
+
+void RenderedBlock::releasePictureCaches()
+{
+    decodedPictures().clear();
+    pictureSizes().clear();
+    scaledLocalImages().clear();
+    scaledRemoteImages().clear();
+    dataPictures().decoded.clear();
+    dataPictures().fitted.clear();
+    LaterPictures &later = laterPictures();
+    ++later.generation; // (What is being read is dropped when it is in.)
+    later.waiting.clear();
+    later.reading.clear();
+    later.now.clear();
 }
 
 int RenderedBlock::pictureFileReads()

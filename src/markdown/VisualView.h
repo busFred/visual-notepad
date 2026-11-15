@@ -57,6 +57,7 @@ class VisualView : public TextView
 
 public:
     VisualView(MarkdownModel *model, QWidget *parent = nullptr);
+    ~VisualView() override;
 
     void setBaseDirectory(const QString &directory);
     void setHighlightActiveBlock(bool on);
@@ -622,6 +623,7 @@ private:
     QHash<QString, QList<qreal>> m_figureScales;
     int m_figureRevision = 0; // Bumped when m_figureScales changes.
     bool m_figuresRendered = false; // A block that may have figures was rendered.
+    bool m_showsPictures = false;   // Counted in picturedViews (see the destructor).
     bool m_toolbarUpdatePending = false;
     bool m_hasFocus = false; // Not counting the toolbar's menu taking it.
 

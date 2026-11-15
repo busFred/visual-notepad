@@ -76,6 +76,9 @@ bool itemRowsEnabled = true; // For tests.
 // it shows when it is wider than minFigureBarWidth fitted, and keeps clear of
 // the figure's corner by figureBarInset.
 constexpr int figureColumns = 70;
+// Views that have rendered a block that may have pictures (see the
+// destructor).
+int picturedViews = 0;
 constexpr qreal figureHeightPart = 0.75;
 constexpr int figureHeightStep = 16;
 constexpr qreal minFigureBarWidth = 120;
@@ -623,6 +626,15 @@ int renderedOffsetFor(const QString &rendered, const QString &source, int source
             ++r;
     }
     return r;
+}
+
+// The pictures kept for later renders (up to some hundred megabytes) go
+// when the last view that showed any does: a document of big pictures,
+// closed, kept them for the rest of the session.
+VisualView::~VisualView()
+{
+    if (m_showsPictures && --picturedViews == 0)
+        RenderedBlock::releasePictureCaches();
 }
 
 VisualView::VisualView(MarkdownModel *model, QWidget *parent)
@@ -2115,6 +2127,7 @@ bool VisualView::openWideBlock(const Row &r)
     RenderContext ctx = renderContext();
     ctx.overflow = true;
     ctx.width = std::ceil(shown->contentWidth());
+    ctx.picturesLater = false; // (Never rendered again.)
     std::unique_ptr<RenderedBlock> own =
         RenderedBlock::create(m_model->parsedBlock(span.block), m_model->sourceText(span.first, span.last), ctx);
     if (own->contentSize().isEmpty())
@@ -2202,6 +2215,7 @@ RenderContext VisualView::context() const
     ctx.figureHeight = figureBoxHeight();
     ctx.figureScales = m_figureScales;
     ctx.overflow = readActive();
+    ctx.picturesLater = true; // (The view renders pending blocks again.)
     return ctx;
 }
 
@@ -2660,6 +2674,8 @@ const VisualView::Render *VisualView::rendered(const Row &r)
     Render &kept = m_renders[r.firstLine] = std::move(memo);
     if (!m_figuresRendered && RenderedBlock::mayHaveFigure(kept.source))
         m_figuresRendered = true;
+    if (m_figuresRendered && !std::exchange(m_showsPictures, true))
+        ++picturedViews;
     // Keep the memos of the latest renders only: the cache holds the rest
     // within its budget, while memos on every block seen would keep them all
     // alive, however far the view has scrolled on. Those the paint in
