@@ -674,6 +674,48 @@ QImage cachedRemoteImage(const QUrl &url, qreal width, qreal dpr)
     return image;
 }
 
+// Pictures carried in documents (data:) as decoded (null: unreadable) and as
+// fitted to a column, by address. Every rebuild of a block (an edit, a new
+// width, zoom) asked for them again, and decoding a big one takes long. The
+// key is a hash of the address; the address itself is kept (shared with the
+// document, not copied) to tell two that hash alike apart. GUI thread only.
+struct DataPicture
+{
+    QString address;
+    QImage image;
+};
+
+std::atomic<int> dataPictureDecodes{0};
+
+QString dataPictureKey(const QString &address)
+{
+    return QStringLiteral("%1:%2").arg(address.size()).arg(qHash(address, size_t(0x5eed)));
+}
+
+QImage decodeDataAddress(const QString &address); // Below decodePicture().
+
+QImage cachedDataPicture(const QString &address, qreal width, qreal dpr)
+{
+    static QCache<QString, DataPicture> decoded(64 * 1024); // KiB
+    static QCache<QString, DataPicture> fitted(32 * 1024);  // KiB
+    const auto cost = [&](const QImage &image) { return imageCost(image) + address.size() / 512 + 1; };
+    const QString key = dataPictureKey(address);
+    const QString sized = QStringLiteral("%1|%2|").arg(width).arg(dpr) + key;
+    if (const DataPicture *hit = fitted.object(sized); hit && hit->address == address)
+        return hit->image;
+    QImage image;
+    if (const DataPicture *hit = decoded.object(key); hit && hit->address == address) {
+        image = hit->image;
+    } else {
+        image = decodeDataAddress(address);
+        decoded.insert(key, new DataPicture{address, image}, cost(image));
+    }
+    if (!image.isNull())
+        image = fitToColumn(image, width, dpr);
+    fitted.insert(sized, new DataPicture{address, image}, cost(image));
+    return image;
+}
+
 // A picture file at full size, for the zoom viewer.
 QImage fullSizeImage(const QString &path)
 {
@@ -1165,6 +1207,49 @@ public:
         }
     }
 
+    // Pictures carried in the document (data:) are named "vn-data:N"
+    // instead: Qt looks a picture up by its name at every paint (parsing it
+    // as an address and comparing it with the ones it has), and a data
+    // address is the whole picture, often megabytes. Run before
+    // dropNetworkImages(), which would read each address again (a data
+    // address never names another machine, and it is allowed when valid);
+    // such a name written in the text is blocked here, as it was there.
+    void nameDataPictures()
+    {
+        QHash<QString, int> numbers;
+        const bool undo = isUndoRedoEnabled();
+        setUndoRedoEnabled(false);
+        for (QTextBlock block = begin(); block.isValid(); block = block.next()) {
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                const QTextFragment fragment = it.fragment();
+                if (!fragment.charFormat().isImageFormat())
+                    continue;
+                QTextImageFormat format = fragment.charFormat().toImageFormat();
+                const QString name = format.name();
+                if (name.startsWith(QLatin1String("vn-data:"))) {
+                    format.setName(QStringLiteral("vn-blocked:"));
+                } else if (name.startsWith(QLatin1String("data:"), Qt::CaseInsensitive)) {
+                    // As QUrl reads the scheme (loadResource takes the rest).
+                    auto number = numbers.find(name);
+                    if (number == numbers.end()) {
+                        if (!QUrl(name).isValid())
+                            continue; // Blocked by dropNetworkImages().
+                        number = numbers.insert(name, int(m_dataNames.size()));
+                        m_dataNames.append(name);
+                    }
+                    format.setName(QStringLiteral("vn-data:%1").arg(*number));
+                } else {
+                    continue;
+                }
+                QTextCursor cursor(this);
+                cursor.setPosition(fragment.position());
+                cursor.setPosition(fragment.position() + fragment.length(), QTextCursor::KeepAnchor);
+                cursor.mergeCharFormat(format);
+            }
+        }
+        setUndoRedoEnabled(undo);
+    }
+
     // Bytes of the pictures (math, files) the document has resolved so far.
     qsizetype pictureBytes() const { return m_pictureBytes; }
 
@@ -1213,13 +1298,17 @@ protected:
         // drawn: a name left over is blank.
         if (url.toString().startsWith(QLatin1String("vn-math")))
             return standIn(type, url);
+        // A picture carried in the document, by the short name
+        // nameDataPictures() gave it.
+        if (const QString name = url.toString(); name.startsWith(QLatin1String("vn-data:")))
+            return keep(type, url, dataPicture(m_dataNames.value(name.mid(8).toInt())));
         // From here on no picture is ever declined: declined, Qt's image
         // handler opens the name itself, relative to the working folder and
         // past the SVG check (a name that differs once decoded, a picture
         // missing beside the document but present where the app started).
         // What cannot be shown is shown broken, as Qt would show it.
         if (url.scheme() == QLatin1String("data"))
-            return keep(type, url, dataPicture(url));
+            return keep(type, url, dataPicture(url.toString(QUrl::FullyEncoded)));
         const QString path = localPath(url);
         if (path.isEmpty())
             return keep(type, url, brokenPicture());
@@ -1233,7 +1322,7 @@ protected:
     // all (Qt's image handler opens their text as a file name), is not.
     bool allowedPictureName(const QString &name) const
     {
-        static const QRegularExpression internal(QStringLiteral("^(vn-math(-display)?:\\d+|vn-blocked:)$"));
+        static const QRegularExpression internal(QStringLiteral("^(vn-math(-display)?:\\d+|vn-data:\\d+|vn-blocked:)$"));
         if (md::mayNameOtherMachine(name))
             return false;
         const QUrl url(name);
@@ -1271,21 +1360,12 @@ private:
     }
 
     // A picture carried in the document (data:), decoded as files are (an
-    // SVG naming another machine refused) and fitted to the column; broken
-    // if it cannot be read.
-    QImage dataPicture(const QUrl &url) const
+    // SVG naming another machine refused; see decodeDataAddress) and fitted
+    // to the column; broken if it cannot be read.
+    QImage dataPicture(const QString &address) const
     {
-        // Big enough for any picture worth embedding in a text file.
-        constexpr qsizetype maxEncoded = 32 * 1024 * 1024;
-        const QByteArray encoded = url.toEncoded(QUrl::FullyEncoded);
-        const qsizetype comma = encoded.indexOf(',');
-        if (comma < 0 || encoded.size() > maxEncoded)
-            return brokenPicture();
-        const QByteArray header = encoded.mid(5, comma - 5).toLower(); // After "data:".
-        const QByteArray body = QByteArray::fromPercentEncoding(encoded.mid(comma + 1));
-        const QByteArray data = header.endsWith(";base64") ? QByteArray::fromBase64(body) : body;
-        const QImage image = decodePicture(data);
-        return image.isNull() ? brokenPicture() : fitToColumn(image, m_context.width, m_context.devicePixelRatio);
+        const QImage image = cachedDataPicture(address, m_context.width, m_context.devicePixelRatio);
+        return image.isNull() ? brokenPicture() : image;
     }
 
     // Without the user's agreement nothing is requested and the picture
@@ -1337,6 +1417,7 @@ private:
     qsizetype m_pictureBytes = 0;
     QStringList m_remote;
     bool m_pending = false;
+    QStringList m_dataNames; // The addresses of "vn-data:N", by N.
     // The names sizeFigures() gave pictures, with the names they had.
     QHash<QString, QString> m_figureNames;
     std::vector<std::pair<int, RenderedBlock::Figure>> m_figures;
@@ -1760,6 +1841,32 @@ QImage decodePicture(const QByteArray &data)
     return reader.read();
 }
 
+namespace {
+
+// A data: address as loadResource() gets it: the picture in it, decoded as a
+// file is (decodePicture), or null.
+QImage decodeDataAddress(const QString &address)
+{
+    ++dataPictureDecodes;
+    // Big enough for any picture worth embedding in a text file.
+    constexpr qsizetype maxEncoded = 32 * 1024 * 1024;
+    const QByteArray encoded = QUrl(address).toEncoded(QUrl::FullyEncoded);
+    const qsizetype comma = encoded.indexOf(',');
+    if (comma < 0 || encoded.size() > maxEncoded)
+        return {};
+    const QByteArray header = encoded.mid(5, comma - 5).toLower(); // After "data:".
+    const QByteArray body = QByteArray::fromPercentEncoding(encoded.mid(comma + 1));
+    const QByteArray data = header.endsWith(";base64") ? QByteArray::fromBase64(body) : body;
+    return decodePicture(data);
+}
+
+} // namespace
+
+int RenderedBlock::dataPictureDecodes()
+{
+    return vn::dataPictureDecodes;
+}
+
 int RenderedBlock::pictureFileReads()
 {
     return localImageReads;
@@ -2041,6 +2148,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
         const QString html = QString::fromUtf8(block.html.data(), block.html.size());
         doc->setHtml(html);
         clampFontSizes(doc.get(), html);
+        doc->nameDataPictures();
         doc->dropNetworkImages();
         doc->placeMath();
         doc->sizeFigures(context.figureScales.value(figureId(source)));
@@ -2128,6 +2236,7 @@ QStringList RenderedBlock::remoteImages(const core::Block &block, const RenderCo
     doc.setHtml(html);
     clampFontSizes(&doc, html);
     // As in create(): Qt's image handler looks for "@2x" files by name first.
+    doc.nameDataPictures();
     doc.dropNetworkImages();
     doc.setTextWidth(context.width);
     doc.loadPaintedPictures();

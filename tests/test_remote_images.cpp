@@ -224,6 +224,7 @@ class TestRemoteImages : public QObject
 private Q_SLOTS:
     void missingPicturesAreNotReadFromTheWorkingFolder();
     void dataPicturesShow();
+    void dataPicturesDecodeOnce();
     void tinyFontSizesAreClamped();
     void initTestCase();
     void init();
@@ -1028,6 +1029,46 @@ void TestRemoteImages::dataPicturesShow()
         for (int x = 0; x < image.width(); ++x)
             redPixels += QColor(image.pixel(x, y)) == QColor(Qt::red);
     QVERIFY(redPixels > 300);
+}
+
+// A picture carried in the document is decoded once, not again for every
+// rendering of its block (a new width, an edit, zoom); a short name that
+// looks like the app's own, written in the text, shows broken.
+void TestRemoteImages::dataPicturesDecodeOnce()
+{
+    QImage red(30, 20, QImage::Format_RGB32);
+    red.fill(Qt::red);
+    QByteArray png;
+    QBuffer buffer(&png);
+    buffer.open(QIODevice::WriteOnly);
+    QVERIFY(red.save(&buffer, "PNG"));
+    const QString html =
+        QStringLiteral("<p><img src=\"data:image/png;base64,%1\"> and <img src=\"data:image/png;base64,%1\"></p>")
+            .arg(QString::fromLatin1(png.toBase64()));
+    const auto redPixels = [](const RenderedBlock &block, qreal width) {
+        QImage image(QSize(int(width), int(block.height()) + 1), QImage::Format_RGB32);
+        image.fill(Qt::white);
+        {
+            QPainter painter(&image);
+            block.paint(painter, QPointF(0, 0), width);
+        }
+        int count = 0;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x)
+                count += QColor(image.pixel(x, y)) == QColor(Qt::red);
+        return count;
+    };
+    const int before = RenderedBlock::dataPictureDecodes();
+    for (const qreal width : {400.0, 300.0, 400.0, 20.0}) {
+        const auto block = renderHtml(html, context(false, width));
+        QCOMPARE(redPixels(*block, width), width >= 60 ? 2 * 30 * 20 : 2 * 20 * 13);
+    }
+    QCOMPARE(RenderedBlock::dataPictureDecodes() - before, 1);
+
+    const auto forged = renderHtml(QStringLiteral("<p><img src=\"vn-data:0\"> <img src=\"%1\"></p>")
+                                       .arg(QStringLiteral("data:image/png;base64,") + QString::fromLatin1(png.toBase64())),
+                                   context(false));
+    QCOMPARE(redPixels(*forged, 400), 30 * 20);
 }
 
 // A tiny font size in raw HTML made Qt try every fallback font for seconds.

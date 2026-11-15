@@ -297,6 +297,8 @@ public:
 
     // For tests: picture files read (and decoded) from disk so far.
     static int pictureFileReads();
+    // For tests: pictures carried in documents (data:) decoded so far.
+    static int dataPictureDecodes();
     // How many KiB of decoded picture files are kept for later widths (and
     // forgets the ones kept). Set from key::pictureCacheMiB by MainWindow.
     static void setDecodedPictureLimitKiB(int kib);
