@@ -117,6 +117,9 @@ public:
     static bool isLongCodeBox(const core::Block &block, qsizetype sourceChars);
     // For tests: off, isLongCodeBox() says no (views make every box whole).
     static void setPartsEnabled(bool on);
+    // For tests: off, a table's grid is drawn by Qt's rich text as it is
+    // where the renderer cannot draw it itself (see OwnGrid), to compare.
+    static void setOwnTableGridEnabled(bool on);
     // Whether the box wraps its lines anywhere; decided on its whole source.
     static bool wrapsAnywhere(const QString &source);
     struct Part
@@ -346,6 +349,9 @@ private:
     // Of a picture block (Kind::Image), in logical pixels.
     QSizeF pictureSize() const;
     QTextTable *theTable() const;
+    // The lines and backgrounds of a table's cells, drawn here instead of by
+    // Qt (see the source); null for other blocks.
+    struct OwnGrid;
     void collectLineAnchors(int sourceLines);
 
     Kind m_kind = Kind::Empty;
@@ -387,6 +393,7 @@ private:
     mutable QString m_renderedText; // Cached; null until asked for.
     mutable std::optional<std::optional<TableGrid>> m_tableGrid; // Empty until asked for.
     mutable std::optional<Breaks> m_breaks; // Empty until asked for.
+    std::shared_ptr<OwnGrid> m_ownGrid;
 };
 
 // The picture in downloaded bytes, or null: also for an SVG that names a

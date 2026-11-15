@@ -487,6 +487,7 @@ private Q_SLOTS:
     void tablesScrollWhenTheirLongestWordsDoNotFit();
     void viewersLeaveTheWindowUsable();
     void tableViewerIsTheRealTable();
+    void tableGridLooksAsQtDrawsIt();
     void equationViewerIsDrawnAsShapes();
     void readModeWaitsForTheFirstParse();
     void figureBarKeepsClicksAndPictureClickStillZooms();
@@ -6337,6 +6338,80 @@ void TestVisualView::readModeWaitsForTheFirstParse()
     QVERIFY(!view.verticalScrollBar()->isVisible());
     view.readPageForward();
     QVERIFY(view.readLineRange().first > range.first);
+}
+
+// The renderer draws the lines and backgrounds of a table's cells itself (Qt
+// draws them slowly); they look exactly as Qt draws them: at any width,
+// fitted in read mode, scaled, with selections, under a clip.
+void TestVisualView::tableGridLooksAsQtDrawsIt()
+{
+    QString longTable = QStringLiteral("| # | Name | Description |\n|---|---|---|\n");
+    for (int i = 0; i < 12; ++i)
+        longTable += QStringLiteral("| %1 | lorem ipsum | %2 |\n").arg(i).arg(QStringLiteral("dolor sit amet ").repeated(i % 4 + 1));
+    const QStringList documents = {
+        QStringLiteral("| Left | Centre | Right |\n|:---|:---:|---:|\n| ipsum elit | **ipsum** | 0 |\n| `x1` | do | 137 |\n"),
+        QStringLiteral("---\ntitle: Tables\ntags: [a, b]\n---\n"),
+        QStringLiteral("| one column |\n|---|\n| x |\n"),
+        longTable,
+    };
+    const auto render = [](const QString &markdown, qreal width, bool overflow) {
+        const QByteArray utf8 = markdown.toUtf8();
+        // (Front matter as a table.)
+        const rust::Vec<core::Block> blocks = core::blocks(rust::Str(utf8.constData(), utf8.size()),
+                                                           core::RenderOptions{false, true, true, true, 2});
+        RenderContext ctx;
+        ctx.font = theme::textFont();
+        ctx.codeFont = theme::editorFont();
+        ctx.width = width;
+        ctx.overflow = overflow;
+        return RenderedBlock::create(blocks.at(0), markdown, ctx);
+    };
+    struct Paint
+    {
+        qreal scale;
+        bool antialiased;
+        QRectF clip;
+        QPair<int, int> selected;
+    };
+    const QList<Paint> paints = {{1, false, {}, {0, 0}},          {1.5, true, {}, {0, 0}},
+                                 {1, false, {}, {0, 100000}},     {1.25, false, {}, {3, 40}},
+                                 {1, false, {0, 40.3, 2000, 61.6}, {0, 0}}, {0.75, true, {20, 0, 300, 2000}, {2, 9}}};
+    const auto paint = [](const RenderedBlock &block, const Paint &p) {
+        QImage image(QSize(int((block.contentWidth() + 20) * p.scale), int((block.height() + 20) * p.scale)),
+                     QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::white);
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing, p.antialiased);
+        painter.scale(p.scale, p.scale);
+        if (!p.clip.isNull())
+            painter.setClipRect(p.clip);
+        RenderedSelection selection;
+        if (p.selected.second > 0)
+            selection.ranges.append(p.selected);
+        block.paint(painter, QPointF(7, 5), block.contentWidth(), selection);
+        return image;
+    };
+    for (const QString &markdown : documents) {
+        for (const qreal width : {548.0, 200.0}) {
+            for (const bool overflow : {false, true}) {
+                RenderedBlock::setOwnTableGridEnabled(false);
+                const auto qt = render(markdown, width, overflow);
+                RenderedBlock::setOwnTableGridEnabled(true);
+                const auto own = render(markdown, width, overflow);
+                QVERIFY(qt->tableGrid());
+                QCOMPARE(own->height(), qt->height());
+                QCOMPARE(own->contentWidth(), qt->contentWidth());
+                for (const Paint &p : paints) {
+                    const QImage expected = paint(*qt, p);
+                    const QImage actual = paint(*own, p);
+                    QVERIFY2(actual == expected, qPrintable(QStringLiteral("%1 at %2: %3")
+                                                                .arg(markdown.left(20))
+                                                                .arg(width)
+                                                                .arg(imageDifference(actual, expected))));
+                }
+            }
+        }
+    }
 }
 
 QTEST_MAIN(TestVisualView)

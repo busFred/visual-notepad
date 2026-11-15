@@ -1541,6 +1541,7 @@ constexpr qsizetype highlightMax = 400 * 1000; // Characters; highlighting costs
 std::atomic<bool> layoutGuard{true};
 std::atomic<int> guardedBlocks{0};
 std::atomic<bool> partsEnabled{true};
+std::atomic<bool> ownTableGrid{true};
 
 bool isOneOf(QLatin1StringView name, std::initializer_list<QLatin1StringView> names)
 {
@@ -1799,6 +1800,202 @@ qreal fitTable(QTextDocument &doc, QTextTable &table, qreal width)
     return 0;
 }
 
+// Qt's rules for the edges of a table with collapsed borders
+// (QTextDocumentLayout, qtextdocumentlayout.cpp: cellEdgeData, axisEdgeData,
+// checkJoinedEdge, prioritizedEdgeAnchorOffset, drawCellBorder), for a table
+// of single cells whose every edge is a 1 px line: where each edge of a cell
+// is drawn, to draw it there. The names and steps are Qt's.
+namespace grid {
+
+enum Edge { TopEdge, RightEdge, BottomEdge, LeftEdge, NumEdges }; // QCss::Edge
+enum EdgeClass { ClassInvalid, ClassNone, ClassGrid, ClassTableBorder, ClassExplicit };
+
+struct Cell
+{
+    int row = -1;
+    int column = -1;
+    bool isValid() const { return row >= 0; }
+};
+
+struct EdgeData
+{
+    qreal width = 0;
+    Cell cell;
+    Edge edge = NumEdges;
+    EdgeClass edgeClass = ClassInvalid;
+    bool operator<(const EdgeData &other) const
+    {
+        if (width < other.width)
+            return true;
+        if (width > other.width)
+            return false;
+        if (edgeClass < other.edgeClass)
+            return true;
+        if (edgeClass > other.edgeClass)
+            return false;
+        if (edge == TopEdge && other.edge == BottomEdge)
+            return true;
+        if (edge == BottomEdge && other.edge == TopEdge)
+            return false;
+        if (edge == LeftEdge && other.edge == RightEdge)
+            return true;
+        return false;
+    }
+    bool operator>(const EdgeData &other) const { return other < *this; }
+};
+
+EdgeData larger(const EdgeData &a, const EdgeData &b) // qMax
+{
+    return a < b ? b : a;
+}
+
+struct Shape
+{
+    int rows = 0;
+    int columns = 0;
+
+    Cell adjacentCell(const Cell &cell, Edge edge) const
+    {
+        int dr = 0, dc = 0;
+        switch (edge) {
+        case LeftEdge: dc = -1; break;
+        case RightEdge: dc = 1; break;
+        case TopEdge: dr = -1; break;
+        default: dr = 1; break;
+        }
+        const int row = cell.row + dr, column = cell.column + dc;
+        if (column < 0 || row < 0 || column >= columns || row >= rows)
+            return {};
+        return {row, column};
+    }
+
+    // Every cell sets a 1 px border on every edge.
+    static EdgeData cellEdgeData(const Cell &cell, Edge edge)
+    {
+        if (!cell.isValid())
+            return {};
+        return {1, cell, edge, ClassExplicit};
+    }
+
+    static Edge adjacentEdge(Edge edge)
+    {
+        switch (edge) {
+        case TopEdge: return BottomEdge;
+        case RightEdge: return LeftEdge;
+        case BottomEdge: return TopEdge;
+        default: return RightEdge;
+        }
+    }
+
+    static bool isSameAxis(Edge e1, Edge e2) { return e1 == e2 || e1 == adjacentEdge(e2); }
+    static bool isVerticalAxis(Edge e) { return e % 2 > 0; }
+
+    static bool sharesAxis(const Cell &cell, Edge edge, const Cell &competingCell, Edge competingCellEdge)
+    {
+        switch (edge) {
+        case TopEdge: return cell.row == competingCell.row + (competingCellEdge == BottomEdge ? 1 : 0);
+        case BottomEdge: return cell.row + 1 == competingCell.row + (competingCellEdge == TopEdge ? 0 : 1);
+        case LeftEdge: return cell.column == competingCell.column + (competingCellEdge == RightEdge ? 1 : 0);
+        default: return cell.column + 1 == competingCell.column + (competingCellEdge == LeftEdge ? 0 : 1);
+        }
+    }
+
+    EdgeData axisEdgeData(const Cell &cell, Edge edge) const
+    {
+        EdgeData result = cellEdgeData(cell, edge);
+        const Cell ac = adjacentCell(cell, edge);
+        result = larger(result, cellEdgeData(ac, adjacentEdge(edge)));
+        bool mustCheckThirdCell = false;
+        if (ac.isValid()) {
+            if (edge == TopEdge || edge == BottomEdge)
+                mustCheckThirdCell = !sharesAxis(cell, LeftEdge, ac, LeftEdge);
+            else
+                mustCheckThirdCell = !sharesAxis(cell, TopEdge, ac, TopEdge);
+        }
+        if (mustCheckThirdCell)
+            result = larger(result, cellEdgeData(adjacentCell(ac, adjacentEdge(edge)), edge));
+        return result;
+    }
+
+    void checkJoinedEdge(const Cell &cell, Edge competingEdge, const EdgeData &edgeData, bool couldHaveContinuation,
+                         EdgeData *maxCompetingEdgeData, EdgeData *maxOrthogonalEdgeData) const
+    {
+        const EdgeData competingEdgeData = axisEdgeData(cell, competingEdge);
+        if (competingEdgeData > edgeData) {
+            *maxCompetingEdgeData = competingEdgeData;
+        } else if (competingEdgeData.width == edgeData.width) {
+            if ((isSameAxis(edgeData.edge, competingEdge) && couldHaveContinuation)
+                || (!isVerticalAxis(edgeData.edge) && isVerticalAxis(competingEdge)))
+                *maxCompetingEdgeData = competingEdgeData;
+        }
+        if (maxOrthogonalEdgeData && competingEdgeData.width > maxOrthogonalEdgeData->width)
+            *maxOrthogonalEdgeData = competingEdgeData;
+    }
+
+    qreal prioritizedEdgeAnchorOffset(const Cell &cell, const EdgeData &edgeData, Edge orthogonalEdge,
+                                      bool couldHaveContinuation) const
+    {
+        EdgeData maxCompetingEdgeData;
+        EdgeData maxOrthogonalEdgeData;
+        checkJoinedEdge(cell, orthogonalEdge, edgeData, false, &maxCompetingEdgeData, &maxOrthogonalEdgeData);
+        Cell competingCell = adjacentCell(cell, orthogonalEdge);
+        if (competingCell.isValid())
+            checkJoinedEdge(competingCell, edgeData.edge, edgeData, couldHaveContinuation, &maxCompetingEdgeData, nullptr);
+        competingCell = adjacentCell(cell, edgeData.edge);
+        if (competingCell.isValid() && sharesAxis(cell, orthogonalEdge, competingCell, orthogonalEdge))
+            checkJoinedEdge(competingCell, orthogonalEdge, edgeData, false, &maxCompetingEdgeData, &maxOrthogonalEdgeData);
+        const bool hasPriority = edgeData > maxCompetingEdgeData;
+        const qreal offset = maxOrthogonalEdgeData.width / 2.0; // collapseOffset
+        return hasPriority ? -offset : offset;
+    }
+
+    // The rectangle drawCellBorder fills for an edge of a cell drawn in
+    // `borderRect` (the cell's rectangle in whole pixels).
+    QRectF edgeRect(const Cell &cell, const QRectF &borderRect, Edge edge) const
+    {
+        QPointF p1, p2;
+        qreal wh = 0, wv = 0;
+        const EdgeData edgeData = axisEdgeData(cell, edge);
+        switch (edge) {
+        case TopEdge:
+            wv = edgeData.width;
+            p1 = borderRect.topLeft() + QPointF(qFloor(prioritizedEdgeAnchorOffset(cell, edgeData, LeftEdge, false)), 0);
+            p2 = borderRect.topRight() + QPointF(-qCeil(prioritizedEdgeAnchorOffset(cell, edgeData, RightEdge, true)), 0);
+            break;
+        case BottomEdge:
+            wv = edgeData.width;
+            p1 = borderRect.bottomLeft() + QPointF(qFloor(prioritizedEdgeAnchorOffset(cell, edgeData, LeftEdge, false)), -wv);
+            p2 = borderRect.bottomRight() + QPointF(-qCeil(prioritizedEdgeAnchorOffset(cell, edgeData, RightEdge, true)), -wv);
+            break;
+        case LeftEdge:
+            wh = edgeData.width;
+            p1 = borderRect.topLeft() + QPointF(0, qFloor(prioritizedEdgeAnchorOffset(cell, edgeData, TopEdge, false)));
+            p2 = borderRect.bottomLeft() + QPointF(0, -qCeil(prioritizedEdgeAnchorOffset(cell, edgeData, BottomEdge, true)));
+            break;
+        default:
+            wh = edgeData.width;
+            p1 = borderRect.topRight() + QPointF(-wh, qFloor(prioritizedEdgeAnchorOffset(cell, edgeData, TopEdge, false)));
+            p2 = borderRect.bottomRight() + QPointF(-wh, -qCeil(prioritizedEdgeAnchorOffset(cell, edgeData, BottomEdge, true)));
+            break;
+        }
+        // Half the edge out of the cell, to share the place of the next
+        // cell's (in whole pixels).
+        const qreal half = edgeData.width / 2.0;
+        QPointF offset;
+        switch (edge) {
+        case TopEdge: offset = QPointF(0, -qCeil(half)); break;
+        case BottomEdge: offset = QPointF(0, qFloor(half)); break;
+        case LeftEdge: offset = QPointF(-qCeil(half), 0); break;
+        default: offset = QPointF(qFloor(half), 0); break;
+        }
+        p1 += offset;
+        p2 += offset;
+        return QRectF(p1.x(), p1.y(), p2.x() + wh - p1.x(), p2.y() + wv - p1.y());
+    }
+};
+
+} // namespace grid
+
 std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString &definition,
                                             const RenderContext &context, qreal width, bool wrapAnywhere,
                                             bool highlight)
@@ -1909,6 +2106,318 @@ std::unique_ptr<RenderedBlock> RenderedBlock::codeBox(std::unique_ptr<RenderedBl
     r.m_height = r.m_doc->size().height() + 2 * codePadY + blockGap;
     r.collectLineAnchors(int(source.count(u'\n')) + 1);
     return result;
+}
+
+// A table of single cells framed by 1 px lines of one colour, as pipe tables
+// and front matter are: Qt draws those lines slowly (for each edge of each
+// cell it looks its neighbours up by position, and it does so again to lay
+// the table out), so the block draws them, and the cells' backgrounds under
+// them, itself, exactly as Qt would (see grid above). Qt is left a table that
+// takes the same room and draws nothing but the text: a collapsed border of
+// 1 px is half a pixel in each cell next to it, so the cells get that as
+// padding, and the table's outermost half pixels (each rounded to one) as
+// margins; with no border to collapse, the table's borders are kept apart,
+// which Qt handles without the look-ups. Anything else (merged cells, other
+// borders, cells aligned to the middle or bottom, something drawn under the
+// table, fractional padding) keeps Qt's borders.
+struct RenderedBlock::OwnGrid
+{
+    QTextTable *table = nullptr;
+    QBrush line;
+    std::vector<QBrush> backgrounds; // By row, then column; NoBrush: none.
+    qreal padLeft = 0, padTop = 0, padRight = 0; // Of every cell, with the half pixel.
+    qreal padding = 0, leftMargin = 0, topMargin = 0, rightMargin = 0, bottomMargin = 0; // The table's, in Qt's whole pixels.
+    // Where Qt has put the cells, worked out for a layout (see place()).
+    struct Place
+    {
+        QSizeF size;
+        qreal textWidth = -1;
+        QPointF offset; // The table's top-left as Qt draws it (whole pixels).
+        std::vector<qreal> xs, ys; // Cell edges from it: columns + 1, rows + 1.
+        std::vector<int> fixedYs;  // The tops of the rows in Qt's 1/64 px.
+        bool overflows = false;    // Some text is wider than its cell.
+    };
+    mutable Place placed;
+
+    static bool exactPixels(qreal v) { return v * 64 == std::floor(v * 64); }
+    static qreal qtPixels(qreal v) { return std::floor((std::floor(v * 64) + 32) / 64); } // QFixed::fromReal().round()
+
+    static std::shared_ptr<OwnGrid> take(QTextDocument &doc, QTextTable &table)
+    {
+        if (!ownTableGrid)
+            return nullptr;
+        QTextTableFormat format = table.format();
+        const int rows = table.rows(), columns = table.columns();
+        if (rows <= 0 || columns <= 0 || !format.borderCollapse() || format.border() != 0 || format.cellSpacing() != 0
+            || !table.childFrames().isEmpty() || format.background().style() != Qt::NoBrush
+            || format.leftMargin() < 0 || format.topMargin() < 0 || format.rightMargin() < 0 || format.bottomMargin() < 0
+            || doc.rootFrame()->frameFormat().background().style() != Qt::NoBrush)
+            return nullptr;
+        // Nothing drawn under the table (Qt draws the paragraphs before it
+        // first), and nothing but selections drawn of those paragraphs
+        // (see paint()).
+        for (QTextBlock b = doc.begin(); b.isValid(); b = b.next()) {
+            if (QTextCursor(b).currentTable() == &table)
+                continue;
+            if (b.blockFormat().background().style() != Qt::NoBrush)
+                return nullptr;
+            if (b.position() < table.firstPosition()
+                && (b.textList() || b.blockFormat().hasProperty(QTextFormat::BlockTrailingHorizontalRulerWidth)))
+                return nullptr;
+        }
+        static const int borders[4][3] = {
+            {QTextFormat::TableCellTopBorder, QTextFormat::TableCellTopBorderStyle, QTextFormat::TableCellTopBorderBrush},
+            {QTextFormat::TableCellRightBorder, QTextFormat::TableCellRightBorderStyle, QTextFormat::TableCellRightBorderBrush},
+            {QTextFormat::TableCellBottomBorder, QTextFormat::TableCellBottomBorderStyle, QTextFormat::TableCellBottomBorderBrush},
+            {QTextFormat::TableCellLeftBorder, QTextFormat::TableCellLeftBorderStyle, QTextFormat::TableCellLeftBorderBrush}};
+        static const int paddings[4] = {QTextFormat::TableCellTopPadding, QTextFormat::TableCellRightPadding,
+                                        QTextFormat::TableCellBottomPadding, QTextFormat::TableCellLeftPadding};
+        auto grid = std::make_shared<OwnGrid>();
+        grid->table = &table;
+        qreal pad[4] = {-1, -1, -1, -1};
+        for (int row = 0; row < rows; ++row) {
+            for (int col = 0; col < columns; ++col) {
+                const QTextTableCell cell = table.cellAt(row, col);
+                const QTextTableCellFormat f = cell.format().toTableCellFormat();
+                if (cell.rowSpan() != 1 || cell.columnSpan() != 1 || f.verticalAlignment() == QTextCharFormat::AlignMiddle
+                    || f.verticalAlignment() == QTextCharFormat::AlignBottom)
+                    return nullptr;
+                for (int edge = 0; edge < 4; ++edge) {
+                    const QBrush brush = qvariant_cast<QBrush>(f.property(borders[edge][2]));
+                    if (!f.hasProperty(borders[edge][1]) || f.intProperty(borders[edge][1]) != QTextFrameFormat::BorderStyle_Solid
+                        || !f.hasProperty(borders[edge][0]) || f.doubleProperty(borders[edge][0]) != 1
+                        || brush.style() != Qt::SolidPattern || (grid->line.style() != Qt::NoBrush && brush != grid->line))
+                        return nullptr;
+                    grid->line = brush;
+                    const qreal p = f.hasProperty(paddings[edge]) ? f.doubleProperty(paddings[edge]) : format.cellPadding();
+                    if (!exactPixels(p) || p < 0 || (pad[edge] >= 0 && pad[edge] != p))
+                        return nullptr;
+                    pad[edge] = p;
+                }
+                const QBrush background = f.background();
+                if (background.style() != Qt::NoBrush && background.style() != Qt::SolidPattern)
+                    return nullptr;
+                grid->backgrounds.push_back(background);
+            }
+        }
+        // The same layout without the borders.
+        for (int row = 0; row < rows; ++row) {
+            for (int col = 0; col < columns; ++col) {
+                QTextTableCell cell = table.cellAt(row, col);
+                QTextTableCellFormat f = cell.format().toTableCellFormat();
+                for (int edge = 0; edge < 4; ++edge) {
+                    for (const int property : borders[edge])
+                        f.clearProperty(property);
+                    f.setProperty(paddings[edge], pad[edge] + 0.5);
+                }
+                f.clearProperty(QTextFormat::BackgroundBrush);
+                cell.setFormat(f);
+            }
+        }
+        format.setBorderCollapse(false);
+        format.setLeftMargin(format.leftMargin() + 1);
+        format.setTopMargin(format.topMargin() + 1);
+        format.setRightMargin(format.rightMargin() + 1);
+        format.setBottomMargin(format.bottomMargin() + 1);
+        table.setFormat(format);
+        grid->padTop = pad[0] + 0.5;
+        grid->padRight = pad[1] + 0.5;
+        grid->padLeft = pad[3] + 0.5;
+        grid->padding = qtPixels(format.padding());
+        grid->leftMargin = qtPixels(format.leftMargin());
+        grid->topMargin = qtPixels(format.topMargin());
+        grid->rightMargin = qtPixels(format.rightMargin());
+        grid->bottomMargin = qtPixels(format.bottomMargin());
+        return grid;
+    }
+
+    // Where the cells are in the document's present layout: from where Qt
+    // put each column's and each row's text (the cells' padding before it),
+    // and the table's size (its padding and margins after the last cell).
+    const Place &place(QTextDocument &doc) const
+    {
+        QAbstractTextDocumentLayout *layout = doc.documentLayout();
+        const QSizeF size = doc.size(); // (Lays it out.)
+        if (placed.size == size && placed.textWidth == doc.textWidth() && !placed.xs.empty())
+            return placed;
+        placed = {};
+        placed.size = size;
+        placed.textWidth = doc.textWidth();
+        const int rows = table->rows(), columns = table->columns();
+        // A cell's position in the table, plus the table's in the document.
+        const auto origin = [&](int row, int col) {
+            const QTextBlock b = table->cellAt(row, col).firstCursorPosition().block();
+            return layout->blockBoundingRect(b).topLeft() - b.layout()->position();
+        };
+        const QPointF first = origin(0, 0);
+        const qreal column0 = leftMargin + padding, row0 = topMargin + padding;
+        const QPointF at = first - QPointF(column0 + padLeft, row0 + padTop);
+        placed.offset = QPointF(at.toPoint());
+        for (int col = 0; col < columns; ++col)
+            placed.xs.push_back(column0 + origin(0, col).x() - first.x());
+        for (int row = 0; row < rows; ++row)
+            placed.ys.push_back(row0 + origin(row, 0).y() - first.y());
+        const QSizeF frame = layout->frameBoundingRect(table).size();
+        placed.xs.push_back(frame.width() - 2 * padding - rightMargin);
+        placed.ys.push_back(frame.height() - 2 * padding - bottomMargin);
+        for (const qreal y : placed.ys)
+            placed.fixedYs.push_back(qRound(y * 64));
+        // A line wider than its cell (a word or a picture that does not fit
+        // a fixed column) runs over the edge, and Qt draws the next cell
+        // over it.
+        for (int row = 0; row < rows && !placed.overflows; ++row) {
+            for (int col = 0; col < columns && !placed.overflows; ++col) {
+                const QTextTableCell cell = table->cellAt(row, col);
+                const qreal left = at.x() + placed.xs[col] + padLeft - 0.5;
+                const qreal right = at.x() + placed.xs[col + 1] - padRight + 0.5;
+                for (QTextBlock b = cell.firstCursorPosition().block();
+                     b.isValid() && b.position() <= cell.lastPosition() && !placed.overflows; b = b.next()) {
+                    const QTextLayout *lines = b.layout();
+                    const qreal x = layout->blockBoundingRect(b).left();
+                    for (int i = 0; i < lines->lineCount(); ++i) {
+                        const QTextLine line = lines->lineAt(i);
+                        const QRectF text = line.naturalTextRect();
+                        if (x + text.left() < left || x + text.right() > right)
+                            placed.overflows = true;
+                    }
+                }
+            }
+        }
+        return placed;
+    }
+
+    // The document with the table as QTextDocumentLayout draws it (drawFrame,
+    // drawTableCell): cell by cell, the background, the edges, the text.
+    // Without a selection no text reaches into another cell or onto an
+    // edge, so the backgrounds and edges go first and Qt draws all the text
+    // in one go. A selection that runs on past the end of a paragraph shows
+    // a mark a quarter of the line high after it, which can reach over the
+    // cell's right edge (and the next cell's background, at larger sizes),
+    // where Qt draws the next cell over it (as over a line wider than its
+    // cell); so then Qt draws one cell's text at a time, the others hidden (hiding a paragraph without marking the
+    // layout dirty leaves the layout as it is, and drawBlock skips it). The
+    // paragraphs above the table are drawn first, here, and hidden too: Qt
+    // lays the empty one before a table out on the table's top edge, and a
+    // selection over the table takes in its end, whose mark runs on under
+    // the first cells.
+    void paint(QPainter &painter, QTextDocument &doc, const QAbstractTextDocumentLayout::PaintContext &ctx) const
+    {
+        QAbstractTextDocumentLayout *layout = doc.documentLayout();
+        const QRectF &clip = ctx.clip;
+        const Place &p = place(doc);
+        const bool oneByOne = !ctx.selections.isEmpty() || p.overflows;
+        std::vector<QTextBlock> hidden;
+        const auto hide = [&](QTextBlock b) {
+            if (b.isVisible()) {
+                b.setVisible(false);
+                hidden.push_back(b);
+            }
+        };
+        if (oneByOne) {
+            // As drawBlock() draws the paragraphs of the document's frame.
+            const QRectF frame = layout->frameBoundingRect(doc.rootFrame());
+            const QRectF frameClip = clip.isValid() ? (clip & frame) : frame;
+            for (QTextBlock b = doc.begin(); b.isValid() && b.position() < table->firstPosition(); b = b.next()) {
+                if (!b.isVisible())
+                    continue;
+                hide(b);
+                const QTextLayout *lines = b.layout();
+                const QRectF r = lines->boundingRect().translated(lines->position());
+                if (clip.isValid() && (r.bottom() < clip.y() || r.top() > clip.bottom()))
+                    continue;
+                QList<QTextLayout::FormatRange> ranges;
+                for (const auto &selection : std::as_const(ctx.selections)) {
+                    const int start = selection.cursor.selectionStart() - b.position();
+                    const int end = selection.cursor.selectionEnd() - b.position();
+                    if (start < b.length() && end > 0 && end > start)
+                        ranges.append({start, end - start, selection.format});
+                }
+                const QPen pen = painter.pen();
+                painter.setPen(ctx.palette.color(QPalette::Text));
+                lines->draw(&painter, QPointF(), ranges, frameClip);
+                painter.setPen(pen);
+            }
+            for (QTextBlock b = doc.findBlock(table->firstPosition()); b.isValid() && b.position() <= table->lastPosition();
+                 b = b.next())
+                hide(b);
+        }
+        // The cells Qt draws, as drawFrame picks them.
+        const int rows = table->rows(), columns = table->columns();
+        const QPointF off = p.offset;
+        const QSizeF frame = layout->frameBoundingRect(table).size();
+        int firstRow = 0, lastRow = rows;
+        if (clip.isValid()
+            && (off.y() > clip.bottom() || off.y() + frame.height() < clip.top() || off.x() > clip.right()
+                || off.x() + frame.width() < clip.left())) {
+            lastRow = 0;
+        } else if (clip.isValid()) {
+            const auto fixed = [](qreal v) { return int(v * 64); }; // QFixed::fromReal
+            const auto rowsBegin = p.fixedYs.begin(), rowsEnd = p.fixedYs.end() - 1;
+            auto it = std::lower_bound(rowsBegin, rowsEnd, fixed(clip.top() - off.y()));
+            if (it != rowsEnd && it != rowsBegin)
+                firstRow = int(--it - rowsBegin);
+            it = std::upper_bound(rowsBegin, rowsEnd, fixed(clip.bottom() - off.y()));
+            if (it != rowsEnd)
+                lastRow = int(++it - rowsBegin);
+        }
+        const grid::Shape shape{rows, columns};
+        for (int row = firstRow; row < lastRow; ++row) {
+            for (int col = 0; col < columns; ++col) {
+                const QRectF cellRect(off.x() + p.xs[col], off.y() + p.ys[row], p.xs[col + 1] - p.xs[col],
+                                      p.ys[row + 1] - p.ys[row]);
+                if (clip.isValid() && !cellRect.adjusted(-0.5, -0.5, 0.5, 0.5).intersects(clip))
+                    continue;
+                const QBrush &background = backgrounds[size_t(row * columns + col)];
+                if (background.style() != Qt::NoBrush) {
+                    painter.save();
+                    painter.setBrushOrigin(cellRect.topLeft());
+                    painter.fillRect(cellRect, background);
+                    painter.restore();
+                }
+                const QRectF borderRect = cellRect.toRect();
+                if (borderRect.isValid()) {
+                    const bool turnOffAntialiasing = !(painter.renderHints() & QPainter::Antialiasing);
+                    painter.setRenderHint(QPainter::Antialiasing);
+                    for (const grid::Edge edge : {grid::TopEdge, grid::LeftEdge, grid::RightEdge, grid::BottomEdge}) {
+                        painter.save();
+                        painter.setPen(Qt::NoPen);
+                        painter.setBrush(line);
+                        painter.drawRect(shape.edgeRect({row, col}, borderRect, edge));
+                        painter.restore();
+                    }
+                    if (turnOffAntialiasing)
+                        painter.setRenderHint(QPainter::Antialiasing, false);
+                }
+                if (!oneByOne)
+                    continue;
+                // This cell's text alone, with the clip Qt draws it with
+                // (only the clip's height is narrowed, to the row, so that
+                // Qt looks at a few rows of cells only).
+                const QTextTableCell cell = table->cellAt(row, col);
+                std::vector<QTextBlock> shown;
+                for (QTextBlock b = cell.firstCursorPosition().block(); b.isValid() && b.position() <= cell.lastPosition();
+                     b = b.next()) {
+                    b.setVisible(true);
+                    shown.push_back(b);
+                }
+                QAbstractTextDocumentLayout::PaintContext one = ctx;
+                QRectF band(QPointF(-1e9, cellRect.top()), QPointF(1e9, cellRect.bottom()));
+                one.clip = clip.isValid() ? (band & clip) : band;
+                layout->draw(&painter, one);
+                for (QTextBlock &b : shown)
+                    b.setVisible(false);
+            }
+        }
+        if (!oneByOne)
+            layout->draw(&painter, ctx);
+        for (QTextBlock &b : hidden)
+            b.setVisible(true);
+    }
+};
+
+void RenderedBlock::setOwnTableGridEnabled(bool on)
+{
+    ownTableGrid = on;
 }
 
 void RenderedBlock::setPartsEnabled(bool on)
@@ -2185,7 +2694,10 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
             r.m_item.topMargin = first.blockFormat().topMargin();
             r.m_item.bottomMargin = doc->lastBlock().blockFormat().bottomMargin();
         }
-        QTextTable *only = context.overflow && !item ? onlyTable(*doc) : nullptr;
+        QTextTable *single = item ? nullptr : onlyTable(*doc);
+        if (single)
+            r.m_ownGrid = OwnGrid::take(*doc, *single);
+        QTextTable *only = context.overflow ? single : nullptr;
         if (only) {
             // A table fits the column as a browser fits one (see fitTable),
             // and keeps the width its cells ask for, scrolled sideways, only
@@ -2413,7 +2925,10 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
                 sel.format.setForeground(selectionText);
             ctx.selections.append(sel);
         }
-        m_doc->documentLayout()->draw(&painter, ctx);
+        if (m_ownGrid)
+            m_ownGrid->paint(painter, *m_doc, ctx);
+        else
+            m_doc->documentLayout()->draw(&painter, ctx);
         painter.restore();
         return;
     }
