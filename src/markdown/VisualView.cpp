@@ -770,6 +770,11 @@ void VisualView::reflowRenders()
                     m_cache.remove(memo.key);
                 memo.key = key;
                 m_cache.insert(key, new Render(memo), memo.cost);
+                // A diagram's stand-in, still waiting, is dropped by its new
+                // key when the diagram is in; under the old one alone the
+                // cache would hand it out for good.
+                if (memo.block->isPending())
+                    m_pendingKeys.insert(key);
             } else {
                 kept = false;
             }

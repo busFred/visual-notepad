@@ -2644,6 +2644,16 @@ void TestVisualView::diagramsRenderInBackground()
     const QImage pending = m_view->grab().toImage();
     QTRY_VERIFY(spy.count() > 0);
     QTRY_VERIFY(m_view->grab().toImage() != pending);
+    // Also when the column's width changes while it renders (a scroll bar
+    // coming or going): the stand-in, laid out again at the new width, still
+    // gives way to the picture.
+    spy.clear();
+    Settings::instance().setValue(key::mermaidTheme, QStringLiteral("forest"));
+    m_view->grab();
+    m_view->resize(m_view->width() - 20, m_view->height());
+    const QImage narrower = m_view->grab().toImage();
+    QTRY_VERIFY(spy.count() > 0);
+    QTRY_VERIFY(m_view->grab().toImage() != narrower);
     Settings::instance().setValue(key::mermaidTheme, theme);
 }
 
