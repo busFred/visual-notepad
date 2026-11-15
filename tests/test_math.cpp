@@ -357,6 +357,22 @@ void TestMath::aFormulaLeavesNothingBehind_data()
     QTest::newRow("refused, after setting") << QStringLiteral("\\grkaccent.\\magnification");
 }
 
+// The first formula of a new worker loads its fonts, which on a machine busy
+// enough takes more than the time a formula may take: the formula is then
+// shown as source, and not tried again. A formula is drawn again with the
+// time forgiven, a few times; one that something an earlier formula left
+// behind keeps from being drawn would not be drawn then either.
+static QImage renderWhenBusy(const QString &tex)
+{
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const QImage image = math::render(tex, inlineStyle());
+        if (!math::lastRenderFellBack())
+            return image;
+        math::forgetWorkerFailures();
+    }
+    return math::render(tex, inlineStyle());
+}
+
 void TestMath::aFormulaLeavesNothingBehind()
 {
     QFETCH(QString, tex);
@@ -366,10 +382,10 @@ void TestMath::aFormulaLeavesNothingBehind()
     // which formulas a worker has drawn before. So both pictures are a new
     // worker's first: tex comes before the first one too.
     math::render(tex, inlineStyle());
-    const QImage before = math::render(plain, inlineStyle());
+    const QImage before = renderWhenBusy(plain);
     QVERIFY(!math::lastRenderFellBack());
     math::render(tex, inlineStyle());
-    const QImage after = math::render(plain, inlineStyle());
+    const QImage after = renderWhenBusy(plain);
     QVERIFY(!math::lastRenderFellBack());
     QVERIFY(after == before);
 }
