@@ -142,7 +142,8 @@ private:
 };
 
 template<class Lines>
-QList<Range> scan(Lines &lines, const Compiled &query, int scopeStart, int scopeEnd, const std::atomic<bool> *cancel)
+QList<Range> scan(Lines &lines, const Compiled &query, int scopeStart, int scopeEnd, const std::atomic<bool> *cancel,
+                  int limit)
 {
     QList<Range> matches;
     const Options &options = query.options();
@@ -192,7 +193,7 @@ QList<Range> scan(Lines &lines, const Compiled &query, int scopeStart, int scope
                 return matches;
             if (end > start) {
                 matches.append({base + start, base + end});
-                if (matches.size() >= maxMatches)
+                if (matches.size() >= limit)
                     return matches;
                 pos = end;
             } else {
@@ -205,23 +206,23 @@ QList<Range> scan(Lines &lines, const Compiled &query, int scopeStart, int scope
 
 } // namespace
 
-QList<Range> findAll(QTextDocument *document, const Compiled &query, int scopeStart, int scopeEnd)
+QList<Range> findAll(QTextDocument *document, const Compiled &query, int scopeStart, int scopeEnd, int limit)
 {
     DocumentLines lines(document);
-    return scan(lines, query, scopeStart, scopeEnd, nullptr);
+    return scan(lines, query, scopeStart, scopeEnd, nullptr, limit);
 }
 
 QList<Range> findAllInText(QString rawText, const Compiled &query, int scopeStart, int scopeEnd,
-                           const std::atomic<bool> *cancel)
+                           const std::atomic<bool> *cancel, int limit)
 {
     rawText.replace(QChar::Nbsp, u' ');
     TextLines lines(rawText);
-    return scan(lines, query, scopeStart, scopeEnd, cancel);
+    return scan(lines, query, scopeStart, scopeEnd, cancel, limit);
 }
 
-QList<Range> findAll(QTextDocument *document, const Options &options, int scopeStart, int scopeEnd)
+QList<Range> findAll(QTextDocument *document, const Options &options, int scopeStart, int scopeEnd, int limit)
 {
-    return findAll(document, Compiled(options), scopeStart, scopeEnd);
+    return findAll(document, Compiled(options), scopeStart, scopeEnd, limit);
 }
 
 QString replacementFor(QTextDocument *document, const Compiled &query, Range match, const QString &replacement,

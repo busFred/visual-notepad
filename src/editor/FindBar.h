@@ -66,6 +66,12 @@ private:
     search::Options options() const;
     void setReplaceVisible(bool on);
     void research();
+    // Searches with `limit` as the most matches. A Replace All search
+    // replaces what it finds instead of showing it.
+    void startSearch(int limit, bool replaceAll);
+    // Replaces the matches of a search made with `options`, as one edit.
+    void replaceMatches(const QList<search::Range> &matches, const search::Options &options, const QString &replacement,
+                        bool preserveCase);
     // Shows the matches of the latest search and carries on with whatever
     // waited for it.
     void applyMatches(QList<search::Range> matches);
