@@ -98,6 +98,7 @@ MarkdownModel::MarkdownModel(QTextDocument *document)
     connect(&Settings::instance(), &Settings::changed, this, [this](const QString &key) {
         if (affectsParse(key)) {
             m_dirty = true;
+            m_spanEdit = {};
             ++m_revision;
             ++m_inputSerial;
         } else if (!affectsRendering(key)) {
@@ -190,6 +191,7 @@ bool MarkdownModel::parseInBackground()
         return false;
     m_awaiting = true;
     m_spans.clear();
+    m_spanEdit = {};
     ++m_revision;
     startJob();
     return true;
@@ -261,40 +263,44 @@ void MarkdownModel::documentChanged(int from, int, int added)
     if (oldLast < first || oldLast >= m_lineCount || lastNew - first > maxShiftedLines
         || oldLast - first > maxShiftedLines) {
         m_dirty = true;
+        m_spanEdit = {};
         m_timer.stop();
         return;
     }
 
     // Spans before the edit stay, spans after it move by delta, and the
     // edited lines plus every span they touched become one unparsed span.
-    std::vector<Span> spans;
-    spans.reserve(m_spans.size() + 1);
+    // The spans are in order and apart, so the touched ones are [lo, hi).
+    const auto lo = std::lower_bound(m_spans.begin(), m_spans.end(), first,
+                                     [](const Span &s, int line) { return s.last < line; });
+    const auto hi = std::upper_bound(lo, m_spans.end(), oldLast, [](int line, const Span &s) { return line < s.first; });
+    const int editedAt = int(lo - m_spans.begin());
+    const int touched = int(hi - lo);
     Span edited{first, lastNew, -1, -1};
-    int touched = 0;
-    int previous = -1;
-    bool placed = false;
-    const auto place = [&] {
-        edited.previous = touched == 1 ? previous : -1;
-        spans.push_back(edited);
-        placed = true;
-    };
-    for (const Span &s : m_spans) {
-        if (s.last < first) {
-            spans.push_back(s);
-        } else if (s.first > oldLast) {
-            if (!placed)
-                place();
-            spans.push_back({s.first + delta, s.last + delta, s.block, s.previous});
-        } else {
-            edited.first = qMin(edited.first, s.first);
-            edited.last = qMax(edited.last, s.last > oldLast ? s.last + delta : lastNew);
-            ++touched;
-            previous = s.block >= 0 ? s.block : s.previous;
+    int touchedUnparsed = 0;
+    if (touched > 0) {
+        const Span &tail = *(hi - 1);
+        edited.first = qMin(first, lo->first);
+        edited.last = tail.last > oldLast ? tail.last + delta : lastNew;
+        edited.previous = touched == 1 ? (tail.block >= 0 ? tail.block : tail.previous) : -1;
+        touchedUnparsed = int(std::count_if(lo, hi, [](const Span &s) { return s.block < 0; }));
+    }
+    // (In place: a large document has a span for every block, and a copy of
+    // them all for every key typed took longer than the rest of the edit.)
+    if (touched == 1) {
+        *lo = edited;
+    } else {
+        const auto at = m_spans.erase(lo, hi);
+        m_spans.insert(at, edited);
+    }
+    if (delta != 0) {
+        for (auto it = m_spans.begin() + editedAt + 1; it != m_spans.end(); ++it) {
+            it->first += delta;
+            it->last += delta;
         }
     }
-    if (!placed)
-        place();
-    m_spans = std::move(spans);
+    m_spanEdit = {m_revision - 1, editedAt, touched, delta};
+    m_unparsedSpans += 1 - touchedUnparsed;
     m_lineCount = newCount;
     m_pending = true;
     m_timer.start();
@@ -336,6 +342,8 @@ void MarkdownModel::apply(std::shared_ptr<const core::Document> parsed)
     }
     m_dirty = false;
     m_pending = false;
+    m_spanEdit = {};
+    m_unparsedSpans = 0;
     m_timer.stop();
     ++m_revision;
     ++m_parseGeneration;

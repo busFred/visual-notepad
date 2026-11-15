@@ -66,6 +66,21 @@ public:
     int revision() const { return m_revision; }
     // Bumped by every parse.
     int parseGeneration() const { return m_parseGeneration; }
+    // How the last edit changed the spans, when it did so in place (not a
+    // reparse or a whole new set): the spans [first, first + replaced) of
+    // the revision before are now the single unparsed span `first`, and the
+    // lines after it moved by lineDelta. A view that built its rows at
+    // revisionBefore, and sees the revision one past it, can patch them.
+    struct SpanEdit
+    {
+        int revisionBefore = -1;
+        int first = 0;
+        int replaced = 0;
+        int lineDelta = 0;
+    };
+    const SpanEdit &lastSpanEdit() const { return m_spanEdit; }
+    // Spans edited since the last parse (block -1).
+    int unparsedSpans() const { return m_unparsedSpans; }
     bool hasPendingEdits() const { return m_pending || m_dirty; }
     // Reparses now if edits are pending; emits reparsed if it did. Always
     // synchronous: when it returns, blocks() and spans() match the document.
@@ -146,6 +161,8 @@ private:
     bool m_awaiting = false;  // Unusable spans emptied for a worker's parse.
     int m_revision = 0;
     int m_parseGeneration = 0;
+    SpanEdit m_spanEdit;
+    int m_unparsedSpans = 0;
     int m_optionsRevision = 0;
     // Bumped by every edit and every change of a parse setting: a parse of
     // the text taken at one value is current while it stays the same.

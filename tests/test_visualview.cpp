@@ -32,9 +32,11 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QPainter>
 #include <QPlainTextEdit>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSlider>
@@ -455,6 +457,10 @@ private Q_SLOTS:
     void selectingInALongTableKeepsTheScroll_data();
     void selectingInALongTableKeepsTheScroll();
     void editsReparseLater();
+    void patchedRowsEqualWholeRows_data();
+    void patchedRowsEqualWholeRows();
+    void patchedRowsWithCaretsEqualWholeRows();
+    void patchedRowsAfterTyping();
     void caretMovesDontReparse();
     void diagramsRenderInBackground();
     void oversizedDiagramsRenderOnce();
@@ -6602,6 +6608,192 @@ void TestVisualView::reflowedBlocksAreMadeBlocks()
         ctx.width = 300;
         QVERIFY(!block->reflow(ctx));
     }
+}
+
+namespace {
+
+// A document of blocks of every kind that makes rows (long lists an item a
+// row, a code box in parts, tables, gaps), for the edits of
+// patchedRowsEqualWholeRows.
+QString rowsDocument()
+{
+    QString text = QStringLiteral("# Title\n\nIntro paragraph with **bold** text.\nSecond line of it.\n\n## Items\n\n");
+    text += listOf(QStringLiteral("- item %1 with `code` and [a link](https://example.com/%1)"), 40);
+    text += QStringLiteral("\nBetween the lists.\n\n");
+    text += listOf(QStringLiteral("%1. step %1\n   - detail of %1"), 24);
+    text += QStringLiteral("\n### Code\n\n```text\n");
+    for (int i = 0; i < 450; ++i)
+        text += QStringLiteral("line %1 of a long code box\n").arg(i);
+    text += QStringLiteral("```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\n> quoted\n> text\n\n");
+    for (int i = 0; i < 12; ++i)
+        text += QStringLiteral("## Section %1\n\nParagraph %1 of the section.\n\n- one\n- two\n\n").arg(i);
+    text += QStringLiteral("<div>raw html</div>\n\nLast paragraph.\n");
+    return text;
+}
+
+// One random edit of the document: a character typed or taken, a line
+// broken or joined, lines added or removed, a block of Markdown pasted.
+void randomEdit(QTextDocument *doc, QRandomGenerator &random)
+{
+    static const QStringList pieces = {
+        QStringLiteral("a"), QStringLiteral("x y"), QStringLiteral("*"), QStringLiteral("#"), QStringLiteral("- "),
+        QStringLiteral("`"), QStringLiteral("|"), QStringLiteral("\n"), QStringLiteral("\n\n"), QStringLiteral("1. "),
+        QStringLiteral("  "), QStringLiteral("```\n"), QStringLiteral("- a\n- b\n\n"), QStringLiteral("para\n\npara 2\n"),
+        QStringLiteral("> "), QStringLiteral("# Heading\n\n"),
+    };
+    QTextCursor c(doc);
+    const int line = int(random.bounded(doc->blockCount()));
+    const QTextBlock block = doc->findBlockByNumber(line);
+    const int position = block.position() + int(random.bounded(block.length()));
+    c.setPosition(qMin(position, doc->characterCount() - 1));
+    switch (random.bounded(6)) {
+    case 0:
+    case 1:
+    case 2:
+        c.insertText(pieces.at(int(random.bounded(pieces.size()))));
+        break;
+    case 3:
+        c.setPosition(qMin(c.position() + int(random.bounded(6)), doc->characterCount() - 1), QTextCursor::KeepAnchor);
+        c.removeSelectedText();
+        break;
+    case 4: {
+        // Whole lines removed.
+        const int last = qMin(line + int(random.bounded(4)), doc->blockCount() - 1);
+        c.setPosition(block.position());
+        c.setPosition(doc->findBlockByNumber(last).position() + doc->findBlockByNumber(last).length() - 1,
+                      QTextCursor::KeepAnchor);
+        c.removeSelectedText();
+        break;
+    }
+    default:
+        c.movePosition(QTextCursor::EndOfBlock);
+        c.insertText(QStringLiteral("\n") + pieces.at(int(random.bounded(pieces.size()))));
+        break;
+    }
+}
+
+} // namespace
+
+void TestVisualView::patchedRowsEqualWholeRows_data()
+{
+    QTest::addColumn<bool>("folds");
+    QTest::addColumn<uint>("seed");
+    QTest::newRow("no folds, seed 1") << false << 1u;
+    QTest::newRow("no folds, seed 2") << false << 2u;
+    QTest::newRow("folds, seed 3") << true << 3u;
+    QTest::newRow("folds, seed 4") << true << 4u;
+}
+
+// The rows an edit patches are those a whole build makes: a second view of
+// the same document builds them all again on every edit.
+void TestVisualView::patchedRowsEqualWholeRows()
+{
+    QFETCH(bool, folds);
+    QFETCH(uint, seed);
+    auto *view = static_cast<ProbeView *>(m_view);
+    setDocument(rowsDocument(), 0);
+    ProbeView whole(m_model);
+    whole.setRowPatching(false);
+    whole.resize(760, 900);
+    whole.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&whole));
+    // Neither has the focus: no caret opens a block or a fold.
+    auto *other = new QLineEdit(&whole);
+    other->setFocus();
+    QVERIFY(QTest::qWaitForWindowActive(&whole));
+    m_view->clearFocus();
+    QVERIFY(!m_view->hasFocus());
+    QVERIFY(!whole.hasFocus());
+    m_model->flush();
+    if (folds) {
+        // Chips on some blocks, and a section folded after the edits' reach
+        // (headings folded before them make the edits build all the rows).
+        for (const int line : {2, 7, 47, 78, 120})
+            m_view->setFolded(line, true), whole.setFolded(line, true);
+        m_view->grab();
+        whole.grab();
+    }
+    QCOMPARE(m_view->rowsDigest(), whole.rowsDigest());
+    QRandomGenerator random(seed);
+    int patched = 0;
+    for (int step = 0; step < 400; ++step) {
+        randomEdit(m_doc, random);
+        // Now and then the pause ends and the document is parsed again.
+        if (random.bounded(3) == 0)
+            m_model->flush();
+        patched += view->lastEditPatchedRows();
+        const QString what = QStringLiteral("step %1").arg(step);
+        QVERIFY2(whole.rowsConsistent(), qPrintable(what));
+        QVERIFY2(view->rowsConsistent(), qPrintable(what));
+        QVERIFY2(view->rowsDigest() == whole.rowsDigest(), qPrintable(what));
+    }
+    // Many edits were patched (the rest built them all: edits at another
+    // place before the pause ends, a line count that differs from the
+    // parse's for the first time, a heading folded above).
+    QVERIFY2(patched > 30, qPrintable(QString::number(patched)));
+}
+
+// The same with the focus in the view: the caret opens the block it is in
+// (while typing in source), a blank line it is on, or a fold. The edit's
+// rows are compared with the same view's rows built from nothing.
+void TestVisualView::patchedRowsWithCaretsEqualWholeRows()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    setDocument(rowsDocument(), 0);
+    m_model->flush();
+    for (const int line : {2, 47, 78, 120})
+        view->setFolded(line, true);
+    view->grab();
+    QRandomGenerator random(7);
+    int patched = 0;
+    for (int step = 0; step < 300; ++step) {
+        // The caret goes somewhere (and opens what is there).
+        QTextCursor c(m_doc->findBlockByNumber(int(random.bounded(m_doc->blockCount()))));
+        c.movePosition(QTextCursor::EndOfBlock);
+        view->setTextCursor(c);
+        if (random.bounded(4) == 0)
+            view->openBlockAtCaret();
+        if (random.bounded(3) == 0)
+            m_model->flush();
+        // An edit at the caret.
+        if (random.bounded(2) == 0) {
+            QTest::keyClicks(view, random.bounded(2) ? QStringLiteral("ab") : QStringLiteral("*"));
+            if (random.bounded(3) == 0)
+                QTest::keyClick(view, Qt::Key_Return);
+        } else {
+            randomEdit(m_doc, random);
+        }
+        const QString what = QStringLiteral("step %1").arg(step);
+        patched += view->lastEditPatchedRows();
+        QVERIFY2(view->rowsConsistent(), qPrintable(what));
+        const QString digest = view->rowsDigest();
+        view->rebuildRowsFully();
+        QVERIFY2(digest == view->rowsDigest(), qPrintable(what));
+    }
+    QVERIFY2(patched > 20, qPrintable(QString::number(patched)));
+}
+
+// Typing in a paragraph of a large document patches the rows; so does a
+// line break in it, and the rows are those of a whole build.
+void TestVisualView::patchedRowsAfterTyping()
+{
+    auto *view = static_cast<ProbeView *>(m_view);
+    setDocument(rowsDocument(), 0);
+    m_model->flush();
+    m_view->grab();
+    QTextCursor c(m_doc->findBlockByNumber(2));
+    c.movePosition(QTextCursor::EndOfBlock);
+    m_view->setTextCursor(c);
+    QTest::keyClicks(m_view, QStringLiteral("abc"));
+    QVERIFY(m_view->lastEditPatchedRows());
+    QVERIFY(view->rowsConsistent());
+    QTest::keyClick(m_view, Qt::Key_Return);
+    QVERIFY(view->rowsConsistent());
+    QTest::keyClicks(m_view, QStringLiteral("def"));
+    QVERIFY(m_view->lastEditPatchedRows());
+    const QString patched = m_view->rowsDigest();
+    m_view->rebuildRowsFully();
+    QCOMPARE(patched, m_view->rowsDigest());
 }
 
 QTEST_MAIN(TestVisualView)
