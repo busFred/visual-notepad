@@ -59,6 +59,7 @@ class TestMath : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
+    void aPreparedWorkerIsTheOneThatDraws();
     void lockedDownWorkerReadsNoUserFiles();
     void lockedDownWorkerStillDrawsEveryFont();
     void fractionIsTallerThanText();
@@ -405,6 +406,22 @@ Q_COREAPP_STARTUP_FUNCTION(useTestSettings)
 // Once locked down (as the worker is after MicroTeX starts), a process can
 // still read fonts but not the user's files, cannot write and cannot make
 // sockets. Checked in a child process: the lock is for good.
+void TestMath::aPreparedWorkerIsTheOneThatDraws()
+{
+    // The worker can be started ahead of the first formula (for a document
+    // with math); that formula is then drawn by it, not by another.
+    if (math::workerStarts() != 0)
+        QSKIP("a worker was started before this test");
+    math::prepareWorker();
+    QCOMPARE(math::workerStarts(), 1);
+    math::prepareWorker(); // Not again.
+    QCOMPARE(math::workerStarts(), 1);
+    const QImage image = math::render(QStringLiteral("x^2+\\frac{a}{b}"), inlineStyle());
+    QVERIFY(!math::lastRenderFellBack());
+    QVERIFY(hasInk(image));
+    QCOMPARE(math::workerStarts(), 1);
+}
+
 void TestMath::lockedDownWorkerReadsNoUserFiles()
 {
 #ifdef Q_OS_LINUX

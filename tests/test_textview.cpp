@@ -39,6 +39,21 @@ public:
     int positionAtPoint(const QPointF &point) { return positionAt(point); }
 };
 
+// Counts what the view's viewport is asked to paint.
+class PaintSpy : public QObject
+{
+public:
+    QList<QRect> rects;
+
+protected:
+    bool eventFilter(QObject *, QEvent *event) override
+    {
+        if (event->type() == QEvent::Paint)
+            rects.append(static_cast<QPaintEvent *>(event)->rect());
+        return false;
+    }
+};
+
 class TestTextView : public QObject
 {
     Q_OBJECT
@@ -80,6 +95,7 @@ private Q_SLOTS:
     void smartHome();
     void escapeCollapsesCarets();
     void lineCacheFollowsEdits();
+    void caretBlinkRepaintsOnlyTheCaret();
     void longLinePaintsTheSameInStrips();
     void surroundSelection();
     void surroundRepeatsAndMultiCaret();
@@ -624,6 +640,41 @@ void TestTextView::lineCacheFollowsEdits()
     m_doc->setPlainText(QStringLiteral("only"));
     QVERIFY(!m_view->grab().isNull());
     QCOMPARE(m_doc->blockCount(), 1);
+}
+
+void TestTextView::caretBlinkRepaintsOnlyTheCaret()
+{
+    // A blink repaints a strip where the caret is, and the view painted there is
+    // what a whole repaint gives.
+    QStringList lines;
+    for (int i = 0; i < 60; ++i)
+        lines << QStringLiteral("line %1 with some words in it").arg(i);
+    setText(lines.join(u'\n'));
+    place(5, 7);
+    QWidget *viewport = m_view->viewport();
+    PaintSpy spy;
+    viewport->installEventFilter(&spy);
+    const auto checkBlink = [&](const QString &what) {
+        QTest::qWait(100);
+        const QImage before = viewport->grab().toImage();
+        spy.rects.clear();
+        QTRY_VERIFY_WITH_TIMEOUT(!spy.rects.isEmpty(), 3000);
+        const QRect strip = spy.rects.first();
+        QVERIFY2(strip.width() < 60 && strip.height() < 3 * static_cast<ProbeView *>(m_view)->rowHeight(),
+                 qPrintable(QStringLiteral("%1: repainted %2x%3").arg(what).arg(strip.width()).arg(strip.height())));
+        QImage composed = before;
+        viewport->render(&composed, strip.topLeft(), QRegion(strip));
+        QVERIFY2(composed != before, qPrintable(what)); // The caret went or came.
+        QVERIFY2(composed == viewport->grab().toImage(), qPrintable(what));
+    };
+    checkBlink(QStringLiteral("scrolling"));
+    if (QTest::currentTestFailed())
+        return;
+    m_view->resize(1400, 500);
+    m_view->setColumnChars(50);
+    m_view->setColumnsShown(true);
+    place(5, 7);
+    checkBlink(QStringLiteral("in columns"));
 }
 
 void TestTextView::longLinePaintsTheSameInStrips()

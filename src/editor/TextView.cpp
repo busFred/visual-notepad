@@ -1298,6 +1298,10 @@ void TextView::paintEvent(QPaintEvent *event)
     painter.setClipRect(QRectF(gutter, 0, viewport()->width() - gutter, height));
     qreal y = firstRowY();
     for (int r = m_topRow; r < rows && y < height; ++r) {
+        // Rows below what is being painted (a caret blinking is a strip of the
+        // view) change nothing in it, and a table or a picture takes a while to draw.
+        if (y > area.bottom())
+            break;
         const Row info = row(r);
         const qreal h = rowHeight(r);
         if (y + h < area.top()) {
@@ -1962,11 +1966,44 @@ void TextView::resizeEvent(QResizeEvent *event)
     }
 }
 
+void TextView::updateBlinkingCarets()
+{
+    // A blink changes the carets and nothing else: repaint a strip around
+    // each (the whole row where it is drawn by the row's own painter) instead of
+    // the whole view, which with tables on screen is a few dozen milliseconds
+    // ten times a second. Many carets, or a caret being composed in an input
+    // method (drawn after its text), are not worth working out.
+    constexpr int mostCarets = 32;
+    if (m_carets.size() > mostCarets || !m_preedit.isEmpty() || !caretRectsKnown()) {
+        viewport()->update();
+        return;
+    }
+    QRegion region;
+    for (const Caret &caret : m_carets) {
+        QRectF rect;
+        qreal top = 0;
+        if (m_columnsOn) {
+            rect = columnsCaretRect(caret.cursor);
+        } else if (const int index = rowOfLine(caret.cursor.blockNumber()); !rowTop(index, &top)) {
+            continue; // Not on the screen.
+        } else if (row(index).rendered) {
+            rect = QRectF(0, top, viewport()->width(), rowHeight(index));
+        } else {
+            rect = caretRect(caret.cursor);
+        }
+        // (A caret is a bar two pixels wide, a pixel taller than its line.)
+        if (!rect.isEmpty())
+            region += rect.adjusted(-2, -2, 2, 2).toAlignedRect();
+    }
+    if (!region.isEmpty())
+        viewport()->update(region);
+}
+
 void TextView::timerEvent(QTimerEvent *event)
 {
     if (event->timerId() == m_blink.timerId()) {
         m_caretOn = !m_caretOn;
-        viewport()->update();
+        updateBlinkingCarets();
     } else if (event->timerId() == m_autoScroll.timerId()) {
         const qreal h = viewport()->height();
         QScrollBar *v = verticalScrollBar();

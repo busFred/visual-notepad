@@ -207,6 +207,9 @@ private:
     void updateAccent();
     QWidget *createGoToLine();
     void ensureVisualView();
+    // Starts the formula worker if the document has math, so the first
+    // formula shown does not wait for it (see math::prepareWorker).
+    void prepareMathWorker();
     void updateViews();
     void syncScroll(TextView *from, TextView *to);
     // Shows from's selection in the other half of a split (see mirrorCursorsFrom).
