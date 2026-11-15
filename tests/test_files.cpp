@@ -8,6 +8,8 @@
 #include "Theme.h"
 #include "editor/TextView.h"
 
+#include <QDir>
+#include <QElapsedTimer>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QMimeData>
@@ -25,6 +27,17 @@
 
 #include <algorithm>
 #include <memory>
+
+#ifdef Q_OS_WIN
+#include <chrono>
+#include <thread>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+// Leaves out rpcndr.h, whose `small` macro breaks code below.
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 using vn::DocumentTab;
 namespace enc = vn::encoding;
@@ -56,6 +69,12 @@ private Q_SLOTS:
     void sourceViewsAlwaysHighlight();
     void closeScopes();
     void dropOpensFiles();
+#ifdef Q_OS_WIN
+    void saveWaitsForAFileInUse_data();
+    void saveWaitsForAFileInUse();
+    void saveOverAFileHeldForGoodFails_data();
+    void saveOverAFileHeldForGoodFails();
+#endif
 
 private:
     QString write(const QString &name, const QByteArray &content);
@@ -609,6 +628,89 @@ static void useTestSettings()
     vn::Settings::instance().useFile(dir.filePath(QStringLiteral("settings.ini")));
 }
 Q_COREAPP_STARTUP_FUNCTION(useTestSettings)
+
+#ifdef Q_OS_WIN
+namespace {
+
+// Opens `path` as another program would, for reading, with `share`.
+HANDLE holdOpen(const QString &path, DWORD share)
+{
+    return CreateFileW(reinterpret_cast<const wchar_t *>(QDir::toNativeSeparators(path).utf16()), GENERIC_READ,
+                       share, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+}
+
+void addSharingRows()
+{
+    QTest::addColumn<uint>("share");
+    // Either way the file cannot be replaced while open: ERROR_ACCESS_DENIED.
+    // A scanner's way, letting others rename or delete the file:
+    QTest::newRow("delete shared") << uint(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    // Most programs' way (QFile's too):
+    QTest::newRow("delete not shared") << uint(FILE_SHARE_READ | FILE_SHARE_WRITE);
+}
+
+} // namespace
+
+void TestFiles::saveWaitsForAFileInUse_data()
+{
+    addSharingRows();
+}
+
+// Another program holding the file open for a moment (a scan of the file
+// just written) makes replacing it fail on Windows: the save waits it out.
+void TestFiles::saveWaitsForAFileInUse()
+{
+    QFETCH(uint, share);
+    const QString name = QStringLiteral("held-%1.txt").arg(QTest::currentDataTag()).replace(u' ', u'-');
+    const QString path = write(name, "old\n");
+    DocumentTab tab;
+    QVERIFY(tab.load(path));
+    append(tab, QStringLiteral("new\n"));
+
+    const HANDLE held = holdOpen(path, share);
+    QVERIFY(held != INVALID_HANDLE_VALUE);
+    std::thread release([held] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        CloseHandle(held);
+    });
+    const bool saved = tab.save(path);
+    release.join();
+    QVERIFY2(saved, qPrintable(tab.errorString()));
+    QCOMPARE(read(path), QByteArray("old\nnew\n"));
+    QVERIFY(!tab.isModified());
+    // No temporary file left behind by the failed tries.
+    QCOMPARE(QDir(m_dir.path()).entryList({name + u'*'}, QDir::Files | QDir::Hidden), QStringList{name});
+}
+
+void TestFiles::saveOverAFileHeldForGoodFails_data()
+{
+    addSharingRows();
+}
+
+// A file that stays in use is not waited for long: the save fails, says why,
+// and leaves the file as it was.
+void TestFiles::saveOverAFileHeldForGoodFails()
+{
+    QFETCH(uint, share);
+    const QString name = QStringLiteral("locked-%1.txt").arg(QTest::currentDataTag()).replace(u' ', u'-');
+    const QString path = write(name, "old\n");
+    DocumentTab tab;
+    QVERIFY(tab.load(path));
+    append(tab, QStringLiteral("new\n"));
+
+    const HANDLE held = holdOpen(path, share);
+    QVERIFY(held != INVALID_HANDLE_VALUE);
+    const auto close = qScopeGuard([held] { CloseHandle(held); });
+    QElapsedTimer timer;
+    timer.start();
+    QVERIFY(!tab.save(path));
+    QVERIFY2(timer.elapsed() < 5000, qPrintable(QString::number(timer.elapsed())));
+    QVERIFY2(tab.errorString().contains(QStringLiteral("Another program")), qPrintable(tab.errorString()));
+    QVERIFY(tab.isModified());
+    QCOMPARE(read(path), QByteArray("old\n"));
+    QCOMPARE(QDir(m_dir.path()).entryList({name + u'*'}, QDir::Files | QDir::Hidden), QStringList{name});
+}
+#endif
 
 QTEST_MAIN(TestFiles)
 #include "test_files.moc"

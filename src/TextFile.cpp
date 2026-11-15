@@ -2,6 +2,7 @@
 
 #include "DocumentTab.h"
 
+#include "SafeWrite.h"
 #include "Settings.h"
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
@@ -21,7 +22,6 @@
 #include <QFileSystemWatcher>
 #include <QHash>
 #include <QRegularExpression>
-#include <QSaveFile>
 #include <QSet>
 #include <QTextCursor>
 #include <QTextDocument>
@@ -825,16 +825,8 @@ bool TextFile::save(const QString &path, bool overwrite)
         }
     }
 
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly)) {
-        m_error = file.errorString();
+    if (!writeFileSafely(path, *encoded, &m_error))
         return false;
-    }
-    file.write(*encoded);
-    if (!file.commit()) {
-        m_error = file.errorString();
-        return false;
-    }
 
     if (renamed) {
         m_languageOverridden = false;

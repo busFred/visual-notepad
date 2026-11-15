@@ -47,6 +47,8 @@ add_library(vn_app STATIC
     src/PlainText.h
     src/PreferencesDialog.cpp
     src/PreferencesDialog.h
+    src/SafeWrite.cpp
+    src/SafeWrite.h
     src/Session.cpp
     src/Session.h
     src/Settings.cpp
