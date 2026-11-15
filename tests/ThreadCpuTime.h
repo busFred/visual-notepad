@@ -35,3 +35,23 @@ inline double threadCpuMs()
     return now.tv_sec * 1000.0 + now.tv_nsec / 1e6;
 #endif
 }
+
+// QElapsedTimer's calls, in the processor time of the thread that made it.
+// For a test that times what the thread itself computes (layout, painting),
+// not what it waits for.
+class ThreadCpuTimer
+{
+public:
+    ThreadCpuTimer() { start(); }
+    void start() { m_start = threadCpuMs(); }
+    qint64 restart()
+    {
+        const qint64 spent = elapsed();
+        start();
+        return spent;
+    }
+    qint64 elapsed() const { return qint64(threadCpuMs() - m_start); }
+
+private:
+    double m_start = 0;
+};

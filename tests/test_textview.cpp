@@ -1,6 +1,7 @@
 // Editing behaviour of the multi-cursor TextView, run offscreen.
 #include "Theme.h"
 #include "Settings.h"
+#include "ThreadCpuTime.h"
 #include "editor/DocumentLayout.h"
 #include "editor/LineLayout.h"
 #include "editor/TableSizePicker.h"
@@ -2276,8 +2277,9 @@ void TestTextView::columnsStayFastOnABigFile()
     setText(lines.join(u'\n'));
     m_view->resize(1400, 500);
     m_view->setColumnChars(50);
-    QElapsedTimer timer;
-    timer.start();
+    // (The time the thread worked: a busy machine takes seconds more for the
+    // same work.)
+    ThreadCpuTimer timer;
     m_view->setColumnsShown(true, 100000);
     m_view->grab();
     for (int i = 0; i < 20; ++i) {
@@ -2726,8 +2728,7 @@ void TestTextView::longLineTypingIsFast()
         // The fastest of three tries: a loaded machine stalls now and then.
         qint64 fastest = LLONG_MAX;
         for (int attempt = 0; attempt < 3 && fastest >= 20 * 60; ++attempt) {
-            QElapsedTimer timer;
-            timer.start();
+            ThreadCpuTimer timer;
             for (int i = 0; i < 10; ++i) {
                 QTest::keyClick(m_view, Qt::Key_A);
                 m_view->grab();

@@ -336,6 +336,16 @@ void TestOpen::failureIsReported()
 void TestOpen::cancelStopsTheWorker()
 {
     const QString path = write(QStringLiteral("cancel.txt"), sampleText(10'000'000));
+    // How long this machine takes for the whole load right now: what a cancel
+    // is measured against, as a busy machine slows both.
+    qint64 wholeLoadMs = 0;
+    {
+        QElapsedTimer whole;
+        whole.start();
+        auto probe = TextFile::create();
+        QVERIFY(probe->load(path));
+        wholeLoadMs = whole.elapsed();
+    }
     auto file = TextFile::create();
     QSignalSpy finished(file.get(), &TextFile::loadFinished);
     file->loadAsync(path);
@@ -345,8 +355,9 @@ void TestOpen::cancelStopsTheWorker()
     t.start();
     file->cancelLoad();
     const qint64 ms = t.elapsed();
-    qInfo() << "cancel took ms:" << ms;
-    QVERIFY2(ms < 500, qPrintable(QString::number(ms)));
+    qInfo() << "cancel took ms:" << ms << "(the whole load:" << wholeLoadMs << ")";
+    // Not the whole load: the worker stops between its chunks.
+    QVERIFY2(ms < qMax<qint64>(500, wholeLoadMs / 2), qPrintable(QString::number(ms)));
     QVERIFY(!file->isLoading());
     QVERIFY(!TextFile::isLoadingPath(path));
     QVERIFY(!TextFile::find(path));

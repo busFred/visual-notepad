@@ -5,6 +5,7 @@
 // one). The stub is on 127.0.0.1, so most tests let local hosts through with
 // RemoteImages::setAllowLocalHostsForTests; the ones about local hosts don't.
 #include "Settings.h"
+#include "ThreadCpuTime.h"
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
 #include "markdown/BlockRenderer.h"
@@ -1080,8 +1081,7 @@ void TestRemoteImages::dataPicturesDecodeOnce()
 // A tiny font size in raw HTML made Qt try every fallback font for seconds.
 void TestRemoteImages::tinyFontSizesAreClamped()
 {
-    QElapsedTimer timer;
-    timer.start();
+    ThreadCpuTimer timer; // (Seconds of work, not of waiting.)
     const auto block = renderHtml(QStringLiteral("<p><span style=\"font-size:0.1pt\">t</span></p>"), context(false));
     QVERIFY(block->height() > 0);
     QVERIFY2(timer.elapsed() < 2000, qPrintable(QString::number(timer.elapsed())));

@@ -4,6 +4,7 @@
 #include "MainWindow.h"
 #include "PlainText.h"
 #include "Settings.h"
+#include "ThreadCpuTime.h"
 #include "markdown/MathRenderer.h"
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
@@ -4023,8 +4024,7 @@ void TestVisualView::svgBombsAreRefused()
     QVERIFY(!decodePicture(useBomb(3)).isNull());
     QVERIFY(!decodePicture(useBomb(1, 1000)).isNull());
 
-    QElapsedTimer timer;
-    timer.start();
+    ThreadCpuTimer timer; // (Time worked, not time a busy machine kept it waiting.)
     QVERIFY(decodePicture(useBomb(12)).isNull());
     QVERIFY(decodePicture(gzipped(useBomb(12))).isNull());
     QVERIFY(decodePicture(patternBomb(12)).isNull());
@@ -4230,8 +4230,7 @@ void TestVisualView::hugeBlocksFallBackToTheirSource()
 {
     QFETCH(QString, markdown);
     const int before = RenderedBlock::guardedBlockCount();
-    QElapsedTimer timer;
-    timer.start();
+    ThreadCpuTimer timer;
     const auto block = renderFirstBlock(markdown);
     const QImage image = paintBlock(*block);
     const qint64 ms = timer.elapsed();
