@@ -2500,15 +2500,132 @@ void TextView::restoreCarets(const CaretState &state)
     setCursors(cursors, state.primary);
 }
 
+namespace {
+
+// The carets as plain numbers while an edit goes through all of them in turn.
+// With a QTextCursor for each, every change moves every cursor (N changes
+// times N cursors: 0.4 s for a key at 5,000 carets); a caret as two numbers is
+// moved the way a cursor would be, by the few edits that reach it. The carets
+// are edited in order: those before the one being edited are done, and those
+// after it wait, all moved by `m_shift` unless an edit reached into them.
+class CaretSpans
+{
+public:
+    struct Span
+    {
+        int anchor;
+        int position;
+    };
+
+    explicit CaretSpans(std::vector<Span> spans) : m_spans(std::move(spans)) {}
+
+    int size() const { return int(m_spans.size()); }
+
+    // The next caret, where the document has it now.
+    Span next()
+    {
+        const Span &s = m_spans[m_next++];
+        return {s.anchor + m_shift, s.position + m_shift};
+    }
+
+    // The caret taken last was edited: `removed` characters at `at` went, then
+    // `added` came there, and it ends as `result`.
+    void edited(int at, int removed, int added, Span result)
+    {
+        const int index = m_next - 1;
+        if (removed != 0 || added != 0) {
+            // Those done are points, in order: only the last few can be at or
+            // after the edit.
+            for (int i = index - 1; i >= 0 && qMax(m_spans[i].anchor, m_spans[i].position) >= at; --i) {
+                m_spans[i].anchor = moved(m_spans[i].anchor, at, removed, added);
+                m_spans[i].position = moved(m_spans[i].position, at, removed, added);
+            }
+            // Those waiting that the removal reaches into; the rest all move
+            // by the same.
+            const int newShift = m_shift + added - removed;
+            for (int i = m_next; i < size(); ++i) {
+                Span &s = m_spans[i];
+                if (qMin(s.anchor, s.position) + m_shift >= at + removed)
+                    break;
+                s.anchor = moved(s.anchor + m_shift, at, removed, added) - newShift;
+                s.position = moved(s.position + m_shift, at, removed, added) - newShift;
+            }
+            m_shift = newShift;
+        }
+        m_spans[index] = result;
+    }
+
+    // All the carets once each is done.
+    const std::vector<Span> &spans() const { return m_spans; }
+
+private:
+    // Where a position goes when `removed` characters at `at` are removed and
+    // `added` inserted there, as a QTextCursor's does (one at the insertion
+    // point goes after the text).
+    static int moved(int p, int at, int removed, int added)
+    {
+        if (p > at)
+            p = p >= at + removed ? p - removed : at;
+        return p >= at ? p + added : p;
+    }
+
+    std::vector<Span> m_spans;
+    int m_next = 0;
+    int m_shift = 0;
+};
+
+} // namespace
+
+void TextView::editAtCarets(const std::function<CaretChange(Caret &)> &edit)
+{
+    std::vector<CaretSpans::Span> spans;
+    std::vector<qreal> desiredX;
+    spans.reserve(m_carets.size());
+    desiredX.reserve(m_carets.size());
+    for (const Caret &caret : m_carets) {
+        spans.push_back({caret.cursor.anchor(), caret.cursor.position()});
+        desiredX.push_back(caret.desiredX);
+    }
+    const int primary = m_primary;
+    // Cursors left in the document are moved by every change in it: one
+    // stands in for them until the edit is done.
+    m_carets.assign(1, Caret{QTextCursor(m_doc), -1});
+    m_primary = 0;
+    CaretSpans carets(std::move(spans));
+    Caret work{QTextCursor(m_doc), -1};
+    for (int i = 0, n = carets.size(); i < n; ++i) {
+        const CaretSpans::Span now = carets.next();
+        work.cursor.setPosition(now.anchor);
+        work.cursor.setPosition(now.position, QTextCursor::KeepAnchor);
+        work.desiredX = desiredX[i];
+        const CaretChange change = edit(work);
+        desiredX[i] = work.desiredX;
+        carets.edited(change.at, change.removed, change.added, {work.cursor.anchor(), work.cursor.position()});
+    }
+    m_carets.clear();
+    m_carets.reserve(carets.size());
+    for (int i = 0; i < carets.size(); ++i) {
+        const CaretSpans::Span &span = carets.spans()[i];
+        QTextCursor cursor(m_doc);
+        cursor.setPosition(span.anchor);
+        cursor.setPosition(span.position, QTextCursor::KeepAnchor);
+        m_carets.push_back({cursor, desiredX[i]});
+    }
+    m_primary = primary;
+}
+
 void TextView::insertTextAtCarets(const QString &text)
 {
     if (!canEdit())
         return;
     beginEdit();
-    for (Caret &caret : m_carets) {
+    editAtCarets([&text](Caret &caret) {
+        const int at = caret.cursor.selectionStart();
+        const int selected = caret.cursor.selectionEnd() - at;
         caret.cursor.insertText(text);
         caret.desiredX = -1;
-    }
+        return CaretChange{at, selected, caret.cursor.position() - at};
+    });
     endEdit();
     m_expandHistory.clear();
     caretsChanged();
@@ -2519,11 +2636,13 @@ void TextView::deleteAtCarets(QTextCursor::MoveOperation op)
     if (!canEdit())
         return;
     beginEdit();
-    for (Caret &caret : m_carets) {
+    editAtCarets([this, op](Caret &caret) {
         QTextCursor &c = caret.cursor;
+        const int lengthBefore = m_doc->characterCount();
+        const auto removedAt = [&] { return CaretChange{c.position(), lengthBefore - m_doc->characterCount(), 0}; };
         if (!c.hasSelection()) {
             if (op == QTextCursor::PreviousCharacter && deleteAutoClosedPair(caret))
-                continue;
+                return removedAt();
             if (op == QTextCursor::PreviousCharacter && m_insertSpaces && c.positionInBlock() > 0) {
                 // In leading spaces, Backspace removes back to the previous tab stop.
                 const QString text = c.block().text();
@@ -2532,14 +2651,15 @@ void TextView::deleteAtCarets(QTextCursor::MoveOperation op)
                     const int remove = ((pos - 1) % m_tabWidth) + 1;
                     c.movePosition(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor, remove);
                     c.removeSelectedText();
-                    continue;
+                    return removedAt();
                 }
             }
             c.movePosition(op, QTextCursor::KeepAnchor);
         }
         c.removeSelectedText();
         caret.desiredX = -1;
-    }
+        return removedAt();
+    });
     endEdit();
     caretsChanged();
 }
@@ -3455,6 +3575,11 @@ void TextView::undoRedo(bool undo)
             }
             positions.append(from + added);
         });
+    // Every change an undo makes would move every caret's cursor: the carets
+    // wait as numbers (`current`) with one cursor standing in.
+    const int primary = m_primary;
+    m_carets.assign(1, Caret{QTextCursor(m_doc), -1});
+    m_primary = 0;
     if (undo)
         m_doc->undo();
     else
@@ -3474,8 +3599,18 @@ void TextView::undoRedo(bool undo)
         restoreCarets(target);
         return;
     }
-    if (positions.isEmpty())
+    if (positions.isEmpty()) {
+        // Nothing changed: the carets are as they were.
+        m_carets.clear();
+        for (const auto &range : std::as_const(current.ranges)) {
+            QTextCursor cursor(m_doc);
+            cursor.setPosition(range.first);
+            cursor.setPosition(range.second, QTextCursor::KeepAnchor);
+            m_carets.push_back({cursor, -1});
+        }
+        m_primary = primary;
         return;
+    }
     QList<QTextCursor> cursors;
     const int end = m_doc->characterCount() - 1;
     for (const int p : std::as_const(positions)) {

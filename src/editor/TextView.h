@@ -20,6 +20,7 @@
 #include <QString>
 #include <QStringList>
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -502,6 +503,19 @@ private:
     void beginEdit();
     void endEdit();
     void deleteAtCarets(QTextCursor::MoveOperation op);
+    // What an edit at a caret changed: `removed` characters at `at` went, then
+    // `added` came there.
+    struct CaretChange
+    {
+        int at = 0;
+        int removed = 0;
+        int added = 0;
+    };
+    // Runs `edit` at each caret in turn, on a cursor put where the caret is
+    // (and left where the caret goes, nothing selected), and puts the carets
+    // there. Within beginEdit()/endEdit(). Moving the carets as numbers, not as
+    // N live cursors, keeps it from taking N times N moves.
+    void editAtCarets(const std::function<CaretChange(Caret &)> &edit);
     void insertNewline();
     void insertTab();
     // Auto-closing, overtyping and surrounding for one typed ASCII character.

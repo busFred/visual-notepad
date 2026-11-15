@@ -21,7 +21,10 @@
 #include <QWheelEvent>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QRandomGenerator>
 
+#include <algorithm>
+#include <functional>
 #include <tuple>
 
 using vn::TextView;
@@ -68,6 +71,8 @@ private Q_SLOTS:
     void deleteLines();
     void tabAndOutdent();
     void undoRevertsMultiCaretEditAtOnce();
+    void manyCaretsEditAsLiveCursorsDo();
+    void manyCaretsUndoAndRedoInOneStep();
     void undoRestoresCaretAtEdit();
     void toggleLineComment();
     void backspaceInIndentGoesToTabStop();
@@ -371,6 +376,143 @@ void TestTextView::undoRevertsMultiCaretEditAtOnce()
     QCOMPARE(text(), QStringLiteral("a\nb\nc"));
     m_view->redo();
     QCOMPARE(text(), QStringLiteral("\n\n"));
+}
+
+// The text and carets a key must leave, found with a live QTextCursor for
+// each caret (a second document, the way every edit once went).
+static QString editedByLiveCursors(const QList<QTextCursor> &carets, const std::function<void(QTextCursor &)> &edit,
+                                   QStringList *carets_)
+{
+    QTextDocument reference;
+    reference.setPlainText(carets.first().document()->toPlainText());
+    QList<QTextCursor> live;
+    for (const QTextCursor &c : carets) {
+        QTextCursor copy(&reference);
+        copy.setPosition(c.anchor());
+        copy.setPosition(c.position(), QTextCursor::KeepAnchor);
+        live.append(copy);
+    }
+    for (QTextCursor &c : live)
+        edit(c);
+    // The view merges carets that come to touch.
+    std::vector<std::pair<int, int>> ranges;
+    for (const QTextCursor &c : std::as_const(live))
+        ranges.emplace_back(c.selectionStart(), c.selectionEnd());
+    std::sort(ranges.begin(), ranges.end());
+    carets_->clear();
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        if (i > 0 && ranges[i] == ranges[i - 1])
+            continue;
+        carets_->append(QStringLiteral("%1-%2").arg(ranges[i].first).arg(ranges[i].second));
+    }
+    return reference.toPlainText();
+}
+
+void TestTextView::manyCaretsEditAsLiveCursorsDo()
+{
+    // Edits go through all the carets as numbers, not as live cursors that every
+    // change would move (see CaretSpans): the same text and carets must come
+    // out, also where carets touch or an edit reaches into the next.
+    QRandomGenerator random(20260114);
+    struct Key
+    {
+        Qt::Key key;
+        Qt::KeyboardModifiers mods;
+        QString text; // Typed (empty: the key's own).
+        std::function<void(QTextCursor &)> edit;
+    };
+    const std::vector<Key> keys = {
+        {Qt::Key_Z, Qt::NoModifier, QStringLiteral("z"), [](QTextCursor &c) { c.insertText(QStringLiteral("z")); }},
+        {Qt::Key_Space, Qt::NoModifier, QStringLiteral(" "), [](QTextCursor &c) { c.insertText(QStringLiteral(" ")); }},
+        {Qt::Key_Backspace, Qt::NoModifier, {}, [](QTextCursor &c) {
+             if (!c.hasSelection())
+                 c.movePosition(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor);
+             c.removeSelectedText();
+         }},
+        {Qt::Key_Delete, Qt::NoModifier, {}, [](QTextCursor &c) {
+             if (!c.hasSelection())
+                 c.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
+             c.removeSelectedText();
+         }},
+        {Qt::Key_Backspace, Qt::ControlModifier, {}, [](QTextCursor &c) {
+             if (!c.hasSelection())
+                 c.movePosition(QTextCursor::PreviousWord, QTextCursor::KeepAnchor);
+             c.removeSelectedText();
+         }},
+        {Qt::Key_Delete, Qt::ControlModifier, {}, [](QTextCursor &c) {
+             if (!c.hasSelection())
+                 c.movePosition(QTextCursor::NextWord, QTextCursor::KeepAnchor);
+             c.removeSelectedText();
+         }},
+    };
+    for (int round = 0; round < 60; ++round) {
+        QStringList lines;
+        for (int i = 0; i < 40; ++i) {
+            QString line;
+            for (int w = random.bounded(0, 7); w > 0; --w)
+                line += QStringLiteral("word%1 ").arg(random.bounded(100));
+            lines << line;
+        }
+        setText(lines.join(u'\n'));
+        const int length = m_doc->characterCount() - 1;
+        // Carets close together (words are 5 to 7 characters long), some
+        // selecting, some touching.
+        QList<QTextCursor> chosen;
+        for (int pos = random.bounded(0, 6); pos < length;) {
+            QTextCursor c(m_doc);
+            const int width = random.bounded(0, 4) == 0 ? random.bounded(1, 12) : 0;
+            c.setPosition(pos);
+            c.setPosition(qMin(length, pos + width), QTextCursor::KeepAnchor);
+            chosen.append(c);
+            pos += width + random.bounded(0, 3) * random.bounded(1, 9);
+        }
+        if (chosen.isEmpty())
+            continue;
+        m_view->setCursors(chosen, chosen.size() / 2);
+        const Key &key = keys[round % keys.size()];
+        const QList<QTextCursor> before = m_view->cursors();
+        QStringList expectedCarets;
+        const QString expected = editedByLiveCursors(before, key.edit, &expectedCarets);
+        if (key.text.isEmpty())
+            QTest::keyClick(m_view, key.key, key.mods);
+        else
+            QTest::keyClicks(m_view, key.text);
+        QStringList carets;
+        for (const QTextCursor &c : m_view->cursors())
+            carets << QStringLiteral("%1-%2").arg(c.selectionStart()).arg(c.selectionEnd());
+        const QString what = QStringLiteral("round %1, key %2").arg(round).arg(round % keys.size());
+        QVERIFY2(text() == expected, qPrintable(what + QStringLiteral(": text")));
+        QVERIFY2(carets == expectedCarets, qPrintable(what + QStringLiteral(": carets %1 against %2")
+                                                          .arg(carets.join(u' '), expectedCarets.join(u' '))));
+    }
+}
+
+void TestTextView::manyCaretsUndoAndRedoInOneStep()
+{
+    QStringList lines;
+    for (int i = 0; i < 3000; ++i)
+        lines << QStringLiteral("lorem %1 lorem").arg(i);
+    const QString original = lines.join(u'\n');
+    setText(original);
+    selectRange(0, 5);
+    m_view->selectAllOccurrences();
+    QCOMPARE(m_view->cursorCount(), 6000);
+    QTest::keyClick(m_view, Qt::Key_Z);
+    const QString typed = text();
+    QVERIFY(typed.startsWith(QStringLiteral("z 0 z\nz 1 z")));
+    QCOMPARE(m_view->cursorCount(), 6000);
+    m_view->undo();
+    QCOMPARE(text(), original); // One step.
+    QCOMPARE(m_view->cursorCount(), 6000);
+    QVERIFY(m_view->textCursor().hasSelection());
+    m_view->redo();
+    QCOMPARE(text(), typed);
+    QCOMPARE(m_view->cursorCount(), 6000);
+    m_view->undo();
+    QCOMPARE(text(), original);
+    // Typing again over the carets undone to goes on as before.
+    QTest::keyClick(m_view, Qt::Key_Y);
+    QVERIFY(text().startsWith(QStringLiteral("y 0 y\ny 1 y")));
 }
 
 void TestTextView::undoRestoresCaretAtEdit()
