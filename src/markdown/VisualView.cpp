@@ -2214,6 +2214,28 @@ VisualView::LongBox &VisualView::longBox(int blockIndex)
     return m_longBoxes[blockIndex];
 }
 
+// Whether a block of the parse is a list long enough to show an item a row
+// (itemRows looks closer). Remembered for the parse: the rows are made again
+// after every edit, and reading every block's HTML for it took milliseconds
+// in a large document.
+bool VisualView::mayBeLongList(int blockIndex)
+{
+    if (m_mayBeListsGeneration != m_model->parseGeneration()) {
+        m_mayBeLists.assign(size_t(m_model->parsedBlockCount()), -1);
+        m_mayBeListsGeneration = m_model->parseGeneration();
+    }
+    if (blockIndex < 0 || size_t(blockIndex) >= m_mayBeLists.size())
+        return false;
+    signed char &known = m_mayBeLists[size_t(blockIndex)];
+    if (known < 0) {
+        const core::Block &block = m_model->parsedBlock(blockIndex);
+        const std::string_view html(block.html.data(), block.html.size());
+        known = block.kind == core::BlockKind::Html && (startsWith(html, 0, "<ul") || startsWith(html, 0, "<ol"))
+                && (int(block.last_line - block.first_line) + 1 >= itemRowsMinItems || int(html.size()) >= itemRowsMinHtml);
+    }
+    return known;
+}
+
 bool VisualView::madeInParts(int s)
 {
     const MarkdownModel::Span &span = m_model->spans()[s];
@@ -2298,12 +2320,11 @@ bool VisualView::itemRows(int s, int line, int last)
         return false;
     const MarkdownModel::Span &span = m_model->spans()[s];
     const int blockIndex = span.block >= 0 ? span.block : span.previous;
+    // Quick for the blocks that are not long lists.
+    if (!mayBeLongList(blockIndex))
+        return false;
     const core::Block &block = m_model->parsedBlock(blockIndex);
     const std::string_view html(block.html.data(), block.html.size());
-    // Quick for the blocks that are not long lists.
-    if (block.kind != core::BlockKind::Html || !(startsWith(html, 0, "<ul") || startsWith(html, 0, "<ol"))
-        || (int(block.last_line - block.first_line) + 1 < itemRowsMinItems && int(html.size()) < itemRowsMinHtml))
-        return false;
     const ListItems &parsed = parsedItems(blockIndex);
     const int n = int(parsed.items.size());
     if (!parsed.ok || n < 2 || (n < itemRowsMinItems && int(html.size()) < itemRowsMinHtml)

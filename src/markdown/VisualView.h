@@ -352,6 +352,7 @@ private:
     const Render *memoized(const Row &row) const;
     int spanForRow(const Row &row) const;
     LongBox &longBox(int blockIndex);
+    bool mayBeLongList(int blockIndex);
     // Whether a span shows as a code box in parts.
     bool madeInParts(int span);
     // Adds rows for the items of the span (lines line..last) if it is a long
@@ -753,6 +754,10 @@ private:
     // Blocks made in parts, by block index of m_longBoxesGeneration's parse.
     std::unordered_map<int, LongBox> m_longBoxes;
     int m_longBoxesGeneration = -1;
+    // Whether each block of m_mayBeListsGeneration's parse may show as a long
+    // list (see mayBeLongList): -1 until asked.
+    std::vector<signed char> m_mayBeLists;
+    int m_mayBeListsGeneration = -1;
 
     // The bar above the text asking about remote pictures (see
     // updateRemoteBanner); the remote addresses are scanned once per parse.
