@@ -98,6 +98,9 @@ private Q_SLOTS:
     void languageChangeColoursInSlices();
     void longLinesColourTheirStart();
     void closingWhileColouringIsSafe();
+    void firstUseOfADefinitionWaitsForThePaint();
+    void firstUseWithoutAPaintStillColours();
+    void visualOnlyFilesDoNotColourUntilTheSourceShows();
 
 private:
     QString write(const QString &name, const QByteArray &content);
@@ -381,6 +384,78 @@ void TestHighlighting::closingWhileColouringIsSafe()
         QTest::qWait(30);
         QCOMPARE(tab.text(), QStringLiteral("# small\n"));
     }
+}
+
+// Loading a syntax definition takes tens of milliseconds (Markdown: 72). The
+// first text coloured with one stays uncoloured until the window has painted,
+// then gets exactly the colours it gets at once. No other test uses Ruby or
+// Lua, so their definitions are cold here.
+void TestHighlighting::firstUseOfADefinitionWaitsForThePaint()
+{
+    const QByteArray ruby = "# comment\nclass Foo\n  def bar(x)\n    \"text #{x}\" + 'more'\n  end\nend\n";
+    const QString path = write(QStringLiteral("cold.rb"), ruby);
+    DocumentTab tab;
+    tab.resize(800, 600);
+    QVERIFY(tab.load(path));
+    QTextDocument *doc = tab.document();
+    QVERIFY(tab.file()->isHighlighting());
+    QVERIFY(tab.file()->isHighlightPending());
+    QVERIFY(!coloured(doc, 0));
+    // Nothing has painted: still waiting.
+    for (int i = 0; i < 3; ++i)
+        QApplication::processEvents();
+    QVERIFY(tab.file()->isHighlightPending());
+    QVERIFY(!coloured(doc, 0));
+
+    tab.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&tab));
+    (void)tab.grab();
+    finish(tab.file());
+    QVERIFY(coloured(doc, 0));
+    QVERIFY(coloured(doc, 1));
+    const Formats got = formatsOf(doc);
+    QCOMPARE(got, atOnce(path));
+    // Warm now: another file of the language colours at once.
+    DocumentTab other;
+    QVERIFY(other.load(path));
+    QVERIFY(!other.file()->isHighlightPending());
+    QVERIFY(coloured(other.document(), 0));
+}
+
+// If nothing paints (a hidden window, a background tab) the colours come
+// anyway, a little later.
+void TestHighlighting::firstUseWithoutAPaintStillColours()
+{
+    const QString path = write(QStringLiteral("cold.lua"), "-- comment\nlocal function f(x)\n  return x .. \"s\"\nend\n");
+    DocumentTab tab;
+    QVERIFY(tab.load(path));
+    QTextDocument *doc = tab.document();
+    QVERIFY(tab.file()->isHighlightPending());
+    QVERIFY(!coloured(doc, 0));
+    QTRY_VERIFY_WITH_TIMEOUT(coloured(doc, 0), 5000);
+    finish(tab.file());
+    QCOMPARE(formatsOf(doc), atOnce(path));
+}
+
+// A file shown only as Visual never loads its definition; the source view
+// that comes later colours it.
+void TestHighlighting::visualOnlyFilesDoNotColourUntilTheSourceShows()
+{
+    const QString path = write(QStringLiteral("visual.md"), markdown(20'000));
+    const Formats expected = atOnce(path); // In source mode, as init() sets.
+    vn::Settings::instance().setValue(vn::key::defaultMode, QStringLiteral("visual"));
+    auto file = TextFile::create();
+    QVERIFY(file->load(path));
+    QVERIFY(!file->isHighlighting());
+    DocumentTab tab(file);
+    QVERIFY(!file->isHighlighting());
+    QVERIFY(!file->isHighlightPending());
+    QVERIFY(!coloured(tab.document(), 0));
+    tab.setViewMode(DocumentTab::ViewMode::Source);
+    QVERIFY(file->isHighlighting());
+    finish(file.get());
+    QVERIFY(coloured(tab.document(), 0));
+    QCOMPARE(formatsOf(tab.document()), expected);
 }
 
 QTEST_MAIN(TestHighlighting)
