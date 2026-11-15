@@ -704,8 +704,11 @@ void TextFile::updateHighlighting(bool highlightable)
 {
     m_highlighted = highlightable;
     // Attached or detached before the text is set, so a highlighter that is
-    // not wanted never sees it.
-    const bool wanted = wantsHighlighting();
+    // not wanted never sees it. In the application (slicing on) a file with
+    // no view yet waits for the first one that shows the source
+    // (syncHighlighting()): one shown only as Visual never loads its syntax
+    // definition, which takes 72 ms for Markdown.
+    const bool wanted = wantsHighlighting() && !(m_views.isEmpty() && Highlighter::isSliced());
     if (wanted)
         m_highlighter->attach(m_doc);
     else

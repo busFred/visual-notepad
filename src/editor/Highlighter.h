@@ -14,6 +14,11 @@
 // edited ahead of it, are coloured again when it gets there, so the end
 // result is what colouring everything at once gives.
 //
+// The first line of a syntax definition loads it, and everything it
+// includes: 72 ms for Markdown. With slicing on, a text whose definition has
+// not been used yet is coloured after the window's first paint, so the file
+// opens first and one frame is uncoloured.
+//
 // An edit recolours the blocks it touched, and the ones after for as long
 // as a line ends in another state than it did (an opened comment); with
 // slicing on, a long run of those goes on in slices.
@@ -109,6 +114,10 @@ private:
     void moveFrontierBack(int position);
     void stopSlices();
     bool slicesFor(int chars) const;
+    // Whether the first line coloured with the definition still has to load
+    // it (and what it includes); with slicing on, colouring then waits for
+    // the first paint.
+    bool isCold();
     const QTextCharFormat &textFormat(const KSyntaxHighlighting::Format &format);
 
     QPointer<QTextDocument> m_doc;
@@ -123,6 +132,8 @@ private:
     // A big edit is complete when contentsChanged() follows; the first slice
     // runs then.
     bool m_sliceAfterEdit = false;
+    // The definition has coloured a line (here or in another highlighter).
+    bool m_warm = false;
     // applyFormat()'s output for the block being coloured.
     QList<QTextLayout::FormatRange> m_ranges;
     // Qt formats by KSyntaxHighlighting format id (0: the default format).

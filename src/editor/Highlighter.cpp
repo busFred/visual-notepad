@@ -6,7 +6,10 @@
 #include <KSyntaxHighlighting/Theme>
 
 #include <QAbstractTextDocumentLayout>
+#include <QApplication>
 #include <QElapsedTimer>
+#include <QEvent>
+#include <QSet>
 #include <QSignalBlocker>
 #include <QTextBlock>
 #include <QTimer>
@@ -24,6 +27,8 @@ constexpr qint64 sliceBudgetNs = 6'000'000;
 // Lines a view shows are coloured from this far above, so that a code block
 // or comment opened just before them is usually seen.
 constexpr int leadInLines = 50;
+// Colouring that waits for the first paint starts without one after this long.
+constexpr int firstPaintWaitMs = 250;
 
 bool &sliced()
 {
@@ -48,6 +53,16 @@ BlockState *stateOf(const QTextBlock &block)
     return static_cast<BlockState *>(block.userData());
 }
 
+// The definitions that have coloured a line in this process. The first line
+// of one loads it and every definition it includes (72 ms for Markdown, which
+// includes 44), so the first colouring of a cold definition waits for the
+// window's first paint.
+QSet<QString> &warmDefinitions()
+{
+    static QSet<QString> names;
+    return names;
+}
+
 } // namespace
 
 // Runs the slices of every highlighter that has some to do, within one
@@ -70,7 +85,37 @@ public:
         m_timer.start();
     }
 
-    void remove(Highlighter *highlighter) { m_queue.removeAll(highlighter); }
+    // Like add(), but not before a widget has painted (or the wait is over):
+    // the user sees the text, uncoloured, a frame earlier.
+    void addAfterPaint(Highlighter *highlighter)
+    {
+        if (m_cold.contains(highlighter))
+            return;
+        m_cold.append(highlighter);
+        if (!m_waiting) {
+            m_waiting = true;
+            qApp->installEventFilter(this);
+            m_fallback.start();
+        }
+    }
+
+    void remove(Highlighter *highlighter)
+    {
+        m_queue.removeAll(highlighter);
+        m_cold.removeAll(highlighter);
+    }
+
+protected:
+    bool eventFilter(QObject *, QEvent *event) override
+    {
+        if (m_waiting && event->type() == QEvent::Paint) {
+            // After this paint is done: the next turn of the event loop.
+            m_waiting = false;
+            m_fallback.stop();
+            QTimer::singleShot(0, this, &SliceScheduler::releaseCold);
+        }
+        return false;
+    }
 
 private:
     SliceScheduler()
@@ -78,6 +123,21 @@ private:
         m_timer.setSingleShot(true);
         m_timer.setInterval(0);
         connect(&m_timer, &QTimer::timeout, this, &SliceScheduler::run);
+        m_fallback.setSingleShot(true);
+        m_fallback.setInterval(firstPaintWaitMs);
+        connect(&m_fallback, &QTimer::timeout, this, [this] {
+            m_waiting = false;
+            releaseCold();
+        });
+    }
+
+    void releaseCold()
+    {
+        if (qApp)
+            qApp->removeEventFilter(this);
+        const QList<Highlighter *> cold = std::exchange(m_cold, {});
+        for (Highlighter *highlighter : cold)
+            add(highlighter);
     }
 
     void run()
@@ -98,7 +158,10 @@ private:
     }
 
     QTimer m_timer;
+    QTimer m_fallback;
     QList<Highlighter *> m_queue;
+    QList<Highlighter *> m_cold; // Waiting for the first paint.
+    bool m_waiting = false;
 };
 
 Highlighter::Highlighter(QObject *parent)
@@ -167,6 +230,7 @@ void Highlighter::setDefinition(const KSyntaxHighlighting::Definition &def)
     AbstractHighlighter::setDefinition(def);
     if (!changed)
         return;
+    m_warm = false;
     m_formats.clear();
     if (m_doc)
         recolourAll();
@@ -205,17 +269,30 @@ void Highlighter::recolourAll()
 {
     stopSlices();
     clearAll();
-    if (slicesFor(m_doc->characterCount())) {
+    const bool cold = isCold();
+    if (cold || slicesFor(m_doc->characterCount())) {
         m_frontier = QTextCursor(m_doc);
         settle();
         Q_EMIT highlighted(0, m_doc->blockCount() - 1);
-        runSlice(sliceBudgetNs);
+        if (cold)
+            SliceScheduler::instance().addAfterPaint(this);
+        else
+            runSlice(sliceBudgetNs);
         return;
     }
     for (QTextBlock block = m_doc->begin(); block.isValid(); block = block.next())
         colour(block, true);
     settle();
     Q_EMIT highlighted(0, m_doc->blockCount() - 1);
+}
+
+bool Highlighter::isCold()
+{
+    if (!sliced() || m_warm || !definition().isValid())
+        return false;
+    // Loaded by an earlier file, or by another highlighter.
+    m_warm = warmDefinitions().contains(definition().name());
+    return !m_warm;
 }
 
 const QTextCharFormat &Highlighter::textFormat(const KSyntaxHighlighting::Format &format)
@@ -260,6 +337,10 @@ void Highlighter::applyFormat(int offset, int length, const KSyntaxHighlighting:
 
 bool Highlighter::colour(const QTextBlock &block, bool inOrder)
 {
+    if (!m_warm && definition().isValid()) {
+        m_warm = true;
+        warmDefinitions().insert(definition().name());
+    }
     const BlockState *before = stateOf(block.previous());
     m_ranges.clear();
     const QString text = block.text();
@@ -290,10 +371,11 @@ void Highlighter::onContentsChange(int from, int charsRemoved, int charsAdded)
     const QTextBlock lastBlock = m_doc->findBlock(from + charsAdded + (charsRemoved > 0 ? 1 : 0));
     const int end = lastBlock.isValid() ? lastBlock.position() + lastBlock.length() : m_doc->characterCount();
 
-    if (slicesFor(charsAdded)) {
+    if (slicesFor(charsAdded) || isCold()) {
         // A big edit (a reload, a paste, undoing one) is coloured like a big
         // text: by the slices, the first one as soon as the edit is
-        // complete. Its blocks count as not coloured yet.
+        // complete (after the first paint, if it has to load the
+        // definition). Its blocks count as not coloured yet.
         moveFrontierBack(block.position());
         for (; block.isValid() && block.position() < end; block = block.next()) {
             if (!block.layout()->formats().isEmpty())
@@ -331,7 +413,10 @@ void Highlighter::onContentsChanged()
 {
     if (m_sliceAfterEdit) {
         m_sliceAfterEdit = false;
-        runSlice(sliceBudgetNs);
+        if (isCold())
+            SliceScheduler::instance().addAfterPaint(this);
+        else
+            runSlice(sliceBudgetNs);
     }
 }
 

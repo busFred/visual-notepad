@@ -50,6 +50,8 @@ private Q_SLOTS:
     void closingCancelsTheSearch();
     void navigationWaitsForTheSearch();
     void replaceAllWaitsForTheSearch();
+    void replaceAllReplacesBeyondTheMatchCap_data();
+    void replaceAllReplacesBeyondTheMatchCap();
     void catastrophicRegexKeepsTheGuiResponsive();
 
 private:
@@ -674,6 +676,78 @@ void TestFind::replaceAllWaitsForTheSearch()
     waitForSearch();
     const QString regexExpected = QString(original).replace(QRegularExpression(QStringLiteral("(k)(\\d+)=v(\\d+)")), QStringLiteral("\\2:\\1:\\3"));
     QVERIFY(m_doc->toPlainText() == regexExpected);
+}
+
+// The match list stops at search::maxMatches; one press of Replace All must
+// not (VS Code's does not).
+void TestFind::replaceAllReplacesBeyondTheMatchCap_data()
+{
+    QTest::addColumn<int>("lines");
+    QTest::addColumn<bool>("regex");
+    QTest::addColumn<bool>("inSelection");
+    // 40,000 short lines are searched on the GUI thread, 60,000 longer ones on a worker.
+    QTest::newRow("small") << 40000 << false << false;
+    QTest::newRow("small regex") << 40000 << true << false;
+    QTest::newRow("big") << 60000 << false << false;
+    QTest::newRow("big regex captures") << 60000 << true << false;
+    QTest::newRow("big in selection") << 60000 << true << true;
+}
+
+void TestFind::replaceAllReplacesBeyondTheMatchCap()
+{
+    QFETCH(int, lines);
+    QFETCH(bool, regex);
+    QFETCH(bool, inSelection);
+    const bool big = lines > 50000;
+    QStringList text;
+    text.reserve(lines);
+    for (int i = 0; i < lines; ++i)
+        text << (big ? QStringLiteral("foo bar %1").arg(i) : QStringLiteral("foo%1").arg(i % 10));
+    const QString original = text.join(u'\n');
+    m_doc->setPlainText(original);
+    QVERIFY(lines > search::maxMatches);
+    QCOMPARE(big, m_doc->characterCount() > 256 * 1024);
+
+    // In selection: all but the first and the last line, still far more than the cap.
+    int from = 0;
+    int to = int(original.size());
+    if (inSelection) {
+        from = int(original.indexOf(u'\n')) + 1;
+        to = int(original.lastIndexOf(u'\n'));
+        QTextCursor scope(m_doc);
+        scope.setPosition(from);
+        scope.setPosition(to, QTextCursor::KeepAnchor);
+        m_view->setTextCursor(scope);
+    }
+    m_bar->open(true);
+    const QString pattern = regex ? QStringLiteral("(foo) (bar)? ?(\\d+)|foo(\\d)") : QStringLiteral("foo");
+    if (regex)
+        setOptions(false, false, true);
+    if (inSelection) {
+        for (QToolButton *button : m_bar->findChildren<QToolButton *>()) {
+            if (button->toolTip() == QLatin1String("Find in Selection"))
+                button->setChecked(true);
+        }
+    }
+    m_bar->setQuery(pattern);
+    m_bar->replaceField()->setText(regex ? QStringLiteral("$3$4:$2") : QStringLiteral("quux"));
+    waitForSearch();
+    QCOMPARE(m_bar->matchCount(), search::maxMatches); // The list stays capped.
+    m_bar->replaceAll();
+    waitForSearch();
+
+    const auto replaced = [&](QString part) {
+        return regex ? part.replace(QRegularExpression(pattern), QStringLiteral("\\3\\4:\\2"))
+                     : part.replace(QLatin1String("foo"), QLatin1String("quux"), Qt::CaseInsensitive);
+    };
+    const QString expected = original.left(from) + replaced(original.mid(from, to - from)) + original.mid(to);
+    QVERIFY(m_doc->toPlainText() == expected);
+    QVERIFY(inSelection || !m_doc->toPlainText().contains(QLatin1String("foo")));
+    // One press, one undo step.
+    m_view->undo();
+    QVERIFY(m_doc->toPlainText() == original);
+    m_view->redo();
+    QVERIFY(m_doc->toPlainText() == expected);
 }
 
 void TestFind::catastrophicRegexKeepsTheGuiResponsive()

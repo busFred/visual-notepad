@@ -64,6 +64,12 @@ struct FindBar::Job
     QString text;
     int scopeStart = -1;
     int scopeEnd = -1;
+    int limit = search::maxMatches;
+    // Set for a Replace All that had to search again without the limit: the
+    // matches are replaced, not shown.
+    bool replaceAll = false;
+    QString replacement;
+    bool preserveCase = false;
     QList<search::Range> matches;
 };
 
@@ -335,6 +341,11 @@ void FindBar::research()
 {
     m_researchTimer.stop();
     cancelSearch();
+    startSearch(search::maxMatches, false);
+}
+
+void FindBar::startSearch(int limit, bool replaceAll)
+{
     const search::Compiled query(options());
     const bool valid = query.isValid();
     // Re-polishing restyles the whole bar, so only do it when the state flips.
@@ -348,7 +359,11 @@ void FindBar::research()
     const int scopeEnd = m_scope.isNull() ? -1 : m_scope.selectionEnd();
     QTextDocument *document = m_view->document();
     if (!valid || query.options().pattern.isEmpty() || document->characterCount() <= asyncThreshold) {
-        applyMatches(search::findAll(document, query, scopeStart, scopeEnd));
+        QList<search::Range> matches = search::findAll(document, query, scopeStart, scopeEnd, limit);
+        if (replaceAll)
+            replaceMatches(matches, options(), m_replace->text(), m_preserveCaseOption->isChecked());
+        else
+            applyMatches(std::move(matches));
         return;
     }
 
@@ -364,6 +379,10 @@ void FindBar::research()
     job->text = m_snapshot;
     job->scopeStart = scopeStart;
     job->scopeEnd = scopeEnd;
+    job->limit = limit;
+    job->replaceAll = replaceAll;
+    job->replacement = m_replace->text();
+    job->preserveCase = m_preserveCaseOption->isChecked();
     auto promise = std::make_shared<QPromise<void>>();
     promise->start();
     m_jobWatcher.setFuture(promise->future());
@@ -374,7 +393,7 @@ void FindBar::research()
         // every use of it on one thread.
         const search::Compiled compiled(job->options);
         job->matches = search::findAllInText(std::move(job->text), compiled, job->scopeStart, job->scopeEnd,
-                                             &job->cancel);
+                                             &job->cancel, job->limit);
         job->done.store(true, std::memory_order_release);
         promise->finish();
     });
@@ -393,7 +412,10 @@ void FindBar::finishSearch()
         research();
         return;
     }
-    applyMatches(job->matches);
+    if (job->replaceAll)
+        replaceMatches(job->matches, job->options, job->replacement, job->preserveCase);
+    else
+        applyMatches(job->matches);
 }
 
 void FindBar::applyMatches(QList<search::Range> matches)
@@ -595,24 +617,39 @@ void FindBar::replaceAllNow()
     if (m_view->isReadOnly() || m_matches.isEmpty())
         return;
     remember(m_replace);
-    const search::Compiled query(options());
-    const bool preserveCase = m_preserveCaseOption->isChecked();
-    // Compute every replacement first: regex groups need the original text.
-    QStringList replacements;
-    replacements.reserve(m_matches.size());
-    search::LineText line;
-    for (const search::Range &match : std::as_const(m_matches))
-        replacements.append(search::replacementFor(m_view->document(), query, match, m_replace->text(), preserveCase, &line));
-    // Back to front with one cursor, so earlier positions stay valid and Qt
-    // only adjusts that single cursor.
-    QTextCursor edit(m_view->document());
-    edit.beginEditBlock();
-    for (int i = int(m_matches.size()) - 1; i >= 0; --i) {
-        edit.setPosition(m_matches[i].start);
-        edit.setPosition(m_matches[i].end, QTextCursor::KeepAnchor);
-        edit.insertText(replacements[i]);
+    // The list stops at maxMatches (the counter and the highlights do), but
+    // Replace All must not: with more than that, search again without the
+    // limit, on the worker for a big document.
+    if (m_matches.size() >= search::maxMatches) {
+        cancelSearch();
+        startSearch(search::noLimit, true);
+        return;
     }
-    edit.endEditBlock();
+    replaceMatches(m_matches, options(), m_replace->text(), m_preserveCaseOption->isChecked());
+}
+
+void FindBar::replaceMatches(const QList<search::Range> &matches, const search::Options &options,
+                             const QString &replacement, bool preserveCase)
+{
+    if (!matches.isEmpty()) {
+        const search::Compiled query(options);
+        // Compute every replacement first: regex groups need the original text.
+        QStringList replacements;
+        replacements.reserve(matches.size());
+        search::LineText line;
+        for (const search::Range &match : matches)
+            replacements.append(search::replacementFor(m_view->document(), query, match, replacement, preserveCase, &line));
+        // Back to front with one cursor, so earlier positions stay valid and Qt
+        // only adjusts that single cursor.
+        QTextCursor edit(m_view->document());
+        edit.beginEditBlock();
+        for (int i = int(matches.size()) - 1; i >= 0; --i) {
+            edit.setPosition(matches[i].start);
+            edit.setPosition(matches[i].end, QTextCursor::KeepAnchor);
+            edit.insertText(replacements[i]);
+        }
+        edit.endEditBlock();
+    }
     research();
 }
 

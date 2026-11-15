@@ -7,6 +7,7 @@
 #include <QString>
 
 #include <atomic>
+#include <limits>
 
 class QTextDocument;
 
@@ -46,23 +47,29 @@ private:
     bool m_valid = true;
 };
 
-// Most matches collected; VS Code stops counting at the same number.
+// Most matches collected unless a search asks for another limit; VS Code
+// stops counting and highlighting at the same number.
 constexpr int maxMatches = 19999;
+// For a search that must find every match (Replace All does not stop at
+// maxMatches either, as in VS Code).
+constexpr int noLimit = std::numeric_limits<int>::max();
 
 // False if the regex does not compile.
 bool isValid(const Options &options);
 
-// Non-empty matches in document order, optionally limited to [scopeStart,
-// scopeEnd). Matches never span lines.
-QList<Range> findAll(QTextDocument *document, const Compiled &query, int scopeStart = -1, int scopeEnd = -1);
-QList<Range> findAll(QTextDocument *document, const Options &options, int scopeStart = -1, int scopeEnd = -1);
+// Non-empty matches in document order, at most `limit`, optionally limited
+// to [scopeStart, scopeEnd). Matches never span lines.
+QList<Range> findAll(QTextDocument *document, const Compiled &query, int scopeStart = -1, int scopeEnd = -1,
+                     int limit = maxMatches);
+QList<Range> findAll(QTextDocument *document, const Options &options, int scopeStart = -1, int scopeEnd = -1,
+                     int limit = maxMatches);
 
 // The same search over QTextDocument::toRawText(), for a worker thread: it
 // touches no document. Returns the same ranges as findAll() would on the
 // document the text came from. Gives up and returns nothing once `cancel` is
 // set (checked between lines; a regex call already running cannot be stopped).
 QList<Range> findAllInText(QString rawText, const Compiled &query, int scopeStart = -1, int scopeEnd = -1,
-                           const std::atomic<bool> *cancel = nullptr);
+                           const std::atomic<bool> *cancel = nullptr, int limit = maxMatches);
 
 // The line a replacement last read, so consecutive matches on one line do not
 // copy it again.

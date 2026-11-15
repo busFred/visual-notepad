@@ -815,8 +815,10 @@ void DocumentTab::onDefinitionChanged()
 {
     const QString name = definitionName();
     const auto def = name.isEmpty() ? KSyntaxHighlighting::Definition() : theme::syntaxRepository().definitionForName(name);
-    m_editor->setCommentMarker(def.singleLineCommentMarker());
-    m_editor->setCodeEditing(def.isValid() && def.name() != QLatin1String("Markdown"));
+    // Markdown has no line comment, and asking would load its definition (72 ms) before the first paint.
+    const bool markdown = def.name() == QLatin1String("Markdown");
+    m_editor->setCommentMarker(markdown ? QString() : def.singleLineCommentMarker());
+    m_editor->setCodeEditing(def.isValid() && !markdown);
     updateViews();
 }
 
