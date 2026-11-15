@@ -75,6 +75,7 @@ private Q_SLOTS:
     void smartHome();
     void escapeCollapsesCarets();
     void lineCacheFollowsEdits();
+    void longLinePaintsTheSameInStrips();
     void surroundSelection();
     void surroundRepeatsAndMultiCaret();
     void surroundPairsDependOnLanguage();
@@ -481,6 +482,41 @@ void TestTextView::lineCacheFollowsEdits()
     m_doc->setPlainText(QStringLiteral("only"));
     QVERIFY(!m_view->grab().isNull());
     QCOMPARE(m_doc->blockCount(), 1);
+}
+
+void TestTextView::longLinePaintsTheSameInStrips()
+{
+    // A long line is drawn only where the view is painted; painting the view
+    // a strip at a time (as a caret blink or an uncovered edge does) must give
+    // what painting it whole does, selection and highlights included.
+    QString line;
+    for (int i = 0; i < 4000; ++i)
+        line += QStringLiteral("word%1 lorem ").arg(i);
+    setText(line + QStringLiteral("\nshort line\n") + line);
+    m_view->setSearchHighlights(vn::search::findAll(m_doc, vn::search::Options{"lorem", false, false, false}), 3);
+    selectRange(900, 41000);
+    const auto compareInStrips = [&](const QString &what) {
+        const QImage whole = m_view->viewport()->grab().toImage();
+        const int w = whole.width();
+        const int h = whole.height();
+        const int strip = 37; // Not a multiple of the row height.
+        for (int y = 0; y < h; y += strip) {
+            const QRect rect(0, y, w, qMin(strip, h - y));
+            QImage part(whole.size(), whole.format());
+            part.fill(Qt::magenta);
+            m_view->viewport()->render(&part, rect.topLeft(), QRegion(rect));
+            QVERIFY2(part.copy(rect) == whole.copy(rect), qPrintable(QStringLiteral("%1, strip at %2").arg(what).arg(y)));
+        }
+    };
+    for (const int top : {0, 90, 400}) {
+        m_view->verticalScrollBar()->setValue(top);
+        compareInStrips(QStringLiteral("scrolled to %1").arg(top));
+    }
+    // The same line in columns, which cut the line at their edges.
+    m_view->resize(1400, 500);
+    m_view->setColumnChars(50);
+    m_view->setColumnsShown(true);
+    compareInStrips(QStringLiteral("in columns"));
 }
 
 void TestTextView::addCursorsToLineEnds()

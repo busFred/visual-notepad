@@ -602,8 +602,10 @@ private:
         bool recolorSelection = false;
     };
     LinePaintState linePaintState() const;
+    // `visible` is the part of the view being painted: rows of a long line
+    // outside it are skipped.
     void paintSourceLine(QPainter &painter, int lineNo, const QPointF &origin, const QRectF &shade,
-                         const LinePaintState &state);
+                         const QRectF &visible, const LinePaintState &state);
     QTextCursor wordAt(const QTextCursor &cursor) const;
     QTextCursor findNext(const QString &text, int from) const;
     void restartBlink();

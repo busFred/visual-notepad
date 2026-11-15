@@ -401,10 +401,17 @@ void TextView::onDocumentChanged(int from, int charsRemoved, int charsAdded)
         m_tableRun = {};
         m_htmlRun = {};
     } else {
-        m_lines.erase(m_lines.begin() + first, m_lines.begin() + first + oldAffected);
-        std::vector<LineCache> fresh(newAffected);
-        m_lines.insert(m_lines.begin() + first, std::make_move_iterator(fresh.begin()),
-                       std::make_move_iterator(fresh.end()));
+        if (newAffected == oldAffected) {
+            // The lines keep their places: reset them where they are rather
+            // than shifting everything after them down and up again.
+            for (int i = first; i < first + newAffected; ++i)
+                m_lines[i] = LineCache();
+        } else {
+            m_lines.erase(m_lines.begin() + first, m_lines.begin() + first + oldAffected);
+            std::vector<LineCache> fresh(newAffected);
+            m_lines.insert(m_lines.begin() + first, std::make_move_iterator(fresh.begin()),
+                           std::make_move_iterator(fresh.end()));
+        }
         spliceFenceMarks(first, oldAffected, newAffected);
         spliceTableRun(first, oldAffected, newAffected);
     }
@@ -1138,7 +1145,7 @@ TextView::LinePaintState TextView::linePaintState() const
 }
 
 void TextView::paintSourceLine(QPainter &painter, int lineNo, const QPointF &origin, const QRectF &shade,
-                               const LinePaintState &state)
+                               const QRectF &visible, const LinePaintState &state)
 {
     const QTextBlock block = m_doc->findBlockByNumber(lineNo);
     QTextLayout *layout = layoutForLine(lineNo);
@@ -1150,14 +1157,23 @@ void TextView::paintSourceLine(QPainter &painter, int lineNo, const QPointF &ori
     const int blockStart = block.position();
     const int blockEnd = blockStart + block.length(); // Includes the separator.
 
+    // The wrapped rows that can reach `visible` (a line of a few hundred
+    // thousand characters has some thousands of rows, a screenful shows a few
+    // dozen): only these are filled, outlined and drawn. A row is
+    // m_lineHeight high and rows follow one another from `y`; one more each
+    // way for the rounding.
+    const int rowCount = layout->lineCount();
+    const int shownFirst = qBound(0, int(std::floor((visible.top() - y) / m_lineHeight)) - 1, rowCount);
+    const int shownEnd = qBound(0, int(std::ceil((visible.bottom() - y) / m_lineHeight)) + 2, rowCount);
+
     // Backgrounds are filled by hand so they span the full line height
     // (QTextLayout's own selection only covers the font height).
     const auto fillRange = [&](int start, int end, const QColor &color, bool newline) {
-        for (int i = 0; i < layout->lineCount(); ++i) {
+        for (int i = shownFirst; i < shownEnd; ++i) {
             const QTextLine textLine = layout->lineAt(i);
             const int ls = textLine.textStart();
             const int le = ls + textLine.textLength();
-            const bool last = i == layout->lineCount() - 1;
+            const bool last = i == rowCount - 1;
             const int s = qMax(start, ls);
             const int e = qMin(end, le);
             if (s > e || (s == e && !(newline && last && e == le)))
@@ -1204,7 +1220,8 @@ void TextView::paintSourceLine(QPainter &painter, int lineNo, const QPointF &ori
     }
 
     painter.setPen(theme::color(theme::Role::text));
-    layout->draw(&painter, origin, selectedText);
+    // (The clip is a line taller each way: it is only to skip rows.)
+    layout->draw(&painter, origin, selectedText, visible.adjusted(0, -m_lineHeight, 0, m_lineHeight));
 
     const auto &spans = state.diagnosticSpans;
     const auto &maxEnd = state.diagnosticMaxEnd;
@@ -1219,7 +1236,7 @@ void TextView::paintSourceLine(QPainter &painter, int lineNo, const QPointF &ori
         painter.setRenderHint(QPainter::Antialiasing, true);
         const int ds = qMax(rangeStart, blockStart) - blockStart;
         const int de = qMin(rangeEnd, blockEnd - 1) - blockStart;
-        for (int i = 0; i < layout->lineCount(); ++i) {
+        for (int i = shownFirst; i < shownEnd; ++i) {
             const QTextLine textLine = layout->lineAt(i);
             const int s = qMax(ds, textLine.textStart());
             const int e = qMin(de, textLine.textStart() + textLine.textLength());
@@ -1297,7 +1314,7 @@ void TextView::paintEvent(QPaintEvent *event)
         }
         const int lineNo = info.firstLine;
         paintSourceLine(painter, lineNo, QPointF(left - hscroll, y), QRectF(gutter, y, viewport()->width() - gutter, h),
-                        state);
+                        QRectF(area), state);
         visibleLines.append({lineNo, y, h});
         y += h;
     }
