@@ -1259,6 +1259,15 @@ void runWorker(int &argc, char **argv)
 #endif
 
     const qint32 hello[2] = {qint32(answerMagic), ensureInitialized() ? 1 : 0};
+    // Draw once before any copy is made (and before the lock-down, which
+    // leaves no way to open font files): the copies inherit the font setup
+    // and the fonts read, where each would otherwise open the font
+    // configuration and some 260 files again for its one formula.
+    if (hello[1] == 1) {
+        Formula warm;
+        microTeXFormula(QStringLiteral("x_{1}^2+\\frac{a}{b}\\sum_{i=0}^{n}\\int\\sqrt{y}\\,\\mathbf{A}\\mathcal{B}\\mathrm{C}\\alpha\\left(\\frac{1}{2}\\right)"), true, warm);
+        microTeXFormula(QStringLiteral("x_{1}^2+\\frac{a}{b}"), false, warm);
+    }
     if (!writeFully(reinterpret_cast<const char *>(hello), sizeof hello))
         endWorker(1);
     lockDownWorker();
