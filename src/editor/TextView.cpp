@@ -1661,6 +1661,12 @@ void TextView::inputMethodEvent(QInputMethodEvent *event)
         event->ignore();
         return;
     }
+    // An input method (IBus, fcitx) says "nothing composed" now and then, as
+    // focus comes and goes. That changes nothing, and must not take the view
+    // back to the caret from wherever it was scrolled.
+    if (event->commitString().isEmpty() && event->replacementLength() == 0 && event->preeditString().isEmpty()
+        && m_preedit.isEmpty())
+        return;
     const int line = textCursor().blockNumber();
     const bool typed = event->replacementLength() == 0 && typeCharacter(event->commitString());
     if (!typed && (!event->commitString().isEmpty() || event->replacementLength() > 0)) {
