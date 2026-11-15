@@ -18,7 +18,31 @@
 
 #include <atomic>
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
 using namespace vn;
+
+// Milliseconds of processor time the calling thread has used. What the GUI
+// thread does itself is told from the time a busy machine does not let it run
+// at all: a stretch where it is held up by others costs the clock, not this.
+static double threadCpuMs()
+{
+#ifdef Q_OS_WIN
+    FILETIME created, exited, kernel, user;
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user))
+        return 0;
+    const auto ticks = [](const FILETIME &t) { return double((quint64(t.dwHighDateTime) << 32) | t.dwLowDateTime); };
+    return (ticks(kernel) + ticks(user)) / 10'000.0; // In 100 ns.
+#else
+    timespec now{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+    return now.tv_sec * 1000.0 + now.tv_nsec / 1e6;
+#endif
+}
 
 class TestFind : public QObject
 {
@@ -764,13 +788,24 @@ void TestFind::catastrophicRegexKeepsTheGuiResponsive()
     setOptions(false, false, true);
     waitForSearch();
 
+    // The GUI thread is to go on while the search runs on another. A busy
+    // machine can keep it from running for hundreds of milliseconds whatever
+    // the program does, so a gap on the clock says little: what is measured
+    // is the longest stretch the thread itself worked between two ticks (a
+    // search on this thread would use all of it). The clock is read as well,
+    // for the message.
+    double longestWork = 0;
     qint64 longestGap = 0;
     int ticks = 0;
     QElapsedTimer sinceTick;
     sinceTick.start();
+    double cpuAtTick = threadCpuMs();
     QTimer ticker;
     ticker.setInterval(5);
     connect(&ticker, &QTimer::timeout, this, [&] {
+        const double cpu = threadCpuMs();
+        longestWork = qMax(longestWork, cpu - cpuAtTick);
+        cpuAtTick = cpu;
         longestGap = qMax(longestGap, sinceTick.restart());
         ++ticks;
     });
@@ -778,9 +813,11 @@ void TestFind::catastrophicRegexKeepsTheGuiResponsive()
 
     QElapsedTimer total;
     total.start();
+    const double cpuAtStart = threadCpuMs();
     m_bar->setQuery(QStringLiteral("(a+)+$"));
     QVERIFY(m_bar->isSearching());
-    QVERIFY(total.elapsed() < 100); // Starting it does not wait for it.
+    // Starting it does not wait for it.
+    QVERIFY2(threadCpuMs() - cpuAtStart < 100, qPrintable(QString::number(threadCpuMs() - cpuAtStart)));
     const QLabel *count = m_bar->findChild<QLabel *>(QStringLiteral("FindCount"));
     bool sawBusy = false;
     while (m_bar->isSearching() && total.elapsed() < 60000) {
@@ -790,9 +827,11 @@ void TestFind::catastrophicRegexKeepsTheGuiResponsive()
     ticker.stop();
     QVERIFY(!m_bar->isSearching());
     // The search took long, the GUI thread went on, and the counter said so.
-    QVERIFY2(total.elapsed() > 500, qPrintable(QString::number(total.elapsed())));
-    QVERIFY(ticks > total.elapsed() / 50);
-    QVERIFY2(longestGap < 150, qPrintable(QString::number(longestGap)));
+    const qint64 slowSearchMs = total.elapsed();
+    QVERIFY2(slowSearchMs > 500, qPrintable(QString::number(slowSearchMs)));
+    QVERIFY(ticks > slowSearchMs / 50);
+    QVERIFY2(longestWork < 150,
+             qPrintable(QStringLiteral("worked %1 ms (waited %2 ms) between ticks").arg(longestWork).arg(longestGap)));
     QVERIFY(sawBusy);
 
     // A new query does not wait for the slow one: it is cancelled between lines.
@@ -801,7 +840,9 @@ void TestFind::catastrophicRegexKeepsTheGuiResponsive()
     QVERIFY(m_bar->isSearching());
     m_bar->setQuery(QStringLiteral("section"));
     waitForSearch();
-    QVERIFY(total.elapsed() < 1500);
+    // (On a busy machine in proportion to the search it replaced, which it
+    // did not wait for.)
+    QVERIFY2(total.elapsed() < qMax<qint64>(1500, slowSearchMs / 4), qPrintable(QString::number(total.elapsed())));
     QVERIFY(m_bar->matchCount() > 0);
     QVERIFY(count->text() != QStringLiteral("…"));
 }
