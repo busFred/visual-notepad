@@ -477,8 +477,12 @@ bool LineLayout::rebuild(const QTextBlock &block, const Setup &setup, LineLayout
             continue;
         }
         int end = next < kept.size() ? kept[next].start : n;
-        while (end - pos < pieceTarget / 2 && next < kept.size())
-            end = kept[next].start + int(kept[next++].text.size());
+        while (end - pos < pieceTarget / 2 && next < kept.size()) {
+            // (Not in one expression: which side of + reads `next` first is
+            // up to the compiler, and MSVC took the next piece's start.)
+            end = kept[next].start + int(kept[next].text.size());
+            ++next;
+        }
         if (end - pos < pieceTarget / 2 && !pieces.empty()) {
             pos = pieces.back().start;
             pieces.pop_back();
