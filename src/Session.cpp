@@ -2,6 +2,7 @@
 
 #include "DocumentTab.h"
 #include "MainWindow.h"
+#include "SafeWrite.h"
 #include "Settings.h"
 #include "TextFile.h"
 #include "editor/TextView.h"
@@ -17,7 +18,6 @@
 #include <QJsonObject>
 #include <QMap>
 #include <QPointer>
-#include <QSaveFile>
 #include <QSessionManager>
 #include <QSet>
 #include <QStandardPaths>
@@ -194,14 +194,10 @@ void runBackupJob(BackupJob &job)
     for (BackupItem &item : job.items) {
         if (job.hook)
             job.hook();
-        QSaveFile file(job.backupsDir + u'/' + item.name);
-        if (!file.open(QIODevice::WriteOnly))
-            continue;
-        makePrivate(file);
         // As TextFile::text() would give it.
         item.text.replace(QChar::ParagraphSeparator, u'\n');
         const QByteArray bytes = std::exchange(item.text, QString()).toUtf8();
-        item.written = file.write(bytes) == bytes.size() && file.commit();
+        item.written = writeFileSafely(job.backupsDir + u'/' + item.name, bytes, nullptr, makePrivate);
     }
 }
 
@@ -477,12 +473,7 @@ QString SessionManager::writeBackup(DocumentTab *tab, bool write)
         name = QUuid::createUuid().toString(QUuid::WithoutBraces);
     if (!makePrivateDir(dataDir()) || !makePrivateDir(backupsDir()))
         return {};
-    QSaveFile file(backupsDir() + u'/' + name);
-    if (!file.open(QIODevice::WriteOnly))
-        return {};
-    makePrivate(file);
-    const QByteArray bytes = tab->text().toUtf8();
-    if (file.write(bytes) != bytes.size() || !file.commit())
+    if (!writeFileSafely(backupsDir() + u'/' + name, tab->text().toUtf8(), nullptr, makePrivate))
         return {};
     document->setBackupName(name);
     document->setBackupSerial(serial);
@@ -593,14 +584,8 @@ QList<DocumentTab *> SessionManager::writeSession(const QList<DocumentTab *> &sk
     QJsonObject root;
     root[QStringLiteral("version")] = 1;
     root[QStringLiteral("windows")] = windows;
-    QSaveFile file(sessionFile());
     const QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Compact);
-    bool saved = makePrivateDir(dataDir()) && file.open(QIODevice::WriteOnly);
-    if (saved) {
-        makePrivate(file);
-        saved = file.write(json) == json.size() && file.commit();
-    }
-    if (!saved) {
+    if (!makePrivateDir(dataDir()) || !writeFileSafely(sessionFile(), json, nullptr, makePrivate)) {
         // Backups exist but nothing points at them: the content is not safe.
         failed.clear();
         for (MainWindow *window : std::as_const(m_windows)) {
