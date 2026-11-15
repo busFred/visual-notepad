@@ -149,11 +149,13 @@ private Q_SLOTS:
     void longLineJoinsAreSafe();
     void longLineHitTestingMatchesTheWholeLine_data();
     void longLineHitTestingMatchesTheWholeLine();
+    void longLineCaretMovesAsQtDoes();
     void longLineEditsLookAsLaidOutAfresh();
     void longLineWrapsInPieces();
     void longLineSelectionAndMatchesSpanAJoin();
     void longLineComposes();
     void longLineInColumns();
+    void longLineTypingIsFast();
 
 private:
     void setText(const QString &text);
@@ -2394,6 +2396,66 @@ void TestTextView::longLineHitTestingMatchesTheWholeLine()
     QVERIFY(m_view->horizontalScrollBar()->maximum() >= int(wholeRow.naturalTextWidth() - m_view->viewport()->width()));
 }
 
+void TestTextView::longLineCaretMovesAsQtDoes()
+{
+    // Left, Right, Ctrl+Left and Ctrl+Right look only at the text around
+    // the caret in a long line; they go where Qt's own moves go, word
+    // longer than what they look at first included.
+    QString line = longLine(QStringLiteral("lorem ipsum, e\u0301te\u0301 ab\U0001F600c\U0001F44D\U0001F3FDd dolor "), 20000)
+                   + QString(5000, u'w') + QStringLiteral(" tail ") + longLine(QStringLiteral("xyz"), 3000);
+    setText(line + QStringLiteral("\nshort"));
+    QTextDocument reference;
+    reference.setPlainText(m_doc->toPlainText());
+    QList<int> positions{0, 1, int(line.size()) - 1, int(line.size()), 20000, 20001, 22500, 25005};
+    for (int join : joinsOf(m_doc->firstBlock())) {
+        for (int d = -3; d <= 3; ++d)
+            positions.append(join + d);
+    }
+    for (int i = 0; i < 60; ++i)
+        positions.append(QRandomGenerator::global()->bounded(int(line.size())));
+    const QList<std::pair<Qt::KeyboardModifiers, std::pair<Qt::Key, QTextCursor::MoveOperation>>> moves = {
+        {Qt::NoModifier, {Qt::Key_Left, QTextCursor::PreviousCharacter}},
+        {Qt::NoModifier, {Qt::Key_Right, QTextCursor::NextCharacter}},
+        {Qt::ControlModifier, {Qt::Key_Left, QTextCursor::PreviousWord}},
+        {Qt::ControlModifier, {Qt::Key_Right, QTextCursor::NextWord}},
+    };
+    for (int p : std::as_const(positions)) {
+        QTextCursor ref(&reference);
+        ref.setPosition(p);
+        if (ref.position() != p) // (Inside a surrogate pair.)
+            continue;
+        for (const auto &[mods, move] : moves) {
+            QTextCursor c(m_doc);
+            c.setPosition(p);
+            m_view->setTextCursor(c);
+            QTest::keyClick(m_view, move.first, mods);
+            QTextCursor expected(&reference);
+            expected.setPosition(p);
+            expected.movePosition(move.second);
+            QVERIFY2(m_view->textCursor().position() == expected.position(),
+                     qPrintable(QStringLiteral("%1 from %2: %3, Qt %4")
+                                    .arg(int(move.second)).arg(p).arg(m_view->textCursor().position()).arg(expected.position())));
+        }
+    }
+    // Backspace and Delete take what Qt's moves would.
+    for (int p : {1, 20001, 25005, int(line.size()) - 2}) {
+        for (const auto &[key, op] : {std::pair{Qt::Key_Backspace, QTextCursor::PreviousCharacter},
+                                      std::pair{Qt::Key_Delete, QTextCursor::NextCharacter}}) {
+            setText(line + QStringLiteral("\nshort"));
+            QTextCursor c(m_doc);
+            c.setPosition(p);
+            m_view->setTextCursor(c);
+            QTest::keyClick(m_view, key);
+            reference.setPlainText(line + QStringLiteral("\nshort"));
+            QTextCursor r(&reference);
+            r.setPosition(p);
+            r.movePosition(op, QTextCursor::KeepAnchor);
+            r.removeSelectedText();
+            QCOMPARE(text(), reference.toPlainText());
+        }
+    }
+}
+
 void TestTextView::longLineEditsLookAsLaidOutAfresh()
 {
     // Edits lay out again only the pieces they reach; the line looks as a
@@ -2618,6 +2680,38 @@ void TestTextView::longLineInColumns()
         m_view->setColumnsShown(false);
         QTest::keyClick(m_view, Qt::Key_Z, Qt::ControlModifier);
     }
+}
+
+void TestTextView::longLineTypingIsFast()
+{
+    // A key in a line of a megabyte lays out a piece or two, not the line
+    // (a fifth of a second a key before; a few milliseconds now).
+    m_view->setWordWrap(false);
+    const QString line = longLine(QStringLiteral("{\"id\":12345,\"name\":\"value\",\"list\":[1,2,3]},"), 1'000'000);
+    setText(line);
+    QTextCursor c(m_doc);
+    c.setPosition(500'000);
+    m_view->setTextCursor(c);
+    m_view->grab();
+    for (bool wrap : {false, true}) {
+        m_view->setWordWrap(wrap);
+        m_view->grab();
+        // The fastest of three tries: a loaded machine stalls now and then.
+        qint64 fastest = LLONG_MAX;
+        for (int attempt = 0; attempt < 3 && fastest >= 20 * 60; ++attempt) {
+            QElapsedTimer timer;
+            timer.start();
+            for (int i = 0; i < 10; ++i) {
+                QTest::keyClick(m_view, Qt::Key_A);
+                m_view->grab();
+                QTest::keyClick(m_view, Qt::Key_Backspace);
+                m_view->grab();
+            }
+            fastest = qMin(fastest, timer.elapsed());
+        }
+        QVERIFY2(fastest < 20 * 60, qPrintable(QString::number(fastest)));
+    }
+    QCOMPARE(m_doc->firstBlock().text(), line);
 }
 
 QTEST_MAIN(TestTextView)

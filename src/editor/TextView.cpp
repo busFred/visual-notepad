@@ -2169,10 +2169,52 @@ void TextView::contextMenuEvent(QContextMenuEvent *event)
 void TextView::moveCarets(QTextCursor::MoveOperation op, bool select)
 {
     for (Caret &caret : m_carets) {
-        caret.cursor.movePosition(op, select ? QTextCursor::KeepAnchor : QTextCursor::MoveAnchor);
+        moveCursor(caret.cursor, op, select ? QTextCursor::KeepAnchor : QTextCursor::MoveAnchor);
         caret.desiredX = -1;
     }
     caretsChanged();
+}
+
+void TextView::moveCursor(QTextCursor &cursor, QTextCursor::MoveOperation op, QTextCursor::MoveMode mode) const
+{
+    const bool back = op == QTextCursor::PreviousCharacter || op == QTextCursor::PreviousWord;
+    const bool words = op == QTextCursor::PreviousWord || op == QTextCursor::NextWord;
+    const QTextBlock block = cursor.block();
+    const int length = block.length() - 1;
+    if (!(back || words || op == QTextCursor::NextCharacter) || length <= LineLayout::piecesFrom) {
+        cursor.movePosition(op, mode);
+        return;
+    }
+    // As QTextDocumentPrivate::previous/nextCursorPosition(): across the
+    // line break at either end, else the block layout's answer, here a
+    // layout of the text around. One that lands on an end of that text
+    // (a long word) asks again with more around.
+    const int pos = cursor.positionInBlock();
+    int target = pos;
+    if (back && pos == 0) {
+        target = -1;
+    } else if (!back && pos == length) {
+        target = length + 1;
+    } else {
+        const auto mode = words ? QTextLayout::SkipWords : QTextLayout::SkipCharacters;
+        for (int reach = 1024;; reach *= 4) {
+            const int from = qMax(0, pos - reach);
+            const int to = qMin(length, pos + reach);
+            QString text(to - from, Qt::Uninitialized);
+            for (int i = from; i < to; ++i)
+                text[i - from] = m_doc->characterAt(block.position() + i);
+            QTextLayout around(text);
+            const int found = from + (back ? around.previousCursorPosition(pos - from, mode)
+                                           : around.nextCursorPosition(pos - from, mode));
+            if ((found > from || from == 0) && (found < to || to == length)) {
+                target = found;
+                break;
+            }
+        }
+    }
+    const int position = qBound(0, block.position() + target, m_doc->characterCount() - 1);
+    if (position != cursor.position())
+        cursor.setPosition(position, mode);
 }
 
 void TextView::moveCaretsHome(bool select)
@@ -2798,12 +2840,12 @@ void TextView::deleteAtCarets(QTextCursor::MoveOperation op)
                 const int pos = c.positionInBlock();
                 if (leadingWhitespace(text) >= pos && text.left(pos).count(u' ') == pos) {
                     const int remove = ((pos - 1) % m_tabWidth) + 1;
-                    c.movePosition(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor, remove);
+                    c.setPosition(c.position() - remove, QTextCursor::KeepAnchor); // (Spaces.)
                     c.removeSelectedText();
                     return removedAt();
                 }
             }
-            c.movePosition(op, QTextCursor::KeepAnchor);
+            moveCursor(c, op, QTextCursor::KeepAnchor);
         }
         c.removeSelectedText();
         caret.desiredX = -1;
@@ -3072,7 +3114,7 @@ bool TextView::autoCloseBrackets(QChar open)
     for (Caret &caret : m_carets) {
         QTextCursor &c = caret.cursor;
         c.insertText(QString(open) + close);
-        c.movePosition(QTextCursor::PreviousCharacter);
+        c.setPosition(c.position() - 1); // Before the closer.
         AutoClosed entry;
         entry.inner = QTextCursor(m_doc);
         entry.inner.setPosition(c.position());
@@ -3206,7 +3248,7 @@ void TextView::outdent()
         if (remove == 0)
             continue;
         QTextCursor c(block);
-        c.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor, remove);
+        c.setPosition(c.position() + remove, QTextCursor::KeepAnchor); // (Spaces or a tab.)
         c.removeSelectedText();
     }
     endEdit();

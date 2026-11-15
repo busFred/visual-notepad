@@ -602,6 +602,11 @@ private:
 
     // Caret helpers.
     void moveCarets(QTextCursor::MoveOperation op, bool select);
+    // QTextCursor::movePosition(); a character or word move in a very long
+    // line looks only at the text around the cursor (Qt works out the
+    // whole line's character attributes first: a tenth of a second on a
+    // 3 MB line, again after every edit).
+    void moveCursor(QTextCursor &cursor, QTextCursor::MoveOperation op, QTextCursor::MoveMode mode) const;
     void moveCaretsVertically(int lines, bool select);
     bool moveVertically(Caret &caret, int direction, QTextCursor::MoveMode mode);
     void moveCaretsHome(bool select);
