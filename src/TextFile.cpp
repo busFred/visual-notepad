@@ -1041,12 +1041,17 @@ QString TextFile::languageName() const
 
 QString TextFile::text() const
 {
+    QString text = rawText();
+    text.replace(QChar::ParagraphSeparator, u'\n');
+    return text;
+}
+
+QString TextFile::rawText() const
+{
     if (isLoading())
         return {};
     // toPlainText() would turn non-breaking spaces into spaces.
-    QString text = m_doc->toRawText();
-    text.replace(QChar::ParagraphSeparator, u'\n');
-    return text;
+    return m_doc->toRawText();
 }
 
 MarkdownModel *TextFile::markdownModel()

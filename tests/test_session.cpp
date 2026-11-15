@@ -13,6 +13,7 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -20,11 +21,16 @@
 #include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
+#include <QSemaphore>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextCursor>
 #include <QTextDocument>
+#include <QThread>
 #include <QTimer>
+
+#include <atomic>
+#include <thread>
 
 #ifdef Q_OS_UNIX
 #include <csignal>
@@ -47,6 +53,10 @@ private Q_SLOTS:
     void discardedTabIsNotRecovered();
     void closeOthersDropsBackupsAtOnce();
     void unchangedBackupIsNotRewritten();
+    void backupIsWrittenOffTheWindowThread();
+    void editDuringBackupIsBackedUpNext();
+    void saveSessionWaitsForBackup();
+    void quitDuringBackupLeavesNoBackup();
     void quitPrompts();
     void recoveryOff();
     void recentFiles();
@@ -77,10 +87,17 @@ private:
     // The paths session.json lists for its first window, in grid order.
     static QList<QStringList> storedGroups();
     int backupCount() const;
+    // `count` backup files, and no write still to be taken over.
+    bool backupsWritten(int count) const;
+    // The backup session.json lists for its first window's first tab.
+    static QString storedBackup();
     void closeWindows();
 
     QTemporaryDir m_dir;
     QTimer m_watcher;
+    // For the tests holding a backup write in flight.
+    std::atomic<bool> m_entered{false};
+    QSemaphore m_gate;
     int m_prompts = 0;
     QList<QPointer<MainWindow>> m_made;
 };
@@ -115,6 +132,9 @@ void TestSession::init()
 
 void TestSession::cleanup()
 {
+    SessionManager::setBackupHook({});
+    // A failed test must not leave the helper waiting.
+    m_gate.release(100);
     closeWindows();
 }
 
@@ -208,6 +228,27 @@ int TestSession::backupCount() const
     return QDir(SessionManager::dataDir() + QStringLiteral("/backups")).entryList(QDir::Files).size();
 }
 
+bool TestSession::backupsWritten(int count) const
+{
+    return backupCount() == count && !SessionManager::instance().isBackingUp();
+}
+
+QString TestSession::storedBackup()
+{
+    return QJsonDocument::fromJson(read(SessionManager::dataDir() + QStringLiteral("/session.json")))
+        .object()
+        .value(QStringLiteral("windows"))
+        .toArray()
+        .at(0)
+        .toObject()
+        .value(QStringLiteral("tabs"))
+        .toArray()
+        .at(0)
+        .toObject()
+        .value(QStringLiteral("backup"))
+        .toString();
+}
+
 void TestSession::roundTrip()
 {
     Settings::instance().setValue(key::restoreSession, true);
@@ -269,7 +310,7 @@ void TestSession::crashRecovery()
     window->newFile(); // Empty untitled: nothing to keep.
 
     // Backed up shortly after the edits, without quitting.
-    QTRY_COMPARE_WITH_TIMEOUT(backupCount(), 2, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(backupsWritten(2), 5000);
     QCOMPARE(read(f), QByteArray("a\r\nb\r\n"));
     closeWindows(); // A crash: no close events, no prompts.
     QCOMPARE(m_prompts, 0);
@@ -299,7 +340,7 @@ void TestSession::discardedTabIsNotRecovered()
     append(window->tabs().at(0), QStringLiteral("keep"));
     window->newFile();
     append(window->tabs().at(1), QStringLiteral("throw away"));
-    QTRY_COMPARE_WITH_TIMEOUT(backupCount(), 2, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(backupsWritten(2), 5000);
 
     QVERIFY(window->closeTabs(1, MainWindow::CloseScope::This)); // The watcher discards.
     QCOMPARE(m_prompts, 1);
@@ -319,7 +360,7 @@ void TestSession::closeOthersDropsBackupsAtOnce()
         window->newFile();
         append(window->tabs().last(), text);
     }
-    QTRY_COMPARE_WITH_TIMEOUT(backupCount(), 3, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(backupsWritten(3), 5000);
 
     // One session write for the batch, done before closeTabs returns.
     QVERIFY(window->closeTabs(0, MainWindow::CloseScope::Others)); // The watcher discards.
@@ -368,6 +409,155 @@ void TestSession::unchangedBackupIsNotRewritten()
     QCOMPARE(read(path), QByteArray("one two"));
 }
 
+// The timer's backup copies the text and leaves the encoding and writing to a
+// helper thread: while the helper is held before its first file, the window
+// thread is free, nothing is written, and a backup file appears, with the
+// session pointing at it, only once the helper is done.
+void TestSession::backupIsWrittenOffTheWindowThread()
+{
+    auto &session = SessionManager::instance();
+    m_entered = false;
+    m_gate.acquire(m_gate.available());
+    QThread *helper = nullptr;
+    SessionManager::setBackupHook([&] {
+        helper = QThread::currentThread();
+        m_entered = true;
+        m_gate.acquire();
+    });
+    MainWindow *window = makeWindow();
+    window->newFile();
+    DocumentTab *tab = window->tabs().at(0);
+    append(tab, QStringLiteral("one\nline two é"));
+    QTRY_VERIFY_WITH_TIMEOUT(m_entered.load(), 5000);
+    QVERIFY(helper && helper != QThread::currentThread());
+    QVERIFY(session.isBackingUp());
+    QCOMPARE(backupCount(), 0);
+    QVERIFY(storedBackup().isEmpty());
+    // The window thread keeps going.
+    QTest::qWait(50);
+    QVERIFY(session.isBackingUp());
+
+    m_gate.release();
+    QTRY_VERIFY_WITH_TIMEOUT(backupsWritten(1), 5000);
+    const QString name = tab->file()->backupName();
+    QVERIFY(!name.isEmpty());
+    QCOMPARE(storedBackup(), name);
+    QCOMPARE(read(SessionManager::dataDir() + QStringLiteral("/backups/") + name), QByteArray("one\nline two \xC3\xA9"));
+}
+
+// An edit made while a write is in flight is not lost and does not make the
+// write stale: the file keeps the text it was copied from (a complete
+// backup the session may point at) until the next round replaces it, under
+// the same name, with the newest text.
+void TestSession::editDuringBackupIsBackedUpNext()
+{
+    auto &session = SessionManager::instance();
+    m_entered = false;
+    m_gate.acquire(m_gate.available());
+    std::atomic<int> writes{0};
+    SessionManager::setBackupHook([&] {
+        if (writes++ != 0)
+            return;
+        m_entered = true;
+        m_gate.acquire();
+    });
+    MainWindow *window = makeWindow();
+    window->newFile();
+    DocumentTab *tab = window->tabs().at(0);
+    append(tab, QStringLiteral("one"));
+    QTRY_VERIFY_WITH_TIMEOUT(m_entered.load(), 5000);
+    append(tab, QStringLiteral(" two"));
+    m_gate.release();
+    QTRY_VERIFY_WITH_TIMEOUT(backupsWritten(1), 5000);
+    const QString name = tab->file()->backupName();
+    const QString path = SessionManager::dataDir() + QStringLiteral("/backups/") + name;
+    QCOMPARE(storedBackup(), name);
+    QCOMPARE(read(path), QByteArray("one"));
+    QVERIFY(tab->isModified());
+
+    // The next round, a timer period later.
+    QTRY_COMPARE_WITH_TIMEOUT(read(path), QByteArray("one two"), 6000);
+    QTRY_VERIFY_WITH_TIMEOUT(!session.isBackingUp(), 5000);
+    QCOMPARE(writes.load(), 2);
+    QCOMPARE(tab->file()->backupName(), name);
+    QCOMPARE(storedBackup(), name);
+    QCOMPARE(backupCount(), 1);
+    // Nothing is left to do: another round would not write again.
+    QTest::qWait(2300);
+    QCOMPARE(writes.load(), 2);
+}
+
+// Whatever saves the session (a forced close, a logout) while a write is in
+// flight waits for it, and then finds a complete backup of the text.
+void TestSession::saveSessionWaitsForBackup()
+{
+    auto &session = SessionManager::instance();
+    m_entered = false;
+    m_gate.acquire(m_gate.available());
+    std::atomic<int> writes{0};
+    SessionManager::setBackupHook([&] {
+        ++writes;
+        m_entered = true;
+        m_gate.acquire();
+    });
+    MainWindow *window = makeWindow();
+    window->newFile();
+    DocumentTab *tab = window->tabs().at(0);
+    append(tab, QStringLiteral("typed just now"));
+    QTRY_VERIFY_WITH_TIMEOUT(m_entered.load(), 5000);
+    QVERIFY(session.isBackingUp());
+
+    std::thread releaser([&] {
+        QThread::msleep(300);
+        m_gate.release();
+    });
+    QElapsedTimer elapsed;
+    elapsed.start();
+    const bool saved = session.saveSession().isEmpty();
+    releaser.join();
+    QVERIFY(saved);
+    QVERIFY(elapsed.elapsed() >= 250); // it waited
+    QVERIFY(!session.isBackingUp());
+    QCOMPARE(writes.load(), 1); // and did not write the same text again
+    const QString name = tab->file()->backupName();
+    QVERIFY(!name.isEmpty());
+    QCOMPARE(storedBackup(), name);
+    QCOMPARE(read(SessionManager::dataDir() + QStringLiteral("/backups/") + name), QByteArray("typed just now"));
+    // No temporary file of the write is left beside it.
+    QCOMPARE(QDir(SessionManager::dataDir() + QStringLiteral("/backups")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 1);
+}
+
+// A quit during a write: the write finishes first, then the discarded text
+// is removed, and the finished write cannot put its file back afterwards.
+void TestSession::quitDuringBackupLeavesNoBackup()
+{
+    auto &session = SessionManager::instance();
+    m_entered = false;
+    m_gate.acquire(m_gate.available());
+    SessionManager::setBackupHook([&] {
+        m_entered = true;
+        m_gate.acquire();
+    });
+    MainWindow *window = makeWindow();
+    window->newFile();
+    append(window->tabs().at(0), QStringLiteral("thrown away"));
+    QTRY_VERIFY_WITH_TIMEOUT(m_entered.load(), 5000);
+
+    std::thread releaser([&] {
+        QThread::msleep(300);
+        m_gate.release();
+    });
+    const bool quit = session.quit(); // asks; the watcher discards
+    releaser.join();
+    QVERIFY(quit);
+    QCOMPARE(m_prompts, 1);
+    QVERIFY(!session.isBackingUp());
+    QCOMPARE(backupCount(), 0);
+    QTest::qWait(300);
+    QCOMPARE(backupCount(), 0);
+    QCOMPARE(QDir(SessionManager::dataDir() + QStringLiteral("/backups")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), 0);
+}
+
 void TestSession::quitPrompts()
 {
     const QString f = write("f.txt", "a\n");
@@ -377,7 +567,7 @@ void TestSession::quitPrompts()
     window->newFile();
     append(window->tabs().at(1), QStringLiteral("scratch"));
     window->newFile(); // Empty untitled never prompts.
-    QTRY_COMPARE_WITH_TIMEOUT(backupCount(), 2, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(backupsWritten(2), 5000);
 
     QVERIFY(SessionManager::instance().quit());
     QCOMPARE(m_prompts, 2);

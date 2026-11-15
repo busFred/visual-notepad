@@ -102,6 +102,9 @@ public:
     QString errorString() const { return m_error; }
     QTextDocument *document() const { return m_doc; }
     QString text() const;
+    // text() before its block separators (U+2029) became newlines: only the
+    // copy, so a worker can do the rest.
+    QString rawText() const;
     bool isModified() const;
     bool isMarkdown() const;
     QString languageName() const;
