@@ -371,6 +371,21 @@ void wheel(TextView *view, qreal dy)
 
 } // namespace
 
+// Counts what the view's viewport is asked to paint.
+class PaintSpy : public QObject
+{
+public:
+    QList<QRect> rects;
+
+protected:
+    bool eventFilter(QObject *, QEvent *event) override
+    {
+        if (event->type() == QEvent::Paint)
+            rects.append(static_cast<QPaintEvent *>(event)->rect());
+        return false;
+    }
+};
+
 class TestVisualView : public QObject
 {
     Q_OBJECT
@@ -381,6 +396,7 @@ private Q_SLOTS:
     void cleanup();
 
     void blocksWithoutCaretAreRendered();
+    void caretBlinkRepaintsOnlyTheCaretsRow();
     void caretExpandsItsBlock();
     void typingInExpandedBlockKeepsRows();
     void singleClickKeepsTheBlockRendered();
@@ -699,6 +715,28 @@ void TestVisualView::openLongDocument()
     m_source->activateWindow();
     m_source->setFocus();
     QVERIFY(QTest::qWaitForWindowActive(m_source));
+}
+
+void TestVisualView::caretBlinkRepaintsOnlyTheCaretsRow()
+{
+    // A blink repaints the row the caret is drawn in, not the whole view, and
+    // the view painted there is what a whole repaint gives.
+    QWidget *viewport = m_view->viewport();
+    PaintSpy spy;
+    viewport->installEventFilter(&spy);
+    for (const int line : {4, 10, 24}) { // A blank line, a paragraph, a table row.
+        m_view->setTextCursor(QTextCursor(m_doc->findBlockByNumber(line)));
+        QTest::qWait(100);
+        const QImage before = viewport->grab().toImage();
+        spy.rects.clear();
+        QTRY_VERIFY_WITH_TIMEOUT(!spy.rects.isEmpty(), 3000);
+        const QRect strip = spy.rects.first();
+        QVERIFY2(strip.height() < viewport->height() / 2,
+                 qPrintable(QStringLiteral("line %1: repainted %2x%3").arg(line).arg(strip.width()).arg(strip.height())));
+        QImage composed = before;
+        viewport->render(&composed, strip.topLeft(), QRegion(strip));
+        QVERIFY2(composed == viewport->grab().toImage(), qPrintable(QStringLiteral("line %1").arg(line)));
+    }
 }
 
 void TestVisualView::blocksWithoutCaretAreRendered()

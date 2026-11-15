@@ -20,6 +20,7 @@
 #include <QString>
 #include <QStringList>
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -354,6 +355,10 @@ protected:
     void setScrollBarsHidden(bool hidden);
     // Whether the blinking carets are drawn at the moment.
     bool caretBlinkOn() const { return m_caretOn; }
+    // Whether the rows are laid out as in the scrolling view (or in columns),
+    // so that a blink can repaint just where the carets are; a view that
+    // draws its carets by other rules says no, and the blink repaints it all.
+    virtual bool caretRectsKnown() const { return true; }
     // Called when an edit made through this view starts (once per undo step,
     // also for undo and redo), before the document changes.
     virtual void editStarting() {}
@@ -502,6 +507,19 @@ private:
     void beginEdit();
     void endEdit();
     void deleteAtCarets(QTextCursor::MoveOperation op);
+    // What an edit at a caret changed: `removed` characters at `at` went, then
+    // `added` came there.
+    struct CaretChange
+    {
+        int at = 0;
+        int removed = 0;
+        int added = 0;
+    };
+    // Runs `edit` at each caret in turn, on a cursor put where the caret is
+    // (and left where the caret goes, nothing selected), and puts the carets
+    // there. Within beginEdit()/endEdit(). Moving the carets as numbers, not as
+    // N live cursors, keeps it from taking N times N moves.
+    void editAtCarets(const std::function<CaretChange(Caret &)> &edit);
     void insertNewline();
     void insertTab();
     // Auto-closing, overtyping and surrounding for one typed ASCII character.
@@ -602,11 +620,15 @@ private:
         bool recolorSelection = false;
     };
     LinePaintState linePaintState() const;
+    // `visible` is the part of the view being painted: rows of a long line
+    // outside it are skipped.
     void paintSourceLine(QPainter &painter, int lineNo, const QPointF &origin, const QRectF &shade,
-                         const LinePaintState &state);
+                         const QRectF &visible, const LinePaintState &state);
     QTextCursor wordAt(const QTextCursor &cursor) const;
     QTextCursor findNext(const QString &text, int from) const;
     void restartBlink();
+    // Repaints what a blink of the carets changes: where they are drawn.
+    void updateBlinkingCarets();
     void selectByUnit(const QPointF &point, bool extend);
     // Box selection from the anchor to the point.
     bool columnSelectTo(const QPointF &point);

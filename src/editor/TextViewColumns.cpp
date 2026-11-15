@@ -813,7 +813,9 @@ void TextView::paintColumns(QPaintEvent *event)
                 // long line scrolls in it); room for a caret at the end.
                 painter.setClipRect(QRectF(left + gutter, y, l.columnWidth() - gutter + 2, h));
                 paintSourceLine(painter, s.row, QPointF(text.x(), rowTop),
-                                QRectF(left + gutter, rowTop, l.columnWidth() - gutter, rowHeight), state);
+                                QRectF(left + gutter, rowTop, l.columnWidth() - gutter, rowHeight),
+                                QRectF(left + gutter, y, l.columnWidth() - gutter + 2, h).intersected(event->rect()),
+                                state);
                 painter.restore();
                 // The number goes on a line's first row: a wrapped row, or a
                 // line going on from the column before, has none.

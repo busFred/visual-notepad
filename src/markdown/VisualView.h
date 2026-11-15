@@ -230,6 +230,7 @@ protected:
     qreal textWidth() const override;
     int rowAtPoint(const QPointF &point, QPointF *origin) override;
     int positionAt(const QPointF &point) override;
+    bool caretRectsKnown() const override { return !readActive(); }
 
 private:
     struct RowInfo

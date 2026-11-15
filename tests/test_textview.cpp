@@ -21,7 +21,10 @@
 #include <QWheelEvent>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QRandomGenerator>
 
+#include <algorithm>
+#include <functional>
 #include <tuple>
 
 using vn::TextView;
@@ -34,6 +37,21 @@ public:
     qreal left() const { return textLeft(); }
     int rowHeight() const { return lineHeight(); }
     int positionAtPoint(const QPointF &point) { return positionAt(point); }
+};
+
+// Counts what the view's viewport is asked to paint.
+class PaintSpy : public QObject
+{
+public:
+    QList<QRect> rects;
+
+protected:
+    bool eventFilter(QObject *, QEvent *event) override
+    {
+        if (event->type() == QEvent::Paint)
+            rects.append(static_cast<QPaintEvent *>(event)->rect());
+        return false;
+    }
 };
 
 class TestTextView : public QObject
@@ -68,6 +86,8 @@ private Q_SLOTS:
     void deleteLines();
     void tabAndOutdent();
     void undoRevertsMultiCaretEditAtOnce();
+    void manyCaretsEditAsLiveCursorsDo();
+    void manyCaretsUndoAndRedoInOneStep();
     void undoRestoresCaretAtEdit();
     void toggleLineComment();
     void backspaceInIndentGoesToTabStop();
@@ -75,6 +95,8 @@ private Q_SLOTS:
     void smartHome();
     void escapeCollapsesCarets();
     void lineCacheFollowsEdits();
+    void caretBlinkRepaintsOnlyTheCaret();
+    void longLinePaintsTheSameInStrips();
     void surroundSelection();
     void surroundRepeatsAndMultiCaret();
     void surroundPairsDependOnLanguage();
@@ -372,6 +394,143 @@ void TestTextView::undoRevertsMultiCaretEditAtOnce()
     QCOMPARE(text(), QStringLiteral("\n\n"));
 }
 
+// The text and carets a key must leave, found with a live QTextCursor for
+// each caret (a second document, the way every edit once went).
+static QString editedByLiveCursors(const QList<QTextCursor> &carets, const std::function<void(QTextCursor &)> &edit,
+                                   QStringList *carets_)
+{
+    QTextDocument reference;
+    reference.setPlainText(carets.first().document()->toPlainText());
+    QList<QTextCursor> live;
+    for (const QTextCursor &c : carets) {
+        QTextCursor copy(&reference);
+        copy.setPosition(c.anchor());
+        copy.setPosition(c.position(), QTextCursor::KeepAnchor);
+        live.append(copy);
+    }
+    for (QTextCursor &c : live)
+        edit(c);
+    // The view merges carets that come to touch.
+    std::vector<std::pair<int, int>> ranges;
+    for (const QTextCursor &c : std::as_const(live))
+        ranges.emplace_back(c.selectionStart(), c.selectionEnd());
+    std::sort(ranges.begin(), ranges.end());
+    carets_->clear();
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        if (i > 0 && ranges[i] == ranges[i - 1])
+            continue;
+        carets_->append(QStringLiteral("%1-%2").arg(ranges[i].first).arg(ranges[i].second));
+    }
+    return reference.toPlainText();
+}
+
+void TestTextView::manyCaretsEditAsLiveCursorsDo()
+{
+    // Edits go through all the carets as numbers, not as live cursors that every
+    // change would move (see CaretSpans): the same text and carets must come
+    // out, also where carets touch or an edit reaches into the next.
+    QRandomGenerator random(20260114);
+    struct Key
+    {
+        Qt::Key key;
+        Qt::KeyboardModifiers mods;
+        QString text; // Typed (empty: the key's own).
+        std::function<void(QTextCursor &)> edit;
+    };
+    const std::vector<Key> keys = {
+        {Qt::Key_Z, Qt::NoModifier, QStringLiteral("z"), [](QTextCursor &c) { c.insertText(QStringLiteral("z")); }},
+        {Qt::Key_Space, Qt::NoModifier, QStringLiteral(" "), [](QTextCursor &c) { c.insertText(QStringLiteral(" ")); }},
+        {Qt::Key_Backspace, Qt::NoModifier, {}, [](QTextCursor &c) {
+             if (!c.hasSelection())
+                 c.movePosition(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor);
+             c.removeSelectedText();
+         }},
+        {Qt::Key_Delete, Qt::NoModifier, {}, [](QTextCursor &c) {
+             if (!c.hasSelection())
+                 c.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
+             c.removeSelectedText();
+         }},
+        {Qt::Key_Backspace, Qt::ControlModifier, {}, [](QTextCursor &c) {
+             if (!c.hasSelection())
+                 c.movePosition(QTextCursor::PreviousWord, QTextCursor::KeepAnchor);
+             c.removeSelectedText();
+         }},
+        {Qt::Key_Delete, Qt::ControlModifier, {}, [](QTextCursor &c) {
+             if (!c.hasSelection())
+                 c.movePosition(QTextCursor::NextWord, QTextCursor::KeepAnchor);
+             c.removeSelectedText();
+         }},
+    };
+    for (int round = 0; round < 60; ++round) {
+        QStringList lines;
+        for (int i = 0; i < 40; ++i) {
+            QString line;
+            for (int w = random.bounded(0, 7); w > 0; --w)
+                line += QStringLiteral("word%1 ").arg(random.bounded(100));
+            lines << line;
+        }
+        setText(lines.join(u'\n'));
+        const int length = m_doc->characterCount() - 1;
+        // Carets close together (words are 5 to 7 characters long), some
+        // selecting, some touching.
+        QList<QTextCursor> chosen;
+        for (int pos = random.bounded(0, 6); pos < length;) {
+            QTextCursor c(m_doc);
+            const int width = random.bounded(0, 4) == 0 ? random.bounded(1, 12) : 0;
+            c.setPosition(pos);
+            c.setPosition(qMin(length, pos + width), QTextCursor::KeepAnchor);
+            chosen.append(c);
+            pos += width + random.bounded(0, 3) * random.bounded(1, 9);
+        }
+        if (chosen.isEmpty())
+            continue;
+        m_view->setCursors(chosen, chosen.size() / 2);
+        const Key &key = keys[round % keys.size()];
+        const QList<QTextCursor> before = m_view->cursors();
+        QStringList expectedCarets;
+        const QString expected = editedByLiveCursors(before, key.edit, &expectedCarets);
+        if (key.text.isEmpty())
+            QTest::keyClick(m_view, key.key, key.mods);
+        else
+            QTest::keyClicks(m_view, key.text);
+        QStringList carets;
+        for (const QTextCursor &c : m_view->cursors())
+            carets << QStringLiteral("%1-%2").arg(c.selectionStart()).arg(c.selectionEnd());
+        const QString what = QStringLiteral("round %1, key %2").arg(round).arg(round % keys.size());
+        QVERIFY2(text() == expected, qPrintable(what + QStringLiteral(": text")));
+        QVERIFY2(carets == expectedCarets, qPrintable(what + QStringLiteral(": carets %1 against %2")
+                                                          .arg(carets.join(u' '), expectedCarets.join(u' '))));
+    }
+}
+
+void TestTextView::manyCaretsUndoAndRedoInOneStep()
+{
+    QStringList lines;
+    for (int i = 0; i < 3000; ++i)
+        lines << QStringLiteral("lorem %1 lorem").arg(i);
+    const QString original = lines.join(u'\n');
+    setText(original);
+    selectRange(0, 5);
+    m_view->selectAllOccurrences();
+    QCOMPARE(m_view->cursorCount(), 6000);
+    QTest::keyClick(m_view, Qt::Key_Z);
+    const QString typed = text();
+    QVERIFY(typed.startsWith(QStringLiteral("z 0 z\nz 1 z")));
+    QCOMPARE(m_view->cursorCount(), 6000);
+    m_view->undo();
+    QCOMPARE(text(), original); // One step.
+    QCOMPARE(m_view->cursorCount(), 6000);
+    QVERIFY(m_view->textCursor().hasSelection());
+    m_view->redo();
+    QCOMPARE(text(), typed);
+    QCOMPARE(m_view->cursorCount(), 6000);
+    m_view->undo();
+    QCOMPARE(text(), original);
+    // Typing again over the carets undone to goes on as before.
+    QTest::keyClick(m_view, Qt::Key_Y);
+    QVERIFY(text().startsWith(QStringLiteral("y 0 y\ny 1 y")));
+}
+
 void TestTextView::undoRestoresCaretAtEdit()
 {
     QStringList lines;
@@ -481,6 +640,76 @@ void TestTextView::lineCacheFollowsEdits()
     m_doc->setPlainText(QStringLiteral("only"));
     QVERIFY(!m_view->grab().isNull());
     QCOMPARE(m_doc->blockCount(), 1);
+}
+
+void TestTextView::caretBlinkRepaintsOnlyTheCaret()
+{
+    // A blink repaints a strip where the caret is, and the view painted there is
+    // what a whole repaint gives.
+    QStringList lines;
+    for (int i = 0; i < 60; ++i)
+        lines << QStringLiteral("line %1 with some words in it").arg(i);
+    setText(lines.join(u'\n'));
+    place(5, 7);
+    QWidget *viewport = m_view->viewport();
+    PaintSpy spy;
+    viewport->installEventFilter(&spy);
+    const auto checkBlink = [&](const QString &what) {
+        QTest::qWait(100);
+        const QImage before = viewport->grab().toImage();
+        spy.rects.clear();
+        QTRY_VERIFY_WITH_TIMEOUT(!spy.rects.isEmpty(), 3000);
+        const QRect strip = spy.rects.first();
+        QVERIFY2(strip.width() < 60 && strip.height() < 3 * static_cast<ProbeView *>(m_view)->rowHeight(),
+                 qPrintable(QStringLiteral("%1: repainted %2x%3").arg(what).arg(strip.width()).arg(strip.height())));
+        QImage composed = before;
+        viewport->render(&composed, strip.topLeft(), QRegion(strip));
+        QVERIFY2(composed != before, qPrintable(what)); // The caret went or came.
+        QVERIFY2(composed == viewport->grab().toImage(), qPrintable(what));
+    };
+    checkBlink(QStringLiteral("scrolling"));
+    if (QTest::currentTestFailed())
+        return;
+    m_view->resize(1400, 500);
+    m_view->setColumnChars(50);
+    m_view->setColumnsShown(true);
+    place(5, 7);
+    checkBlink(QStringLiteral("in columns"));
+}
+
+void TestTextView::longLinePaintsTheSameInStrips()
+{
+    // A long line is drawn only where the view is painted; painting the view
+    // a strip at a time (as a caret blink or an uncovered edge does) must give
+    // what painting it whole does, selection and highlights included.
+    QString line;
+    for (int i = 0; i < 4000; ++i)
+        line += QStringLiteral("word%1 lorem ").arg(i);
+    setText(line + QStringLiteral("\nshort line\n") + line);
+    m_view->setSearchHighlights(vn::search::findAll(m_doc, vn::search::Options{"lorem", false, false, false}), 3);
+    selectRange(900, 41000);
+    const auto compareInStrips = [&](const QString &what) {
+        const QImage whole = m_view->viewport()->grab().toImage();
+        const int w = whole.width();
+        const int h = whole.height();
+        const int strip = 37; // Not a multiple of the row height.
+        for (int y = 0; y < h; y += strip) {
+            const QRect rect(0, y, w, qMin(strip, h - y));
+            QImage part(whole.size(), whole.format());
+            part.fill(Qt::magenta);
+            m_view->viewport()->render(&part, rect.topLeft(), QRegion(rect));
+            QVERIFY2(part.copy(rect) == whole.copy(rect), qPrintable(QStringLiteral("%1, strip at %2").arg(what).arg(y)));
+        }
+    };
+    for (const int top : {0, 90, 400}) {
+        m_view->verticalScrollBar()->setValue(top);
+        compareInStrips(QStringLiteral("scrolled to %1").arg(top));
+    }
+    // The same line in columns, which cut the line at their edges.
+    m_view->resize(1400, 500);
+    m_view->setColumnChars(50);
+    m_view->setColumnsShown(true);
+    compareInStrips(QStringLiteral("in columns"));
 }
 
 void TestTextView::addCursorsToLineEnds()

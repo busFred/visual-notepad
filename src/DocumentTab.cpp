@@ -8,6 +8,7 @@
 #include "editor/TextView.h"
 #include "markdown/MarkdownEditing.h"
 #include "markdown/MarkdownModel.h"
+#include "markdown/MathRenderer.h"
 #include "markdown/VisualView.h"
 
 #include <KSyntaxHighlighting/Definition>
@@ -374,6 +375,7 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
     connect(f, &TextFile::modificationChanged, this, &DocumentTab::modificationChanged);
     connect(f, &TextFile::contentsChanged, this, &DocumentTab::textChanged);
     connect(f, &TextFile::contentReset, this, &DocumentTab::resetCarets);
+    connect(f, &TextFile::contentReset, this, &DocumentTab::prepareMathWorker);
     connect(f, &TextFile::definitionChanged, this, &DocumentTab::onDefinitionChanged);
     connect(f, &TextFile::formatChanged, this, &DocumentTab::formatChanged);
     connect(f, &TextFile::indentationChanged, this, [this] {
@@ -530,6 +532,17 @@ bool DocumentTab::isReadOnly() const
     return m_editor->isReadOnly();
 }
 
+void DocumentTab::prepareMathWorker()
+{
+    // Math is between dollar signs (and nothing else is read as math), so a
+    // document with none has none; a very large one is not looked through.
+    constexpr int mostChars = 8 * 1024 * 1024;
+    if (!m_visual || !isMarkdown() || m_doc->characterCount() > mostChars)
+        return;
+    if (!m_doc->find(QStringLiteral("$")).isNull())
+        math::prepareWorker();
+}
+
 void DocumentTab::ensureVisualView()
 {
     if (m_visual)
@@ -547,6 +560,7 @@ void DocumentTab::ensureVisualView()
     connect(m_visual, &TextView::filesDropped, this, &DocumentTab::filesDropped);
     connect(m_file.get(), &TextFile::contentReset, m_visual, &VisualView::documentReset);
     m_visual->setDiagnostics(m_file->diagnostics());
+    prepareMathWorker();
     connect(m_visual, &TextView::scrolled, this, [this] { syncScroll(m_visual, m_editor); });
     connect(m_visual, &TextView::selectionChanged, this, [this] { mirrorSelection(m_visual, m_editor); });
     connect(m_visual, &TextView::cursorPositionChanged, this, [this] {

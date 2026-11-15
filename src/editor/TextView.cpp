@@ -401,10 +401,17 @@ void TextView::onDocumentChanged(int from, int charsRemoved, int charsAdded)
         m_tableRun = {};
         m_htmlRun = {};
     } else {
-        m_lines.erase(m_lines.begin() + first, m_lines.begin() + first + oldAffected);
-        std::vector<LineCache> fresh(newAffected);
-        m_lines.insert(m_lines.begin() + first, std::make_move_iterator(fresh.begin()),
-                       std::make_move_iterator(fresh.end()));
+        if (newAffected == oldAffected) {
+            // The lines keep their places: reset them where they are rather
+            // than shifting everything after them down and up again.
+            for (int i = first; i < first + newAffected; ++i)
+                m_lines[i] = LineCache();
+        } else {
+            m_lines.erase(m_lines.begin() + first, m_lines.begin() + first + oldAffected);
+            std::vector<LineCache> fresh(newAffected);
+            m_lines.insert(m_lines.begin() + first, std::make_move_iterator(fresh.begin()),
+                           std::make_move_iterator(fresh.end()));
+        }
         spliceFenceMarks(first, oldAffected, newAffected);
         spliceTableRun(first, oldAffected, newAffected);
     }
@@ -1138,7 +1145,7 @@ TextView::LinePaintState TextView::linePaintState() const
 }
 
 void TextView::paintSourceLine(QPainter &painter, int lineNo, const QPointF &origin, const QRectF &shade,
-                               const LinePaintState &state)
+                               const QRectF &visible, const LinePaintState &state)
 {
     const QTextBlock block = m_doc->findBlockByNumber(lineNo);
     QTextLayout *layout = layoutForLine(lineNo);
@@ -1150,14 +1157,23 @@ void TextView::paintSourceLine(QPainter &painter, int lineNo, const QPointF &ori
     const int blockStart = block.position();
     const int blockEnd = blockStart + block.length(); // Includes the separator.
 
+    // The wrapped rows that can reach `visible` (a line of a few hundred
+    // thousand characters has some thousands of rows, a screenful shows a few
+    // dozen): only these are filled, outlined and drawn. A row is
+    // m_lineHeight high and rows follow one another from `y`; one more each
+    // way for the rounding.
+    const int rowCount = layout->lineCount();
+    const int shownFirst = qBound(0, int(std::floor((visible.top() - y) / m_lineHeight)) - 1, rowCount);
+    const int shownEnd = qBound(0, int(std::ceil((visible.bottom() - y) / m_lineHeight)) + 2, rowCount);
+
     // Backgrounds are filled by hand so they span the full line height
     // (QTextLayout's own selection only covers the font height).
     const auto fillRange = [&](int start, int end, const QColor &color, bool newline) {
-        for (int i = 0; i < layout->lineCount(); ++i) {
+        for (int i = shownFirst; i < shownEnd; ++i) {
             const QTextLine textLine = layout->lineAt(i);
             const int ls = textLine.textStart();
             const int le = ls + textLine.textLength();
-            const bool last = i == layout->lineCount() - 1;
+            const bool last = i == rowCount - 1;
             const int s = qMax(start, ls);
             const int e = qMin(end, le);
             if (s > e || (s == e && !(newline && last && e == le)))
@@ -1204,7 +1220,8 @@ void TextView::paintSourceLine(QPainter &painter, int lineNo, const QPointF &ori
     }
 
     painter.setPen(theme::color(theme::Role::text));
-    layout->draw(&painter, origin, selectedText);
+    // (The clip is a line taller each way: it is only to skip rows.)
+    layout->draw(&painter, origin, selectedText, visible.adjusted(0, -m_lineHeight, 0, m_lineHeight));
 
     const auto &spans = state.diagnosticSpans;
     const auto &maxEnd = state.diagnosticMaxEnd;
@@ -1219,7 +1236,7 @@ void TextView::paintSourceLine(QPainter &painter, int lineNo, const QPointF &ori
         painter.setRenderHint(QPainter::Antialiasing, true);
         const int ds = qMax(rangeStart, blockStart) - blockStart;
         const int de = qMin(rangeEnd, blockEnd - 1) - blockStart;
-        for (int i = 0; i < layout->lineCount(); ++i) {
+        for (int i = shownFirst; i < shownEnd; ++i) {
             const QTextLine textLine = layout->lineAt(i);
             const int s = qMax(ds, textLine.textStart());
             const int e = qMin(de, textLine.textStart() + textLine.textLength());
@@ -1281,6 +1298,10 @@ void TextView::paintEvent(QPaintEvent *event)
     painter.setClipRect(QRectF(gutter, 0, viewport()->width() - gutter, height));
     qreal y = firstRowY();
     for (int r = m_topRow; r < rows && y < height; ++r) {
+        // Rows below what is being painted (a caret blinking is a strip of the
+        // view) change nothing in it, and a table or a picture takes a while to draw.
+        if (y > area.bottom())
+            break;
         const Row info = row(r);
         const qreal h = rowHeight(r);
         if (y + h < area.top()) {
@@ -1297,7 +1318,7 @@ void TextView::paintEvent(QPaintEvent *event)
         }
         const int lineNo = info.firstLine;
         paintSourceLine(painter, lineNo, QPointF(left - hscroll, y), QRectF(gutter, y, viewport()->width() - gutter, h),
-                        state);
+                        QRectF(area), state);
         visibleLines.append({lineNo, y, h});
         y += h;
     }
@@ -1945,11 +1966,44 @@ void TextView::resizeEvent(QResizeEvent *event)
     }
 }
 
+void TextView::updateBlinkingCarets()
+{
+    // A blink changes the carets and nothing else: repaint a strip around
+    // each (the whole row where it is drawn by the row's own painter) instead of
+    // the whole view, which with tables on screen is a few dozen milliseconds
+    // ten times a second. Many carets, or a caret being composed in an input
+    // method (drawn after its text), are not worth working out.
+    constexpr int mostCarets = 32;
+    if (m_carets.size() > mostCarets || !m_preedit.isEmpty() || !caretRectsKnown()) {
+        viewport()->update();
+        return;
+    }
+    QRegion region;
+    for (const Caret &caret : m_carets) {
+        QRectF rect;
+        qreal top = 0;
+        if (m_columnsOn) {
+            rect = columnsCaretRect(caret.cursor);
+        } else if (const int index = rowOfLine(caret.cursor.blockNumber()); !rowTop(index, &top)) {
+            continue; // Not on the screen.
+        } else if (row(index).rendered) {
+            rect = QRectF(0, top, viewport()->width(), rowHeight(index));
+        } else {
+            rect = caretRect(caret.cursor);
+        }
+        // (A caret is a bar two pixels wide, a pixel taller than its line.)
+        if (!rect.isEmpty())
+            region += rect.adjusted(-2, -2, 2, 2).toAlignedRect();
+    }
+    if (!region.isEmpty())
+        viewport()->update(region);
+}
+
 void TextView::timerEvent(QTimerEvent *event)
 {
     if (event->timerId() == m_blink.timerId()) {
         m_caretOn = !m_caretOn;
-        viewport()->update();
+        updateBlinkingCarets();
     } else if (event->timerId() == m_autoScroll.timerId()) {
         const qreal h = viewport()->height();
         QScrollBar *v = verticalScrollBar();
@@ -2483,15 +2537,132 @@ void TextView::restoreCarets(const CaretState &state)
     setCursors(cursors, state.primary);
 }
 
+namespace {
+
+// The carets as plain numbers while an edit goes through all of them in turn.
+// With a QTextCursor for each, every change moves every cursor (N changes
+// times N cursors: 0.4 s for a key at 5,000 carets); a caret as two numbers is
+// moved the way a cursor would be, by the few edits that reach it. The carets
+// are edited in order: those before the one being edited are done, and those
+// after it wait, all moved by `m_shift` unless an edit reached into them.
+class CaretSpans
+{
+public:
+    struct Span
+    {
+        int anchor;
+        int position;
+    };
+
+    explicit CaretSpans(std::vector<Span> spans) : m_spans(std::move(spans)) {}
+
+    int size() const { return int(m_spans.size()); }
+
+    // The next caret, where the document has it now.
+    Span next()
+    {
+        const Span &s = m_spans[m_next++];
+        return {s.anchor + m_shift, s.position + m_shift};
+    }
+
+    // The caret taken last was edited: `removed` characters at `at` went, then
+    // `added` came there, and it ends as `result`.
+    void edited(int at, int removed, int added, Span result)
+    {
+        const int index = m_next - 1;
+        if (removed != 0 || added != 0) {
+            // Those done are points, in order: only the last few can be at or
+            // after the edit.
+            for (int i = index - 1; i >= 0 && qMax(m_spans[i].anchor, m_spans[i].position) >= at; --i) {
+                m_spans[i].anchor = moved(m_spans[i].anchor, at, removed, added);
+                m_spans[i].position = moved(m_spans[i].position, at, removed, added);
+            }
+            // Those waiting that the removal reaches into; the rest all move
+            // by the same.
+            const int newShift = m_shift + added - removed;
+            for (int i = m_next; i < size(); ++i) {
+                Span &s = m_spans[i];
+                if (qMin(s.anchor, s.position) + m_shift >= at + removed)
+                    break;
+                s.anchor = moved(s.anchor + m_shift, at, removed, added) - newShift;
+                s.position = moved(s.position + m_shift, at, removed, added) - newShift;
+            }
+            m_shift = newShift;
+        }
+        m_spans[index] = result;
+    }
+
+    // All the carets once each is done.
+    const std::vector<Span> &spans() const { return m_spans; }
+
+private:
+    // Where a position goes when `removed` characters at `at` are removed and
+    // `added` inserted there, as a QTextCursor's does (one at the insertion
+    // point goes after the text).
+    static int moved(int p, int at, int removed, int added)
+    {
+        if (p > at)
+            p = p >= at + removed ? p - removed : at;
+        return p >= at ? p + added : p;
+    }
+
+    std::vector<Span> m_spans;
+    int m_next = 0;
+    int m_shift = 0;
+};
+
+} // namespace
+
+void TextView::editAtCarets(const std::function<CaretChange(Caret &)> &edit)
+{
+    std::vector<CaretSpans::Span> spans;
+    std::vector<qreal> desiredX;
+    spans.reserve(m_carets.size());
+    desiredX.reserve(m_carets.size());
+    for (const Caret &caret : m_carets) {
+        spans.push_back({caret.cursor.anchor(), caret.cursor.position()});
+        desiredX.push_back(caret.desiredX);
+    }
+    const int primary = m_primary;
+    // Cursors left in the document are moved by every change in it: one
+    // stands in for them until the edit is done.
+    m_carets.assign(1, Caret{QTextCursor(m_doc), -1});
+    m_primary = 0;
+    CaretSpans carets(std::move(spans));
+    Caret work{QTextCursor(m_doc), -1};
+    for (int i = 0, n = carets.size(); i < n; ++i) {
+        const CaretSpans::Span now = carets.next();
+        work.cursor.setPosition(now.anchor);
+        work.cursor.setPosition(now.position, QTextCursor::KeepAnchor);
+        work.desiredX = desiredX[i];
+        const CaretChange change = edit(work);
+        desiredX[i] = work.desiredX;
+        carets.edited(change.at, change.removed, change.added, {work.cursor.anchor(), work.cursor.position()});
+    }
+    m_carets.clear();
+    m_carets.reserve(carets.size());
+    for (int i = 0; i < carets.size(); ++i) {
+        const CaretSpans::Span &span = carets.spans()[i];
+        QTextCursor cursor(m_doc);
+        cursor.setPosition(span.anchor);
+        cursor.setPosition(span.position, QTextCursor::KeepAnchor);
+        m_carets.push_back({cursor, desiredX[i]});
+    }
+    m_primary = primary;
+}
+
 void TextView::insertTextAtCarets(const QString &text)
 {
     if (!canEdit())
         return;
     beginEdit();
-    for (Caret &caret : m_carets) {
+    editAtCarets([&text](Caret &caret) {
+        const int at = caret.cursor.selectionStart();
+        const int selected = caret.cursor.selectionEnd() - at;
         caret.cursor.insertText(text);
         caret.desiredX = -1;
-    }
+        return CaretChange{at, selected, caret.cursor.position() - at};
+    });
     endEdit();
     m_expandHistory.clear();
     caretsChanged();
@@ -2502,11 +2673,13 @@ void TextView::deleteAtCarets(QTextCursor::MoveOperation op)
     if (!canEdit())
         return;
     beginEdit();
-    for (Caret &caret : m_carets) {
+    editAtCarets([this, op](Caret &caret) {
         QTextCursor &c = caret.cursor;
+        const int lengthBefore = m_doc->characterCount();
+        const auto removedAt = [&] { return CaretChange{c.position(), lengthBefore - m_doc->characterCount(), 0}; };
         if (!c.hasSelection()) {
             if (op == QTextCursor::PreviousCharacter && deleteAutoClosedPair(caret))
-                continue;
+                return removedAt();
             if (op == QTextCursor::PreviousCharacter && m_insertSpaces && c.positionInBlock() > 0) {
                 // In leading spaces, Backspace removes back to the previous tab stop.
                 const QString text = c.block().text();
@@ -2515,14 +2688,15 @@ void TextView::deleteAtCarets(QTextCursor::MoveOperation op)
                     const int remove = ((pos - 1) % m_tabWidth) + 1;
                     c.movePosition(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor, remove);
                     c.removeSelectedText();
-                    continue;
+                    return removedAt();
                 }
             }
             c.movePosition(op, QTextCursor::KeepAnchor);
         }
         c.removeSelectedText();
         caret.desiredX = -1;
-    }
+        return removedAt();
+    });
     endEdit();
     caretsChanged();
 }
@@ -3438,6 +3612,11 @@ void TextView::undoRedo(bool undo)
             }
             positions.append(from + added);
         });
+    // Every change an undo makes would move every caret's cursor: the carets
+    // wait as numbers (`current`) with one cursor standing in.
+    const int primary = m_primary;
+    m_carets.assign(1, Caret{QTextCursor(m_doc), -1});
+    m_primary = 0;
     if (undo)
         m_doc->undo();
     else
@@ -3457,8 +3636,18 @@ void TextView::undoRedo(bool undo)
         restoreCarets(target);
         return;
     }
-    if (positions.isEmpty())
+    if (positions.isEmpty()) {
+        // Nothing changed: the carets are as they were.
+        m_carets.clear();
+        for (const auto &range : std::as_const(current.ranges)) {
+            QTextCursor cursor(m_doc);
+            cursor.setPosition(range.first);
+            cursor.setPosition(range.second, QTextCursor::KeepAnchor);
+            m_carets.push_back({cursor, -1});
+        }
+        m_primary = primary;
         return;
+    }
     QList<QTextCursor> cursors;
     const int end = m_doc->characterCount() - 1;
     for (const int p : std::as_const(positions)) {

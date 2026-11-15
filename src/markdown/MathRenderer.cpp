@@ -863,8 +863,21 @@ public:
         return drawn;
     }
 
+    // Starts the worker if none is running, without waiting for it to come up:
+    // the first formula then finds it ready, or nearly, instead of waiting
+    // the whole 125 to 150 ms for it.
+    void prepare()
+    {
+        if (m_unavailable || m_process || workerPath().isEmpty() || !QCoreApplication::instance())
+            return;
+        if (m_failuresInARow >= maxFailuresInARow && m_paused.isValid() && m_paused.elapsed() < pauseMs)
+            return;
+        launch();
+    }
+
     void stop()
     {
+        m_awaitingHello = false;
         if (!m_process)
             return;
         QProcess *process = m_process;
@@ -878,14 +891,17 @@ public:
     }
 
 private:
-    bool start()
+    static QString workerPath()
     {
-        if (m_process && m_process->state() == QProcess::Running)
-            return true;
+        const QString program = workerProgram();
+        return program.isEmpty() ? qEnvironmentVariable("VN_MATH_WORKER") : program;
+    }
+
+    // Starts the process; its greeting is read by start().
+    bool launch()
+    {
         stop();
-        QString program = workerProgram();
-        if (program.isEmpty())
-            program = qEnvironmentVariable("VN_MATH_WORKER");
+        const QString program = workerPath();
         if (program.isEmpty() || !QCoreApplication::instance()) {
             m_unavailable = true;
             return false;
@@ -913,7 +929,46 @@ private:
             // Ended with the application, before it deletes the process.
             qAddPostRoutine([] { Worker::instance().stop(); });
         }
+        startWithFewDescriptorsToClose();
+        m_awaitingHello = true;
+        return true;
+    }
+
+    // QProcess::start() with the descriptors of the worker closed one by one
+    // up to the limit, as CloseFileDescriptors does (above), costs 0.2 s at
+    // the usual limit of a million, with this thread waiting for it. The
+    // limit is lowered, for the start, to a little above the highest
+    // descriptor open: all there are get closed as before. The worker has the
+    // limit back for itself.
+    void startWithFewDescriptorsToClose()
+    {
+#ifdef Q_OS_LINUX
+        rlimit original{};
+        constexpr rlim_t spare = 1024; // Others opening files at the same time.
+        if (getrlimit(RLIMIT_NOFILE, &original) == 0 && original.rlim_cur > 4 * spare) {
+            int highest = 2;
+            const QStringList open = QDir(QStringLiteral("/proc/self/fd")).entryList(QDir::NoDotAndDotDot);
+            for (const QString &name : open)
+                highest = qMax(highest, name.toInt());
+            rlimit lowered = original;
+            lowered.rlim_cur = qMin(original.rlim_cur, rlim_t(highest) + spare);
+            if (!open.isEmpty() && lowered.rlim_cur < original.rlim_cur && setrlimit(RLIMIT_NOFILE, &lowered) == 0) {
+                m_process->setChildProcessModifier([original] { setrlimit(RLIMIT_NOFILE, &original); });
+                m_process->start();
+                setrlimit(RLIMIT_NOFILE, &original);
+                return;
+            }
+        }
+#endif
         m_process->start();
+    }
+
+    bool start()
+    {
+        if (m_process && !m_awaitingHello && m_process->state() == QProcess::Running)
+            return true;
+        if (!(m_process && m_awaitingHello) && !launch())
+            return false;
         qint32 hello[2] = {};
         const QDeadlineTimer deadline(workerStartMs);
         if (!m_process->waitForStarted(workerStartMs) || !read(reinterpret_cast<char *>(hello), sizeof hello, deadline)
@@ -925,6 +980,7 @@ private:
             m_paused.start();
             return false;
         }
+        m_awaitingHello = false;
         if (hello[1] != 1) { // It runs, but MicroTeX has no resources.
             stop();
             m_unavailable = true;
@@ -961,6 +1017,7 @@ private:
     }
 
     QPointer<QProcess> m_process;
+    bool m_awaitingHello = false; // Started (by launch()), its greeting not yet read.
     bool m_unavailable = false; // No worker program, or it cannot draw at all.
     int m_timeouts = 0;
     int m_failuresInARow = 0;
@@ -1003,6 +1060,11 @@ void Formula::draw(QPainter &painter, const QPointF &origin, qreal scale, const 
             painter.fillPath(shape.path, shape.textColor ? text : QColor::fromRgba(shape.color));
     }
     painter.restore();
+}
+
+void prepareWorker()
+{
+    Worker::instance().prepare();
 }
 
 std::shared_ptr<const Formula> layout(const QString &tex, bool display)
@@ -1259,6 +1321,15 @@ void runWorker(int &argc, char **argv)
 #endif
 
     const qint32 hello[2] = {qint32(answerMagic), ensureInitialized() ? 1 : 0};
+    // Draw once before any copy is made (and before the lock-down, which
+    // leaves no way to open font files): the copies inherit the font setup
+    // and the fonts read, where each would otherwise open the font
+    // configuration and some 260 files again for its one formula.
+    if (hello[1] == 1) {
+        Formula warm;
+        microTeXFormula(QStringLiteral("x_{1}^2+\\frac{a}{b}\\sum_{i=0}^{n}\\int\\sqrt{y}\\,\\mathbf{A}\\mathcal{B}\\mathrm{C}\\alpha\\left(\\frac{1}{2}\\right)"), true, warm);
+        microTeXFormula(QStringLiteral("x_{1}^2+\\frac{a}{b}"), false, warm);
+    }
     if (!writeFully(reinterpret_cast<const char *>(hello), sizeof hello))
         endWorker(1);
     lockDownWorker();

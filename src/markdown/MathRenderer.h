@@ -55,6 +55,11 @@ struct Formula
     void draw(QPainter &painter, const QPointF &origin, qreal scale, const QColor &text) const;
 };
 
+// Starts the worker now, if it is not running, without waiting for it, so
+// the first formula of a document with math does not wait for it to come up.
+// Does nothing without a worker program.
+void prepareWorker();
+
 // The formula's shapes; never empty for non-empty input (source text when
 // MicroTeX cannot draw it). Asks the worker every time: cache the result.
 std::shared_ptr<const Formula> layout(const QString &tex, bool display);
