@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn oversized_source_is_rejected_quickly() {
-        let start = std::time::Instant::now();
+        let start = crate::cpu_time::Instant::now();
         let label = format!("flowchart LR\nA[\"{}\"] --> B\n", "x".repeat(200_000));
         assert_eq!(raster(&label, "auto", 1.0).err().as_deref(), Some("diagram too large"));
         let blob = format!("flowchart LR\n{}", "A-->B\n".repeat(50_000));
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn huge_diagrams_fail_without_allocating_gigabytes() {
-        let start = std::time::Instant::now();
+        let start = crate::cpu_time::Instant::now();
         // Within the source limit, but far too many pixels at any scale.
         let code = chain(700, 20);
         assert!(code.len() <= MAX_SOURCE_BYTES, "{}", code.len());
@@ -526,7 +526,7 @@ mod tests {
         for &(name, make) in SHAPES {
             let n = largest_affordable(make);
             let code = make(n);
-            let start = std::time::Instant::now();
+            let start = crate::cpu_time::Instant::now();
             // The library checks its own layout in debug builds (these tests)
             // and panics when a route for one of these contrived shapes grazes
             // a node; release builds, which ship, do not check, and the
@@ -562,7 +562,7 @@ mod tests {
         for &(name, make) in SHAPES {
             let code = make(1000);
             assert!(code.len() < MAX_SOURCE_BYTES, "{name}: {}", code.len());
-            let start = std::time::Instant::now();
+            let start = crate::cpu_time::Instant::now();
             assert_eq!(raster(&code, "auto", 1.0).err().as_deref(), Some("diagram too large"), "{name}");
             assert!(start.elapsed().as_secs_f64() < 2.0, "{name} took {:?}", start.elapsed());
         }
@@ -579,7 +579,7 @@ mod tests {
                 code.push_str(&format!("N{i}[Step {i}] --> N{}\n", i + 1));
             }
         }
-        let start = std::time::Instant::now();
+        let start = crate::cpu_time::Instant::now();
         let (w, h, pixels, _) = raster(&code, "auto", 1.0).expect("render");
         eprintln!("300 nodes: {w}x{h} in {:?}", start.elapsed());
         assert_eq!(pixels.len(), (w * h * 4) as usize);
