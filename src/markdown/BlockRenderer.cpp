@@ -43,6 +43,7 @@
 #include <functional>
 #include <atomic>
 #include <deque>
+#include <tuple>
 
 namespace vn {
 
@@ -476,6 +477,9 @@ public:
         clear();
     }
 
+    // Whether find() would find it (without counting as a request).
+    bool contains(const QString &version) const { return m_entries.contains(version); }
+
     QImage find(const QString &version)
     {
         ++m_requests;
@@ -486,34 +490,39 @@ public:
         return it->compact ? it->image.convertToFormat(QImage::Format_RGB32) : it->image;
     }
 
-    // `image` was just read because find() had nothing.
-    void insert(const QString &version, const QImage &image)
+    // `image` was just read because find() had nothing. False if it is not
+    // kept.
+    bool insert(const QString &version, const QImage &image)
     {
         const bool compact = image.format() == QImage::Format_RGB32;
-        const qsizetype kib = compact ? imageCost(image) * 3 / 4 : imageCost(image);
-        if (kib > m_limit)
-            return; // Does not fit at all.
-        bool again = false;
-        for (auto it = m_reads.begin(); it != m_reads.end(); ++it) {
-            if (it->first == version) {
-                again = m_requests - it->second <= qMax<quint64>(4, m_entries.size());
-                m_reads.erase(it);
-                break;
-            }
-        }
-        m_reads.push_back({version, m_requests});
-        if (m_reads.size() > 64)
-            m_reads.pop_front();
-        if (m_kib + kib > m_limit && !again)
-            return; // Full, and not shown to be wanted again soon.
-        evictFor(kib);
-        Entry entry;
-        entry.compact = compact;
-        entry.image = compact ? image.convertToFormat(QImage::Format_RGB888) : image;
-        entry.kib = imageCost(entry.image);
-        entry.used = ++m_clock;
-        m_kib += entry.kib;
-        m_entries.insert(version, entry);
+        if (!admit(version, compact ? imageCost(image) * 3 / 4 : imageCost(image), false))
+            return false;
+        store(version, compactForm(image), compact);
+        return true;
+    }
+
+    // As insert(), for a picture read on a worker thread for a render to
+    // come (so wanted again soon), given in the form kept (`kept`, see
+    // compactForm; `compact`: it was 32 bit RGB) and what it costs so (`kib`).
+    bool insertRead(const QString &version, const QImage &kept, bool compact, qsizetype kib)
+    {
+        if (!admit(version, kib, true))
+            return false;
+        store(version, kept, compact);
+        return true;
+    }
+
+    // What insert() takes from a picture: whether it is kept 24 bit, and its cost.
+    static std::pair<bool, qsizetype> costOf(const QImage &image)
+    {
+        const bool compact = image.format() == QImage::Format_RGB32;
+        return {compact, compact ? imageCost(image) * 3 / 4 : imageCost(image)};
+    }
+
+    // The form a picture is kept in (any thread).
+    static QImage compactForm(const QImage &image)
+    {
+        return image.format() == QImage::Format_RGB32 ? image.convertToFormat(QImage::Format_RGB888) : image;
     }
 
     void clear()
@@ -524,6 +533,40 @@ public:
     }
 
 private:
+    // Whether a picture of `kib` decoded is to be kept (see above), with
+    // room made for it.
+    bool admit(const QString &version, qsizetype kib, bool wanted)
+    {
+        if (kib > m_limit)
+            return false; // Does not fit at all.
+        bool again = wanted;
+        for (auto it = m_reads.begin(); it != m_reads.end(); ++it) {
+            if (it->first == version) {
+                again = again || m_requests - it->second <= qMax<quint64>(4, m_entries.size());
+                m_reads.erase(it);
+                break;
+            }
+        }
+        m_reads.push_back({version, m_requests});
+        if (m_reads.size() > 64)
+            m_reads.pop_front();
+        if (m_kib + kib > m_limit && !again)
+            return false; // Full, and not shown to be wanted again soon.
+        evictFor(kib);
+        return true;
+    }
+
+    void store(const QString &version, const QImage &kept, bool compact)
+    {
+        Entry entry;
+        entry.compact = compact;
+        entry.image = kept;
+        entry.kib = imageCost(entry.image);
+        entry.used = ++m_clock;
+        m_kib += entry.kib;
+        m_entries.insert(version, entry);
+    }
+
     struct Entry
     {
         QImage image;
@@ -619,16 +662,168 @@ QImage decodedLocalImage(const QString &path)
     return image;
 }
 
+// Local pictures scaled to a column (see cachedLocalImage), by scaledKey().
+QCache<QString, QImage> &scaledLocalImages()
+{
+    static QCache<QString, QImage> cache(64 * 1024); // KiB
+    return cache;
+}
+
+QString scaledKey(const QString &version, qreal width, qreal dpr)
+{
+    return QStringLiteral("%1|%2|").arg(width).arg(dpr) + version;
+}
+
+// Picture files at least this big are read on the thread pool when the
+// context allows it (RenderContext::picturesLater): reading one of 12
+// million pixels takes 0.1 s.
+constexpr qint64 bigPicturePixels = 1000 * 1000;
+
+// Big picture files on their way (by file version): asked for (waiting or
+// being read), or to be read on the GUI thread as small ones are
+// (unreadable, or too big for the decoded pictures to keep, which is where
+// a read one goes). Two are read at a time, the latest asked for first: a
+// page turned past should not hold up the one shown, and each takes its
+// size in memory while it is read. Of those waiting only the latest few
+// are kept (asked for again, the others wait again). GUI thread only.
+struct LaterPictures
+{
+    struct Request
+    {
+        QString path;
+        QString version;
+        QString key; // Of the scaled pictures.
+        qreal width = 0;
+        qreal dpr = 1;
+    };
+    QSet<QString> reading;
+    QSet<QString> now;
+    std::deque<Request> waiting;
+    int running = 0;
+    static constexpr int runningMax = 2;
+    static constexpr size_t waitingMax = 4;
+    // Bumped by releasePictureCaches(): what is being read is not wanted.
+    std::atomic<int> generation{0};
+};
+
+LaterPictures &laterPictures()
+{
+    static LaterPictures pictures;
+    return pictures;
+}
+
+bool isBig(const QSize &size)
+{
+    return size.isValid() && qint64(size.width()) * size.height() >= bigPicturePixels;
+}
+
+// The size of a picture file as readImage() turns it, from its header; null
+// for an SVG (read on the GUI thread, checked first) or when unknown.
+QSize headerSize(const QString &path)
+{
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    if (reader.format().startsWith("svg"))
+        return {};
+    QSize size = reader.size();
+    if (size.isValid() && (reader.transformation() & QImageIOHandler::TransformationRotate90))
+        size.transpose();
+    return size;
+}
+
+// Starts reading the latest pictures asked for, as many as may be read at a
+// time: each is read and fitted to the column it was asked for at on the
+// thread pool; when it is in (with the decoded and the scaled pictures),
+// DiagramNotifier::ready tells the views.
+void readWaiting()
+{
+    LaterPictures &later = laterPictures();
+    while (later.running < LaterPictures::runningMax && !later.waiting.empty()) {
+        const LaterPictures::Request request = later.waiting.back();
+        later.waiting.pop_back();
+        ++later.running;
+        // Made here, on the GUI thread, so the result is delivered there.
+        DiagramNotifier *notifier = &DiagramNotifier::instance();
+        const int generation = later.generation;
+        QThreadPool::globalInstance()->start([request, notifier, generation] {
+            QImage fitted, kept;
+            bool compact = false;
+            qsizetype kib = 0;
+            if (laterPictures().generation == generation) {
+                const QImage image = readImage(request.path);
+                if (!image.isNull()) {
+                    fitted = fitToColumn(image, request.width, request.dpr);
+                    std::tie(compact, kib) = DecodedPictures::costOf(image);
+                    kept = DecodedPictures::compactForm(image);
+                }
+            }
+            QMetaObject::invokeMethod(notifier, [request, fitted, kept, compact, kib, generation]() {
+                LaterPictures &later = laterPictures();
+                --later.running;
+                if (later.generation == generation && later.reading.remove(request.version)) {
+                    if (kept.isNull() || !decodedPictures().insertRead(request.version, kept, compact, kib))
+                        later.now.insert(request.version);
+                    if (!fitted.isNull())
+                        scaledLocalImages().insert(request.key, new QImage(fitted), imageCost(fitted));
+                    Q_EMIT DiagramNotifier::instance().ready();
+                }
+                readWaiting();
+            });
+        });
+    }
+}
+
+// Asks for a big picture file to be read (once), for a column `width` wide.
+void readLater(const QString &path, const QString &version, const QString &key, qreal width, qreal dpr)
+{
+    LaterPictures &later = laterPictures();
+    if (later.reading.contains(version))
+        return;
+    later.reading.insert(version);
+    later.waiting.push_back({path, version, key, width, dpr});
+    while (later.waiting.size() > LaterPictures::waitingMax) {
+        later.reading.remove(later.waiting.front().version);
+        later.waiting.pop_front();
+    }
+    readWaiting();
+}
+
+// Whether a big picture file is to be read later, and starts that (for a
+// column `width` wide): when the context allows it, it is not decoded
+// already, and it is big.
+bool readsLater(const QString &path, const QString &version, const QSize &size, bool later, qreal width, qreal dpr)
+{
+    if (!later || laterPictures().now.contains(version) || decodedPictures().contains(version) || !isBig(size))
+        return false;
+    readLater(path, version, scaledKey(version, width, dpr), width, dpr);
+    return true;
+}
+
 // The size a local picture has (null if unreadable), without keeping or
 // asking for the decoded picture when it is known: a figure's size depends
 // on it. `decoded` gets the picture if it had to be read, for the caller to
-// scale (read once, even if the cache does not keep it).
-QSize localPictureSize(const QString &path, QImage *decoded)
+// scale (read once, even if the cache does not keep it). A big one read
+// later (see readsLater) has the size its file's header says until it is in.
+QCache<QString, QSize> &pictureSizes()
 {
     static QCache<QString, QSize> sizes(4096);
+    return sizes;
+}
+
+QSize localPictureSize(const QString &path, QImage *decoded, bool later = false)
+{
+    QCache<QString, QSize> &sizes = pictureSizes();
     const QString version = fileVersion(path);
     if (const QSize *known = sizes.object(version))
         return *known;
+    // (Read for its size only: started by cachedLocalImage, at the width
+    // the figure gets.)
+    if (later && laterPictures().reading.contains(version))
+        return headerSize(path);
+    if (later && !laterPictures().now.contains(version) && !decodedPictures().contains(version)) {
+        if (const QSize header = headerSize(path); isBig(header))
+            return header;
+    }
     *decoded = decodedLocalImage(path);
     if (decoded->isNull())
         return {};
@@ -639,15 +834,33 @@ QSize localPictureSize(const QString &path, QImage *decoded)
 // Local pictures, read and scaled to the column, by file version and size.
 // The decoded files are kept too (see above). SVGs are kept as decoded as
 // well: they are read at their own size, never at the column's, so a bigger
-// or smaller column scales the same pixels either way.
-QImage cachedLocalImage(const QString &path, qreal width, qreal dpr, QImage decoded = {})
+// or smaller column scales the same pixels either way. A big picture read
+// later (see readsLater; `size` is its own) is blank until it is in, as big
+// as it will be, and `waiting` is set.
+
+QImage cachedLocalImage(const QString &path, qreal width, qreal dpr, QImage decoded = {}, bool later = false,
+                        const QSize &size = {}, bool *waiting = nullptr)
 {
-    static QCache<QString, QImage> cache(64 * 1024); // KiB
-    const QFileInfo info(path);
-    const QString version = QStringLiteral("%1|%2|").arg(info.lastModified().toMSecsSinceEpoch()).arg(info.size()) + path;
-    const QString key = QStringLiteral("%1|%2|").arg(width).arg(dpr) + version;
+    QCache<QString, QImage> &cache = scaledLocalImages();
+    const QString version = fileVersion(path);
+    const QString key = scaledKey(version, width, dpr);
     if (const QImage *hit = cache.object(key))
         return *hit;
+    if (decoded.isNull() && readsLater(path, version, size, later, width, dpr)) {
+        *waiting = true;
+        // As fitToColumn() would size it (and QImage::scaledToWidth).
+        QSize blankSize = size;
+        const bool scaled = size.width() > width;
+        if (scaled) {
+            const int w = int(width * dpr);
+            blankSize = QSize(w, qRound(qreal(w) / size.width() * size.height()));
+        }
+        QImage blank(blankSize, QImage::Format_ARGB32_Premultiplied);
+        blank.fill(Qt::transparent);
+        if (scaled)
+            blank.setDevicePixelRatio(dpr);
+        return blank;
+    }
     QImage image = decoded.isNull() ? decodedLocalImage(path) : decoded;
     if (image.isNull())
         return image; // Not cached: the file may appear later.
@@ -660,9 +873,15 @@ QImage cachedLocalImage(const QString &path, qreal width, qreal dpr, QImage deco
 // downloaded). Their decoded full-size form is RemoteImages' to keep, as
 // DecodedPictures keeps the files': decoded once on a worker thread when they
 // arrive, in a bounded cache of its own (shared with the zoom viewer).
-QImage cachedRemoteImage(const QUrl &url, qreal width, qreal dpr)
+QCache<QString, QImage> &scaledRemoteImages()
 {
     static QCache<QString, QImage> cache(32 * 1024); // KiB
+    return cache;
+}
+
+QImage cachedRemoteImage(const QUrl &url, qreal width, qreal dpr)
+{
+    QCache<QString, QImage> &cache = scaledRemoteImages();
     RemoteImages &remote = RemoteImages::instance();
     const QString key = QStringLiteral("%1|%2|%3|").arg(remote.generation()).arg(width).arg(dpr)
                         + url.toString(QUrl::FullyEncoded);
@@ -671,6 +890,60 @@ QImage cachedRemoteImage(const QUrl &url, qreal width, qreal dpr)
     const QImage image = fitToColumn(remote.fullImage(url), width, dpr);
     if (!image.isNull())
         cache.insert(key, new QImage(image), imageCost(image));
+    return image;
+}
+
+// Pictures carried in documents (data:) as decoded (null: unreadable) and as
+// fitted to a column, by address. Every rebuild of a block (an edit, a new
+// width, zoom) asked for them again, and decoding a big one takes long. The
+// key is a hash of the address; the address itself is kept (shared with the
+// document, not copied) to tell two that hash alike apart. GUI thread only.
+struct DataPicture
+{
+    QString address;
+    QImage image;
+};
+
+std::atomic<int> dataPictureDecodes{0};
+
+QString dataPictureKey(const QString &address)
+{
+    return QStringLiteral("%1:%2").arg(address.size()).arg(qHash(address, size_t(0x5eed)));
+}
+
+QImage decodeDataAddress(const QString &address); // Below decodePicture().
+
+struct DataPictures
+{
+    QCache<QString, DataPicture> decoded{64 * 1024}; // KiB
+    QCache<QString, DataPicture> fitted{32 * 1024};  // KiB
+};
+
+DataPictures &dataPictures()
+{
+    static DataPictures pictures;
+    return pictures;
+}
+
+QImage cachedDataPicture(const QString &address, qreal width, qreal dpr)
+{
+    QCache<QString, DataPicture> &decoded = dataPictures().decoded;
+    QCache<QString, DataPicture> &fitted = dataPictures().fitted;
+    const auto cost = [&](const QImage &image) { return imageCost(image) + address.size() / 512 + 1; };
+    const QString key = dataPictureKey(address);
+    const QString sized = QStringLiteral("%1|%2|").arg(width).arg(dpr) + key;
+    if (const DataPicture *hit = fitted.object(sized); hit && hit->address == address)
+        return hit->image;
+    QImage image;
+    if (const DataPicture *hit = decoded.object(key); hit && hit->address == address) {
+        image = hit->image;
+    } else {
+        image = decodeDataAddress(address);
+        decoded.insert(key, new DataPicture{address, image}, cost(image));
+    }
+    if (!image.isNull())
+        image = fitToColumn(image, width, dpr);
+    fitted.insert(sized, new DataPicture{address, image}, cost(image));
     return image;
 }
 
@@ -927,8 +1200,9 @@ public:
                 path = localPath(url);
                 if (path.isEmpty())
                     continue;
-                own = localPictureSize(path, &decoded);
+                own = localPictureSize(path, &decoded, m_context.picturesLater);
             }
+            const QSize natural = own.toSize(); // The picture's own, before the HTML's.
             if (own.isEmpty())
                 continue;
             const qreal aspect = own.height() / own.width();
@@ -940,8 +1214,11 @@ public:
                 own = QSizeF(format.height() / aspect, format.height());
             const FigureFit fit = fitFigure(own, m_context, int(index) < factors.size() ? factors[int(index)] : 1);
             const qreal width = qMax<qreal>(1, fit.size.width());
+            bool waiting = false;
             const QImage image = path.isEmpty() ? cachedRemoteImage(url, width, dpr)
-                                                : cachedLocalImage(path, width, dpr, decoded);
+                                                : cachedLocalImage(path, width, dpr, decoded, m_context.picturesLater,
+                                                                   natural, &waiting);
+            m_pending = m_pending || waiting;
             if (image.isNull())
                 continue;
             // The picture's own pixels, unless it is made for another size
@@ -1165,6 +1442,49 @@ public:
         }
     }
 
+    // Pictures carried in the document (data:) are named "vn-data:N"
+    // instead: Qt looks a picture up by its name at every paint (parsing it
+    // as an address and comparing it with the ones it has), and a data
+    // address is the whole picture, often megabytes. Run before
+    // dropNetworkImages(), which would read each address again (a data
+    // address never names another machine, and it is allowed when valid);
+    // such a name written in the text is blocked here, as it was there.
+    void nameDataPictures()
+    {
+        QHash<QString, int> numbers;
+        const bool undo = isUndoRedoEnabled();
+        setUndoRedoEnabled(false);
+        for (QTextBlock block = begin(); block.isValid(); block = block.next()) {
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                const QTextFragment fragment = it.fragment();
+                if (!fragment.charFormat().isImageFormat())
+                    continue;
+                QTextImageFormat format = fragment.charFormat().toImageFormat();
+                const QString name = format.name();
+                if (name.startsWith(QLatin1String("vn-data:"))) {
+                    format.setName(QStringLiteral("vn-blocked:"));
+                } else if (name.startsWith(QLatin1String("data:"), Qt::CaseInsensitive)) {
+                    // As QUrl reads the scheme (loadResource takes the rest).
+                    auto number = numbers.find(name);
+                    if (number == numbers.end()) {
+                        if (!QUrl(name).isValid())
+                            continue; // Blocked by dropNetworkImages().
+                        number = numbers.insert(name, int(m_dataNames.size()));
+                        m_dataNames.append(name);
+                    }
+                    format.setName(QStringLiteral("vn-data:%1").arg(*number));
+                } else {
+                    continue;
+                }
+                QTextCursor cursor(this);
+                cursor.setPosition(fragment.position());
+                cursor.setPosition(fragment.position() + fragment.length(), QTextCursor::KeepAnchor);
+                cursor.mergeCharFormat(format);
+            }
+        }
+        setUndoRedoEnabled(undo);
+    }
+
     // Bytes of the pictures (math, files) the document has resolved so far.
     qsizetype pictureBytes() const { return m_pictureBytes; }
 
@@ -1213,13 +1533,17 @@ protected:
         // drawn: a name left over is blank.
         if (url.toString().startsWith(QLatin1String("vn-math")))
             return standIn(type, url);
+        // A picture carried in the document, by the short name
+        // nameDataPictures() gave it.
+        if (const QString name = url.toString(); name.startsWith(QLatin1String("vn-data:")))
+            return keep(type, url, dataPicture(m_dataNames.value(name.mid(8).toInt())));
         // From here on no picture is ever declined: declined, Qt's image
         // handler opens the name itself, relative to the working folder and
         // past the SVG check (a name that differs once decoded, a picture
         // missing beside the document but present where the app started).
         // What cannot be shown is shown broken, as Qt would show it.
         if (url.scheme() == QLatin1String("data"))
-            return keep(type, url, dataPicture(url));
+            return keep(type, url, dataPicture(url.toString(QUrl::FullyEncoded)));
         const QString path = localPath(url);
         if (path.isEmpty())
             return keep(type, url, brokenPicture());
@@ -1233,7 +1557,7 @@ protected:
     // all (Qt's image handler opens their text as a file name), is not.
     bool allowedPictureName(const QString &name) const
     {
-        static const QRegularExpression internal(QStringLiteral("^(vn-math(-display)?:\\d+|vn-blocked:)$"));
+        static const QRegularExpression internal(QStringLiteral("^(vn-math(-display)?:\\d+|vn-data:\\d+|vn-blocked:)$"));
         if (md::mayNameOtherMachine(name))
             return false;
         const QUrl url(name);
@@ -1271,21 +1595,12 @@ private:
     }
 
     // A picture carried in the document (data:), decoded as files are (an
-    // SVG naming another machine refused) and fitted to the column; broken
-    // if it cannot be read.
-    QImage dataPicture(const QUrl &url) const
+    // SVG naming another machine refused; see decodeDataAddress) and fitted
+    // to the column; broken if it cannot be read.
+    QImage dataPicture(const QString &address) const
     {
-        // Big enough for any picture worth embedding in a text file.
-        constexpr qsizetype maxEncoded = 32 * 1024 * 1024;
-        const QByteArray encoded = url.toEncoded(QUrl::FullyEncoded);
-        const qsizetype comma = encoded.indexOf(',');
-        if (comma < 0 || encoded.size() > maxEncoded)
-            return brokenPicture();
-        const QByteArray header = encoded.mid(5, comma - 5).toLower(); // After "data:".
-        const QByteArray body = QByteArray::fromPercentEncoding(encoded.mid(comma + 1));
-        const QByteArray data = header.endsWith(";base64") ? QByteArray::fromBase64(body) : body;
-        const QImage image = decodePicture(data);
-        return image.isNull() ? brokenPicture() : fitToColumn(image, m_context.width, m_context.devicePixelRatio);
+        const QImage image = cachedDataPicture(address, m_context.width, m_context.devicePixelRatio);
+        return image.isNull() ? brokenPicture() : image;
     }
 
     // Without the user's agreement nothing is requested and the picture
@@ -1337,6 +1652,7 @@ private:
     qsizetype m_pictureBytes = 0;
     QStringList m_remote;
     bool m_pending = false;
+    QStringList m_dataNames; // The addresses of "vn-data:N", by N.
     // The names sizeFigures() gave pictures, with the names they had.
     QHash<QString, QString> m_figureNames;
     std::vector<std::pair<int, RenderedBlock::Figure>> m_figures;
@@ -1460,6 +1776,7 @@ constexpr qsizetype highlightMax = 400 * 1000; // Characters; highlighting costs
 std::atomic<bool> layoutGuard{true};
 std::atomic<int> guardedBlocks{0};
 std::atomic<bool> partsEnabled{true};
+std::atomic<bool> ownTableGrid{true};
 
 bool isOneOf(QLatin1StringView name, std::initializer_list<QLatin1StringView> names)
 {
@@ -1661,17 +1978,12 @@ qreal fitTable(QTextDocument &doc, QTextTable &table, qreal width)
     doc.setDefaultTextOption(option);
 
     doc.setTextWidth(unboundedWidth);
-    const qreal widest = std::ceil(doc.idealWidth());
+    const qreal ideal = doc.idealWidth();
+    const qreal widest = std::ceil(ideal);
     if (widest <= width) {
         doc.setTextWidth(width);
         return 0;
     }
-    // Every column as narrow as it goes.
-    doc.setTextWidth(1);
-    const qreal narrowest = std::ceil(doc.idealWidth());
-    if (narrowest > width)
-        return widest;
-
     const int columns = table.columns();
     bool plain = columns > 0;
     for (int row = 0; plain && row < table.rows(); ++row) {
@@ -1681,10 +1993,6 @@ qreal fitTable(QTextDocument &doc, QTextTable &table, qreal width)
                 plain = false;
         }
     }
-    if (!plain) {
-        doc.setTextWidth(width);
-        return 0;
-    }
     // The text of each column (as wide in every row): from the first row.
     QAbstractTextDocumentLayout *layout = doc.documentLayout();
     const auto texts = [&] {
@@ -1693,29 +2001,324 @@ qreal fitTable(QTextDocument &doc, QTextTable &table, qreal width)
             rects.push_back(layout->blockBoundingRect(table.cellAt(0, col).firstCursorPosition().block()));
         return rects;
     };
-    const QList<QRectF> least = texts();
-    doc.setTextWidth(unboundedWidth);
-    const QList<QRectF> most = texts();
+    // The widest layout gives each column its widest width (its text on
+    // one line).
+    const QList<QRectF> most = plain ? texts() : QList<QRectF>();
     // What a column takes around its text: the padding and border between
     // one column's text and the next one's.
-    const qreal around = columns > 1 ? most[1].left() - most[0].right() : 2 * table.format().cellPadding() + 1;
+    const qreal around = columns > 1 && plain ? most[1].left() - most[0].right() : 2 * table.format().cellPadding() + 1;
+    // The narrowest layout gives each column its least width: Qt makes it
+    // the widest of its cells' longest unbreakable pieces (their
+    // QTextLayout::minimumWidth, the same at any width) and their padding,
+    // in whole pixels (at least one), in its fixed point (1/64 px). Those
+    // are known from the widest layout, unless a paragraph in a cell has
+    // margins of its own or a cell holds a frame (then the table is laid out
+    // narrowest to see).
+    QList<qreal> least;
+    bool known = plain;
+    // Formulas are objects in the text, each in a frame of its own that Qt
+    // counts in its cell's least width as well.
+    QHash<int, int> objects; // Widest object by cell (row * columns + column), in 1/64 px.
+    for (QTextFrame *frame : table.childFrames()) {
+        if (frame->firstPosition() <= frame->lastPosition()) {
+            known = false; // A frame in the text (a table in a table).
+            break;
+        }
+        const QTextTableCell cell = table.cellAt(frame->firstPosition());
+        int &widest = objects[cell.row() * columns + cell.column()];
+        widest = qMax(widest, int(layout->frameBoundingRect(frame).width() * 64));
+    }
+    for (int col = 0; known && col < columns; ++col) {
+        int columnMin = 64;
+        for (int row = 0; row < table.rows() && known; ++row) {
+            const QTextTableCell cell = table.cellAt(row, col);
+            int cellMin = objects.value(row * columns + col);
+            for (QTextBlock b = cell.firstCursorPosition().block(); b.isValid() && b.position() <= cell.lastPosition();
+                 b = b.next()) {
+                const QTextBlockFormat format = b.blockFormat();
+                if (b.textList() || format.leftMargin() != 0 || format.rightMargin() != 0 || format.indent() != 0
+                    || format.textIndent() != 0) {
+                    known = false;
+                    break;
+                }
+                cellMin = qMax(cellMin, int(b.layout()->minimumWidth() * 64));
+            }
+            const int padded = cellMin + int(around * 64);
+            columnMin = qMax(columnMin, (padded + 63) & -64);
+        }
+        least.push_back(columnMin / 64.0 - around);
+    }
+    qreal narrowest = 0;
+    if (known) {
+        // The table as wide as its columns' least widths, and as much around
+        // them as now.
+        qreal mostSum = 0, leastSum = 0;
+        for (int col = 0; col < columns; ++col) {
+            mostSum += most[col].width();
+            leastSum += least[col];
+        }
+        narrowest = std::ceil(ideal - mostSum + leastSum);
+    } else {
+        // Every column as narrow as it goes.
+        doc.setTextWidth(1);
+        narrowest = std::ceil(doc.idealWidth());
+        least.clear();
+        if (plain) {
+            for (const QRectF &text : texts())
+                least.push_back(text.width());
+        }
+    }
+    if (narrowest > width)
+        return widest;
+    if (!plain) {
+        // Cells that span columns or rows: left to Qt.
+        doc.setTextWidth(width);
+        return 0;
+    }
     qreal wanted = 0;
     for (int col = 0; col < columns; ++col)
-        wanted += most[col].width() - least[col].width();
+        wanted += most[col].width() - least[col];
     // What is left of the column past the narrowest layout, in Qt's fixed
     // point (1/64 px; the shares rounded down so that they never add up to more).
     const qreal spare = std::floor((width - narrowest) * 64) / 64;
     QList<QTextLength> lengths;
     for (int col = 0; col < columns; ++col) {
-        const qreal share =
-            wanted > 0 ? std::floor(spare * (most[col].width() - least[col].width()) / wanted * 64) / 64 : 0;
-        lengths.push_back(QTextLength(QTextLength::FixedLength, least[col].width() + around + share));
+        const qreal share = wanted > 0 ? std::floor(spare * (most[col].width() - least[col]) / wanted * 64) / 64 : 0;
+        lengths.push_back(QTextLength(QTextLength::FixedLength, least[col] + around + share));
     }
     QTextTableFormat format = table.format();
     format.setColumnWidthConstraints(lengths);
     table.setFormat(format);
     doc.setTextWidth(width);
     return 0;
+}
+
+// Qt's rules for the edges of a table with collapsed borders
+// (QTextDocumentLayout, qtextdocumentlayout.cpp: cellEdgeData, axisEdgeData,
+// checkJoinedEdge, prioritizedEdgeAnchorOffset, drawCellBorder), for a table
+// of single cells whose every edge is a 1 px line: where each edge of a cell
+// is drawn, to draw it there. The names and steps are Qt's.
+namespace grid {
+
+enum Edge { TopEdge, RightEdge, BottomEdge, LeftEdge, NumEdges }; // QCss::Edge
+enum EdgeClass { ClassInvalid, ClassNone, ClassGrid, ClassTableBorder, ClassExplicit };
+
+struct Cell
+{
+    int row = -1;
+    int column = -1;
+    bool isValid() const { return row >= 0; }
+};
+
+struct EdgeData
+{
+    qreal width = 0;
+    Cell cell;
+    Edge edge = NumEdges;
+    EdgeClass edgeClass = ClassInvalid;
+    bool operator<(const EdgeData &other) const
+    {
+        if (width < other.width)
+            return true;
+        if (width > other.width)
+            return false;
+        if (edgeClass < other.edgeClass)
+            return true;
+        if (edgeClass > other.edgeClass)
+            return false;
+        if (edge == TopEdge && other.edge == BottomEdge)
+            return true;
+        if (edge == BottomEdge && other.edge == TopEdge)
+            return false;
+        if (edge == LeftEdge && other.edge == RightEdge)
+            return true;
+        return false;
+    }
+    bool operator>(const EdgeData &other) const { return other < *this; }
+};
+
+EdgeData larger(const EdgeData &a, const EdgeData &b) // qMax
+{
+    return a < b ? b : a;
+}
+
+struct Shape
+{
+    int rows = 0;
+    int columns = 0;
+
+    Cell adjacentCell(const Cell &cell, Edge edge) const
+    {
+        int dr = 0, dc = 0;
+        switch (edge) {
+        case LeftEdge: dc = -1; break;
+        case RightEdge: dc = 1; break;
+        case TopEdge: dr = -1; break;
+        default: dr = 1; break;
+        }
+        const int row = cell.row + dr, column = cell.column + dc;
+        if (column < 0 || row < 0 || column >= columns || row >= rows)
+            return {};
+        return {row, column};
+    }
+
+    // Every cell sets a 1 px border on every edge.
+    static EdgeData cellEdgeData(const Cell &cell, Edge edge)
+    {
+        if (!cell.isValid())
+            return {};
+        return {1, cell, edge, ClassExplicit};
+    }
+
+    static Edge adjacentEdge(Edge edge)
+    {
+        switch (edge) {
+        case TopEdge: return BottomEdge;
+        case RightEdge: return LeftEdge;
+        case BottomEdge: return TopEdge;
+        default: return RightEdge;
+        }
+    }
+
+    static bool isSameAxis(Edge e1, Edge e2) { return e1 == e2 || e1 == adjacentEdge(e2); }
+    static bool isVerticalAxis(Edge e) { return e % 2 > 0; }
+
+    static bool sharesAxis(const Cell &cell, Edge edge, const Cell &competingCell, Edge competingCellEdge)
+    {
+        switch (edge) {
+        case TopEdge: return cell.row == competingCell.row + (competingCellEdge == BottomEdge ? 1 : 0);
+        case BottomEdge: return cell.row + 1 == competingCell.row + (competingCellEdge == TopEdge ? 0 : 1);
+        case LeftEdge: return cell.column == competingCell.column + (competingCellEdge == RightEdge ? 1 : 0);
+        default: return cell.column + 1 == competingCell.column + (competingCellEdge == LeftEdge ? 0 : 1);
+        }
+    }
+
+    EdgeData axisEdgeData(const Cell &cell, Edge edge) const
+    {
+        EdgeData result = cellEdgeData(cell, edge);
+        const Cell ac = adjacentCell(cell, edge);
+        result = larger(result, cellEdgeData(ac, adjacentEdge(edge)));
+        bool mustCheckThirdCell = false;
+        if (ac.isValid()) {
+            if (edge == TopEdge || edge == BottomEdge)
+                mustCheckThirdCell = !sharesAxis(cell, LeftEdge, ac, LeftEdge);
+            else
+                mustCheckThirdCell = !sharesAxis(cell, TopEdge, ac, TopEdge);
+        }
+        if (mustCheckThirdCell)
+            result = larger(result, cellEdgeData(adjacentCell(ac, adjacentEdge(edge)), edge));
+        return result;
+    }
+
+    void checkJoinedEdge(const Cell &cell, Edge competingEdge, const EdgeData &edgeData, bool couldHaveContinuation,
+                         EdgeData *maxCompetingEdgeData, EdgeData *maxOrthogonalEdgeData) const
+    {
+        const EdgeData competingEdgeData = axisEdgeData(cell, competingEdge);
+        if (competingEdgeData > edgeData) {
+            *maxCompetingEdgeData = competingEdgeData;
+        } else if (competingEdgeData.width == edgeData.width) {
+            if ((isSameAxis(edgeData.edge, competingEdge) && couldHaveContinuation)
+                || (!isVerticalAxis(edgeData.edge) && isVerticalAxis(competingEdge)))
+                *maxCompetingEdgeData = competingEdgeData;
+        }
+        if (maxOrthogonalEdgeData && competingEdgeData.width > maxOrthogonalEdgeData->width)
+            *maxOrthogonalEdgeData = competingEdgeData;
+    }
+
+    qreal prioritizedEdgeAnchorOffset(const Cell &cell, const EdgeData &edgeData, Edge orthogonalEdge,
+                                      bool couldHaveContinuation) const
+    {
+        EdgeData maxCompetingEdgeData;
+        EdgeData maxOrthogonalEdgeData;
+        checkJoinedEdge(cell, orthogonalEdge, edgeData, false, &maxCompetingEdgeData, &maxOrthogonalEdgeData);
+        Cell competingCell = adjacentCell(cell, orthogonalEdge);
+        if (competingCell.isValid())
+            checkJoinedEdge(competingCell, edgeData.edge, edgeData, couldHaveContinuation, &maxCompetingEdgeData, nullptr);
+        competingCell = adjacentCell(cell, edgeData.edge);
+        if (competingCell.isValid() && sharesAxis(cell, orthogonalEdge, competingCell, orthogonalEdge))
+            checkJoinedEdge(competingCell, orthogonalEdge, edgeData, false, &maxCompetingEdgeData, &maxOrthogonalEdgeData);
+        const bool hasPriority = edgeData > maxCompetingEdgeData;
+        const qreal offset = maxOrthogonalEdgeData.width / 2.0; // collapseOffset
+        return hasPriority ? -offset : offset;
+    }
+
+    // The rectangle drawCellBorder fills for an edge of a cell drawn in
+    // `borderRect` (the cell's rectangle in whole pixels).
+    QRectF edgeRect(const Cell &cell, const QRectF &borderRect, Edge edge) const
+    {
+        QPointF p1, p2;
+        qreal wh = 0, wv = 0;
+        const EdgeData edgeData = axisEdgeData(cell, edge);
+        switch (edge) {
+        case TopEdge:
+            wv = edgeData.width;
+            p1 = borderRect.topLeft() + QPointF(qFloor(prioritizedEdgeAnchorOffset(cell, edgeData, LeftEdge, false)), 0);
+            p2 = borderRect.topRight() + QPointF(-qCeil(prioritizedEdgeAnchorOffset(cell, edgeData, RightEdge, true)), 0);
+            break;
+        case BottomEdge:
+            wv = edgeData.width;
+            p1 = borderRect.bottomLeft() + QPointF(qFloor(prioritizedEdgeAnchorOffset(cell, edgeData, LeftEdge, false)), -wv);
+            p2 = borderRect.bottomRight() + QPointF(-qCeil(prioritizedEdgeAnchorOffset(cell, edgeData, RightEdge, true)), -wv);
+            break;
+        case LeftEdge:
+            wh = edgeData.width;
+            p1 = borderRect.topLeft() + QPointF(0, qFloor(prioritizedEdgeAnchorOffset(cell, edgeData, TopEdge, false)));
+            p2 = borderRect.bottomLeft() + QPointF(0, -qCeil(prioritizedEdgeAnchorOffset(cell, edgeData, BottomEdge, true)));
+            break;
+        default:
+            wh = edgeData.width;
+            p1 = borderRect.topRight() + QPointF(-wh, qFloor(prioritizedEdgeAnchorOffset(cell, edgeData, TopEdge, false)));
+            p2 = borderRect.bottomRight() + QPointF(-wh, -qCeil(prioritizedEdgeAnchorOffset(cell, edgeData, BottomEdge, true)));
+            break;
+        }
+        // Half the edge out of the cell, to share the place of the next
+        // cell's (in whole pixels).
+        const qreal half = edgeData.width / 2.0;
+        QPointF offset;
+        switch (edge) {
+        case TopEdge: offset = QPointF(0, -qCeil(half)); break;
+        case BottomEdge: offset = QPointF(0, qFloor(half)); break;
+        case LeftEdge: offset = QPointF(-qCeil(half), 0); break;
+        default: offset = QPointF(qFloor(half), 0); break;
+        }
+        p1 += offset;
+        p2 += offset;
+        return QRectF(p1.x(), p1.y(), p2.x() + wh - p1.x(), p2.y() + wv - p1.y());
+    }
+};
+
+} // namespace grid
+
+// Whether a document of rich text holds a picture (fitted to the column
+// when laid out) or a background picture, or another object in its text.
+bool asksForPictures(const QTextDocument &doc)
+{
+    const auto background = [](const QTextFormat &format) { return format.hasProperty(QTextFormat::BackgroundImageUrl); };
+    for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+        if (background(block.blockFormat()))
+            return true;
+        for (auto it = block.begin(); !it.atEnd(); ++it) {
+            const QTextCharFormat format = it.fragment().charFormat();
+            if (format.isImageFormat() || format.objectType() >= QTextFormat::UserObject || background(format))
+                return true;
+        }
+    }
+    QList<QTextFrame *> frames = {doc.rootFrame()};
+    while (!frames.isEmpty()) {
+        QTextFrame *frame = frames.takeLast();
+        if (background(frame->frameFormat()))
+            return true;
+        if (auto *table = qobject_cast<QTextTable *>(frame)) {
+            for (int row = 0; row < table->rows(); ++row) {
+                for (int col = 0; col < table->columns(); ++col) {
+                    if (background(table->cellAt(row, col).format()))
+                        return true;
+                }
+            }
+        }
+        frames += frame->childFrames();
+    }
+    return false;
 }
 
 std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString &definition,
@@ -1760,6 +2363,47 @@ QImage decodePicture(const QByteArray &data)
     return reader.read();
 }
 
+namespace {
+
+// A data: address as loadResource() gets it: the picture in it, decoded as a
+// file is (decodePicture), or null.
+QImage decodeDataAddress(const QString &address)
+{
+    ++dataPictureDecodes;
+    // Big enough for any picture worth embedding in a text file.
+    constexpr qsizetype maxEncoded = 32 * 1024 * 1024;
+    const QByteArray encoded = QUrl(address).toEncoded(QUrl::FullyEncoded);
+    const qsizetype comma = encoded.indexOf(',');
+    if (comma < 0 || encoded.size() > maxEncoded)
+        return {};
+    const QByteArray header = encoded.mid(5, comma - 5).toLower(); // After "data:".
+    const QByteArray body = QByteArray::fromPercentEncoding(encoded.mid(comma + 1));
+    const QByteArray data = header.endsWith(";base64") ? QByteArray::fromBase64(body) : body;
+    return decodePicture(data);
+}
+
+} // namespace
+
+int RenderedBlock::dataPictureDecodes()
+{
+    return vn::dataPictureDecodes;
+}
+
+void RenderedBlock::releasePictureCaches()
+{
+    decodedPictures().clear();
+    pictureSizes().clear();
+    scaledLocalImages().clear();
+    scaledRemoteImages().clear();
+    dataPictures().decoded.clear();
+    dataPictures().fitted.clear();
+    LaterPictures &later = laterPictures();
+    ++later.generation; // (What is being read is dropped when it is in.)
+    later.waiting.clear();
+    later.reading.clear();
+    later.now.clear();
+}
+
 int RenderedBlock::pictureFileReads()
 {
     return localImageReads;
@@ -1800,8 +2444,322 @@ std::unique_ptr<RenderedBlock> RenderedBlock::codeBox(std::unique_ptr<RenderedBl
         end.insertText(QStringLiteral("\n") + QObject::tr("Diagram error: %1").arg(r.m_error), errorFormat);
     }
     r.m_height = r.m_doc->size().height() + 2 * codePadY + blockGap;
-    r.collectLineAnchors(int(source.count(u'\n')) + 1);
+    r.m_sourceLines = int(source.count(u'\n')) + 1;
+    r.collectLineAnchors(r.m_sourceLines);
+    r.m_reflows = true;
     return result;
+}
+
+// A table of single cells framed by 1 px lines of one colour, as pipe tables
+// and front matter are: Qt draws those lines slowly (for each edge of each
+// cell it looks its neighbours up by position, and it does so again to lay
+// the table out), so the block draws them, and the cells' backgrounds under
+// them, itself, exactly as Qt would (see grid above). Qt is left a table that
+// takes the same room and draws nothing but the text: a collapsed border of
+// 1 px is half a pixel in each cell next to it, so the cells get that as
+// padding, and the table's outermost half pixels (each rounded to one) as
+// margins; with no border to collapse, the table's borders are kept apart,
+// which Qt handles without the look-ups. Anything else (merged cells, other
+// borders, cells aligned to the middle or bottom, something drawn under the
+// table, fractional padding) keeps Qt's borders.
+struct RenderedBlock::OwnGrid
+{
+    QTextTable *table = nullptr;
+    QBrush line;
+    std::vector<QBrush> backgrounds; // By row, then column; NoBrush: none.
+    qreal padLeft = 0, padTop = 0, padRight = 0; // Of every cell, with the half pixel.
+    qreal padding = 0, leftMargin = 0, topMargin = 0, rightMargin = 0, bottomMargin = 0; // The table's, in Qt's whole pixels.
+    // Where Qt has put the cells, worked out for a layout (see place()).
+    struct Place
+    {
+        QSizeF size;
+        qreal textWidth = -1;
+        QPointF offset; // The table's top-left as Qt draws it (whole pixels).
+        std::vector<qreal> xs, ys; // Cell edges from it: columns + 1, rows + 1.
+        std::vector<int> fixedYs;  // The tops of the rows in Qt's 1/64 px.
+        bool overflows = false;    // Some text is wider than its cell.
+    };
+    mutable Place placed;
+
+    static bool exactPixels(qreal v) { return v * 64 == std::floor(v * 64); }
+    static qreal qtPixels(qreal v) { return std::floor((std::floor(v * 64) + 32) / 64); } // QFixed::fromReal().round()
+
+    static std::shared_ptr<OwnGrid> take(QTextDocument &doc, QTextTable &table)
+    {
+        if (!ownTableGrid)
+            return nullptr;
+        QTextTableFormat format = table.format();
+        const int rows = table.rows(), columns = table.columns();
+        if (rows <= 0 || columns <= 0 || !format.borderCollapse() || format.border() != 0 || format.cellSpacing() != 0
+            || !table.childFrames().isEmpty() || format.background().style() != Qt::NoBrush
+            || format.leftMargin() < 0 || format.topMargin() < 0 || format.rightMargin() < 0 || format.bottomMargin() < 0
+            || doc.rootFrame()->frameFormat().background().style() != Qt::NoBrush)
+            return nullptr;
+        // Nothing drawn under the table (Qt draws the paragraphs before it
+        // first), and nothing but selections drawn of those paragraphs
+        // (see paint()).
+        for (QTextBlock b = doc.begin(); b.isValid(); b = b.next()) {
+            if (QTextCursor(b).currentTable() == &table)
+                continue;
+            if (b.blockFormat().background().style() != Qt::NoBrush)
+                return nullptr;
+            if (b.position() < table.firstPosition()
+                && (b.textList() || b.blockFormat().hasProperty(QTextFormat::BlockTrailingHorizontalRulerWidth)))
+                return nullptr;
+        }
+        static const int borders[4][3] = {
+            {QTextFormat::TableCellTopBorder, QTextFormat::TableCellTopBorderStyle, QTextFormat::TableCellTopBorderBrush},
+            {QTextFormat::TableCellRightBorder, QTextFormat::TableCellRightBorderStyle, QTextFormat::TableCellRightBorderBrush},
+            {QTextFormat::TableCellBottomBorder, QTextFormat::TableCellBottomBorderStyle, QTextFormat::TableCellBottomBorderBrush},
+            {QTextFormat::TableCellLeftBorder, QTextFormat::TableCellLeftBorderStyle, QTextFormat::TableCellLeftBorderBrush}};
+        static const int paddings[4] = {QTextFormat::TableCellTopPadding, QTextFormat::TableCellRightPadding,
+                                        QTextFormat::TableCellBottomPadding, QTextFormat::TableCellLeftPadding};
+        auto grid = std::make_shared<OwnGrid>();
+        grid->table = &table;
+        qreal pad[4] = {-1, -1, -1, -1};
+        for (int row = 0; row < rows; ++row) {
+            for (int col = 0; col < columns; ++col) {
+                const QTextTableCell cell = table.cellAt(row, col);
+                const QTextTableCellFormat f = cell.format().toTableCellFormat();
+                if (cell.rowSpan() != 1 || cell.columnSpan() != 1 || f.verticalAlignment() == QTextCharFormat::AlignMiddle
+                    || f.verticalAlignment() == QTextCharFormat::AlignBottom)
+                    return nullptr;
+                for (int edge = 0; edge < 4; ++edge) {
+                    const QBrush brush = qvariant_cast<QBrush>(f.property(borders[edge][2]));
+                    if (!f.hasProperty(borders[edge][1]) || f.intProperty(borders[edge][1]) != QTextFrameFormat::BorderStyle_Solid
+                        || !f.hasProperty(borders[edge][0]) || f.doubleProperty(borders[edge][0]) != 1
+                        || brush.style() != Qt::SolidPattern || (grid->line.style() != Qt::NoBrush && brush != grid->line))
+                        return nullptr;
+                    grid->line = brush;
+                    const qreal p = f.hasProperty(paddings[edge]) ? f.doubleProperty(paddings[edge]) : format.cellPadding();
+                    if (!exactPixels(p) || p < 0 || (pad[edge] >= 0 && pad[edge] != p))
+                        return nullptr;
+                    pad[edge] = p;
+                }
+                const QBrush background = f.background();
+                if (background.style() != Qt::NoBrush && background.style() != Qt::SolidPattern)
+                    return nullptr;
+                grid->backgrounds.push_back(background);
+            }
+        }
+        // The same layout without the borders.
+        for (int row = 0; row < rows; ++row) {
+            for (int col = 0; col < columns; ++col) {
+                QTextTableCell cell = table.cellAt(row, col);
+                QTextTableCellFormat f = cell.format().toTableCellFormat();
+                for (int edge = 0; edge < 4; ++edge) {
+                    for (const int property : borders[edge])
+                        f.clearProperty(property);
+                    f.setProperty(paddings[edge], pad[edge] + 0.5);
+                }
+                f.clearProperty(QTextFormat::BackgroundBrush);
+                cell.setFormat(f);
+            }
+        }
+        format.setBorderCollapse(false);
+        format.setLeftMargin(format.leftMargin() + 1);
+        format.setTopMargin(format.topMargin() + 1);
+        format.setRightMargin(format.rightMargin() + 1);
+        format.setBottomMargin(format.bottomMargin() + 1);
+        table.setFormat(format);
+        grid->padTop = pad[0] + 0.5;
+        grid->padRight = pad[1] + 0.5;
+        grid->padLeft = pad[3] + 0.5;
+        grid->padding = qtPixels(format.padding());
+        grid->leftMargin = qtPixels(format.leftMargin());
+        grid->topMargin = qtPixels(format.topMargin());
+        grid->rightMargin = qtPixels(format.rightMargin());
+        grid->bottomMargin = qtPixels(format.bottomMargin());
+        return grid;
+    }
+
+    // Where the cells are in the document's present layout: from where Qt
+    // put each column's and each row's text (the cells' padding before it),
+    // and the table's size (its padding and margins after the last cell).
+    const Place &place(QTextDocument &doc) const
+    {
+        QAbstractTextDocumentLayout *layout = doc.documentLayout();
+        const QSizeF size = doc.size(); // (Lays it out.)
+        if (placed.size == size && placed.textWidth == doc.textWidth() && !placed.xs.empty())
+            return placed;
+        placed = {};
+        placed.size = size;
+        placed.textWidth = doc.textWidth();
+        const int rows = table->rows(), columns = table->columns();
+        // A cell's position in the table, plus the table's in the document.
+        const auto origin = [&](int row, int col) {
+            const QTextBlock b = table->cellAt(row, col).firstCursorPosition().block();
+            return layout->blockBoundingRect(b).topLeft() - b.layout()->position();
+        };
+        const QPointF first = origin(0, 0);
+        const qreal column0 = leftMargin + padding, row0 = topMargin + padding;
+        const QPointF at = first - QPointF(column0 + padLeft, row0 + padTop);
+        placed.offset = QPointF(at.toPoint());
+        for (int col = 0; col < columns; ++col)
+            placed.xs.push_back(column0 + origin(0, col).x() - first.x());
+        for (int row = 0; row < rows; ++row)
+            placed.ys.push_back(row0 + origin(row, 0).y() - first.y());
+        const QSizeF frame = layout->frameBoundingRect(table).size();
+        placed.xs.push_back(frame.width() - 2 * padding - rightMargin);
+        placed.ys.push_back(frame.height() - 2 * padding - bottomMargin);
+        for (const qreal y : placed.ys)
+            placed.fixedYs.push_back(qRound(y * 64));
+        // A line wider than its cell (a word or a picture that does not fit
+        // a fixed column) runs over the edge, and Qt draws the next cell
+        // over it.
+        for (int row = 0; row < rows && !placed.overflows; ++row) {
+            for (int col = 0; col < columns && !placed.overflows; ++col) {
+                const QTextTableCell cell = table->cellAt(row, col);
+                const qreal left = at.x() + placed.xs[col] + padLeft - 0.5;
+                const qreal right = at.x() + placed.xs[col + 1] - padRight + 0.5;
+                for (QTextBlock b = cell.firstCursorPosition().block();
+                     b.isValid() && b.position() <= cell.lastPosition() && !placed.overflows; b = b.next()) {
+                    const QTextLayout *lines = b.layout();
+                    const qreal x = layout->blockBoundingRect(b).left();
+                    for (int i = 0; i < lines->lineCount(); ++i) {
+                        const QTextLine line = lines->lineAt(i);
+                        const QRectF text = line.naturalTextRect();
+                        if (x + text.left() < left || x + text.right() > right)
+                            placed.overflows = true;
+                    }
+                }
+            }
+        }
+        return placed;
+    }
+
+    // The document with the table as QTextDocumentLayout draws it (drawFrame,
+    // drawTableCell): cell by cell, the background, the edges, the text.
+    // Without a selection no text reaches into another cell or onto an
+    // edge, so the backgrounds and edges go first and Qt draws all the text
+    // in one go. A selection that runs on past the end of a paragraph shows
+    // a mark a quarter of the line high after it, which can reach over the
+    // cell's right edge (and the next cell's background, at larger sizes),
+    // where Qt draws the next cell over it (as over a line wider than its
+    // cell); so then Qt draws one cell's text at a time, the others hidden (hiding a paragraph without marking the
+    // layout dirty leaves the layout as it is, and drawBlock skips it). The
+    // paragraphs above the table are drawn first, here, and hidden too: Qt
+    // lays the empty one before a table out on the table's top edge, and a
+    // selection over the table takes in its end, whose mark runs on under
+    // the first cells.
+    void paint(QPainter &painter, QTextDocument &doc, const QAbstractTextDocumentLayout::PaintContext &ctx) const
+    {
+        QAbstractTextDocumentLayout *layout = doc.documentLayout();
+        const QRectF &clip = ctx.clip;
+        const Place &p = place(doc);
+        const bool oneByOne = !ctx.selections.isEmpty() || p.overflows;
+        std::vector<QTextBlock> hidden;
+        const auto hide = [&](QTextBlock b) {
+            if (b.isVisible()) {
+                b.setVisible(false);
+                hidden.push_back(b);
+            }
+        };
+        if (oneByOne) {
+            // As drawBlock() draws the paragraphs of the document's frame.
+            const QRectF frame = layout->frameBoundingRect(doc.rootFrame());
+            const QRectF frameClip = clip.isValid() ? (clip & frame) : frame;
+            for (QTextBlock b = doc.begin(); b.isValid() && b.position() < table->firstPosition(); b = b.next()) {
+                if (!b.isVisible())
+                    continue;
+                hide(b);
+                const QTextLayout *lines = b.layout();
+                const QRectF r = lines->boundingRect().translated(lines->position());
+                if (clip.isValid() && (r.bottom() < clip.y() || r.top() > clip.bottom()))
+                    continue;
+                QList<QTextLayout::FormatRange> ranges;
+                for (const auto &selection : std::as_const(ctx.selections)) {
+                    const int start = selection.cursor.selectionStart() - b.position();
+                    const int end = selection.cursor.selectionEnd() - b.position();
+                    if (start < b.length() && end > 0 && end > start)
+                        ranges.append({start, end - start, selection.format});
+                }
+                const QPen pen = painter.pen();
+                painter.setPen(ctx.palette.color(QPalette::Text));
+                lines->draw(&painter, QPointF(), ranges, frameClip);
+                painter.setPen(pen);
+            }
+            for (QTextBlock b = doc.findBlock(table->firstPosition()); b.isValid() && b.position() <= table->lastPosition();
+                 b = b.next())
+                hide(b);
+        }
+        // The cells Qt draws, as drawFrame picks them.
+        const int rows = table->rows(), columns = table->columns();
+        const QPointF off = p.offset;
+        const QSizeF frame = layout->frameBoundingRect(table).size();
+        int firstRow = 0, lastRow = rows;
+        if (clip.isValid()
+            && (off.y() > clip.bottom() || off.y() + frame.height() < clip.top() || off.x() > clip.right()
+                || off.x() + frame.width() < clip.left())) {
+            lastRow = 0;
+        } else if (clip.isValid()) {
+            const auto fixed = [](qreal v) { return int(v * 64); }; // QFixed::fromReal
+            const auto rowsBegin = p.fixedYs.begin(), rowsEnd = p.fixedYs.end() - 1;
+            auto it = std::lower_bound(rowsBegin, rowsEnd, fixed(clip.top() - off.y()));
+            if (it != rowsEnd && it != rowsBegin)
+                firstRow = int(--it - rowsBegin);
+            it = std::upper_bound(rowsBegin, rowsEnd, fixed(clip.bottom() - off.y()));
+            if (it != rowsEnd)
+                lastRow = int(++it - rowsBegin);
+        }
+        const grid::Shape shape{rows, columns};
+        for (int row = firstRow; row < lastRow; ++row) {
+            for (int col = 0; col < columns; ++col) {
+                const QRectF cellRect(off.x() + p.xs[col], off.y() + p.ys[row], p.xs[col + 1] - p.xs[col],
+                                      p.ys[row + 1] - p.ys[row]);
+                if (clip.isValid() && !cellRect.adjusted(-0.5, -0.5, 0.5, 0.5).intersects(clip))
+                    continue;
+                const QBrush &background = backgrounds[size_t(row * columns + col)];
+                if (background.style() != Qt::NoBrush) {
+                    painter.save();
+                    painter.setBrushOrigin(cellRect.topLeft());
+                    painter.fillRect(cellRect, background);
+                    painter.restore();
+                }
+                const QRectF borderRect = cellRect.toRect();
+                if (borderRect.isValid()) {
+                    const bool turnOffAntialiasing = !(painter.renderHints() & QPainter::Antialiasing);
+                    painter.setRenderHint(QPainter::Antialiasing);
+                    for (const grid::Edge edge : {grid::TopEdge, grid::LeftEdge, grid::RightEdge, grid::BottomEdge}) {
+                        painter.save();
+                        painter.setPen(Qt::NoPen);
+                        painter.setBrush(line);
+                        painter.drawRect(shape.edgeRect({row, col}, borderRect, edge));
+                        painter.restore();
+                    }
+                    if (turnOffAntialiasing)
+                        painter.setRenderHint(QPainter::Antialiasing, false);
+                }
+                if (!oneByOne)
+                    continue;
+                // This cell's text alone, with the clip Qt draws it with
+                // (only the clip's height is narrowed, to the row, so that
+                // Qt looks at a few rows of cells only).
+                const QTextTableCell cell = table->cellAt(row, col);
+                std::vector<QTextBlock> shown;
+                for (QTextBlock b = cell.firstCursorPosition().block(); b.isValid() && b.position() <= cell.lastPosition();
+                     b = b.next()) {
+                    b.setVisible(true);
+                    shown.push_back(b);
+                }
+                QAbstractTextDocumentLayout::PaintContext one = ctx;
+                QRectF band(QPointF(-1e9, cellRect.top()), QPointF(1e9, cellRect.bottom()));
+                one.clip = clip.isValid() ? (band & clip) : band;
+                layout->draw(&painter, one);
+                for (QTextBlock &b : shown)
+                    b.setVisible(false);
+            }
+        }
+        if (!oneByOne)
+            layout->draw(&painter, ctx);
+        for (QTextBlock &b : hidden)
+            b.setVisible(true);
+    }
+};
+
+void RenderedBlock::setOwnTableGridEnabled(bool on)
+{
+    ownTableGrid = on;
 }
 
 void RenderedBlock::setPartsEnabled(bool on)
@@ -1851,7 +2809,9 @@ std::unique_ptr<RenderedBlock> RenderedBlock::createPart(const QString &source, 
     const qreal textHeight = part.last ? r.m_doc->size().height()
                                        : r.m_doc->documentLayout()->blockBoundingRect(r.m_doc->lastBlock()).top();
     r.m_height = r.m_strip + textHeight + (part.first ? codePadY : 0) + (part.last ? codePadY + blockGap : 0);
-    r.collectLineAnchors(int(source.count(u'\n')) + 1);
+    r.m_sourceLines = int(source.count(u'\n')) + 1;
+    r.collectLineAnchors(r.m_sourceLines);
+    r.m_reflows = true;
     return result;
 }
 
@@ -2041,6 +3001,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
         const QString html = QString::fromUtf8(block.html.data(), block.html.size());
         doc->setHtml(html);
         clampFontSizes(doc.get(), html);
+        doc->nameDataPictures();
         doc->dropNetworkImages();
         doc->placeMath();
         doc->sizeFigures(context.figureScales.value(figureId(source)));
@@ -2077,7 +3038,13 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
             r.m_item.topMargin = first.blockFormat().topMargin();
             r.m_item.bottomMargin = doc->lastBlock().blockFormat().bottomMargin();
         }
-        QTextTable *only = context.overflow && !item ? onlyTable(*doc) : nullptr;
+        QTextTable *single = item ? nullptr : onlyTable(*doc);
+        if (single)
+            r.m_ownGrid = OwnGrid::take(*doc, *single);
+        QTextTable *only = context.overflow ? single : nullptr;
+        r.m_fitsTable = only != nullptr;
+        if (only)
+            r.m_tableConstraints = only->format().property(QTextFormat::TableColumnWidthConstraints);
         if (only) {
             // A table fits the column as a browser fits one (see fitTable),
             // and keeps the width its cells ask for, scrolled sideways, only
@@ -2098,6 +3065,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
         r.m_pending = doc->hasPendingDownload();
         r.m_pictureBytes = doc->pictureBytes() // Resolved by the layout (and the dry paint).
                            + doc->mathElements() * qsizetype(sizeof(QPainterPath::Element));
+        r.m_reflows = block.inline_math.empty() && !r.m_pending && r.m_pictureBytes == 0 && !asksForPictures(*doc);
         r.m_doc = std::move(doc);
         r.collectLineAnchors(0);
         return result;
@@ -2128,10 +3096,53 @@ QStringList RenderedBlock::remoteImages(const core::Block &block, const RenderCo
     doc.setHtml(html);
     clampFontSizes(&doc, html);
     // As in create(): Qt's image handler looks for "@2x" files by name first.
+    doc.nameDataPictures();
     doc.dropNetworkImages();
     doc.setTextWidth(context.width);
     doc.loadPaintedPictures();
     return doc.remoteUrls();
+}
+
+bool RenderedBlock::reflow(const RenderContext &context)
+{
+    if (!m_reflows || !m_doc || (m_kind != Kind::Rich && m_kind != Kind::Code))
+        return false;
+    m_width = context.width;
+    m_tableGrid.reset();
+    m_breaks.reset();
+    m_lineAnchors.clear();
+    if (m_kind == Kind::Code) {
+        // As codeBox() and createPart() lay it out.
+        m_doc->setTextWidth(context.width - 2 * codePadX);
+        const qreal textHeight = m_part.last ? m_doc->size().height()
+                                             : m_doc->documentLayout()->blockBoundingRect(m_doc->lastBlock()).top();
+        m_height = m_strip + textHeight + (m_part.first ? codePadY : 0) + (m_part.last ? codePadY + blockGap : 0);
+        collectLineAnchors(m_sourceLines);
+        return true;
+    }
+    // As build() lays it out (and create() adds the strip).
+    m_contentWidth = 0;
+    m_scrollRoom = 0;
+    QTextTable *table = m_fitsTable ? onlyTable(*m_doc) : nullptr;
+    if (table) {
+        // The widths the table had before fitTable() set its own.
+        QTextTableFormat format = table->format();
+        if (m_tableConstraints.isValid())
+            format.setProperty(QTextFormat::TableColumnWidthConstraints, m_tableConstraints);
+        else
+            format.clearProperty(QTextFormat::TableColumnWidthConstraints);
+        table->setFormat(format);
+        if (const qreal wide = fitTable(*m_doc, *table, context.width); wide > 0) {
+            m_doc->setTextWidth(wide);
+            m_contentWidth = wide;
+            m_scrollRoom = scrollBarHeight;
+        }
+    } else {
+        m_doc->setTextWidth(context.width);
+    }
+    m_height = m_doc->size().height() + (m_item.made ? 0 : blockGap) + m_scrollRoom + m_strip;
+    collectLineAnchors(0);
+    return true;
 }
 
 void RenderedBlock::collectLineAnchors(int sourceLines)
@@ -2304,7 +3315,10 @@ void RenderedBlock::paint(QPainter &painter, const QPointF &topLeft, qreal width
                 sel.format.setForeground(selectionText);
             ctx.selections.append(sel);
         }
-        m_doc->documentLayout()->draw(&painter, ctx);
+        if (m_ownGrid)
+            m_ownGrid->paint(painter, *m_doc, ctx);
+        else
+            m_doc->documentLayout()->draw(&painter, ctx);
         painter.restore();
         return;
     }

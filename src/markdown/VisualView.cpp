@@ -76,6 +76,9 @@ bool itemRowsEnabled = true; // For tests.
 // it shows when it is wider than minFigureBarWidth fitted, and keeps clear of
 // the figure's corner by figureBarInset.
 constexpr int figureColumns = 70;
+// Views that have rendered a block that may have pictures (see the
+// destructor).
+int picturedViews = 0;
 constexpr qreal figureHeightPart = 0.75;
 constexpr int figureHeightStep = 16;
 constexpr qreal minFigureBarWidth = 120;
@@ -625,6 +628,15 @@ int renderedOffsetFor(const QString &rendered, const QString &source, int source
     return r;
 }
 
+// The pictures kept for later renders (up to some hundred megabytes) go
+// when the last view that showed any does: a document of big pictures,
+// closed, kept them for the rest of the session.
+VisualView::~VisualView()
+{
+    if (m_showsPictures && --picturedViews == 0)
+        RenderedBlock::releasePictureCaches();
+}
+
 VisualView::VisualView(MarkdownModel *model, QWidget *parent)
     : TextView(model->document(), parent)
     , m_model(model)
@@ -723,8 +735,50 @@ void VisualView::clearRenderCache()
 void VisualView::resetRenders()
 {
     m_renders.clear();
+    m_renderKeys.clear();
     m_renderOrder.clear();
     m_renderKiB = 0;
+}
+
+// A new width (and nothing else new): the renders at hand are laid out
+// again at it where that is all the width changes (RenderedBlock::reflow),
+// which takes a fraction of making them, and filed in the cache under their
+// new key; the others are made again when asked for. (Renders the cache has
+// at the old width stay there for it.)
+void VisualView::reflowRenders()
+{
+    const RenderContext &ctx = renderContext();
+    RenderContext before = ctx;
+    before.width = m_rendersWidth;
+    before.figureWidth = qMin(before.width, figureColumns * QFontMetricsF(before.font).averageCharWidth());
+    m_renderKeys.clear();
+    std::erase_if(m_renderOrder, [&](int line) {
+        const auto it = m_renders.find(line);
+        Render &memo = it->second;
+        const QString oldBase = renderKey(before, memo.kind, memo.source);
+        bool kept = memo.key.startsWith(oldBase);
+        if (kept) {
+            const QString key = renderKey(ctx, memo.kind, memo.source) + QStringView(memo.key).mid(oldBase.size());
+            if (const Render *made = m_cache.object(key); made && made->source == memo.source && made->html == memo.html) {
+                const quint64 used = memo.used;
+                m_renderKiB += made->cost - memo.cost;
+                memo = *made;
+                memo.used = used;
+            } else if (memo.block->reflow(ctx)) {
+                if (const Render *old = m_cache.object(memo.key); old && old->block == memo.block)
+                    m_cache.remove(memo.key);
+                memo.key = key;
+                m_cache.insert(key, new Render(memo), memo.cost);
+            } else {
+                kept = false;
+            }
+        }
+        if (!kept) {
+            m_renderKiB -= memo.cost;
+            m_renders.erase(it);
+        }
+        return !kept;
+    });
 }
 
 void VisualView::asyncRenderReady()
@@ -2073,6 +2127,7 @@ bool VisualView::openWideBlock(const Row &r)
     RenderContext ctx = renderContext();
     ctx.overflow = true;
     ctx.width = std::ceil(shown->contentWidth());
+    ctx.picturesLater = false; // (Never rendered again.)
     std::unique_ptr<RenderedBlock> own =
         RenderedBlock::create(m_model->parsedBlock(span.block), m_model->sourceText(span.first, span.last), ctx);
     if (own->contentSize().isEmpty())
@@ -2160,6 +2215,7 @@ RenderContext VisualView::context() const
     ctx.figureHeight = figureBoxHeight();
     ctx.figureScales = m_figureScales;
     ctx.overflow = readActive();
+    ctx.picturesLater = true; // (The view renders pending blocks again.)
     return ctx;
 }
 
@@ -2170,6 +2226,28 @@ VisualView::LongBox &VisualView::longBox(int blockIndex)
         m_longBoxesGeneration = m_model->parseGeneration();
     }
     return m_longBoxes[blockIndex];
+}
+
+// Whether a block of the parse is a list long enough to show an item a row
+// (itemRows looks closer). Remembered for the parse: the rows are made again
+// after every edit, and reading every block's HTML for it took milliseconds
+// in a large document.
+bool VisualView::mayBeLongList(int blockIndex)
+{
+    if (m_mayBeListsGeneration != m_model->parseGeneration()) {
+        m_mayBeLists.assign(size_t(m_model->parsedBlockCount()), -1);
+        m_mayBeListsGeneration = m_model->parseGeneration();
+    }
+    if (blockIndex < 0 || size_t(blockIndex) >= m_mayBeLists.size())
+        return false;
+    signed char &known = m_mayBeLists[size_t(blockIndex)];
+    if (known < 0) {
+        const core::Block &block = m_model->parsedBlock(blockIndex);
+        const std::string_view html(block.html.data(), block.html.size());
+        known = block.kind == core::BlockKind::Html && (startsWith(html, 0, "<ul") || startsWith(html, 0, "<ol"))
+                && (int(block.last_line - block.first_line) + 1 >= itemRowsMinItems || int(html.size()) >= itemRowsMinHtml);
+    }
+    return known;
 }
 
 bool VisualView::madeInParts(int s)
@@ -2256,12 +2334,11 @@ bool VisualView::itemRows(int s, int line, int last)
         return false;
     const MarkdownModel::Span &span = m_model->spans()[s];
     const int blockIndex = span.block >= 0 ? span.block : span.previous;
+    // Quick for the blocks that are not long lists.
+    if (!mayBeLongList(blockIndex))
+        return false;
     const core::Block &block = m_model->parsedBlock(blockIndex);
     const std::string_view html(block.html.data(), block.html.size());
-    // Quick for the blocks that are not long lists.
-    if (block.kind != core::BlockKind::Html || !(startsWith(html, 0, "<ul") || startsWith(html, 0, "<ol"))
-        || (int(block.last_line - block.first_line) + 1 < itemRowsMinItems && int(html.size()) < itemRowsMinHtml))
-        return false;
     const ListItems &parsed = parsedItems(blockIndex);
     const int n = int(parsed.items.size());
     if (!parsed.ok || n < 2 || (n < itemRowsMinItems && int(html.size()) < itemRowsMinHtml)
@@ -2470,13 +2547,15 @@ const VisualView::Render *VisualView::rendered(const Row &r)
 
     const qreal width = textWidth();
     const qreal dpr = devicePixelRatioF();
-    if (m_rendersRevision != m_model->revision() || m_rendersWidth != width || m_rendersDpr != dpr
-        || m_rendersOverflow != readActive()) {
+    if (m_rendersRevision != m_model->revision() || m_rendersDpr != dpr || m_rendersOverflow != readActive()) {
         resetRenders();
         m_rendersRevision = m_model->revision();
         m_rendersWidth = width;
         m_rendersDpr = dpr;
         m_rendersOverflow = readActive();
+    } else if (m_rendersWidth != width) {
+        reflowRenders();
+        m_rendersWidth = width;
     }
     if (m_rendersFigureHeight != figureBoxHeight() || m_rendersFigureRevision != m_figureRevision) {
         dropFigureRenders();
@@ -2526,6 +2605,17 @@ const VisualView::Render *VisualView::rendered(const Row &r)
     const core::Block &block = m_model->parsedBlock(blockIndex);
     // A part of a long code box: the lines of the row, and where it sits in the box.
     const bool inParts = !chip && m_partSpans.contains(index);
+    // Rendered before in this revision and context, and let go since (see
+    // below): the cache may still have it, found without reading the
+    // source (a block can be megabytes: a picture carried in the text).
+    const Render *known = nullptr;
+    if (const auto it = m_renderKeys.find(r.firstLine);
+        it != m_renderKeys.end() && span.block >= 0 && it->second.lastLine == r.lastLine
+        && it->second.blockIndex == blockIndex && it->second.chip == chip && it->second.inParts == inParts)
+        known = m_cache.object(it->second.key);
+    if (known) {
+        memo = *known;
+    } else {
     RenderedBlock::Part part;
     QString source;
     if (inParts) {
@@ -2576,11 +2666,16 @@ const VisualView::Render *VisualView::rendered(const Row &r)
             m_pendingKeys.insert(key);
         m_cache.insert(key, new Render(memo), cost);
     }
+    if (span.block >= 0)
+        m_renderKeys[r.firstLine] = {key, r.lastLine, blockIndex, chip, inParts};
+    }
     }
     memo.used = m_frame;
     Render &kept = m_renders[r.firstLine] = std::move(memo);
     if (!m_figuresRendered && RenderedBlock::mayHaveFigure(kept.source))
         m_figuresRendered = true;
+    if (m_figuresRendered && !std::exchange(m_showsPictures, true))
+        ++picturedViews;
     // Keep the memos of the latest renders only: the cache holds the rest
     // within its budget, while memos on every block seen would keep them all
     // alive, however far the view has scrolled on. Those the paint in
@@ -3279,6 +3374,7 @@ bool VisualView::dropFigureRenders()
         return true;
     });
     // (The items' memos are keyed by the context, which has changed.)
+    m_renderKeys.clear();
     return dropped;
 }
 

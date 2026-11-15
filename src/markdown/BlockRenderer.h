@@ -16,6 +16,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTextDocument>
+#include <QVariant>
 
 #include <memory>
 #include <optional>
@@ -61,6 +62,11 @@ struct RenderContext
     // RenderedBlock::contentWidth); the view scrolls those sideways.
     // Everywhere else they are fitted to the width.
     bool overflow = false;
+    // Big picture files (a million pixels or more) are read on a worker
+    // thread: until one is in, the block keeps its room blank and is pending
+    // (RenderedBlock::isPending), and DiagramNotifier::ready says when it is
+    // in. Otherwise they are read when the block is made.
+    bool picturesLater = false;
 };
 
 // What to highlight in a block: ranges of rendered-text characters (for code,
@@ -85,6 +91,8 @@ struct RenderedSelection
 // Mermaid diagrams render on a worker thread (they can take a while);
 // ready is emitted on the GUI thread when one has finished, after which
 // RenderedBlock::create returns it. Blocks created before show the source.
+// Big picture files read on a worker thread (RenderContext::picturesLater)
+// say they are in by the same signal.
 class DiagramNotifier : public QObject
 {
     Q_OBJECT
@@ -117,6 +125,9 @@ public:
     static bool isLongCodeBox(const core::Block &block, qsizetype sourceChars);
     // For tests: off, isLongCodeBox() says no (views make every box whole).
     static void setPartsEnabled(bool on);
+    // For tests: off, a table's grid is drawn by Qt's rich text as it is
+    // where the renderer cannot draw it itself (see OwnGrid), to compare.
+    static void setOwnTableGridEnabled(bool on);
     // Whether the box wraps its lines anywhere; decided on its whole source.
     static bool wrapsAnywhere(const QString &source);
     struct Part
@@ -297,6 +308,11 @@ public:
 
     // For tests: picture files read (and decoded) from disk so far.
     static int pictureFileReads();
+    // Forgets the pictures kept for later renders (decoded, scaled, their
+    // sizes), for when no document shows any.
+    static void releasePictureCaches();
+    // For tests: pictures carried in documents (data:) decoded so far.
+    static int dataPictureDecodes();
     // How many KiB of decoded picture files are kept for later widths (and
     // forgets the ones kept). Set from key::pictureCacheMiB by MainWindow.
     static void setDecodedPictureLimitKiB(int kib);
@@ -308,6 +324,15 @@ public:
 
     // Memory use in KiB (about, but not under), for caches.
     int cost() const;
+
+    // The block for a column of another width (RenderContext::width; the
+    // rest of the context as it was made with), made by laying the same
+    // text out again rather than from the start: text and tables, code
+    // boxes and their parts. False, and the block as it was, when more than
+    // the layout depends on the width (pictures and figures fit the column,
+    // formulas shrink to it) or the block is quick to make again (pictures,
+    // formulas, diagrams, chips): create() it.
+    bool reflow(const RenderContext &context);
 
     // Where source lines start in the rendering: (line offset from the
     // block's first line, y from the block's top), ascending by line. Code
@@ -344,6 +369,9 @@ private:
     // Of a picture block (Kind::Image), in logical pixels.
     QSizeF pictureSize() const;
     QTextTable *theTable() const;
+    // The lines and backgrounds of a table's cells, drawn here instead of by
+    // Qt (see the source); null for other blocks.
+    struct OwnGrid;
     void collectLineAnchors(int sourceLines);
 
     Kind m_kind = Kind::Empty;
@@ -365,6 +393,10 @@ private:
     bool m_pending = false;
     Figure m_diagramFigure; // Of a diagram (m_diagramCode not null), without its rectangle.
     Part m_part; // Of a code box; the whole box by default.
+    bool m_reflows = false;   // See reflow().
+    bool m_fitsTable = false; // The block is a table fitted to the column (RenderContext::overflow),
+    QVariant m_tableConstraints; // and its column widths before.
+    int m_sourceLines = 0;    // Of a code box, for its line anchors.
     qreal m_strip = 0; // See stripHeight().
     QRectF m_chipRect;
     QFont m_chipFont;
@@ -385,6 +417,7 @@ private:
     mutable QString m_renderedText; // Cached; null until asked for.
     mutable std::optional<std::optional<TableGrid>> m_tableGrid; // Empty until asked for.
     mutable std::optional<Breaks> m_breaks; // Empty until asked for.
+    std::shared_ptr<OwnGrid> m_ownGrid;
 };
 
 // The picture in downloaded bytes, or null: also for an SVG that names a

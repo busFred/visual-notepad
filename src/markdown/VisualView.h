@@ -57,6 +57,7 @@ class VisualView : public TextView
 
 public:
     VisualView(MarkdownModel *model, QWidget *parent = nullptr);
+    ~VisualView() override;
 
     void setBaseDirectory(const QString &directory);
     void setHighlightActiveBlock(bool on);
@@ -353,6 +354,7 @@ private:
     const Render *memoized(const Row &row) const;
     int spanForRow(const Row &row) const;
     LongBox &longBox(int blockIndex);
+    bool mayBeLongList(int blockIndex);
     // Whether a span shows as a code box in parts.
     bool madeInParts(int span);
     // Adds rows for the items of the span (lines line..last) if it is a long
@@ -388,6 +390,7 @@ private:
     void updateRemoteBanner();
     void layoutBanner();
     void resetRenders();
+    void reflowRenders();
     // The toolbar over the table being edited: shown while the caret is in a
     // table of an editable view with the focus; the update is made once the
     // event being handled is done.
@@ -621,6 +624,7 @@ private:
     QHash<QString, QList<qreal>> m_figureScales;
     int m_figureRevision = 0; // Bumped when m_figureScales changes.
     bool m_figuresRendered = false; // A block that may have figures was rendered.
+    bool m_showsPictures = false;   // Counted in picturedViews (see the destructor).
     bool m_toolbarUpdatePending = false;
     bool m_hasFocus = false; // Not counting the toolbar's menu taking it.
 
@@ -729,6 +733,17 @@ private:
     // m_cache, within its budget, or gone.
     std::unordered_map<int, Render> m_renders;
     std::deque<int> m_renderOrder; // First lines in the order they were set.
+    // The cache keys of the blocks rendered since the renders were reset, by
+    // first line, with what else made the key (see rendered()).
+    struct RenderKey
+    {
+        QString key;
+        int lastLine = -1;
+        int blockIndex = -1;
+        bool chip = false;
+        bool inParts = false;
+    };
+    std::unordered_map<int, RenderKey> m_renderKeys;
     qint64 m_renderKiB = 0;
     int m_rendersRevision = -1;
     qreal m_rendersWidth = -1;
@@ -742,6 +757,10 @@ private:
     // Blocks made in parts, by block index of m_longBoxesGeneration's parse.
     std::unordered_map<int, LongBox> m_longBoxes;
     int m_longBoxesGeneration = -1;
+    // Whether each block of m_mayBeListsGeneration's parse may show as a long
+    // list (see mayBeLongList): -1 until asked.
+    std::vector<signed char> m_mayBeLists;
+    int m_mayBeListsGeneration = -1;
 
     // The bar above the text asking about remote pictures (see
     // updateRemoteBanner); the remote addresses are scanned once per parse.

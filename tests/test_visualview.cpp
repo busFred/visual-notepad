@@ -467,6 +467,8 @@ private Q_SLOTS:
     void modeSwitchDuringBackgroundParse();
     void wideImagesShrinkToColumn();
     void decodedPicturesServeEveryWidth();
+    void bigPicturesArriveInTheirRoom();
+    void pictureCachesCanBeReleased();
     void pictureCacheSettingResizesTheCache();
     void codeBlocksArePaintedAsTheStockHighlighterDoes_data();
     void codeBlocksArePaintedAsTheStockHighlighterDoes();
@@ -503,6 +505,8 @@ private Q_SLOTS:
     void tablesScrollWhenTheirLongestWordsDoNotFit();
     void viewersLeaveTheWindowUsable();
     void tableViewerIsTheRealTable();
+    void tableGridLooksAsQtDrawsIt();
+    void reflowedBlocksAreMadeBlocks();
     void equationViewerIsDrawnAsShapes();
     void readModeWaitsForTheFirstParse();
     void figureBarKeepsClicksAndPictureClickStillZooms();
@@ -2979,6 +2983,85 @@ void TestVisualView::pictureCacheSettingResizesTheCache()
     paintHtml(html, dir.path(), 900);
     QCOMPARE(RenderedBlock::pictureFileReads(), start + 1);
     settings.reset(key::pictureCacheMiB);
+}
+
+// A big picture file is read on a worker thread when the context allows
+// it: the block keeps its room blank meanwhile and is pending, and once the
+// picture is in, the block made again is as tall and shows it. Small ones
+// are read at once.
+void TestVisualView::bigPicturesArriveInTheirRoom()
+{
+    QTemporaryDir dir;
+    QImage big(1500, 900, QImage::Format_RGB32);
+    big.fill(Qt::red);
+    QVERIFY(big.save(dir.filePath(QStringLiteral("big.png"))));
+    QImage small(60, 40, QImage::Format_RGB32);
+    small.fill(Qt::red);
+    QVERIFY(small.save(dir.filePath(QStringLiteral("small.png"))));
+    const auto make = [&](const QString &name, qreal dpr) {
+        RenderContext ctx;
+        ctx.font = theme::textFont();
+        ctx.codeFont = theme::editorFont();
+        ctx.width = 500;
+        ctx.devicePixelRatio = dpr;
+        ctx.baseDirectory = dir.path();
+        ctx.picturesLater = true;
+        const QString html = QStringLiteral("<p>Before</p><p><img src=\"%1\"></p><p>after</p>").arg(name);
+        core::Block block;
+        block.kind = core::BlockKind::Html;
+        const QByteArray utf8 = html.toUtf8();
+        block.html = rust::String(utf8.constData(), utf8.size());
+        return RenderedBlock::create(block, html, ctx);
+    };
+    const auto redPixels = [](const RenderedBlock &block, qreal dpr) {
+        QImage image(QSize(int(500 * dpr), int(block.height() * dpr) + 1), QImage::Format_RGB32);
+        image.setDevicePixelRatio(dpr);
+        image.fill(Qt::white);
+        {
+            QPainter painter(&image);
+            block.paint(painter, QPointF(0, 0), 500);
+        }
+        int count = 0;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x)
+                count += QColor(image.pixel(x, y)) == QColor(Qt::red);
+        return count;
+    };
+    for (const qreal dpr : {1.0, 1.5}) {
+        RenderedBlock::releasePictureCaches();
+        QSignalSpy ready(&DiagramNotifier::instance(), &DiagramNotifier::ready);
+        const int reads = RenderedBlock::pictureFileReads();
+        const auto waiting = make(QStringLiteral("big.png"), dpr);
+        QVERIFY(waiting->isPending());
+        QCOMPARE(redPixels(*waiting, dpr), 0);
+        // (Other work may say it is ready too.)
+        QTRY_VERIFY_WITH_TIMEOUT(!make(QStringLiteral("big.png"), dpr)->isPending(), 10000);
+        QVERIFY(ready.count() > 0);
+        const auto shown = make(QStringLiteral("big.png"), dpr);
+        QCOMPARE(shown->height(), waiting->height());
+        QVERIFY(redPixels(*shown, dpr) > 1000);
+        QCOMPARE(RenderedBlock::pictureFileReads(), reads + 1);
+    }
+    const auto at = make(QStringLiteral("small.png"), 1);
+    QVERIFY(!at->isPending());
+    QCOMPARE(redPixels(*at, 1), 60 * 40);
+}
+
+// Forgotten, the pictures kept for later renders are read again.
+void TestVisualView::pictureCachesCanBeReleased()
+{
+    QTemporaryDir dir;
+    QImage picture(300, 200, QImage::Format_RGB32);
+    picture.fill(Qt::blue);
+    QVERIFY(picture.save(dir.filePath(QStringLiteral("p.png"))));
+    const QString html = QStringLiteral("<p><img src=\"p.png\"></p>");
+    const int start = RenderedBlock::pictureFileReads();
+    const QImage first = paintHtml(html, dir.path(), 400);
+    paintHtml(html, dir.path(), 500);
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 1);
+    RenderedBlock::releasePictureCaches();
+    QCOMPARE(paintHtml(html, dir.path(), 400), first);
+    QCOMPARE(RenderedBlock::pictureFileReads(), start + 2);
 }
 
 void TestVisualView::decodedPicturesServeEveryWidth()
@@ -6375,6 +6458,150 @@ void TestVisualView::readModeWaitsForTheFirstParse()
     QVERIFY(!view.verticalScrollBar()->isVisible());
     view.readPageForward();
     QVERIFY(view.readLineRange().first > range.first);
+}
+
+// The renderer draws the lines and backgrounds of a table's cells itself (Qt
+// draws them slowly); they look exactly as Qt draws them: at any width,
+// fitted in read mode, scaled, with selections, under a clip.
+void TestVisualView::tableGridLooksAsQtDrawsIt()
+{
+    QString longTable = QStringLiteral("| # | Name | Description |\n|---|---|---|\n");
+    for (int i = 0; i < 12; ++i)
+        longTable += QStringLiteral("| %1 | lorem ipsum | %2 |\n").arg(i).arg(QStringLiteral("dolor sit amet ").repeated(i % 4 + 1));
+    const QStringList documents = {
+        QStringLiteral("| Left | Centre | Right |\n|:---|:---:|---:|\n| ipsum elit | **ipsum** | 0 |\n| `x1` | do | 137 |\n"),
+        QStringLiteral("---\ntitle: Tables\ntags: [a, b]\n---\n"),
+        QStringLiteral("| one column |\n|---|\n| x |\n"),
+        longTable,
+    };
+    const auto render = [](const QString &markdown, qreal width, bool overflow) {
+        const QByteArray utf8 = markdown.toUtf8();
+        // (Front matter as a table.)
+        const rust::Vec<core::Block> blocks = core::blocks(rust::Str(utf8.constData(), utf8.size()),
+                                                           core::RenderOptions{false, true, true, true, 2});
+        RenderContext ctx;
+        ctx.font = theme::textFont();
+        ctx.codeFont = theme::editorFont();
+        ctx.width = width;
+        ctx.overflow = overflow;
+        return RenderedBlock::create(blocks.at(0), markdown, ctx);
+    };
+    struct Paint
+    {
+        qreal scale;
+        bool antialiased;
+        QRectF clip;
+        QPair<int, int> selected;
+    };
+    const QList<Paint> paints = {{1, false, {}, {0, 0}},          {1.5, true, {}, {0, 0}},
+                                 {1, false, {}, {0, 100000}},     {1.25, false, {}, {3, 40}},
+                                 {1, false, {0, 40.3, 2000, 61.6}, {0, 0}}, {0.75, true, {20, 0, 300, 2000}, {2, 9}}};
+    const auto paint = [](const RenderedBlock &block, const Paint &p) {
+        QImage image(QSize(int((block.contentWidth() + 20) * p.scale), int((block.height() + 20) * p.scale)),
+                     QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::white);
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing, p.antialiased);
+        painter.scale(p.scale, p.scale);
+        if (!p.clip.isNull())
+            painter.setClipRect(p.clip);
+        RenderedSelection selection;
+        if (p.selected.second > 0)
+            selection.ranges.append(p.selected);
+        block.paint(painter, QPointF(7, 5), block.contentWidth(), selection);
+        return image;
+    };
+    for (const QString &markdown : documents) {
+        for (const qreal width : {548.0, 200.0}) {
+            for (const bool overflow : {false, true}) {
+                RenderedBlock::setOwnTableGridEnabled(false);
+                const auto qt = render(markdown, width, overflow);
+                RenderedBlock::setOwnTableGridEnabled(true);
+                const auto own = render(markdown, width, overflow);
+                QVERIFY(qt->tableGrid());
+                QCOMPARE(own->height(), qt->height());
+                QCOMPARE(own->contentWidth(), qt->contentWidth());
+                for (const Paint &p : paints) {
+                    const QImage expected = paint(*qt, p);
+                    const QImage actual = paint(*own, p);
+                    QVERIFY2(actual == expected, qPrintable(QStringLiteral("%1 at %2: %3")
+                                                                .arg(markdown.left(20))
+                                                                .arg(width)
+                                                                .arg(imageDifference(actual, expected))));
+                }
+            }
+        }
+    }
+}
+
+// A block laid out again at a new width (a window-edge drag) is the block
+// made at that width: its height, anchors, cuts, grid and pixels. Blocks
+// whose more than layout depends on the width are made again.
+void TestVisualView::reflowedBlocksAreMadeBlocks()
+{
+    QString table = QStringLiteral("| # | Name | Description |\n|---|---|---|\n");
+    for (int i = 0; i < 8; ++i)
+        table += QStringLiteral("| %1 | lorem ipsum | %2 |\n").arg(i).arg(QStringLiteral("dolor sit amet ").repeated(i % 4 + 1));
+    const QString words = QStringLiteral("lorem ipsum dolor sit amet consectetur ").repeated(12);
+    const QStringList documents = {
+        QStringLiteral("A paragraph of %1 with **bold** and `code`.\n").arg(words),
+        QStringLiteral("> A quote of %1\n>\n> - with a list\n> - of two items\n").arg(words),
+        QStringLiteral("```cpp\nint main() { return 0; } // %1\n```\n").arg(words),
+        QStringLiteral("---\ntitle: %1\n---\n").arg(words),
+        table,
+    };
+    const auto make = [](const QString &markdown, qreal width, bool overflow) {
+        const QByteArray utf8 = markdown.toUtf8();
+        const rust::Vec<core::Block> blocks = core::blocks(rust::Str(utf8.constData(), utf8.size()),
+                                                           core::RenderOptions{false, true, true, true, 2});
+        RenderContext ctx;
+        ctx.font = theme::textFont();
+        ctx.codeFont = theme::editorFont();
+        ctx.width = width;
+        ctx.overflow = overflow;
+        return std::pair{RenderedBlock::create(blocks.at(0), markdown, ctx), ctx};
+    };
+    const auto picture = [](const RenderedBlock &block) {
+        QImage image(QSize(int(block.contentWidth()) + 10, int(block.height()) + 10), QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::white);
+        QPainter painter(&image);
+        block.paint(painter, QPointF(3, 2), block.contentWidth());
+        return image;
+    };
+    for (const QString &markdown : documents) {
+        for (const bool overflow : {false, true}) {
+            auto [block, ctx] = make(markdown, 548, overflow);
+            for (const qreal width : {300.0, 731.5, 120.0, 548.0}) {
+                ctx.width = width;
+                const QString what = QStringLiteral("%1 at %2").arg(markdown.left(16)).arg(width);
+                QVERIFY2(block->reflow(ctx), qPrintable(what));
+                const auto made = make(markdown, width, overflow).first;
+                QCOMPARE(block->height(), made->height());
+                QCOMPARE(block->contentWidth(), made->contentWidth());
+                QVERIFY2(block->lineAnchors() == made->lineAnchors(), qPrintable(what));
+                QVERIFY2(block->breaks().cuts == made->breaks().cuts, qPrintable(what));
+                QVERIFY2(block->breaks().lineTops == made->breaks().lineTops, qPrintable(what));
+                QCOMPARE(bool(block->tableGrid()), bool(made->tableGrid()));
+                if (made->tableGrid()) {
+                    QVERIFY(block->tableGrid()->xs == made->tableGrid()->xs);
+                    QVERIFY(block->tableGrid()->ys == made->tableGrid()->ys);
+                }
+                const QImage actual = picture(*block), expected = picture(*made);
+                QVERIFY2(actual == expected, qPrintable(what + u' ' + imageDifference(actual, expected)));
+            }
+        }
+    }
+    // A picture fits the column, a formula shrinks to it: made again.
+    QTemporaryDir dir;
+    QImage red(400, 100, QImage::Format_RGB32);
+    red.fill(Qt::red);
+    QVERIFY(red.save(dir.filePath(QStringLiteral("red.png"))));
+    for (const QString &markdown : {QStringLiteral("![red](%1)\n").arg(dir.filePath(QStringLiteral("red.png"))),
+                                    QStringLiteral("Text and $x^2$.\n")}) {
+        auto [block, ctx] = make(markdown, 548, false);
+        ctx.width = 300;
+        QVERIFY(!block->reflow(ctx));
+    }
 }
 
 QTEST_MAIN(TestVisualView)
