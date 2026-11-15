@@ -57,6 +57,7 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QThreadPool>
+#include <QTextBlock>
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -2502,12 +2503,15 @@ void MainWindow::updateStatus()
     m_scrollButton->setChecked(!tab->showsColumns());
     m_columnsButton->setChecked(tab->showsColumns());
     const TextView *editor = tab->editor();
-    const QTextCursor cursor = editor->textCursor();
-    QString position = tr("Ln %1, Col %2").arg(cursor.blockNumber() + 1).arg(cursor.positionInBlock() + 1);
+    // (The caret as numbers: a QTextCursor placed in a very long line costs a
+    // pass over the line after every edit.)
+    const TextView::CaretRange caret = editor->primaryCaret();
+    const QTextBlock block = editor->document()->findBlock(caret.position);
+    QString position = tr("Ln %1, Col %2").arg(block.blockNumber() + 1).arg(caret.position - block.position() + 1);
     if (editor->cursorCount() > 1)
         position += u' ' + tr("(%1 selections)").arg(editor->cursorCount());
-    else if (cursor.hasSelection())
-        position += u' ' + tr("(%1 selected)").arg(cursor.selectionEnd() - cursor.selectionStart());
+    else if (caret.hasSelection())
+        position += u' ' + tr("(%1 selected)").arg(caret.end() - caret.start());
     // In columns: the source lines on screen. Read mode shows them instead of
     // the caret's place (which shows until a large document's first parse
     // makes the columns), and nothing about editing the file.

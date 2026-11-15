@@ -554,7 +554,9 @@ QList<DocumentTab *> SessionManager::writeSession(const QList<DocumentTab *> &sk
                 entry[QStringLiteral("tabSize")] = tab->indentation().tabSize;
                 entry[QStringLiteral("insertSpaces")] = tab->indentation().insertSpaces;
             }
-            entry[QStringLiteral("caret")] = tab->editor()->textCursor().position();
+            // (Not a QTextCursor: placing one in a very long line costs a pass
+            // over the line after every edit, and this runs after each backup.)
+            entry[QStringLiteral("caret")] = tab->editor()->primaryCaret().position;
             entry[QStringLiteral("topLine")] = tab->sourceView()->topLine();
             if (tab == windowTabs.value(window->currentTabIndex()))
                 current = int(tabs.size());

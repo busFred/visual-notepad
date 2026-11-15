@@ -1085,7 +1085,7 @@ void VisualView::updateTableToolbar()
     qreal lastBottom = 0;
     const bool firstShown = lineBounds(info.firstLine, &firstTop, &firstBottom);
     const bool lastShown = lineBounds(info.lastLine, &lastTop, &lastBottom);
-    if (!firstShown && !lastShown && textCursor().blockNumber() > info.lastLine)
+    if (!firstShown && !lastShown && document()->findBlock(primaryCaret().position).blockNumber() > info.lastLine)
         return hideToolbar();
 
     if (!m_tableToolbar) {
@@ -1441,7 +1441,7 @@ void VisualView::rebuildRows()
     // edit since the rows were built).
     if (m_sourceOpen && !m_openLines.empty() && !m_rowsStale && m_rowsRevision == m_model->revision()
         && int(m_lineToRow.size()) == lines) {
-        const int caret = textCursor().blockNumber();
+        const int caret = document()->findBlock(primaryCaret().position).blockNumber();
         if (std::none_of(m_openLines.begin(), m_openLines.end(),
                          [caret](const auto &range) { return range.first <= caret && caret <= range.second; }))
             m_sourceOpen = false;
@@ -1450,9 +1450,9 @@ void VisualView::rebuildRows()
     // the open blocks.
     std::vector<std::pair<int, int>> expanded;
     if (!isReadOnly() && m_sourceOpen) {
-        for (const QTextCursor &c : cursors()) {
-            int from = document()->findBlock(c.selectionStart()).blockNumber();
-            int to = document()->findBlock(c.selectionEnd()).blockNumber();
+        for (const CaretRange &c : caretRanges()) {
+            int from = document()->findBlock(c.start()).blockNumber();
+            int to = document()->findBlock(c.end()).blockNumber();
             if (const int s = m_model->spanAt(from); s >= 0)
                 from = spans[s].first;
             if (const int s = m_model->spanAt(to); s >= 0)
@@ -1476,10 +1476,11 @@ void VisualView::rebuildRows()
     // lines edited in rendered text) shows that line as source.
     std::vector<int> caretGaps;
     if (!isReadOnly() && hasFocus()) {
-        for (const QTextCursor &c : cursors()) {
-            const int line = c.blockNumber();
+        for (const CaretRange &c : caretRanges()) {
+            const QTextBlock block = document()->findBlock(c.position);
+            const int line = block.blockNumber();
             const int at = m_model->spanAt(line);
-            if (at < 0 || (spans[at].block < 0 && isBlank(c.block().text())))
+            if (at < 0 || (spans[at].block < 0 && isBlank(block.text())))
                 caretGaps.push_back(line);
         }
         std::sort(caretGaps.begin(), caretGaps.end());
@@ -1491,8 +1492,8 @@ void VisualView::rebuildRows()
     const bool revealing = std::exchange(m_revealPending, false);
     std::vector<int> foldCarets;
     if (!m_folds.empty() && (hasFocus() || revealing)) {
-        for (const QTextCursor &c : cursors())
-            foldCarets.push_back(c.position());
+        for (const CaretRange &c : caretRanges())
+            foldCarets.push_back(c.position);
         std::sort(foldCarets.begin(), foldCarets.end());
     }
     if (!m_rowsStale && m_rowsRevision == m_model->revision() && int(m_lineToRow.size()) == lines
@@ -1934,7 +1935,7 @@ VisualView::Place VisualView::place()
         return {m_readLinePosition, false};
     qreal top = 0;
     const int bottom = rowAt(viewport()->height() - 1, &top);
-    const int caret = textCursor().blockNumber();
+    const int caret = document()->findBlock(primaryCaret().position).blockNumber();
     return {topLinePosition(), caret >= topLine() && (bottom < 0 || caret <= row(bottom).lastLine)};
 }
 
@@ -3108,9 +3109,9 @@ void VisualView::paintRenderedRow(QPainter &painter, const Row &r, const QRectF 
         selection.hot = m_hoverFold && r.firstLine == m_hoverLine;
         // A caret on the chip (at the start of its first line, see rebuildRows).
         const int start = document()->findBlockByNumber(r.firstLine).position();
-        const QList<QTextCursor> carets = cursors();
+        const QList<CaretRange> carets = caretRanges();
         selection.caretOn = hasFocus() && std::any_of(carets.cbegin(), carets.cend(),
-                                                      [start](const QTextCursor &c) { return c.position() == start; });
+                                                      [start](const CaretRange &c) { return c.position == start; });
     }
     // (A wide block of read mode is slid sideways; its strip stays.)
     const QPointF origin = rect.topLeft() - QPointF(m_readSlide, 0);
@@ -3175,8 +3176,8 @@ void VisualView::paintEvent(QPaintEvent *event)
     // The carets drawn in rendered text (TextView draws those in source rows).
     m_paintCarets.clear();
     if (hasFocus() && caretBlinkOn() && !isReadOnly()) {
-        for (const QTextCursor &c : cursors())
-            m_paintCarets.push_back(c.position());
+        for (const CaretRange &c : caretRanges())
+            m_paintCarets.push_back(c.position);
         std::sort(m_paintCarets.begin(), m_paintCarets.end());
     }
     if (readActive())
@@ -3199,11 +3200,11 @@ RenderedSelection VisualView::selectionForRow(const Row &r, const RenderedBlock 
     const int rowEnd = last.position() + last.length() - 1; // Without the line break.
 
     QString text;
-    for (const QTextCursor &c : cursors()) {
+    for (const CaretRange &c : caretRanges()) {
         if (!c.hasSelection())
             continue;
-        const int a = c.selectionStart();
-        const int b = c.selectionEnd();
+        const int a = c.start();
+        const int b = c.end();
         if (b <= rowStart || a >= rowEnd)
             continue;
         switch (block->kind()) {
@@ -5186,9 +5187,9 @@ void VisualView::editStarting()
     QTextDocument *doc = document();
     int first = INT_MAX;
     int last = -1;
-    for (const QTextCursor &c : cursors()) {
-        int from = doc->findBlock(c.selectionStart()).blockNumber();
-        int to = doc->findBlock(c.selectionEnd()).blockNumber();
+    for (const CaretRange &c : caretRanges()) {
+        int from = doc->findBlock(c.start()).blockNumber();
+        int to = doc->findBlock(c.end()).blockNumber();
         if (spans) {
             if (const int s = m_model->spanAt(from); s >= 0)
                 from = m_model->spans()[s].first;

@@ -15,6 +15,7 @@
 #include <QAbstractScrollArea>
 #include <QBasicTimer>
 #include <QElapsedTimer>
+#include <QPointer>
 #include <QTextCursor>
 #include <QTextLayout>
 
@@ -89,7 +90,22 @@ public:
     void setDiagnostics(const QList<Diagnostic> &diagnostics);
     QList<Diagnostic> diagnostics() const;
 
-    // The primary caret.
+    // A caret as numbers: where its selection starts (the anchor) and where
+    // the caret is; the same where nothing is selected.
+    struct CaretRange
+    {
+        int anchor = 0;
+        int position = 0;
+        int start() const { return qMin(anchor, position); }
+        int end() const { return qMax(anchor, position); }
+        bool hasSelection() const { return anchor != position; }
+        bool operator==(const CaretRange &other) const = default;
+    };
+
+    // The primary caret. (A QTextCursor made for the asking: placing one in
+    // a very long line costs Qt a pass over the line after every edit, and a
+    // document that has held thousands of them stays slower to edit; the
+    // view keeps its carets as numbers, see primaryCaret() and caretRanges().)
     QTextCursor textCursor() const;
     // Replaces all carets with one.
     void setTextCursor(const QTextCursor &cursor);
@@ -97,6 +113,15 @@ public:
     // Replaces all carets; primary is an index into the list.
     void setCursors(const QList<QTextCursor> &cursors, int primary);
     int cursorCount() const { return int(m_carets.size()); }
+    // The same as numbers: the primary caret, every caret in document order,
+    // and replacing them all (in any order; primary is an index into the list).
+    CaretRange primaryCaret() const;
+    QList<CaretRange> caretRanges() const;
+    void setCaretRanges(const QList<CaretRange> &ranges, int primary);
+    // An edit made outside the views, within an edit block, as
+    // QTextCursor::insertText(): the carets of the views on the document
+    // move as cursors in it would (see Journal).
+    static void insertText(QTextCursor &cursor, const QString &text);
     // Selected text of every caret, joined by newlines, in document order.
     QString selectedText() const;
 
@@ -438,7 +463,7 @@ private:
     int columnsRowAt(const QPointF &point, QPointF *origin);
     // Where a caret is drawn in columns, and in which column; null if it is
     // not on the screen.
-    QRectF columnsCaretRect(const QTextCursor &cursor, int *column = nullptr);
+    QRectF columnsCaretRect(int position, int *column = nullptr);
     // The column (and its x) a point is in: the nearest, the gaps shared.
     int columnAtX(qreal x);
     // Widest line a column shows (Word Wrap off), to scroll it sideways.
@@ -464,10 +489,20 @@ private:
         QTextCursor end;
         QString message;
     };
-    struct Caret
+    // A caret: numbers, not a QTextCursor (see textCursor()), moved by every
+    // change of the document as Qt moves a cursor (see adjustPositions()).
+    struct Caret : CaretRange
     {
-        QTextCursor cursor;
         qreal desiredX = -1; // Remembered x for up/down movement.
+        // As QTextCursor::setPosition() and clearSelection().
+        void setPosition(int pos, QTextCursor::MoveMode mode = QTextCursor::MoveAnchor)
+        {
+            position = pos;
+            if (mode == QTextCursor::MoveAnchor)
+                anchor = pos;
+        }
+        void clearSelection() { anchor = position; }
+        CaretRange range() const { return {anchor, position}; }
     };
     struct LineCache
     {
@@ -505,27 +540,31 @@ private:
 
     // Geometry. Returns false if the position is not in a visible row.
     bool rowTop(int row, qreal *top);
-    QRectF caretRect(const QTextCursor &cursor);
-    qreal cursorX(const QTextCursor &cursor);
+    QRectF caretRect(int position);
+    qreal cursorX(int position);
 
     // Editing helpers.
     bool canEdit() const;
     void beginEdit();
     void endEdit();
     void deleteAtCarets(QTextCursor::MoveOperation op);
-    // What an edit at a caret changed: `removed` characters at `at` went, then
-    // `added` came there.
-    struct CaretChange
-    {
-        int at = 0;
-        int removed = 0;
-        int added = 0;
-    };
-    // Runs `edit` at each caret in turn, on a cursor put where the caret is
-    // (and left where the caret goes, nothing selected), and puts the carets
-    // there. Within beginEdit()/endEdit(). Moving the carets as numbers, not as
-    // N live cursors, keeps it from taking N times N moves.
-    void editAtCarets(const std::function<CaretChange(Caret &)> &edit);
+    // Edits within beginEdit()/endEdit(), as QTextCursor::insertText() (see
+    // above) and removeSelectedText() do them: every position the views on
+    // the document keep (carets, auto-closed pairs, ...) moves as a cursor
+    // would.
+    static void removeSelectedText(QTextCursor &cursor);
+    // The text from `from` to `to` replaced by `text`, as insertText() does.
+    void replaceRange(int from, int to, const QString &text);
+    // A cursor at the range. (Placed within an edit block, it costs Qt
+    // nothing; outside one, see textCursor().)
+    QTextCursor cursorAt(const CaretRange &range) const;
+    // Runs `edit` at each caret in turn, in document order, with the caret
+    // (to be left where it goes) and a cursor placed at it. The edit changes
+    // the text around its caret through insertText() and removeSelectedText(),
+    // leaving the carets in document order. Within beginEdit()/endEdit(). The
+    // other carets wait as numbers moved in bulk (see CaretSpans): moving
+    // each by every edit would take N times N moves.
+    void editAtCarets(const std::function<void(Caret &, QTextCursor &)> &edit);
     void insertNewline();
     void insertTab();
     // Auto-closing, overtyping and surrounding for one typed ASCII character.
@@ -534,7 +573,7 @@ private:
     bool surroundSelections(QChar open);
     bool overtypeClosers(QChar ch);
     bool autoCloseBrackets(QChar open);
-    bool deleteAutoClosedPair(Caret &caret);
+    bool deleteAutoClosedPair(Caret &caret, QTextCursor &cursor);
     void pruneAutoClosed();
     // Distinct line numbers covered by the carets, ascending.
     QList<int> caretLines() const;
@@ -542,7 +581,7 @@ private:
     QList<std::pair<int, int>> caretLineRanges() const;
     // Markdown helpers.
     QString linkAtPosition(int position);
-    bool continueList(Caret &caret);
+    bool continueList(QTextCursor &cursor);
     void insertFileLinks(const QStringList &files);
     void pasteImage(const QImage &image);
     QString diagnosticAt(int position) const;
@@ -550,7 +589,6 @@ private:
     void copyLines(int direction);
     QString indentUnit() const;
     // Markdown formatting (TextViewFormat.cpp).
-    void replaceRange(int from, int to, const QString &text);
     void toggleInline(const QString &open, const QString &close);
     void setHeading(int level);
     void shiftHeading(int direction);
@@ -606,7 +644,7 @@ private:
     // line looks only at the text around the cursor (Qt works out the
     // whole line's character attributes first: a tenth of a second on a
     // 3 MB line, again after every edit).
-    void moveCursor(QTextCursor &cursor, QTextCursor::MoveOperation op, QTextCursor::MoveMode mode) const;
+    void moveCaret(Caret &caret, QTextCursor::MoveOperation op, QTextCursor::MoveMode mode) const;
     void moveCaretsVertically(int lines, bool select);
     bool moveVertically(Caret &caret, int direction, QTextCursor::MoveMode mode);
     void moveCaretsHome(bool select);
@@ -635,8 +673,16 @@ private:
     // outside it are skipped.
     void paintSourceLine(QPainter &painter, int lineNo, const QPointF &origin, const QRectF &shade,
                          const QRectF &visible, const LinePaintState &state);
-    QTextCursor wordAt(const QTextCursor &cursor) const;
-    QTextCursor findNext(const QString &text, int from) const;
+    // The word at a position (selected), or the character after it.
+    CaretRange wordAt(int position) const;
+    // The next match of text (case-sensitive) from `from`, around the end;
+    // nothing selected if there is none.
+    CaretRange findNext(const QString &text, int from) const;
+    // The text between two positions, line breaks as U+2029, as
+    // QTextCursor::selectedText() has it.
+    QString textBetween(int from, int to) const;
+    QString selectedTextOf(const CaretRange &range) const { return textBetween(range.start(), range.end()); }
+    int blockNumberOf(int position) const;
     void restartBlink();
     // Repaints what a blink of the carets changes: where they are drawn.
     void updateBlinkingCarets();
@@ -676,7 +722,7 @@ private:
     int m_editStartSteps = 0;
     int m_syncedRevision = -1; // Document revision our entries are valid for.
     int m_editDepth = 0;
-    QList<QList<QTextCursor>> m_expandHistory;
+    QList<CaretState> m_expandHistory;
 
     // Earlier caret states for cursorUndo(), cleared by document changes.
     struct CursorHistoryEntry
@@ -747,18 +793,19 @@ private:
     int m_tableInfoRevision = -1;
     int m_tableInfoPosition = -1;
     bool m_realignTables = false;
-    QTextCursor m_tableCursor; // In the table the caret was last seen in.
+    int m_tablePosition = 0; // In the table the caret was last seen in.
     bool m_tableTracked = false;
     int m_tableEnterRevision = -1;
     bool m_markdown = false;
     bool m_codeEditing = false;
     // Closers inserted by auto-closing that may still be typed over or
     // deleted with their opener. closer selects the closer; inner marks where
-    // the text between the pair starts.
+    // the text between the pair starts (kept there by text typed at it, as a
+    // cursor with keepPositionOnInsert).
     struct AutoClosed
     {
-        QTextCursor inner;
-        QTextCursor closer;
+        int inner = 0;
+        CaretRange closer;
     };
     QList<AutoClosed> m_autoClosed;
     QString m_documentPath;
@@ -783,7 +830,7 @@ private:
     // Mouse.
     bool m_dragging = false;
     Unit m_dragUnit = Unit::Char;
-    QTextCursor m_dragOrigin;
+    CaretRange m_dragOrigin;
     QBasicTimer m_autoScroll;
     QPointF m_lastMousePos;
     // Double click time and place, for detecting the triple click.
@@ -802,6 +849,38 @@ private:
     bool m_caretOn = true;
     QString m_preedit;
     QList<QInputMethodEvent::Attribute> m_preeditAttributes;
+
+    // The views on a document (one journal for each document), told of every
+    // change made through insertText() and removeSelectedText() as it is
+    // made, so that each moves its positions as Qt moves cursors. The
+    // document tells of a whole edit block as one change, after it: a
+    // position inside it cannot be placed from that. The views' undo is told
+    // the same way (see Journal::undoRedo()). A block with changes made
+    // otherwise (by other code) shows as reports that do not add up to the
+    // change: the views go back to their positions from before it and move
+    // them by the change as a whole.
+    class Journal;
+    QPointer<Journal> m_journal;
+    bool m_reported = false; // Changes were reported since the document last told of one.
+    // Moves every kept position as Qt moves a cursor when `removed`
+    // characters at `at` go and then `added` come there (keepAtInsert: as an
+    // undo puts back what a cursor removed with its position before its
+    // anchor, a cursor at `at` stays before them).
+    void adjustPositions(int at, int removed, int added, bool keepAtInsert = false);
+    // The positions as they were before the edit block being reported.
+    struct KeptPositions
+    {
+        std::vector<Caret> carets;
+        QList<AutoClosed> autoClosed;
+        QList<CaretState> expandHistory;
+        CaretRange dragOrigin;
+        int tablePosition = 0;
+    };
+    std::optional<KeptPositions> m_keptBefore;
+    KeptPositions keptPositions() const;
+    // During editAtCarets(): the carets wait there, not in m_carets.
+    class CaretSpans;
+    CaretSpans *m_spans = nullptr;
 };
 
 } // namespace vn

@@ -103,8 +103,6 @@ QList<int> TextView::ColumnRows::cuts(int row)
 // ---------------------------------------------------------------------------
 // Mode and layout
 
-TextView::~TextView() = default;
-
 TextView::Columns &TextView::columnState()
 {
     if (!m_columns) {
@@ -362,7 +360,7 @@ void TextView::columnsPage(bool forward, bool carry, bool select)
         return;
     Columns &c = *m_columns;
     const int firstBefore = c.flow.lineRange().first;
-    const bool caretShown = !columnsCaretRect(textCursor()).isNull();
+    const bool caretShown = !columnsCaretRect(m_carets[m_primary].position).isNull();
     const md::Position startBefore = c.flow.screen().start;
     forward ? c.flow.pageForward() : c.flow.pageBack();
     columnsMoved(false);
@@ -377,18 +375,15 @@ void TextView::columnsPage(bool forward, bool carry, bool select)
         return; // A caret elsewhere stays there.
     const md::LineRange after = c.flow.lineRange();
     const int delta = after.first - firstBefore;
-    QList<QTextCursor> moved;
-    for (const QTextCursor &caret : cursors()) {
-        const int line = qBound(after.first, caret.blockNumber() + delta, after.last);
+    QList<CaretRange> moved;
+    for (const Caret &caret : m_carets) {
+        const QTextBlock from = m_doc->findBlock(caret.position);
+        const int line = qBound(after.first, from.blockNumber() + delta, after.last);
         const QTextBlock block = m_doc->findBlockByNumber(line);
-        QTextCursor cursor = caret;
-        if (!select)
-            cursor.clearSelection();
-        cursor.setPosition(block.position() + qMin(caret.positionInBlock(), block.length() - 1),
-                           select ? QTextCursor::KeepAnchor : QTextCursor::MoveAnchor);
-        moved.append(cursor);
+        const int position = block.position() + qMin(caret.position - from.position(), block.length() - 1);
+        moved.append({select ? caret.anchor : position, position});
     }
-    setCursors(moved, m_primary);
+    setCaretRanges(moved, m_primary);
 }
 
 void TextView::columnsNudge(int lines)
@@ -429,11 +424,12 @@ void TextView::columnsEnsureCursorVisible()
         return;
     }
     Columns &c = *m_columns;
-    const QTextCursor caret = textCursor();
+    const int caret = m_carets[m_primary].position;
     if (columnsCaretRect(caret).isNull()) {
-        LineLayout *layout = layoutForLine(caret.blockNumber());
-        const LineLayout::Line line = layout ? layout->lineForTextPosition(caret.positionInBlock()) : LineLayout::Line();
-        const md::Position place{caret.blockNumber(), line.isValid() ? line.lineNumber() * m_lineHeight : 0};
+        const QTextBlock block = m_doc->findBlock(caret);
+        LineLayout *layout = layoutForLine(block.blockNumber());
+        const LineLayout::Line line = layout ? layout->lineForTextPosition(caret - block.position()) : LineLayout::Line();
+        const md::Position place{block.blockNumber(), line.isValid() ? line.lineNumber() * m_lineHeight : 0};
         const md::Screen &screen = c.flow.screen();
         bool shifted = false;
         if (place == screen.end)
@@ -552,7 +548,7 @@ void TextView::columnsKeyStarting(QKeyEvent *event)
     if (!event->isAutoRepeat())
         c.key.noted = false;
     int column = -1;
-    c.key.column = columnsCaretRect(textCursor(), &column).isNull() ? -1 : column;
+    c.key.column = columnsCaretRect(m_carets[m_primary].position, &column).isNull() ? -1 : column;
     c.key.start = c.flow.screen().start;
 }
 
@@ -566,7 +562,8 @@ void TextView::columnsKeyDone()
     if (before < 0 || c.key.noted)
         return;
     int column = -1;
-    if (columnsCaretRect(textCursor(), &column).isNull() || column == before || !(c.flow.screen().start == c.key.start))
+    if (columnsCaretRect(m_carets[m_primary].position, &column).isNull() || column == before
+        || !(c.flow.screen().start == c.key.start))
         return;
     c.key.noted = true;
     showColumnsNote(before, column > before);
@@ -751,16 +748,17 @@ int TextView::columnsRowAt(const QPointF &point, QPointF *origin)
     return s.row;
 }
 
-QRectF TextView::columnsCaretRect(const QTextCursor &cursor, int *column)
+QRectF TextView::columnsCaretRect(int position, int *column)
 {
     const md::Screen &screen = columnsScreen();
     if (screen.empty())
         return {};
-    const int lineNo = cursor.blockNumber();
+    const QTextBlock block = m_doc->findBlock(position);
+    const int lineNo = block.blockNumber();
     LineLayout *layout = layoutForLine(lineNo);
     if (!layout)
         return {};
-    const int pos = cursor.positionInBlock();
+    const int pos = position - block.position();
     const LineLayout::Line line = layout->lineForTextPosition(pos);
     const int top = line.isValid() ? line.lineNumber() * m_lineHeight : 0;
     const ColumnLayout &l = columnLayout();

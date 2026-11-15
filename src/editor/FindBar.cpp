@@ -573,11 +573,13 @@ void FindBar::selectAllMatchesNow()
     if (m_matches.isEmpty())
         return;
     remember(m_find);
-    QList<QTextCursor> cursors;
-    cursors.reserve(m_matches.size());
+    // (As numbers: a document that has held thousands of cursors at once
+    // stays slower to edit.)
+    QList<TextView::CaretRange> carets;
+    carets.reserve(m_matches.size());
     for (const search::Range &match : std::as_const(m_matches))
-        cursors.append(cursorFor(match));
-    m_view->setCursors(cursors, qMax(0, m_current));
+        carets.append({match.start, match.end});
+    m_view->setCaretRanges(carets, qMax(0, m_current));
     m_view->revealCaret();
     m_view->setFocus();
 }
@@ -646,7 +648,7 @@ void FindBar::replaceMatches(const QList<search::Range> &matches, const search::
         for (int i = int(matches.size()) - 1; i >= 0; --i) {
             edit.setPosition(matches[i].start);
             edit.setPosition(matches[i].end, QTextCursor::KeepAnchor);
-            edit.insertText(replacements[i]);
+            TextView::insertText(edit, replacements[i]); // (The views' carets move with it.)
         }
         edit.endEditBlock();
     }

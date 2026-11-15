@@ -60,7 +60,7 @@ void TextView::replaceRange(int from, int to, const QString &text)
     QTextCursor c(m_doc);
     c.setPosition(from);
     c.setPosition(to, QTextCursor::KeepAnchor);
-    c.insertText(text);
+    insertText(c, text);
 }
 
 void TextView::formatMarkdown(MarkdownFormat format)
@@ -121,10 +121,7 @@ void TextView::toggleInline(const QString &open, const QString &close)
     const auto slice = [&](int from, int length) {
         if (from < 0 || length <= 0 || from + length > end)
             return QString();
-        QTextCursor c(m_doc);
-        c.setPosition(from);
-        c.setPosition(from + length, QTextCursor::KeepAnchor);
-        return c.selectedText();
+        return textBetween(from, from + length);
     };
     // `*` and `**` share a character: one run of k stars around the text means
     // italic for 1, bold for 2 and both from 3 on.
@@ -143,17 +140,18 @@ void TextView::toggleInline(const QString &open, const QString &close)
     };
 
     beginEdit();
-    for (Caret &caret : m_carets) {
-        QTextCursor &cur = caret.cursor;
-        int s = cur.selectionStart();
-        int e = cur.selectionEnd();
+    // (Each caret as a cursor would be: moved by the edits made before it.)
+    for (size_t i = 0; i < m_carets.size(); ++i) {
+        Caret &caret = m_carets[i];
+        int s = caret.start();
+        int e = caret.end();
         const bool selected = s != e;
-        const int caretPos = cur.position();
+        const int caretPos = caret.position;
         bool word = false;
         if (!selected) {
-            const QTextBlock block = cur.block();
+            const QTextBlock block = m_doc->findBlock(caret.position);
             const QString text = block.text();
-            int pos = cur.positionInBlock();
+            int pos = caret.position - block.position();
             int a = pos;
             int b = pos;
             while (a > 0 && isWordChar(text.at(a - 1)))
@@ -165,10 +163,10 @@ void TextView::toggleInline(const QString &open, const QString &close)
                 if (slice(s - olen, olen) == open && slice(s, clen) == close) {
                     replaceRange(s, s + clen, QString());
                     replaceRange(s - olen, s, QString());
-                    cur.setPosition(s - olen);
+                    m_carets[i].setPosition(s - olen);
                 } else {
                     replaceRange(s, s, open + close);
-                    cur.setPosition(s + olen);
+                    m_carets[i].setPosition(s + olen);
                 }
                 continue;
             }
@@ -221,14 +219,15 @@ void TextView::toggleInline(const QString &open, const QString &close)
             newE = e - olen - clen;
             break;
         }
+        Caret &done = m_carets[i];
         if (word) {
             const int pos = caretPos + (mode == Wrap ? olen : mode == Outside ? -olen : 0);
-            cur.setPosition(pos);
+            done.setPosition(pos);
         } else {
-            cur.setPosition(newS);
-            cur.setPosition(newE, QTextCursor::KeepAnchor);
+            done.setPosition(newS);
+            done.setPosition(newE, QTextCursor::KeepAnchor);
         }
-        caret.desiredX = -1;
+        done.desiredX = -1;
     }
     endEdit();
     m_expandHistory.clear();
@@ -409,20 +408,19 @@ void TextView::toggleLinePrefix(MarkdownFormat kind)
 void TextView::insertLink()
 {
     beginEdit();
-    for (Caret &caret : m_carets) {
-        QTextCursor &cur = caret.cursor;
-        const int s = cur.selectionStart();
-        const int e = cur.selectionEnd();
+    for (size_t i = 0; i < m_carets.size(); ++i) {
+        const int s = m_carets[i].start();
+        const int e = m_carets[i].end();
         if (s == e) {
             replaceRange(s, s, QStringLiteral("[](url)"));
-            cur.setPosition(s + 1);
+            m_carets[i].setPosition(s + 1);
         } else {
             replaceRange(e, e, QStringLiteral("](url)"));
             replaceRange(s, s, QStringLiteral("["));
-            cur.setPosition(e + 3);
-            cur.setPosition(e + 6, QTextCursor::KeepAnchor);
+            m_carets[i].setPosition(e + 3);
+            m_carets[i].setPosition(e + 6, QTextCursor::KeepAnchor);
         }
-        caret.desiredX = -1;
+        m_carets[i].desiredX = -1;
     }
     endEdit();
     m_expandHistory.clear();
@@ -432,25 +430,30 @@ void TextView::insertLink()
 void TextView::wrapInCodeBlock()
 {
     const auto ranges = caretLineRanges();
-    QList<QTextCursor> cursors;
+    QList<int> places;
     beginEdit();
     // Back to front keeps the line numbers and positions of earlier ranges;
-    // the cursors kept for the info strings follow the later edits.
+    // the places kept for the info strings follow the later edits (as
+    // cursors would: from the next range on, edits are all before them).
     for (auto it = ranges.crbegin(); it != ranges.crend(); ++it) {
         const QTextBlock first = m_doc->findBlockByNumber(it->first);
         const QTextBlock last = m_doc->findBlockByNumber(it->second);
         const QString indent = first.text().left(indentLength(first.text()));
         const int start = first.position();
         const int lastEnd = last.position() + last.length() - 1;
+        const int length = m_doc->characterCount();
         replaceRange(lastEnd, lastEnd, u'\n' + indent + QStringLiteral("```"));
         replaceRange(start, start, indent + QStringLiteral("```\n"));
-        QTextCursor place(m_doc);
-        place.setPosition(start + int(indent.size()) + 3);
-        cursors.prepend(place);
+        for (int &place : places)
+            place += m_doc->characterCount() - length;
+        places.prepend(start + int(indent.size()) + 3);
     }
     endEdit();
     m_expandHistory.clear();
-    setCursors(cursors, 0);
+    QList<CaretRange> carets;
+    for (const int place : std::as_const(places))
+        carets.append({place, place});
+    setCaretRanges(carets, 0);
 }
 
 } // namespace vn
