@@ -417,10 +417,12 @@ void TestSharedDocs::windowActivationChecksDisk()
     MainWindow *window = makeWindow();
     QVERIFY(window->openFile(path));
     DocumentTab *tab = window->currentTab();
-    // Showing activates the window, which checks too: let that pass first.
+    // Showing activates the window, which checks too, when its turn comes
+    // (half a second after the file was looked at, longer on a busy machine):
+    // let that pass first.
     window->activateWindow();
     QVERIFY(QTest::qWaitForWindowActive(window));
-    QTest::qWait(200);
+    QTRY_VERIFY_WITH_TIMEOUT(!TextFile::hasDiskChecksPending(), 20000);
     // As if a change notification had been missed: the file's idea of the
     // disk is stale and nothing on disk moves. Activation looks again.
     const TextFile::DiskState actual = tab->file()->diskBaseline();

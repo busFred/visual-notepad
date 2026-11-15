@@ -65,6 +65,11 @@ public:
     // it on; tests that look at every colour right away leave it off.
     static void setSliced(bool on);
     static bool isSliced();
+    // Colouring that waits for the first paint starts without one after this
+    // long. A test that checks the wait sets it (for tests) instead of
+    // leaving it to the speed of the machine.
+    static constexpr int firstPaintWaitMs = 250;
+    static void setFirstPaintWaitMs(int ms);
     static constexpr int slicedFromChars = 128 * 1024;
     static constexpr int maxLineChars = 10'000;
 

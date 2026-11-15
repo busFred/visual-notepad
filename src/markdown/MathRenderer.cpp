@@ -851,7 +851,7 @@ public:
         if (!start())
             return false;
 
-        const int allowed = qMax(leastFormulaMs, formulaMs >> qMin(m_timeouts, 16));
+        const int allowed = allowedMs();
         const QDeadlineTimer deadline(allowed);
         QElapsedTimer spent;
         spent.start();
@@ -900,6 +900,17 @@ public:
         if (usedUp)
             stop();
         return drawn;
+    }
+
+    // How long the worker may take for the next formula.
+    int allowedMs() const { return qMax(leastFormulaMs, formulaMs >> qMin(m_timeouts, 16)); }
+
+    void forgetFailures()
+    {
+        m_timeouts = 0;
+        m_failuresInARow = 0;
+        m_paused.invalidate();
+        m_refused.clear();
     }
 
     // Starts the worker if none is running, without waiting for it to come up:
@@ -1195,6 +1206,16 @@ int workerStarts()
 bool workerContained()
 {
     return contained;
+}
+
+int formulaTimeLimitMs()
+{
+    return Worker::instance().allowedMs();
+}
+
+void forgetWorkerFailures()
+{
+    Worker::instance().forgetFailures();
 }
 
 #ifdef Q_OS_LINUX

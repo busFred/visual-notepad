@@ -64,7 +64,7 @@ mod tests {
         }
         let bomb = encoder.finish().unwrap();
         assert!(bomb.len() < 16 << 20, "{}", bomb.len());
-        let start = std::time::Instant::now();
+        let start = crate::cpu_time::Instant::now();
         assert!(gunzip_bounded(&bomb, 32 << 20).is_empty());
         assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
     }

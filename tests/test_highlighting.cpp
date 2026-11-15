@@ -396,6 +396,10 @@ void TestHighlighting::firstUseOfADefinitionWaitsForThePaint()
     const QString path = write(QStringLiteral("cold.rb"), ruby);
     DocumentTab tab;
     tab.resize(800, 600);
+    // (Waiting for a paint ends by itself after a quarter of a second, which
+    // a busy machine can take between the lines below.)
+    vn::Highlighter::setFirstPaintWaitMs(600'000);
+    const auto restore = qScopeGuard([] { vn::Highlighter::setFirstPaintWaitMs(vn::Highlighter::firstPaintWaitMs); });
     QVERIFY(tab.load(path));
     QTextDocument *doc = tab.document();
     QVERIFY(tab.file()->isHighlighting());

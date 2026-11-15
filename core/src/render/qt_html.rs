@@ -850,7 +850,7 @@ mod tests {
 
     #[test]
     fn malformed_html_is_scanned_in_linear_time() {
-        let start = std::time::Instant::now();
+        let start = crate::cpu_time::Instant::now();
         for unit in [
             "<",
             "<table",

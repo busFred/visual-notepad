@@ -1061,7 +1061,7 @@ mod tests {
     fn deep_html_is_escaped() {
         use qt_html::{MAX_ELEMENT_DEPTH, MAX_TABLE_DEPTH};
         on_small_stack(|| {
-            let start = std::time::Instant::now();
+            let start = crate::cpu_time::Instant::now();
             // An HTML block, and inline HTML with one node per tag: the
             // depth is followed across the whole block.
             for doc in [nested_tables(50), format!("x {}", nested_tables(50))] {
@@ -1123,7 +1123,7 @@ mod tests {
         let unit = "## Heading\n\nA paragraph with *emphasis*, a [link](https://example.com/page) and `code`.\n\n- first item\n- second item\n\n\n";
         let doc = unit.repeat(20_000);
         assert!(doc.len() > 1_900_000);
-        let start = std::time::Instant::now();
+        let start = crate::cpu_time::Instant::now();
         let b = blocks(&doc, &opts());
         let elapsed = start.elapsed();
         println!(

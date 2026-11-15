@@ -27,8 +27,11 @@ constexpr qint64 sliceBudgetNs = 6'000'000;
 // Lines a view shows are coloured from this far above, so that a code block
 // or comment opened just before them is usually seen.
 constexpr int leadInLines = 50;
-// Colouring that waits for the first paint starts without one after this long.
-constexpr int firstPaintWaitMs = 250;
+int &firstPaintWait()
+{
+    static int ms = Highlighter::firstPaintWaitMs;
+    return ms;
+}
 
 bool &sliced()
 {
@@ -95,7 +98,7 @@ public:
         if (!m_waiting) {
             m_waiting = true;
             qApp->installEventFilter(this);
-            m_fallback.start();
+            m_fallback.start(firstPaintWait());
         }
     }
 
@@ -124,7 +127,6 @@ private:
         m_timer.setInterval(0);
         connect(&m_timer, &QTimer::timeout, this, &SliceScheduler::run);
         m_fallback.setSingleShot(true);
-        m_fallback.setInterval(firstPaintWaitMs);
         connect(&m_fallback, &QTimer::timeout, this, [this] {
             m_waiting = false;
             releaseCold();
@@ -185,6 +187,11 @@ void Highlighter::setSliced(bool on)
 bool Highlighter::isSliced()
 {
     return sliced();
+}
+
+void Highlighter::setFirstPaintWaitMs(int ms)
+{
+    firstPaintWait() = ms;
 }
 
 bool Highlighter::slicesFor(int chars) const

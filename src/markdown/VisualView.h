@@ -73,6 +73,9 @@ public:
     void closeBlocks();
     // For tests: renders kept in hand besides the cache.
     int memoizedRenderCount() const { return int(m_renders.size()); }
+    // For tests: whether a diagram is still being drawn; its picture, when it
+    // comes, repaints the whole view.
+    bool hasPendingDiagrams() const { return !m_pendingKeys.isEmpty(); }
     // For tests: blocks (and parts of blocks) rendered so far.
     int renderCount() const { return m_renderCount; }
     // For tests: the rendered text of the row showing a line (null for

@@ -120,5 +120,12 @@ void confineWorkerProcess(QProcess &process);
 bool lastRenderFellBack();
 int workerStarts();
 bool workerContained();
+// How long, in milliseconds, the worker may take for the next formula: less
+// after each formula that ran out of time. For tests.
+int formulaTimeLimitMs();
+// Forgets the formulas the worker failed on and the time they cost: the next
+// gets the whole time a formula may take, and is tried again. For tests,
+// which run formulas that run out of time on purpose.
+void forgetWorkerFailures();
 
 } // namespace vn::math

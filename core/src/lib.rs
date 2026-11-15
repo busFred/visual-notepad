@@ -1,6 +1,8 @@
 //! Rust side of Visual Notepad: Markdown parsing and rendering (comrak)
 //! and Mermaid diagrams. Exposed to C++ through the cxx bridge below.
 
+#[cfg(test)]
+mod cpu_time;
 mod format;
 mod gzip;
 mod html_table;
