@@ -11,8 +11,10 @@
 #include <QApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QLabel>
 #include <QMessageBox>
+#include <QMimeDatabase>
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QTest>
@@ -682,7 +684,8 @@ void TestLinks::otherFileTypesAsk_data()
 {
     QTest::addColumn<QString>("name");
     // Types some program runs or opens with macros (not on any list of
-    // programs), and ordinary documents: all ask, in the "another app" words.
+    // programs), and ordinary documents: all ask, in the "another app" words
+    // (or, for .mht where the MIME data makes it text, open here as text).
     for (const char *name : {"app.pyz", "app.pyzw", "mod.pyc", "deck.ppsm", "book.xlsb", "old.xls", "page.mht",
                              "c.cab", "report.docx", "archive.zip"})
         QTest::newRow(name) << QString::fromLatin1(name);
@@ -699,6 +702,17 @@ void TestLinks::otherFileTypesAsk()
     QVERIFY(tab);
     closeBoxes(&window, &boxes);
     Q_EMIT tab->linkActivated(name);
+    if (name == QLatin1String("page.mht")
+        && QMimeDatabase().mimeTypeForFile(m_dir.filePath(name)).inherits(QStringLiteral("text/plain"))) {
+        // Qt's own MIME data (on Windows) calls .mht multipart/related, a kind
+        // of message/rfc822 and so text: it opens here as text, in a tab of
+        // its own, and is never handed to a browser.
+        QTRY_COMPARE(window.tabCount(), 2);
+        QCOMPARE(QFileInfo(window.currentTab()->path()), QFileInfo(m_dir.filePath(name)));
+        QVERIFY2(boxes.isEmpty(), qPrintable(boxes.join(u'|')));
+        QVERIFY(m_opened.isEmpty());
+        return;
+    }
     QTRY_COMPARE(boxes.size(), 1);
     QVERIFY2(boxes.first().startsWith(QLatin1String("This link opens a file in another app:"))
                  || boxes.first().startsWith(QLatin1String("This link would run a program:")),
