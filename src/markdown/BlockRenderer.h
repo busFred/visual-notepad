@@ -16,6 +16,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTextDocument>
+#include <QVariant>
 
 #include <memory>
 #include <optional>
@@ -314,6 +315,15 @@ public:
     // Memory use in KiB (about, but not under), for caches.
     int cost() const;
 
+    // The block for a column of another width (RenderContext::width; the
+    // rest of the context as it was made with), made by laying the same
+    // text out again rather than from the start: text and tables, code
+    // boxes and their parts. False, and the block as it was, when more than
+    // the layout depends on the width (pictures and figures fit the column,
+    // formulas shrink to it) or the block is quick to make again (pictures,
+    // formulas, diagrams, chips): create() it.
+    bool reflow(const RenderContext &context);
+
     // Where source lines start in the rendering: (line offset from the
     // block's first line, y from the block's top), ascending by line. Code
     // has every line; rich text has the table rows, list items, paragraphs
@@ -373,6 +383,10 @@ private:
     bool m_pending = false;
     Figure m_diagramFigure; // Of a diagram (m_diagramCode not null), without its rectangle.
     Part m_part; // Of a code box; the whole box by default.
+    bool m_reflows = false;   // See reflow().
+    bool m_fitsTable = false; // The block is a table fitted to the column (RenderContext::overflow),
+    QVariant m_tableConstraints; // and its column widths before.
+    int m_sourceLines = 0;    // Of a code box, for its line anchors.
     qreal m_strip = 0; // See stripHeight().
     QRectF m_chipRect;
     QFont m_chipFont;

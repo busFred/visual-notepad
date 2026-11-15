@@ -2054,6 +2054,38 @@ struct Shape
 
 } // namespace grid
 
+// Whether a document of rich text holds a picture (fitted to the column
+// when laid out) or a background picture, or another object in its text.
+bool asksForPictures(const QTextDocument &doc)
+{
+    const auto background = [](const QTextFormat &format) { return format.hasProperty(QTextFormat::BackgroundImageUrl); };
+    for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+        if (background(block.blockFormat()))
+            return true;
+        for (auto it = block.begin(); !it.atEnd(); ++it) {
+            const QTextCharFormat format = it.fragment().charFormat();
+            if (format.isImageFormat() || format.objectType() >= QTextFormat::UserObject || background(format))
+                return true;
+        }
+    }
+    QList<QTextFrame *> frames = {doc.rootFrame()};
+    while (!frames.isEmpty()) {
+        QTextFrame *frame = frames.takeLast();
+        if (background(frame->frameFormat()))
+            return true;
+        if (auto *table = qobject_cast<QTextTable *>(frame)) {
+            for (int row = 0; row < table->rows(); ++row) {
+                for (int col = 0; col < table->columns(); ++col) {
+                    if (background(table->cellAt(row, col).format()))
+                        return true;
+                }
+            }
+        }
+        frames += frame->childFrames();
+    }
+    return false;
+}
+
 std::unique_ptr<QTextDocument> codeDocument(const QString &source, const QString &definition,
                                             const RenderContext &context, qreal width, bool wrapAnywhere,
                                             bool highlight)
@@ -2162,7 +2194,9 @@ std::unique_ptr<RenderedBlock> RenderedBlock::codeBox(std::unique_ptr<RenderedBl
         end.insertText(QStringLiteral("\n") + QObject::tr("Diagram error: %1").arg(r.m_error), errorFormat);
     }
     r.m_height = r.m_doc->size().height() + 2 * codePadY + blockGap;
-    r.collectLineAnchors(int(source.count(u'\n')) + 1);
+    r.m_sourceLines = int(source.count(u'\n')) + 1;
+    r.collectLineAnchors(r.m_sourceLines);
+    r.m_reflows = true;
     return result;
 }
 
@@ -2525,7 +2559,9 @@ std::unique_ptr<RenderedBlock> RenderedBlock::createPart(const QString &source, 
     const qreal textHeight = part.last ? r.m_doc->size().height()
                                        : r.m_doc->documentLayout()->blockBoundingRect(r.m_doc->lastBlock()).top();
     r.m_height = r.m_strip + textHeight + (part.first ? codePadY : 0) + (part.last ? codePadY + blockGap : 0);
-    r.collectLineAnchors(int(source.count(u'\n')) + 1);
+    r.m_sourceLines = int(source.count(u'\n')) + 1;
+    r.collectLineAnchors(r.m_sourceLines);
+    r.m_reflows = true;
     return result;
 }
 
@@ -2756,6 +2792,9 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
         if (single)
             r.m_ownGrid = OwnGrid::take(*doc, *single);
         QTextTable *only = context.overflow ? single : nullptr;
+        r.m_fitsTable = only != nullptr;
+        if (only)
+            r.m_tableConstraints = only->format().property(QTextFormat::TableColumnWidthConstraints);
         if (only) {
             // A table fits the column as a browser fits one (see fitTable),
             // and keeps the width its cells ask for, scrolled sideways, only
@@ -2776,6 +2815,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
         r.m_pending = doc->hasPendingDownload();
         r.m_pictureBytes = doc->pictureBytes() // Resolved by the layout (and the dry paint).
                            + doc->mathElements() * qsizetype(sizeof(QPainterPath::Element));
+        r.m_reflows = block.inline_math.empty() && !r.m_pending && r.m_pictureBytes == 0 && !asksForPictures(*doc);
         r.m_doc = std::move(doc);
         r.collectLineAnchors(0);
         return result;
@@ -2811,6 +2851,48 @@ QStringList RenderedBlock::remoteImages(const core::Block &block, const RenderCo
     doc.setTextWidth(context.width);
     doc.loadPaintedPictures();
     return doc.remoteUrls();
+}
+
+bool RenderedBlock::reflow(const RenderContext &context)
+{
+    if (!m_reflows || !m_doc || (m_kind != Kind::Rich && m_kind != Kind::Code))
+        return false;
+    m_width = context.width;
+    m_tableGrid.reset();
+    m_breaks.reset();
+    m_lineAnchors.clear();
+    if (m_kind == Kind::Code) {
+        // As codeBox() and createPart() lay it out.
+        m_doc->setTextWidth(context.width - 2 * codePadX);
+        const qreal textHeight = m_part.last ? m_doc->size().height()
+                                             : m_doc->documentLayout()->blockBoundingRect(m_doc->lastBlock()).top();
+        m_height = m_strip + textHeight + (m_part.first ? codePadY : 0) + (m_part.last ? codePadY + blockGap : 0);
+        collectLineAnchors(m_sourceLines);
+        return true;
+    }
+    // As build() lays it out (and create() adds the strip).
+    m_contentWidth = 0;
+    m_scrollRoom = 0;
+    QTextTable *table = m_fitsTable ? onlyTable(*m_doc) : nullptr;
+    if (table) {
+        // The widths the table had before fitTable() set its own.
+        QTextTableFormat format = table->format();
+        if (m_tableConstraints.isValid())
+            format.setProperty(QTextFormat::TableColumnWidthConstraints, m_tableConstraints);
+        else
+            format.clearProperty(QTextFormat::TableColumnWidthConstraints);
+        table->setFormat(format);
+        if (const qreal wide = fitTable(*m_doc, *table, context.width); wide > 0) {
+            m_doc->setTextWidth(wide);
+            m_contentWidth = wide;
+            m_scrollRoom = scrollBarHeight;
+        }
+    } else {
+        m_doc->setTextWidth(context.width);
+    }
+    m_height = m_doc->size().height() + (m_item.made ? 0 : blockGap) + m_scrollRoom + m_strip;
+    collectLineAnchors(0);
+    return true;
 }
 
 void RenderedBlock::collectLineAnchors(int sourceLines)

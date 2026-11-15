@@ -488,6 +488,7 @@ private Q_SLOTS:
     void viewersLeaveTheWindowUsable();
     void tableViewerIsTheRealTable();
     void tableGridLooksAsQtDrawsIt();
+    void reflowedBlocksAreMadeBlocks();
     void equationViewerIsDrawnAsShapes();
     void readModeWaitsForTheFirstParse();
     void figureBarKeepsClicksAndPictureClickStillZooms();
@@ -6411,6 +6412,76 @@ void TestVisualView::tableGridLooksAsQtDrawsIt()
                 }
             }
         }
+    }
+}
+
+// A block laid out again at a new width (a window-edge drag) is the block
+// made at that width: its height, anchors, cuts, grid and pixels. Blocks
+// whose more than layout depends on the width are made again.
+void TestVisualView::reflowedBlocksAreMadeBlocks()
+{
+    QString table = QStringLiteral("| # | Name | Description |\n|---|---|---|\n");
+    for (int i = 0; i < 8; ++i)
+        table += QStringLiteral("| %1 | lorem ipsum | %2 |\n").arg(i).arg(QStringLiteral("dolor sit amet ").repeated(i % 4 + 1));
+    const QString words = QStringLiteral("lorem ipsum dolor sit amet consectetur ").repeated(12);
+    const QStringList documents = {
+        QStringLiteral("A paragraph of %1 with **bold** and `code`.\n").arg(words),
+        QStringLiteral("> A quote of %1\n>\n> - with a list\n> - of two items\n").arg(words),
+        QStringLiteral("```cpp\nint main() { return 0; } // %1\n```\n").arg(words),
+        QStringLiteral("---\ntitle: %1\n---\n").arg(words),
+        table,
+    };
+    const auto make = [](const QString &markdown, qreal width, bool overflow) {
+        const QByteArray utf8 = markdown.toUtf8();
+        const rust::Vec<core::Block> blocks = core::blocks(rust::Str(utf8.constData(), utf8.size()),
+                                                           core::RenderOptions{false, true, true, true, 2});
+        RenderContext ctx;
+        ctx.font = theme::textFont();
+        ctx.codeFont = theme::editorFont();
+        ctx.width = width;
+        ctx.overflow = overflow;
+        return std::pair{RenderedBlock::create(blocks.at(0), markdown, ctx), ctx};
+    };
+    const auto picture = [](const RenderedBlock &block) {
+        QImage image(QSize(int(block.contentWidth()) + 10, int(block.height()) + 10), QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::white);
+        QPainter painter(&image);
+        block.paint(painter, QPointF(3, 2), block.contentWidth());
+        return image;
+    };
+    for (const QString &markdown : documents) {
+        for (const bool overflow : {false, true}) {
+            auto [block, ctx] = make(markdown, 548, overflow);
+            for (const qreal width : {300.0, 731.5, 120.0, 548.0}) {
+                ctx.width = width;
+                const QString what = QStringLiteral("%1 at %2").arg(markdown.left(16)).arg(width);
+                QVERIFY2(block->reflow(ctx), qPrintable(what));
+                const auto made = make(markdown, width, overflow).first;
+                QCOMPARE(block->height(), made->height());
+                QCOMPARE(block->contentWidth(), made->contentWidth());
+                QVERIFY2(block->lineAnchors() == made->lineAnchors(), qPrintable(what));
+                QVERIFY2(block->breaks().cuts == made->breaks().cuts, qPrintable(what));
+                QVERIFY2(block->breaks().lineTops == made->breaks().lineTops, qPrintable(what));
+                QCOMPARE(bool(block->tableGrid()), bool(made->tableGrid()));
+                if (made->tableGrid()) {
+                    QVERIFY(block->tableGrid()->xs == made->tableGrid()->xs);
+                    QVERIFY(block->tableGrid()->ys == made->tableGrid()->ys);
+                }
+                const QImage actual = picture(*block), expected = picture(*made);
+                QVERIFY2(actual == expected, qPrintable(what + u' ' + imageDifference(actual, expected)));
+            }
+        }
+    }
+    // A picture fits the column, a formula shrinks to it: made again.
+    QTemporaryDir dir;
+    QImage red(400, 100, QImage::Format_RGB32);
+    red.fill(Qt::red);
+    QVERIFY(red.save(dir.filePath(QStringLiteral("red.png"))));
+    for (const QString &markdown : {QStringLiteral("![red](%1)\n").arg(dir.filePath(QStringLiteral("red.png"))),
+                                    QStringLiteral("Text and $x^2$.\n")}) {
+        auto [block, ctx] = make(markdown, 548, false);
+        ctx.width = 300;
+        QVERIFY(!block->reflow(ctx));
     }
 }
 

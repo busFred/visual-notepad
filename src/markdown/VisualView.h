@@ -387,6 +387,7 @@ private:
     void updateRemoteBanner();
     void layoutBanner();
     void resetRenders();
+    void reflowRenders();
     // The toolbar over the table being edited: shown while the caret is in a
     // table of an editable view with the focus; the update is made once the
     // event being handled is done.

@@ -728,6 +728,47 @@ void VisualView::resetRenders()
     m_renderKiB = 0;
 }
 
+// A new width (and nothing else new): the renders at hand are laid out
+// again at it where that is all the width changes (RenderedBlock::reflow),
+// which takes a fraction of making them, and filed in the cache under their
+// new key; the others are made again when asked for. (Renders the cache has
+// at the old width stay there for it.)
+void VisualView::reflowRenders()
+{
+    const RenderContext &ctx = renderContext();
+    RenderContext before = ctx;
+    before.width = m_rendersWidth;
+    before.figureWidth = qMin(before.width, figureColumns * QFontMetricsF(before.font).averageCharWidth());
+    m_renderKeys.clear();
+    std::erase_if(m_renderOrder, [&](int line) {
+        const auto it = m_renders.find(line);
+        Render &memo = it->second;
+        const QString oldBase = renderKey(before, memo.kind, memo.source);
+        bool kept = memo.key.startsWith(oldBase);
+        if (kept) {
+            const QString key = renderKey(ctx, memo.kind, memo.source) + QStringView(memo.key).mid(oldBase.size());
+            if (const Render *made = m_cache.object(key); made && made->source == memo.source && made->html == memo.html) {
+                const quint64 used = memo.used;
+                m_renderKiB += made->cost - memo.cost;
+                memo = *made;
+                memo.used = used;
+            } else if (memo.block->reflow(ctx)) {
+                if (const Render *old = m_cache.object(memo.key); old && old->block == memo.block)
+                    m_cache.remove(memo.key);
+                memo.key = key;
+                m_cache.insert(key, new Render(memo), memo.cost);
+            } else {
+                kept = false;
+            }
+        }
+        if (!kept) {
+            m_renderKiB -= memo.cost;
+            m_renders.erase(it);
+        }
+        return !kept;
+    });
+}
+
 void VisualView::asyncRenderReady()
 {
     // Drop the source stand-ins of diagrams and the blocks with pictures on
@@ -2471,13 +2512,15 @@ const VisualView::Render *VisualView::rendered(const Row &r)
 
     const qreal width = textWidth();
     const qreal dpr = devicePixelRatioF();
-    if (m_rendersRevision != m_model->revision() || m_rendersWidth != width || m_rendersDpr != dpr
-        || m_rendersOverflow != readActive()) {
+    if (m_rendersRevision != m_model->revision() || m_rendersDpr != dpr || m_rendersOverflow != readActive()) {
         resetRenders();
         m_rendersRevision = m_model->revision();
         m_rendersWidth = width;
         m_rendersDpr = dpr;
         m_rendersOverflow = readActive();
+    } else if (m_rendersWidth != width) {
+        reflowRenders();
+        m_rendersWidth = width;
     }
     if (m_rendersFigureHeight != figureBoxHeight() || m_rendersFigureRevision != m_figureRevision) {
         dropFigureRenders();
