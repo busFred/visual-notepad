@@ -20,6 +20,17 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(microtex_src tinyxml2_src)
 
 set(_mt ${microtex_src_SOURCE_DIR})
+
+# Upstream frees asprintf()'s buffer (from malloc) with delete in
+# LaTeX::queryResourceLocation, which runs at every start of the math worker:
+# undefined behaviour, which AddressSanitizer stops the worker for. Changed
+# in the downloaded source, once.
+file(READ ${_mt}/src/latex.cpp _mt_latex)
+string(FIND "${_mt_latex}" "delete userdata_fallback;" _mt_bad_free)
+if(NOT _mt_bad_free EQUAL -1)
+    string(REPLACE "delete userdata_fallback;" "free(userdata_fallback);" _mt_latex "${_mt_latex}")
+    file(WRITE ${_mt}/src/latex.cpp "${_mt_latex}")
+endif()
 file(GLOB_RECURSE _mt_sources CONFIGURE_DEPENDS
     ${_mt}/src/atom/*.cpp
     ${_mt}/src/box/*.cpp
