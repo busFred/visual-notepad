@@ -266,7 +266,7 @@ const VisualView::ReadLayout &VisualView::readLayout() const
     const int total = l.count * l.width + (l.count - 1) * l.gap;
     l.left = (size.width() - total) / 2;
     l.top = readTop;
-    l.height = qMax(lineHeight() * 2, size.height() - readTop - readBottom);
+    l.height = qMax(int(bodyLineHeight() * 2), size.height() - readTop - readBottom);
     return l;
 }
 

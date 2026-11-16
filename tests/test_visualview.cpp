@@ -536,6 +536,7 @@ private Q_SLOTS:
     void wideMathShrinksToTheColumn();
     void mathIsSharpWhenZoomed();
     void lineSpacingIsTheTextsBesideFormulas();
+    void gapsFollowTheMarkdownLineHeight();
     void smallFormulasKeepTheLineInEveryFont();
     void aCellOfAFormulaAloneSitsOnTheTextsBaseline();
     void ordinaryBlocksIgnoreTheLayoutLimits();
@@ -4388,6 +4389,35 @@ void TestVisualView::lineSpacingIsTheTextsBesideFormulas()
     QVERIFY2(height(tall, 1.0) > height(plain, 1.0) + 5, "the formula is not taller than the text");
     QVERIFY2(tallAdded <= plainAdded + 2 && tallAdded >= plainAdded / 2,
              qPrintable(QStringLiteral("%1 %2").arg(tallAdded).arg(plainAdded)));
+}
+
+// The room between paragraphs (a blank line's gap row) is body text's: the
+// text font times the Markdown line spacing, at the view's zoom. The editor's
+// spacing belongs to the source and never reaches this view.
+void TestVisualView::gapsFollowTheMarkdownLineHeight()
+{
+    setDocument(QStringLiteral("One\n\nTwo\n\nThree\n\nFour\n"), 6);
+    auto *view = static_cast<ProbeView *>(m_view);
+    Settings &settings = Settings::instance();
+    const QVariant keep = settings.value(key::textLineHeight);
+    const auto gap = [&] {
+        m_view->grab();
+        qreal top = 0, bottom = 0;
+        return view->boundsOfLine(1, &top, &bottom) ? bottom - top : -1;
+    };
+    const auto expected = [&](qreal factor) {
+        QFont body = theme::textFont();
+        body.setPointSizeF(body.pointSizeF() * m_view->font().pointSizeF() / theme::editorFont().pointSizeF());
+        return QFontMetricsF(body).height() * factor * 0.6;
+    };
+    settings.setValue(key::textLineHeight, 1.2);
+    const qreal tight = gap();
+    QVERIFY2(qAbs(tight - expected(1.2)) < 1.5, qPrintable(QString::number(tight)));
+    settings.setValue(key::textLineHeight, 2.0);
+    const qreal loose = gap();
+    QVERIFY2(qAbs(loose - expected(2.0)) < 1.5, qPrintable(QString::number(loose)));
+    QVERIFY(loose > tight + 2);
+    settings.setValue(key::textLineHeight, keep);
 }
 
 void TestVisualView::smallFormulasKeepTheLineInEveryFont()

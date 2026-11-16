@@ -371,6 +371,9 @@ private:
     void paintStrip(QPainter &painter, const RenderedBlock *block, const Render *render, const QRectF &rect);
     void paintHeadingMarks(QPainter &painter, const RowInfo &info, const RenderedBlock *block, const QRectF &rect);
     RenderContext context() const;
+    QFont bodyFont() const;
+    // One line of rendered body text (blank-line gaps and rows not rendered yet are sized from it).
+    qreal bodyLineHeight() const;
     // context(), made once for a frame (it reads fonts and settings).
     const RenderContext &renderContext();
     // The render of a rendered row (a block, or a part of one), or null.

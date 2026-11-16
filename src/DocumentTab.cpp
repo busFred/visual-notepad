@@ -988,7 +988,8 @@ void DocumentTab::onSettingChanged(const QString &changedKey)
     } else if (changedKey == QLatin1String(key::drawWhitespace)) {
         forEachView([&](TextView *view) { view->setShowWhitespace(s.flag(key::drawWhitespace)); });
     } else if (changedKey == QLatin1String(key::lineSpacing)) {
-        forEachView([&](TextView *view) { view->setLineSpacing(s.value(key::lineSpacing).toDouble()); });
+        // (The visual view's spacing is the Markdown setting's.)
+        m_editor->setLineSpacing(s.value(key::lineSpacing).toDouble());
     } else if (changedKey == QLatin1String(key::multiCursorModifier)) {
         const Qt::KeyboardModifier modifier =
             s.text(key::multiCursorModifier) == QLatin1String("ctrl") ? Qt::ControlModifier : Qt::AltModifier;
@@ -1040,7 +1041,8 @@ void DocumentTab::applyViewSettings(TextView *view)
     view->setShowWhitespace(s.flag(key::drawWhitespace));
     view->setTabWidth(indentation().tabSize);
     view->setInsertSpaces(indentation().insertSpaces);
-    view->setLineSpacing(s.value(key::lineSpacing).toDouble());
+    if (view != m_visual)
+        view->setLineSpacing(s.value(key::lineSpacing).toDouble());
     view->setMultiCursorModifier(s.text(key::multiCursorModifier) == QLatin1String("ctrl") ? Qt::ControlModifier
                                                                                             : Qt::AltModifier);
     if (view == m_visual) {
