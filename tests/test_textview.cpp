@@ -1300,8 +1300,8 @@ void TestTextView::columnSelectUsesVisualColumns()
     // Every line shorter than the box: a caret at each line end.
     setText(QStringLiteral("a\nbc\nd"));
     place(0, 0);
-    const QPoint far = pointAt(2, 20);
-    boxSelect(far, far, Qt::ShiftModifier | Qt::AltModifier);
+    const QPoint pastEnd = pointAt(2, 20);
+    boxSelect(pastEnd, pastEnd, Qt::ShiftModifier | Qt::AltModifier);
     QCOMPARE(m_view->cursorCount(), 3);
     for (const QTextCursor &caret : m_view->cursors())
         QCOMPARE(caret.position(), caret.block().position() + caret.block().length() - 1);
