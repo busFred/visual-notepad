@@ -36,6 +36,25 @@ inline double threadCpuMs()
 #endif
 }
 
+// Milliseconds of processor time all threads of this process have used. For
+// a test that waits for the program's work on other threads to end: a search
+// that never ends uses it as fast as the clock runs, while a busy machine,
+// which can make the work take minutes on the clock, does not change it.
+inline double processCpuMs()
+{
+#ifdef Q_OS_WIN
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user))
+        return 0;
+    const auto ticks = [](const FILETIME &t) { return double((quint64(t.dwHighDateTime) << 32) | t.dwLowDateTime); };
+    return (ticks(kernel) + ticks(user)) / 10'000.0; // In 100 ns.
+#else
+    timespec now{};
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &now);
+    return now.tv_sec * 1000.0 + now.tv_nsec / 1e6;
+#endif
+}
+
 // QElapsedTimer's calls, in the processor time of the thread that made it.
 // For a test that times what the thread itself computes (layout, painting),
 // not what it waits for.

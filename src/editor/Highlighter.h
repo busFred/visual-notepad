@@ -70,6 +70,13 @@ public:
     // leaving it to the speed of the machine.
     static constexpr int firstPaintWaitMs = 250;
     static void setFirstPaintWaitMs(int ms);
+    // Each slice colours for about this long, then lets the event loop run;
+    // so long, too, an edit recolours the lines after it before leaving the
+    // rest to the slices. A test sets 0 (for tests): slices of one line, and
+    // edits that recolour only the lines they touched, which is what a
+    // machine too busy to do more in that time gets.
+    static constexpr qint64 sliceBudgetNs = 6'000'000;
+    static void setSliceBudgetNs(qint64 ns);
     static constexpr int slicedFromChars = 128 * 1024;
     static constexpr int maxLineChars = 10'000;
 
@@ -115,8 +122,14 @@ private:
     // Whether a view shows some of the text.
     bool isShown() const;
     // The in-order pass goes on from `position` (a block start) if that is
-    // before where it is.
+    // before where it is; it comes back to where it was.
     void moveFrontierBack(int position);
+    // The in-order pass may not skip the block at `position`: an edit
+    // recoloured the line before it, and not it.
+    void resumeAt(int position);
+    // Where the text coloured in order ends (INT_MAX: at the end), past the
+    // pass: as far as it may skip.
+    int inOrderTo() const;
     void stopSlices();
     bool slicesFor(int chars) const;
     // Whether the first line coloured with the definition still has to load
@@ -129,10 +142,15 @@ private:
     std::function<QList<std::pair<int, int>>()> m_visibleLines;
     // Where the in-order pass goes on; null when there is none.
     QTextCursor m_frontier;
-    // Up to where (or, with m_doneToEnd, to the end) the text was coloured in
-    // order before an edit moved the pass back: there it may stop as soon as
-    // a line ends as it did.
-    QTextCursor m_doneTo;
+    // Where the in-order pass goes on after a line that ends as it did, in
+    // order of position: where it was when edits moved it back, and lines
+    // whose recolouring an edit left to it. From such a line the text was
+    // coloured in order before, each line from the one before it, up to the
+    // next of these; a pass that skips to it skips nothing it has to colour.
+    // (Not one place: a second edit behind the pass, or a line left between,
+    // would be skipped.)
+    QList<QTextCursor> m_resume;
+    // And past the last, the text was coloured in order to the end.
     bool m_doneToEnd = false;
     // A big edit is complete when contentsChanged() follows; the first slice
     // runs then.

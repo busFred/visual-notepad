@@ -797,12 +797,18 @@ void TestFind::catastrophicRegexKeepsTheGuiResponsive()
     QVERIFY2(threadCpuMs() - cpuAtStart < 100, qPrintable(QString::number(threadCpuMs() - cpuAtStart)));
     const QLabel *count = m_bar->findChild<QLabel *>(QStringLiteral("FindCount"));
     bool sawBusy = false;
-    while (m_bar->isSearching() && total.elapsed() < 60000) {
+    // Given up on once the search has used a minute of processor time (it
+    // needs some seconds): on a busy machine its thread can wait for a core
+    // for minutes on the clock.
+    const double processCpuAtStart = processCpuMs();
+    while (m_bar->isSearching() && processCpuMs() - processCpuAtStart < 60000) {
         QTest::qWait(10);
         sawBusy = sawBusy || count->text() == QStringLiteral("…");
     }
     ticker.stop();
-    QVERIFY(!m_bar->isSearching());
+    QVERIFY2(!m_bar->isSearching(), qPrintable(QStringLiteral("still searching after %1 ms of processor time, %2 ms")
+                                                   .arg(processCpuMs() - processCpuAtStart)
+                                                   .arg(total.elapsed())));
     // The search took long, the GUI thread went on, and the counter said so.
     const qint64 slowSearchMs = total.elapsed();
     QVERIFY2(slowSearchMs > 500, qPrintable(QString::number(slowSearchMs)));

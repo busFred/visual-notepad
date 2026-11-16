@@ -21,9 +21,12 @@ namespace vn {
 
 namespace {
 
-// Each slice colours for about this long, then lets the event loop run
-// (typing, scrolling, painting) before the next.
-constexpr qint64 sliceBudgetNs = 6'000'000;
+// Highlighter::sliceBudgetNs, or what a test set.
+qint64 &sliceBudget()
+{
+    static qint64 ns = Highlighter::sliceBudgetNs;
+    return ns;
+}
 // Lines a view shows are coloured from this far above, so that a code block
 // or comment opened just before them is usually seen.
 constexpr int leadInLines = 50;
@@ -149,11 +152,11 @@ private:
         // Files on screen first, then the others in turn: one that ran goes
         // to the back (runSlice() adds it again).
         std::stable_partition(m_queue.begin(), m_queue.end(), [](const Highlighter *h) { return h->isShown(); });
-        while (!m_queue.isEmpty()) {
-            const qint64 left = sliceBudgetNs - clock.nsecsElapsed();
-            if (left <= 0)
+        for (bool any = false; !m_queue.isEmpty(); any = true) {
+            const qint64 left = sliceBudget() - clock.nsecsElapsed();
+            if (left <= 0 && any)
                 break;
-            m_queue.takeFirst()->runSlice(left);
+            m_queue.takeFirst()->runSlice(std::max<qint64>(left, 0));
         }
         if (!m_queue.isEmpty())
             m_timer.start();
@@ -187,6 +190,11 @@ void Highlighter::setSliced(bool on)
 bool Highlighter::isSliced()
 {
     return sliced();
+}
+
+void Highlighter::setSliceBudgetNs(qint64 ns)
+{
+    sliceBudget() = ns;
 }
 
 void Highlighter::setFirstPaintWaitMs(int ms)
@@ -284,7 +292,7 @@ void Highlighter::recolourAll()
         if (cold)
             SliceScheduler::instance().addAfterPaint(this);
         else
-            runSlice(sliceBudgetNs);
+            runSlice(sliceBudget());
         return;
     }
     for (QTextBlock block = m_doc->begin(); block.isValid(); block = block.next())
@@ -363,8 +371,9 @@ bool Highlighter::colour(const QTextBlock &block, bool inOrder)
         QTextBlock(block).setUserData(data);
         return true;
     }
-    if (inOrder)
-        data->ahead = false;
+    // Coloured out of order, from a state that may be wrong: the in-order
+    // pass may not take its end for where the text after it follows from.
+    data->ahead = !inOrder;
     if (data->state == state)
         return false;
     data->state = std::move(state);
@@ -373,7 +382,10 @@ bool Highlighter::colour(const QTextBlock &block, bool inOrder)
 
 void Highlighter::onContentsChange(int from, int charsRemoved, int charsAdded)
 {
-    const int frontier = m_frontier.isNull() ? INT_MAX : m_frontier.position();
+    // The start of the line the pass goes on from. (Its cursor can be inside
+    // the line after an edit: text typed where it is, or a removal around it.
+    // That line is not coloured in order yet, all of it.)
+    const int frontier = m_frontier.isNull() ? INT_MAX : m_doc->findBlock(m_frontier.position()).position();
     QTextBlock block = m_doc->findBlock(from);
     const QTextBlock lastBlock = m_doc->findBlock(from + charsAdded + (charsRemoved > 0 ? 1 : 0));
     const int end = lastBlock.isValid() ? lastBlock.position() + lastBlock.length() : m_doc->characterCount();
@@ -402,10 +414,13 @@ void Highlighter::onContentsChange(int from, int charsRemoved, int charsAdded)
     bool changed = false;
     while (block.isValid() && (block.position() < end || changed)) {
         if (block.position() >= end) {
-            // Not coloured, or the in-order pass will be there anyway.
-            if (!block.userData() || block.position() >= frontier)
+            // Not coloured, or the in-order pass will be there anyway (and
+            // not skip it).
+            if (!block.userData() || block.position() >= frontier) {
+                resumeAt(block.position());
                 break;
-            if (sliced() && clock.nsecsElapsed() > sliceBudgetNs) {
+            }
+            if (sliced() && clock.nsecsElapsed() > sliceBudget()) {
                 moveFrontierBack(block.position());
                 SliceScheduler::instance().add(this);
                 break;
@@ -423,7 +438,7 @@ void Highlighter::onContentsChanged()
         if (isCold())
             SliceScheduler::instance().addAfterPaint(this);
         else
-            runSlice(sliceBudgetNs);
+            runSlice(sliceBudget());
     }
 }
 
@@ -435,11 +450,39 @@ void Highlighter::moveFrontierBack(int position)
         m_frontier.setPosition(position);
         return;
     }
-    if (position >= m_frontier.position())
+    if (position >= m_frontier.position()) {
+        // Ahead of the pass (its lines without colours): not to be skipped.
+        resumeAt(position);
         return;
-    if (!m_doneToEnd && m_doneTo.isNull())
-        m_doneTo = m_frontier;
+    }
+    // Every place to go on from is at or after the pass.
+    if (m_resume.isEmpty() || m_resume.first().position() != m_frontier.position())
+        m_resume.prepend(m_frontier);
     m_frontier.setPosition(position);
+}
+
+int Highlighter::inOrderTo() const
+{
+    if (m_doneToEnd)
+        return INT_MAX;
+    if (!m_resume.isEmpty())
+        return m_resume.last().position();
+    return m_frontier.isNull() ? INT_MAX : m_frontier.position();
+}
+
+void Highlighter::resumeAt(int position)
+{
+    // Where the pass is, or past where it may skip to: it gets there anyway.
+    if (m_frontier.isNull() || position <= m_doc->findBlock(m_frontier.position()).position()
+        || position >= inOrderTo())
+        return;
+    const auto at = std::lower_bound(m_resume.begin(), m_resume.end(), position,
+                                     [](const QTextCursor &c, int p) { return c.position() < p; });
+    if (at != m_resume.end() && at->position() == position)
+        return;
+    QTextCursor cursor(m_doc);
+    cursor.setPosition(position);
+    m_resume.insert(at, cursor);
 }
 
 bool Highlighter::isShown() const
@@ -481,22 +524,23 @@ void Highlighter::runSlice(qint64 budgetNs)
         const BlockState *data = stateOf(next);
         const bool wasInOrder = data && !data->ahead;
         const bool changed = colourLine(next, number, true);
-        if (wasInOrder && !changed && (m_doneToEnd || (!m_doneTo.isNull() && next.position() < m_doneTo.position()))) {
+        // Places to go on from in this line: it is coloured.
+        while (!m_resume.isEmpty() && m_resume.first().position() < next.position() + next.length())
+            m_resume.removeFirst();
+        if (wasInOrder && !changed && (!m_resume.isEmpty() || m_doneToEnd)) {
             // Back where the text was coloured in order, and this line ends
-            // as it did: so does everything after it, up to where that was.
-            if (m_doneToEnd) {
+            // as it did: so does everything after it, up to the next place
+            // to go on from (or the end).
+            if (m_resume.isEmpty()) {
                 next = QTextBlock();
                 break;
             }
-            next = m_doc->findBlock(m_doneTo.position());
+            next = m_doc->findBlock(m_resume.takeFirst().position());
             number = next.blockNumber();
-            m_doneTo = QTextCursor();
             continue;
         }
         next = next.next();
         ++number;
-        if (!m_doneTo.isNull() && next.isValid() && next.position() >= m_doneTo.position())
-            m_doneTo = QTextCursor();
     }
     if (next.isValid())
         m_frontier.setPosition(next.position());
@@ -513,7 +557,7 @@ void Highlighter::stopSlices()
 {
     SliceScheduler::instance().remove(this);
     m_frontier = QTextCursor();
-    m_doneTo = QTextCursor();
+    m_resume.clear();
     m_doneToEnd = false;
 }
 
