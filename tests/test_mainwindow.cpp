@@ -134,6 +134,8 @@ private Q_SLOTS:
     void accentFollowsTheHalfInUse();
     void zoomStepsAndDefault();
     void ctrlWheelZoomsTheHalfInUse();
+    void editorLineSpacingLeavesTheVisualViewAlone();
+    void editorLineSpacingLeavesReadModeAlone();
     void zoomCellAndPopup();
     void zoomPopupInSingleView();
     void newTabStartsAtDefaultZoom();
@@ -882,6 +884,74 @@ void TestMainWindow::zoomStepsAndDefault()
     QCOMPARE(tab->zoom(source), 125);
     QCOMPARE(tab->zoom(visual), 125);
     vn::Settings::instance().reset(vn::key::zoom);
+}
+
+// The editor's line spacing is the source's: the visual half (rows, gaps,
+// pixels) answers to the Markdown line spacing only.
+void TestMainWindow::editorLineSpacingLeavesTheVisualViewAlone()
+{
+    vn::Settings &settings = vn::Settings::instance();
+    const QVariant editorSpacing = settings.value(vn::key::lineSpacing);
+    const QVariant textSpacing = settings.value(vn::key::textLineHeight);
+    settings.setValue(vn::key::lineSpacing, 1.0);
+    settings.setValue(vn::key::textLineHeight, 1.4);
+    QByteArray text;
+    for (int i = 1; i <= 40; ++i)
+        text += QByteArray("Paragraph ") + QByteArray::number(i) + "\n\n";
+    vn::MainWindow window;
+    window.resize(900, 500);
+    QVERIFY(window.openFile(write(QStringLiteral("spacing.md"), text)));
+    vn::DocumentTab *tab = window.currentTab();
+    tab->setViewMode(vn::DocumentTab::ViewMode::SourceVisual);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    vn::TextView *source = tab->sourceView();
+    vn::TextView *visual = tab->visualView();
+    focusView(source);
+    const auto shot = [](vn::TextView *view) { return view->grab().toImage(); };
+    const QImage visualBefore = shot(visual);
+    const QImage sourceBefore = shot(source);
+    const int visualPage = visual->verticalScrollBar()->pageStep();
+
+    settings.setValue(vn::key::lineSpacing, 2.0);
+    QVERIFY(shot(source) != sourceBefore); // The source follows it...
+    QVERIFY(shot(visual) == visualBefore); // ...the rendered view does not.
+    QCOMPARE(visual->verticalScrollBar()->pageStep(), visualPage);
+
+    settings.setValue(vn::key::textLineHeight, 2.0);
+    QVERIFY(shot(visual) != visualBefore);
+    QVERIFY(visual->verticalScrollBar()->pageStep() < visualPage);
+    settings.setValue(vn::key::lineSpacing, editorSpacing);
+    settings.setValue(vn::key::textLineHeight, textSpacing);
+}
+
+// Read mode's pages are laid out from the Markdown spacing alone as well.
+void TestMainWindow::editorLineSpacingLeavesReadModeAlone()
+{
+    vn::Settings &settings = vn::Settings::instance();
+    const QVariant editorSpacing = settings.value(vn::key::lineSpacing);
+    const QVariant textSpacing = settings.value(vn::key::textLineHeight);
+    settings.setValue(vn::key::lineSpacing, 1.0);
+    settings.setValue(vn::key::textLineHeight, 1.4);
+    vn::MainWindow window;
+    window.resize(1000, 600);
+    vn::DocumentTab *tab = readingTab(window, QStringLiteral("readspacing.md"));
+    QVERIFY(tab);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    vn::VisualView *visual = tab->visualView();
+    QTRY_VERIFY(visual->showsReadColumns());
+    const auto shot = [&] {
+        visual->grab();
+        return visual->grab().toImage();
+    };
+    const QImage before = shot();
+    settings.setValue(vn::key::lineSpacing, 2.0);
+    QVERIFY(shot() == before);
+    settings.setValue(vn::key::textLineHeight, 2.0);
+    QVERIFY(shot() != before);
+    settings.setValue(vn::key::lineSpacing, editorSpacing);
+    settings.setValue(vn::key::textLineHeight, textSpacing);
 }
 
 // Ctrl+wheel moves the half in use by 5% a notch, wherever the pointer is.

@@ -649,6 +649,9 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
     // A table in source form is realigned when the caret leaves it.
     setRealignTablesOnLeave(true);
     setTextMargins(sideMargin, sideMargin, topMargin);
+    // Source lines in this view (a block opened for editing) are spaced by the
+    // Markdown setting: the editor's spacing never reaches here.
+    setLineSpacing(Settings::instance().value(key::textLineHeight).toDouble());
     viewport()->setMouseTracking(true);
     connect(this, &TextView::scrolled, this, &VisualView::scheduleToolbarUpdate);
     // (The mark of the quick insert is kept in viewport coordinates.)
@@ -660,6 +663,7 @@ VisualView::VisualView(MarkdownModel *model, QWidget *parent)
     });
     connect(model, &MarkdownModel::optionsChanged, this, [this] {
         ++m_readLayoutSerial; // (The text font may be another.)
+        setLineSpacing(Settings::instance().value(key::textLineHeight).toDouble());
         clearRenderCache();
         relayout();
     });
@@ -2229,7 +2233,7 @@ VisualView::FoldSpot VisualView::foldSpotAt(const QPointF &point)
     if (blockClass(blockIndex).kind == FoldKind::Heading) {
         // The margin left of the heading's first line.
         const std::optional<QRectF> first = block->caretRect(0);
-        const qreal height = first ? first->bottom() : lineHeight();
+        const qreal height = first ? first->bottom() : bodyLineHeight();
         if (QRectF(left - sideMargin, top, sideMargin, height).contains(point)) {
             spot.where = FoldSpot::Chevron;
             return spot;
@@ -2257,7 +2261,7 @@ QRect VisualView::foldSpotRect(int line)
         return block->chipRect().translated(left, top).toAlignedRect();
     if (block->stripHeight() > 0)
         return QRectF(left, top, 2 * stripLabelPad, block->stripHeight()).toAlignedRect();
-    return QRectF(left - sideMargin, top, sideMargin, lineHeight()).toAlignedRect();
+    return QRectF(left - sideMargin, top, sideMargin, bodyLineHeight()).toAlignedRect();
 }
 
 bool VisualView::foldPressed(QMouseEvent *event)
@@ -2381,7 +2385,7 @@ void VisualView::paintHeadingMarks(QPainter &painter, const RowInfo &info, const
     // heading always has one.
     if (info.folded || info.row.firstLine == m_hoverLine) {
         const std::optional<QRectF> first = block->caretRect(0);
-        const qreal y = rect.top() + (first ? first->center().y() : lineHeight() / 2);
+        const qreal y = rect.top() + (first ? first->center().y() : bodyLineHeight() / 2);
         RenderedBlock::paintChevron(painter, QPointF(rect.left() - headingChevronOffset, y), !info.folded,
                                     theme::color(theme::Role::text));
     }
@@ -2432,15 +2436,28 @@ const RenderContext &VisualView::renderContext()
     return m_context;
 }
 
+QFont VisualView::bodyFont() const
+{
+    // Body text follows the "text font" setting, scaled with the editor's zoom.
+    const qreal zoom = font().pointSizeF() / theme::editorFont().pointSizeF();
+    QFont body = theme::textFont();
+    body.setPointSizeF(body.pointSizeF() * zoom);
+    return body;
+}
+
+qreal VisualView::bodyLineHeight() const
+{
+    // What a line of a rendered paragraph takes (the editor's font and
+    // spacing have no say in the rendered view).
+    return QFontMetricsF(bodyFont()).height() * Settings::instance().value(key::textLineHeight).toDouble();
+}
+
 RenderContext VisualView::context() const
 {
     RenderContext ctx;
     ctx.baseDirectory = m_baseDirectory;
     ctx.codeFont = font();
-    // Body text follows the "text font" setting, scaled with the editor's zoom.
-    const qreal zoom = font().pointSizeF() / theme::editorFont().pointSizeF();
-    ctx.font = theme::textFont();
-    ctx.font.setPointSizeF(ctx.font.pointSizeF() * zoom);
+    ctx.font = bodyFont();
     ctx.lineHeight = Settings::instance().value(key::textLineHeight).toDouble();
     ctx.width = textWidth();
     ctx.devicePixelRatio = devicePixelRatioF();
@@ -3061,7 +3078,7 @@ const VisualView::Render *VisualView::memoized(const Row &r) const
 qreal VisualView::renderedRowHeight(const Row &r, qreal)
 {
     if (spanForRow(r) < 0)
-        return lineHeight() * gapRowFactor;
+        return bodyLineHeight() * gapRowFactor;
     // Before the first paint the width may change yet (a splitter lays out
     // a view it shows after showing it, and a mode switch shows it in a
     // half first): blocks not rendered at this width are measured roughly,
@@ -3078,14 +3095,14 @@ qreal VisualView::renderedRowHeight(const Row &r, qreal)
         // (A chip stands for a whole block, a folded heading for its section.)
         const RowInfo &info = m_rows[index];
         if (info.chip)
-            return lineHeight() * 2;
+            return bodyLineHeight() * 2;
         if (info.folded)
-            return lineHeight() * (m_model->spans()[info.span].last - m_model->spans()[info.span].first + 1);
-        return lineHeight() * (r.lastLine - r.firstLine + 1);
+            return bodyLineHeight() * (m_model->spans()[info.span].last - m_model->spans()[info.span].first + 1);
+        return bodyLineHeight() * (r.lastLine - r.firstLine + 1);
     }
     const Render *render = rendered(r);
     if (!render)
-        return lineHeight();
+        return bodyLineHeight();
     // A list item reaches down to the next one (whose margin counts).
     const std::shared_ptr<RenderedBlock> block = render->block;
     std::shared_ptr<RenderedBlock> after;
@@ -3150,7 +3167,7 @@ void VisualView::paintRenderedRow(QPainter &painter, const Row &r, const QRectF 
                 text = block->renderedText();
             k = renderedOffsetFor(text, render->source, k);
         }
-        QRectF caret(0, 0, 2, qMin<qreal>(lineHeight(), block->height()));
+        QRectF caret(0, 0, 2, qMin<qreal>(bodyLineHeight(), block->height()));
         if (const auto at = block->caretRect(k))
             caret = *at;
         painter.fillRect(caret.translated(origin), theme::color(theme::Role::text));
