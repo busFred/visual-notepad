@@ -353,21 +353,25 @@ void TestMainWindow::unchangedHeadingsLeaveTheOutlineAlone()
     auto *outline = window.findChild<QTreeWidget *>();
     QVERIFY(window.openFile(write(QStringLiteral("same.md"), "# A\n\n## B\n\ntext\n\n## C\n")));
     vn::DocumentTab *tab = window.currentTab();
-    const QTreeWidgetItem *first = outline->topLevelItem(0);
-    QVERIFY(first);
+    QVERIFY(outline->topLevelItem(0));
+    // A mark on the item, not its address: a rebuilt tree's new item can be
+    // allocated where the old one was (it was, on macOS).
+    constexpr int markRole = Qt::UserRole + 1000;
+    outline->topLevelItem(0)->setData(0, markRole, true);
+    const auto marked = [&] { return outline->topLevelItem(0) && outline->topLevelItem(0)->data(0, markRole).toBool(); };
     const int parses = window.outlineParses();
 
     QTextCursor end(tab->document());
     end.movePosition(QTextCursor::End);
     end.insertText(QStringLiteral("more text\n"));
     QTRY_COMPARE(window.outlineParses(), parses + 1);
-    QCOMPARE(outline->topLevelItem(0), first); // not rebuilt
+    QVERIFY(marked()); // not rebuilt
     QCOMPARE(dumpOutline(outline), referenceOutline(tab->text()));
 
     // A changed heading is rebuilt.
     end.insertText(QStringLiteral("## D\n"));
     QTRY_COMPARE(outline->topLevelItem(0)->child(0)->parent()->childCount(), 3);
-    QVERIFY(outline->topLevelItem(0) != first);
+    QVERIFY(!marked());
     QCOMPARE(dumpOutline(outline), referenceOutline(tab->text()));
 
     // A selected item, or a collapsed branch, is gone after the next one.
