@@ -914,6 +914,8 @@ bool DocumentTab::eventFilter(QObject *watched, QEvent *event)
         placeOverlays();
     if ((watched == m_editor || watched == m_visual) && event->type() == QEvent::FocusIn)
         setActiveView(static_cast<TextView *>(watched));
+    if ((watched == m_editor || watched == m_visual) && event->type() == QEvent::StyleChange)
+        onStyleChanged(static_cast<TextView *>(watched));
     if (m_goToLineEdit && watched == m_goToLineEdit) {
         if (event->type() == QEvent::FocusOut
             || (event->type() == QEvent::KeyPress && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape)) {
@@ -1010,6 +1012,22 @@ void DocumentTab::onSettingChanged(const QString &changedKey)
             && changedKey != QLatin1String(key::autoSurround))
             applySettings();
     }
+}
+
+void DocumentTab::onStyleChanged(TextView *view)
+{
+    // The style sheet style puts back the font a widget had when it was first
+    // polished, whenever it polishes the widget again: on a theme or colour
+    // change, and when the tab moves to another group or window. That undoes
+    // the font and zoom set since (Preferences still shows them). Hidden
+    // tabs set them when shown.
+    if (!isVisible()) {
+        m_settingsStale = true;
+        return;
+    }
+    const QFont font = zoomedEditorFont(view);
+    if (view->font() != font)
+        view->setFont(font);
 }
 
 QFont DocumentTab::zoomedEditorFont(const TextView *view) const

@@ -215,6 +215,7 @@ private:
     void applyDiagnostics();
     void applyViewSettings(TextView *view);
     void onSettingChanged(const QString &changedKey);
+    void onStyleChanged(TextView *view);
     void forEachView(const std::function<void(TextView *)> &apply);
     QFont zoomedEditorFont(const TextView *view) const;
     int &zoomOf(const TextView *view);

@@ -131,6 +131,8 @@ private Q_SLOTS:
     void vscodeEditorShortcuts();
     void menuMnemonics();
     void zoomIsPerHalf();
+    void fontSurvivesThemeChange();
+    void movedTabKeepsItsFont();
     void accentFollowsTheHalfInUse();
     void zoomStepsAndDefault();
     void ctrlWheelZoomsTheHalfInUse();
@@ -798,6 +800,96 @@ void TestMainWindow::zoomIsPerHalf()
     // Back on the visual half, its own value is what the cell shows again.
     focusView(visual);
     QCOMPARE(cell->text(), QStringLiteral("105%"));
+}
+
+// The style sheet is applied again on a theme change: fonts set on the views
+// must come out of it as they were.
+void TestMainWindow::fontSurvivesThemeChange()
+{
+    vn::MainWindow window;
+    vn::DocumentTab *tab = zoomTab(window, vn::DocumentTab::ViewMode::SourceVisual);
+    QVERIFY(tab);
+    vn::Settings &settings = vn::Settings::instance();
+    const QScopeGuard restore([&settings] {
+        settings.reset(vn::key::theme);
+        settings.reset(vn::key::fontFamily);
+        settings.reset(vn::key::fontSize);
+        settings.resetColorOverride(QStringLiteral("standard"), QStringLiteral("editor"));
+    });
+    settings.setValue(vn::key::theme, QStringLiteral("modern"));
+    {
+        vn::Settings::ChangeBatch batch;
+        settings.setValue(vn::key::fontFamily, QStringLiteral("DejaVu Sans Mono"));
+        settings.setValue(vn::key::fontSize, 17);
+    }
+    focusView(tab->sourceView());
+    tab->setZoom(150);
+    const QFont source = tab->sourceView()->font();
+    const QFont visual = tab->visualView()->font();
+    QCOMPARE(source.pointSizeF(), 17 * 1.5);
+    QCOMPARE(visual.pointSizeF(), 17.0);
+
+    settings.setValue(vn::key::theme, QStringLiteral("standard"));
+    QCOMPARE(tab->sourceView()->font().pointSizeF(), source.pointSizeF());
+    QCOMPARE(tab->sourceView()->font().family(), source.family());
+    QCOMPARE(tab->visualView()->font().pointSizeF(), visual.pointSizeF());
+    QCOMPARE(tab->visualView()->font().family(), visual.family());
+
+    // Colour overrides apply the style sheet again too.
+    settings.setColorOverride(QStringLiteral("standard"), QStringLiteral("editor"), QColor(0x123456));
+    QCOMPARE(tab->sourceView()->font().pointSizeF(), source.pointSizeF());
+    QCOMPARE(tab->visualView()->font().pointSizeF(), visual.pointSizeF());
+
+    // A tab that is hidden when the theme changes gets its fonts when shown,
+    // and so does one whose font changed in the meantime.
+    tab->hide();
+    settings.setValue(vn::key::theme, QStringLiteral("classic"));
+    tab->show();
+    QCOMPARE(tab->sourceView()->font().pointSizeF(), source.pointSizeF());
+    QCOMPARE(tab->visualView()->font().pointSizeF(), visual.pointSizeF());
+    tab->hide();
+    settings.setValue(vn::key::fontSize, 11);
+    settings.setValue(vn::key::theme, QStringLiteral("modern"));
+    tab->show();
+    QCOMPARE(tab->sourceView()->font().pointSizeF(), 11 * 1.5);
+    QCOMPARE(tab->visualView()->font().pointSizeF(), 11.0);
+}
+
+// Moving a tab to another group or window shows it again under a new parent,
+// which polishes it again: it keeps the font and zoom it had.
+void TestMainWindow::movedTabKeepsItsFont()
+{
+    vn::MainWindow window;
+    vn::DocumentTab *tab = zoomTab(window, vn::DocumentTab::ViewMode::SourceVisual);
+    QVERIFY(tab);
+    QVERIFY(window.openFile(write(QStringLiteral("moved.txt"), "other\n")));
+    vn::Settings &settings = vn::Settings::instance();
+    const QScopeGuard restore([&settings] {
+        settings.reset(vn::key::fontFamily);
+        settings.reset(vn::key::fontSize);
+    });
+    settings.setValue(vn::key::fontSize, 13);
+    window.activateGroup(window.groupOf(tab));
+    window.groupOf(tab)->setCurrentIndex(window.groupOf(tab)->indexOf(tab));
+    focusView(tab->sourceView());
+    tab->setZoom(150);
+    QCOMPARE(tab->sourceView()->font().pointSizeF(), 13 * 1.5);
+    QCOMPARE(tab->visualView()->font().pointSizeF(), 13.0);
+
+    vn::EditorGroup *beside = window.addGroup(window.groupOf(tab), vn::MainWindow::SplitDirection::Right);
+    window.receiveTab(tab, beside, -1);
+    QCOMPARE(window.groupOf(tab), beside);
+    QTRY_VERIFY(tab->isVisible());
+    QCOMPARE(tab->sourceView()->font().pointSizeF(), 13 * 1.5);
+    QCOMPARE(tab->visualView()->font().pointSizeF(), 13.0);
+
+    vn::MainWindow *other = window.moveTabsToNewWindow({tab}, std::nullopt, false);
+    QVERIFY(other);
+    const QScopeGuard close([other] { delete other; });
+    QVERIFY(QTest::qWaitForWindowExposed(other));
+    QTRY_VERIFY(tab->isVisible());
+    QCOMPARE(tab->sourceView()->font().pointSizeF(), 13 * 1.5);
+    QCOMPARE(tab->visualView()->font().pointSizeF(), 13.0);
 }
 
 // The 2 px accent line sits along the bottom of the half last focused, in a
