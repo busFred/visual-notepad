@@ -4,6 +4,11 @@
 // its source text). fake_math_worker answers each formula as its text says.
 #include "markdown/MathRenderer.h"
 
+#include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QProcess>
+#include <QTemporaryDir>
 #include <QTest>
 
 using namespace vn;
@@ -17,6 +22,7 @@ private Q_SLOTS:
     void aWellFormedAnswerIsDrawn();
     void malformedAnswersAreRefused_data();
     void malformedAnswersAreRefused();
+    void aWorkerSlowToEndDoesNotHoldTheAppUp();
 };
 
 void TestMathAnswers::initTestCase()
@@ -67,6 +73,37 @@ void TestMathAnswers::malformedAnswersAreRefused()
     // The next worker answers as before.
     math::layout(QStringLiteral("valid"), false);
     QVERIFY(!math::lastRenderFellBack());
+}
+
+void TestMathAnswers::aWorkerSlowToEndDoesNotHoldTheAppUp()
+{
+    // A killed worker can take seconds to end on a busy machine. The app
+    // (its GUI thread, which lays formulas out) does not wait for it: once,
+    // it waited 2 s, and QProcess, deleted with the worker still there, up
+    // to 30 s more.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString release = dir.filePath(QStringLiteral("release"));
+    math::layout(QStringLiteral("valid"), false); // Started and answering.
+    QVERIFY(!math::lastRenderFellBack());
+    // The workers that ended are cleared away; this one is left.
+    const auto processes = [] { return QCoreApplication::instance()->findChildren<QProcess *>().size(); };
+    QTRY_COMPARE(processes(), 1);
+
+    QElapsedTimer timer;
+    timer.start();
+    math::layout(QStringLiteral("slow-to-end:") + release, false);
+    const qint64 spent = timer.elapsed();
+    const bool refused = math::lastRenderFellBack();
+    QFile let(release);
+    QVERIFY(let.open(QIODevice::WriteOnly)); // The worker may end now.
+    if (!refused)
+        QSKIP("This system lets no process trace the worker (Linux, ptrace)");
+    // Some milliseconds; before, 32 s. (Not tighter: what is timed is the
+    // fake worker's start of its helper, which a busy machine slows down.)
+    QVERIFY2(spent < 16'000, qPrintable(QString::number(spent)));
+    // And once it has ended, the process is cleared away.
+    QTRY_COMPARE_WITH_TIMEOUT(processes(), 0, 30'000);
 }
 
 QTEST_MAIN(TestMathAnswers)
