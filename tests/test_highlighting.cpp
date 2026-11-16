@@ -9,6 +9,7 @@
 #include "editor/TextView.h"
 
 #include <QApplication>
+#include <QRandomGenerator>
 #include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -93,6 +94,7 @@ private Q_SLOTS:
     void bigTextsColourInSlices();
     void visibleLinesComeFirst();
     void editsWhileColouringEndAsAtOnce();
+    void editsOnABusyMachineEndAsAtOnce();
     void bigEditsColourInSlices();
     void colouringIsNotAnEdit();
     void languageChangeColoursInSlices();
@@ -269,6 +271,73 @@ void TestHighlighting::editsWhileColouringEndAsAtOnce()
         QCOMPARE(got.size(), expected.size());
         for (int i = 0; i < got.size(); ++i)
             QVERIFY2(got[i] == expected[i], qPrintable(QStringLiteral("%1 block %2").arg(name).arg(i)));
+    }
+}
+
+// The same on a machine too busy to colour more than a line in a slice, or
+// past the lines an edit touched: edits, scrolls and slices at random, the
+// pass moved back again and again, by edits at it, behind it, ahead of it and
+// around it. (A pass that went on from one place only, or took the line it
+// was in for coloured, skipped lines and left them in the wrong colours.)
+void TestHighlighting::editsOnABusyMachineEndAsAtOnce()
+{
+    vn::Highlighter::setSliceBudgetNs(0);
+    const auto restore = qScopeGuard([] { vn::Highlighter::setSliceBudgetNs(vn::Highlighter::sliceBudgetNs); });
+    for (int seed = 0; seed < 24; ++seed) {
+        QRandomGenerator random(seed);
+        const bool md = seed % 2;
+        const QString name = md ? QStringLiteral("busy.md") : QStringLiteral("busy.cpp");
+        const QString path = write(name, md ? markdown(300'000) : cpp(300'000));
+        DocumentTab tab;
+        tab.resize(800, 600);
+        tab.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&tab));
+        QVERIFY(tab.load(path));
+        QTextDocument *doc = tab.document();
+        QStringList steps;
+        for (int step = 0; step < 12; ++step) {
+            const int lines = doc->blockCount();
+            switch (random.bounded(6)) {
+            case 0: {
+                const int turns = random.bounded(40);
+                for (int turn = 0; turn < turns; ++turn)
+                    QApplication::processEvents();
+                steps << QStringLiteral("%1 slices").arg(turns);
+                break;
+            }
+            case 1: {
+                const int line = random.bounded(lines);
+                tab.sourceView()->scrollToLine(line);
+                QApplication::processEvents();
+                steps << QStringLiteral("scroll to %1").arg(line);
+                break;
+            }
+            default: {
+                // Most near the top, where the pass is.
+                const int line = random.bounded(2) ? random.bounded(qMin(lines, 60)) : random.bounded(lines);
+                const int kind = random.bounded(4);
+                if (kind == 3) {
+                    QTextCursor cursor(doc->findBlockByNumber(line));
+                    cursor.select(QTextCursor::BlockUnderCursor);
+                    cursor.removeSelectedText();
+                    steps << QStringLiteral("remove %1").arg(line);
+                } else {
+                    const QString text = kind == 2 ? QStringLiteral("\n")
+                                         : kind == 0 ? (md ? QStringLiteral("```\n") : QStringLiteral("/* "))
+                                                     : (md ? QStringLiteral("```") : QStringLiteral(" */"));
+                    typeAt(doc, line, text);
+                    steps << QStringLiteral("type %1 at %2").arg(text.trimmed().isEmpty() ? QStringLiteral("a line break") : text.trimmed()).arg(line);
+                }
+            }
+            }
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(!tab.file()->isHighlightPending(), 120000);
+        const Formats expected = atOnce(doc, QStringLiteral("expected-") + name);
+        const Formats got = formatsOf(doc);
+        QCOMPARE(got.size(), expected.size());
+        for (int i = 0; i < got.size(); ++i)
+            QVERIFY2(got[i] == expected[i], qPrintable(QStringLiteral("%1, seed %2, block %3: %4")
+                                                           .arg(name).arg(seed).arg(i).arg(steps.join(QStringLiteral("; ")))));
     }
 }
 
