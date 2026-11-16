@@ -1,6 +1,7 @@
 // Stands in for "visnotepad --math-worker" (see MathRenderer.cpp) in
 // test_math_answers: answers each formula as its text names, well or in one
-// of the ways a worker a formula has taken over could.
+// of the ways a worker a formula has taken over could, or (Linux) is slow to
+// end once killed, as a worker is on a busy machine.
 #include <QByteArray>
 #include <QDataStream>
 #include <QIODevice>
@@ -14,6 +15,12 @@
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
+#endif
+
+#ifdef __linux__
+#include <sys/prctl.h>
+#include <sys/ptrace.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -72,6 +79,51 @@ QByteArray shapes(const QString &mode)
     return out;
 }
 
+// "slow-to-end:<file>": a helper process traces this one, and whoever
+// started it cannot see it end, or clear it away, until the helper lets go:
+// when <file> exists, or after a minute. (A killed process that the kernel
+// takes seconds to end, on a busy machine, looks the same to the app.) Then
+// an answer the app refuses, so that it kills this process. False if it
+// could not be traced.
+bool slowToEnd(const QString &mode)
+{
+#ifdef __linux__
+    const QByteArray release = mode.section(QLatin1Char(':'), 1).toLocal8Bit();
+    prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+    const pid_t self = getpid();
+    int ready[2];
+    if (pipe(ready) != 0)
+        return false;
+    const pid_t helper = fork();
+    if (helper < 0)
+        return false;
+    if (helper == 0) {
+        // Holds no end of the pipes to the app.
+        close(0);
+        close(1);
+        close(ready[0]);
+        const char held = ptrace(PTRACE_SEIZE, self, nullptr, nullptr) == 0 ? 1 : 0;
+        (void)!::write(ready[1], &held, 1);
+        close(ready[1]);
+        for (int i = 0; held && i < 1200 && access(release.constData(), F_OK) != 0; ++i)
+            usleep(50'000);
+        _exit(0); // Lets go of it.
+    }
+    close(ready[1]);
+    char held = 0;
+    const bool told = ::read(ready[0], &held, 1) == 1;
+    close(ready[0]);
+    if (!told || !held)
+        return false;
+    write(header(7, 0));
+    for (;;)
+        pause(); // Until killed.
+#else
+    Q_UNUSED(mode);
+    return false;
+#endif
+}
+
 } // namespace
 
 int main()
@@ -95,6 +147,8 @@ int main()
         bool display = false;
         stream >> utf8 >> display;
         const QString mode = QString::fromUtf8(utf8);
+        if (mode.startsWith(QLatin1String("slow-to-end:")) && slowToEnd(mode))
+            continue; // (Never: it is killed.)
         if (mode == QLatin1String("oversize")) {
             write(header(1, 9 * 1024 * 1024)); // And nothing after.
         } else if (mode == QLatin1String("wrong-status")) {
@@ -102,6 +156,7 @@ int main()
         } else if (mode == QLatin1String("not-tex")) {
             write(header(0, 0));
         } else {
+            // Well formed (also where slow-to-end could not be had).
             const QByteArray body = shapes(mode);
             write(header(1, qint32(body.size())) + body);
         }

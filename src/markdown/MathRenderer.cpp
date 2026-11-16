@@ -941,11 +941,16 @@ public:
         QProcess *process = m_process;
         m_process = nullptr;
         process->disconnect();
-        if (process->state() != QProcess::NotRunning) {
-            process->kill();
-            process->waitForFinished(2000);
+        if (process->state() == QProcess::NotRunning) {
+            delete process;
+            return;
         }
-        delete process;
+        // Not waited for: on a busy machine a killed worker can take seconds
+        // to end, all of them this thread's (the GUI's), and QProcess's
+        // destructor waits up to 30 s for it. Deleted once it has ended (by
+        // the application, at its end, if not before).
+        process->kill();
+        QObject::connect(process, &QProcess::finished, process, &QObject::deleteLater);
     }
 
 private:
