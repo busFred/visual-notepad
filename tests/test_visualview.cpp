@@ -47,6 +47,7 @@
 #include <QFontDatabase>
 #include <QFontMetricsF>
 #include <QFontInfo>
+#include <QStyleHints>
 #include <QTest>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -1959,8 +1960,20 @@ void TestVisualView::draggingFromCellToCellSelectsARectangle()
     QCOMPARE(after.at(4), (QStringList{"kiwi", "6", ""}));
 }
 
+// Keeps the caret from blinking (it shows, steadily) while it lives, for a
+// test that compares pictures of the view taken with events handled in
+// between (QTest::mouseMove handles them): a blink in between, likely when a
+// busy machine makes the pictures slow, would be the difference.
+struct SteadyCaret
+{
+    const int flashTime = QGuiApplication::styleHints()->cursorFlashTime();
+    SteadyCaret() { QGuiApplication::styleHints()->setCursorFlashTime(0); }
+    ~SteadyCaret() { QGuiApplication::styleHints()->setCursorFlashTime(flashTime); }
+};
+
 void TestVisualView::quickInsertAddsRowsAndColumns()
 {
+    const SteadyCaret steady; // (Before the caret is placed, which starts its blink.)
     useSelectionTable();
     const int expanded = m_view->expandedBlockCount(); // (The block with the caret shows its source.)
     QWidget *viewport = m_view->viewport();
