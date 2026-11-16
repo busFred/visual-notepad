@@ -22,7 +22,11 @@ qt_add_executable(test_mainwindow test_mainwindow.cpp)
 target_link_libraries(test_mainwindow PRIVATE vn_app Qt6::Test)
 target_compile_definitions(test_mainwindow PRIVATE VN_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 add_test(NAME mainwindow COMMAND test_mainwindow)
-set_tests_properties(mainwindow PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
+# The GUI suites run hundreds of test functions (the visual view over 200,
+# 90 s here): longer than CI's per-test --timeout 120 on its slowest
+# runner, the Intel Mac.
+set_tests_properties(mainwindow PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}"
+                     TIMEOUT 600)
 
 add_test(NAME core COMMAND cargo test --manifest-path ${PROJECT_SOURCE_DIR}/core/Cargo.toml
                            --target-dir ${CMAKE_BINARY_DIR}/cargo-test)
@@ -33,7 +37,8 @@ set_tests_properties(core PROPERTIES TIMEOUT 600)
 qt_add_executable(test_textview test_textview.cpp)
 target_link_libraries(test_textview PRIVATE vn_app Qt6::Test)
 add_test(NAME textview COMMAND test_textview)
-set_tests_properties(textview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
+set_tests_properties(textview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}"
+                     TIMEOUT 600)
 
 qt_add_executable(test_find test_find.cpp)
 target_link_libraries(test_find PRIVATE vn_app Qt6::Test)
@@ -49,7 +54,8 @@ qt_add_executable(test_visualview test_visualview.cpp)
 target_link_libraries(test_visualview PRIVATE vn_app Qt6::Test)
 target_compile_definitions(test_visualview PRIVATE VN_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 add_test(NAME visualview COMMAND test_visualview)
-set_tests_properties(visualview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
+set_tests_properties(visualview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}"
+                     TIMEOUT 600)
 
 qt_add_executable(test_remote_images test_remote_images.cpp)
 target_link_libraries(test_remote_images PRIVATE vn_app Qt6::Test)
