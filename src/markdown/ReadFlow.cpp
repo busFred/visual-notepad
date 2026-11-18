@@ -124,7 +124,16 @@ QList<int> ReadFlow::tops(int row) const
         return entry.tops;
     const int h = m_source->height(row);
     QList<int> t = m_source->lineTops(row);
-    std::sort(t.begin(), t.end());
+    // Settlement can invalidate this cache on each page of a long row.
+    // Already normalized tops need only one pass through the list.
+    if (!t.isEmpty() && t.front() == 0 && t.back() < h
+        && std::adjacent_find(t.cbegin(), t.cend(), std::greater_equal<int>()) == t.cend()) {
+        entry.tops = t;
+        entry.hasTops = true;
+        return t;
+    }
+    if (!std::is_sorted(t.cbegin(), t.cend()))
+        std::sort(t.begin(), t.end());
     t.erase(std::remove_if(t.begin(), t.end(), [h](int y) { return y <= 0 || y >= h; }), t.end());
     t.erase(std::unique(t.begin(), t.end()), t.end());
     t.prepend(0);
@@ -142,8 +151,10 @@ QList<int> ReadFlow::legalCuts(int row, RowKind kind, int h) const
     if (entry.hasCuts)
         return entry.cuts;
     QList<int> cuts = m_source->cuts(row);
-    std::sort(cuts.begin(), cuts.end());
-    cuts.erase(std::remove_if(cuts.begin(), cuts.end(), [h](int c) { return c <= 0 || c >= h; }), cuts.end());
+    if (!std::is_sorted(cuts.cbegin(), cuts.cend()))
+        std::sort(cuts.begin(), cuts.end());
+    if (!cuts.isEmpty() && (cuts.front() <= 0 || cuts.back() >= h))
+        cuts.erase(std::remove_if(cuts.begin(), cuts.end(), [h](int c) { return c <= 0 || c >= h; }), cuts.end());
     entry.cuts = cuts;
     entry.hasCuts = true;
     return cuts;

@@ -132,6 +132,8 @@ struct LineLayout::Piece
     int rows = 1;
     Scan scan;
     bool measured = false;
+    enum class Reuse { New, Same, Other };
+    Reuse reuse = Reuse::New;
     // The highlighter's colours it was laid out with (positions in it).
     QList<QTextLayout::FormatRange> formats;
     std::unique_ptr<QTextLayout> layout; // Dropped when not used for a while.
@@ -354,6 +356,13 @@ qreal LineLayout::Line::cursorToX(int position) const
         const int k = l.pieceAtRow(m_row);
         return l.use(k)->lineAt(m_row - l.m_pieces[k].firstRow).cursorToX(position - l.layoutStart(k));
     }
+    const int at = l.pieceAt(position);
+    if (at > 0 && position == l.layoutStart(at)) {
+        // A selection clipped at a piece join only needs its left edge.
+        // The next piece may be outside the paint clip and still estimated.
+        l.settleAround(position - 1);
+        return l.m_pieces[at].x;
+    }
     l.settleAround(position);
     const int k = l.pieceAt(position);
     const Piece &p = l.m_pieces[k];
@@ -441,6 +450,7 @@ bool LineLayout::rebuild(const QTextBlock &block, const Setup &setup, LineLayout
         before = nullptr;
     if (!usable(after))
         after = nullptr;
+    m_fill = before ? before->m_fill : after ? after->m_fill : 0.9;
     // Keep stale pieces too; their measures become estimates below.
     // Their pieces as the text has them, without text being composed.
     if (before)
@@ -457,7 +467,8 @@ bool LineLayout::rebuild(const QTextBlock &block, const Setup &setup, LineLayout
         for (Piece &p : before->m_pieces) {
             if (!unchanged && p.start + int(p.text.size()) > prefix - context)
                 break;
-            if (!sameSetup(before->m_setup, setup)) {
+            p.reuse = sameSetup(before->m_setup, setup) ? Piece::Reuse::Same : Piece::Reuse::Other;
+            if (p.reuse == Piece::Reuse::Other) {
                 p.layout.reset();
                 p.measured = false;
             }
@@ -472,7 +483,8 @@ bool LineLayout::rebuild(const QTextBlock &block, const Setup &setup, LineLayout
             if (p.text.isNull()) // Taken above (the same line).
                 continue;
             if (unchanged || p.start >= from + context) {
-                if (!sameSetup(after->m_setup, setup)) {
+                p.reuse = sameSetup(after->m_setup, setup) ? Piece::Reuse::Same : Piece::Reuse::Other;
+                if (p.reuse == Piece::Reuse::Other) {
                     p.layout.reset();
                     p.measured = false;
                 }
@@ -541,11 +553,11 @@ bool LineLayout::rebuild(const QTextBlock &block, const Setup &setup, LineLayout
                 p.measured = false;
                 ++m_unmeasured;
             }
-        } else if ((!fresh && p.em < 0) || k == 0) {
-            layOut(k, !fresh);
-        } else {
+        } else if (fresh ? k == 0 : p.reuse == Piece::Reuse::New) {
+            layOut(k, true);
+        } else if (fresh || p.reuse == Piece::Reuse::Other) {
             estimate(p);
-        }
+        } // Same setup: keep an unmeasured piece's existing estimate.
     }
     if (!finish())
         return fail();
@@ -869,10 +881,10 @@ void LineLayout::settleAround(int position)
     const int k = pieceAt(position);
     if (!m_setup.wrap) {
         for (int i = 0; i <= k; ++i)
-            if (!m_pieces[i].measured) measure(i, false);
+            if (!m_pieces[i].measured) measure(i, i == k);
     } else {
         for (int i = qMax(0, k - 1); i <= qMin(k + 1, int(m_pieces.size()) - 1); ++i)
-            if (!m_pieces[i].measured) measure(i, false);
+            if (!m_pieces[i].measured) measure(i, true);
     }
     trim(maxLive);
 }
@@ -881,7 +893,10 @@ void LineLayout::settleTo(qreal x)
 {
     if (!inPieces() || m_setup.wrap) return;
     for (int k = 0; k < int(m_pieces.size()) && m_pieces[k].x <= x; ++k)
-        if (!m_pieces[k].measured) measure(k, false);
+        if (!m_pieces[k].measured) {
+            measure(k, true);
+            trim(maxLive);
+        }
 }
 
 bool LineLayout::settleOne(int nearRow)

@@ -303,7 +303,7 @@ void TextView::settleColumnsScreen()
         std::map<int, Window> windows;
         for (int column = 0; column < int(screen.columns.size()); ++column) {
             for (const md::Segment &s : screen.columns[column].segments) {
-                const qreal right = columnOffset(column) + columnLayout().width;
+                const qreal right = columnOffset(column) + columnLayout().width + 2;
                 const auto [it, inserted] = windows.try_emplace(s.row, Window{s.yFrom, s.yTo, right});
                 if (!inserted) {
                     it->second.from = qMin(it->second.from, s.yFrom);

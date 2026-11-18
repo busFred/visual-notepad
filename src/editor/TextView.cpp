@@ -1047,11 +1047,12 @@ void TextView::restartSettling()
 void TextView::listenToLayout(int line)
 {
     const QTextBlock block = m_doc->findBlockByNumber(line);
-    m_lazyBlocks.removeIf( [](const QTextBlock &b) { return !b.isValid(); });
+    m_lazyBlocks.removeIf([](const QTextBlock &b) { return !b.isValid(); });
     if (!m_lazyBlocks.contains(block)) m_lazyBlocks.append(block);
     m_lines[line].layout->setListener([this, block](LineLayout *layout, int from, int delta) {
         if (block.isValid()) rowsMoved(block.blockNumber(), layout, from, delta);
     });
+    restartSettling();
 }
 
 void TextView::rowsMoved(int line, LineLayout *layout, int from, int delta)
@@ -1090,7 +1091,7 @@ void TextView::ensureShownMeasured(bool bottom)
         LineLayout *layout = layoutForLine(info.firstLine);
         if (!layout || !layout->inPieces()) { y += rowHeight(r); continue; }
         if (!m_wordWrap) {
-            layout->settleTo(horizontalScrollBar()->value() + textWidth());
+            layout->settleTo(horizontalScrollBar()->value() + viewport()->width() - textLeft());
         } else {
             y = r == m_topRow ? firstRowY() : y;
             const int anchor = bottom ? INT_MAX : r == m_topRow
@@ -1191,6 +1192,7 @@ void TextView::formatsChanged(int firstLine, int lastLine)
         if (line.layout->inPieces()) {
             // (Colours reach only the start of a long line: see Highlighter.)
             line.layout->formatsChanged(m_doc->findBlockByNumber(i));
+            restartSettling();
             continue;
         }
         line.layout.reset();
@@ -1487,8 +1489,6 @@ LineLayout *TextView::layoutForLine(int line)
         if (hasPreedit || cache.layout->hasPreedit()) {
             cache.layout->setPreedit(caretInBlock, hasPreedit ? m_preedit : QString(),
                                      hasPreedit ? preeditFormats() : QList<QTextLayout::FormatRange>());
-            if (!m_wordWrap)
-                m_maxLineWidth = qMax(m_maxLineWidth, cache.layout->width());
         }
         if (!m_wordWrap) m_maxLineWidth = qMax(m_maxLineWidth, cache.layout->width());
         return cache.layout.get();
