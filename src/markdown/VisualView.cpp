@@ -3551,6 +3551,11 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
             QToolTip::hideText();
             return;
         }
+        if (readChipAt(event->position()) >= 0) {
+            viewport()->setCursor(Qt::PointingHandCursor);
+            QToolTip::hideText();
+            return;
+        }
         // Pointing hand and URL tooltip over links in rendered text.
         QPointF origin;
         const int index = rowAtPoint(event->position(), &origin);
@@ -3875,6 +3880,14 @@ void VisualView::mousePressEvent(QMouseEvent *event)
     // The scrollbar under a wide table or equation.
     if (readActive() && readBarPressed(event))
         return;
+    // A chip where pictures were: the viewer, as a click on them.
+    if (readActive() && event->button() == Qt::LeftButton) {
+        if (const int chip = readChipAt(event->position()); chip >= 0) {
+            event->accept();
+            openMovedPictures(chip);
+            return;
+        }
+    }
     if (event->button() == Qt::LeftButton && !isReadOnly() && markdownEditing()) {
         TableSpot spot = tableSpotAt(event->position());
         const bool shift = (event->modifiers() & ~Qt::KeypadModifier) == Qt::ShiftModifier;

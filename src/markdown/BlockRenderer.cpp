@@ -3712,7 +3712,29 @@ std::optional<RenderedBlock::Picture> RenderedBlock::pictureAt(const QPointF &po
     }
     if (m_kind != Kind::Rich)
         return std::nullopt;
-    const QString source = m_doc->documentLayout()->imageAt(point - contentOffset());
+    return pictureOfSource(m_doc->documentLayout()->imageAt(point - contentOffset()));
+}
+
+std::optional<RenderedBlock::Picture> RenderedBlock::firstPicture() const
+{
+    if (m_kind == Kind::Image)
+        return Picture{m_diagramCode.isNull() ? QObject::tr("Equation") : QObject::tr("Diagram"), {}};
+    if (m_kind != Kind::Rich || !m_doc)
+        return std::nullopt;
+    for (QTextBlock block = m_doc->begin(); block.isValid(); block = block.next()) {
+        for (auto it = block.begin(); !it.atEnd(); ++it) {
+            const QTextCharFormat format = it.fragment().charFormat();
+            if (format.isImageFormat()) {
+                if (auto picture = pictureOfSource(format.toImageFormat().name()))
+                    return picture;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<RenderedBlock::Picture> RenderedBlock::pictureOfSource(const QString &source) const
+{
     if (source.isEmpty())
         return std::nullopt;
     const auto *doc = static_cast<const ResourceDocument *>(m_doc.get());

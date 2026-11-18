@@ -845,6 +845,14 @@ private:
         bool header = false; // The point is on the repeated header.
     };
     ReadHit readHitAt(const QPointF &point, bool exact);
+    // Pictures that moved to the next column: their chip and notes.
+    QFont readNoteFont();
+    QString readPartText(const std::vector<md::Segment> &segments, int index);
+    void paintReadPart(QPainter &painter, const std::vector<md::Segment> &segments, int index, bool lastColumn,
+                       const QRectF &rect);
+    // The row of the chip under a point (-1: none), and the viewer for it.
+    int readChipAt(const QPointF &point);
+    void openMovedPictures(int row);
     // Where the row's top-left corner is for a hit (rowAtPoint's origin).
     QPointF readOrigin(const ReadHit &hit);
     bool readKey(QKeyEvent *event);

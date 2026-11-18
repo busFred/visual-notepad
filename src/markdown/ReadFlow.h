@@ -25,7 +25,12 @@ enum class RowKind {
     Heading,     // Never ends a column on its own.
     Gap,         // Blank lines between blocks; skipped at the top of a column.
     Table,       // Breaks between body rows only; the continued part repeats the header.
-    Unbreakable, // Figures, equations, short tables: only cut when taller than a column.
+    Unbreakable, // Equations, chips, short tables: only cut when taller than a column.
+    // A picture or diagram: in one piece. One that does not fit the room
+    // left in a column moves to the top of the next one and the text after it
+    // fills the room; a chip stays where it was (see ReadFlow::fill). Pictures
+    // with only gap rows between them are a group and move together.
+    Picture,
 };
 
 // Where a screen starts, or ends: a row and a place in it, in pixels from the
@@ -35,6 +40,10 @@ struct Position
 {
     int row = 0;
     int y = 0;
+    // Pictures that moved on from the page before: the screen starts with
+    // them, from this row to the end of its group, then goes on from row, y.
+    // -1: none.
+    int floatRow = -1;
     friend auto operator<=>(const Position &, const Position &) = default;
 };
 
@@ -68,6 +77,11 @@ public:
     // more than one column). 2 for text, so no line is left alone; a source
     // whose cuts are every line (code in columns) says 1.
     virtual int minPieceLines(int row) { Q_UNUSED(row); return 2; }
+    // The chip left where pictures that moved were, and a note over or under
+    // pictures that moved ("from the previous column", "continues on the next
+    // page"). A chip height of 0: pictures do not move.
+    virtual int chipHeight() { return 0; }
+    virtual int noteHeight() { return 0; }
 
     // The source line shown at a place in a row, and the place that shows a
     // source line. The defaults spread the row's source lines evenly over its
@@ -107,9 +121,17 @@ struct Geometry
     Key key() const { return {columns, height, width, revision}; }
 };
 
-// A part of a row in a column: from yFrom to yTo of the row.
+// A part of a row in a column: from yFrom to yTo of the row. Or one of the
+// things moved pictures add (part not Row): no part of a row, as high as
+// RowSource::chipHeight or noteHeight says.
 struct Segment
 {
+    enum class Part {
+        Row,
+        Chip,     // Where pictures were: row is the first of them, to the end of its group.
+        FromNote, // Over moved pictures: row is the first shown here.
+        OnNote,   // Under them, more to come: row is the next.
+    };
     int row = 0;
     int yFrom = 0;
     int yTo = 0;
@@ -119,6 +141,9 @@ struct Segment
     // From yFrom to keptTo is lines kept from the previous page, to be greyed.
     // keptTo <= yFrom: none.
     int keptTo = 0;
+    Part part = Part::Row;
+    // A note: of the page before or after (else of the column).
+    bool page = false;
 };
 
 struct Column
@@ -196,6 +221,8 @@ public:
     Position positionOfLine(int line) const;
     // Height a segment takes in its column.
     int drawnHeight(const Segment &segment) const;
+    // The group of pictures a picture row is in: its first and last rows.
+    std::pair<int, int> pictureGroup(int row) const;
 
     // Page turns remembered for going back.
     int historySize() const { return int(m_history.size()); }
@@ -218,7 +245,9 @@ private:
     bool keepable(Position position) const;
     Position keptStart(Position end, int lines, int *count = nullptr) const;
 
-    Position fillColumn(Position position, Column &column) const;
+    Position fillColumn(Position position, Column &column, int &pending) const;
+    int placePictures(int row, Column &column, bool page, bool lastColumn) const;
+    bool canMove(int row) const;
     void trimColumn(Column &column, int &row, int &y) const;
     Position startingBefore(Position end, std::optional<Position> limit) const;
     Position backwardStart(Position end) const;

@@ -1,6 +1,7 @@
 #include "ImageViewer.h"
 
 #include "ZoomBar.h"
+#include "../editor/ReadControls.h"
 
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -47,6 +48,55 @@ ImageViewer::ImageViewer(const QImage &image, const QString &title, QWidget *par
     });
 }
 
+ImageViewer::ImageViewer(std::vector<Entry> pictures, int index, QWidget *parent)
+    : ImageViewer(pictures.empty() ? QImage() : pictures.front().image, QString(), parent)
+{
+    m_pictures = std::move(pictures);
+    if (m_pictures.size() > 1) {
+        m_back = new columns::PageButton(columns::PageButton::Direction::Left, true, this);
+        m_back->setObjectName(QStringLiteral("ViewerBack"));
+        m_back->setToolTip(tr("Previous picture (Left)"));
+        connect(m_back, &QAbstractButton::clicked, this, [this] { step(-1); });
+        m_forward = new columns::PageButton(columns::PageButton::Direction::Right, true, this);
+        m_forward->setObjectName(QStringLiteral("ViewerForward"));
+        m_forward->setToolTip(tr("Next picture (Right)"));
+        connect(m_forward, &QAbstractButton::clicked, this, [this] { step(1); });
+    }
+    showIndex(qBound(0, index, qMax(0, count() - 1)));
+}
+
+void ImageViewer::step(int by)
+{
+    if (count() > 1)
+        showIndex(qBound(0, m_index + by, count() - 1));
+}
+
+void ImageViewer::showIndex(int index)
+{
+    if (m_pictures.empty())
+        return;
+    m_index = index;
+    const Entry &entry = m_pictures[index];
+    m_image = entry.image;
+    setWindowTitle(count() > 1 ? tr("%1 (%2 of %3)").arg(entry.title).arg(index + 1).arg(count()) : entry.title);
+    if (m_back) {
+        m_back->setEnabled(index > 0);
+        m_forward->setEnabled(index + 1 < count());
+    }
+    fit();
+}
+
+void ImageViewer::placeSteps()
+{
+    if (!m_back)
+        return;
+    const int top = (height() - columns::pageArrowSize) / 2;
+    m_back->move(columns::pageArrowInset, top);
+    m_forward->move(width() - columns::pageArrowInset - columns::pageArrowSize, top);
+    m_back->raise();
+    m_forward->raise();
+}
+
 QPointF ImageViewer::windowCentre() const
 {
     return QPointF(width() / 2.0, height() / 2.0);
@@ -62,6 +112,7 @@ void ImageViewer::refresh()
     const qreal low = lowestScale();
     m_bar->setZoom(std::log(m_scale / low) / std::log(maxScale / low), qRound(m_scale * devicePixelRatioF() * 100));
     m_bar->move((width() - m_bar->width()) / 2, height() - m_bar->height() - int(margin));
+    placeSteps();
     update();
 }
 
@@ -205,6 +256,22 @@ void ImageViewer::keyPressEvent(QKeyEvent *event)
         break;
     case Qt::Key_1:
         actualSize(center);
+        break;
+    case Qt::Key_Left:
+    case Qt::Key_PageUp:
+        if (count() > 1) {
+            step(-1);
+            break;
+        }
+        QDialog::keyPressEvent(event);
+        break;
+    case Qt::Key_Right:
+    case Qt::Key_PageDown:
+        if (count() > 1) {
+            step(1);
+            break;
+        }
+        QDialog::keyPressEvent(event);
         break;
     default:
         QDialog::keyPressEvent(event); // Escape closes.

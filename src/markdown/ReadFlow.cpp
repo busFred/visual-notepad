@@ -96,8 +96,10 @@ Position ReadFlow::skipGaps(Position position) const
     position.row = qMax(0, position.row);
     position.y = qMax(0, position.y);
     while (position.row < n && m_source->kind(position.row) == RowKind::Gap)
-        position = {position.row + 1, 0};
-    return position.row >= n ? endOfDocument() : position;
+        position = {position.row + 1, 0, position.floatRow};
+    if (position.row >= n)
+        return {n, 0, position.floatRow};
+    return position;
 }
 
 // A row's line tops: sorted, inside the row, and the row's own top first (a
@@ -176,7 +178,7 @@ Position ReadFlow::back(Position position, int lines) const
 bool ReadFlow::keepable(Position position) const
 {
     const RowKind kind = m_source->kind(position.row);
-    if (kind == RowKind::Unbreakable || kind == RowKind::Gap)
+    if (kind == RowKind::Unbreakable || kind == RowKind::Picture || kind == RowKind::Gap)
         return false;
     const QList<int> t = tops(position.row);
     // Not a table's header: the part after it repeats it anyway.
@@ -207,6 +209,15 @@ Position ReadFlow::keptStart(Position end, int lines, int *count) const
 
 int ReadFlow::drawnHeight(const Segment &segment) const
 {
+    switch (segment.part) {
+    case Segment::Part::Row:
+        break;
+    case Segment::Part::Chip:
+        return m_source->chipHeight();
+    case Segment::Part::FromNote:
+    case Segment::Part::OnNote:
+        return m_source->noteHeight();
+    }
     return segment.yTo - segment.yFrom + (segment.repeatHeader ? m_source->headerHeight(segment.row) : 0);
 }
 
@@ -222,7 +233,7 @@ int repeatedHeader(RowSource *source, int row, RowKind kind, int y)
 // The legal cuts of a row, kept to inside it.
 QList<int> legalCuts(RowSource *source, int row, RowKind kind, int h)
 {
-    if (kind == RowKind::Unbreakable || kind == RowKind::Gap)
+    if (kind == RowKind::Unbreakable || kind == RowKind::Picture || kind == RowKind::Gap)
         return {};
     QList<int> cuts = source->cuts(row);
     std::sort(cuts.begin(), cuts.end());
@@ -250,23 +261,129 @@ Screen ReadFlow::fill(Position start) const
 {
     Screen screen;
     screen.columns.resize(m_geometry.columns);
+    const int n = m_source->count();
     Position position = skipGaps(start);
     screen.start = position;
-    for (Column &column : screen.columns) {
-        if (position.row >= m_source->count())
+    // Pictures moved on, waiting for the top of a column.
+    int pending = position.floatRow >= 0 && position.floatRow < n ? position.floatRow : -1;
+    position.floatRow = -1;
+    for (int c = 0; c < int(screen.columns.size()); ++c) {
+        Column &column = screen.columns[c];
+        const bool last = c + 1 == int(screen.columns.size());
+        if (pending >= 0) {
+            pending = placePictures(pending, column, c == 0, last);
+            if (pending >= 0)
+                continue; // (The column is theirs.)
+        }
+        if (position.row >= n)
             break;
-        position = skipGaps(fillColumn(position, column));
+        position = skipGaps(fillColumn(position, column, pending));
     }
     screen.end = position;
-    screen.atEnd = position.row >= m_source->count();
-    screen.atStart = screen.start.row >= m_source->count() || !prevLine(screen.start);
+    screen.end.floatRow = pending;
+    screen.atEnd = position.row >= n && pending < 0;
+    screen.atStart = screen.start.floatRow < 0 && (screen.start.row >= n || !prevLine(screen.start));
     return screen;
+}
+
+std::pair<int, int> ReadFlow::pictureGroup(int row) const
+{
+    const int n = m_source->count();
+    const auto isPicture = [this](int r) { return m_source->kind(r) == RowKind::Picture; };
+    int first = row;
+    for (int r = row - 1; r >= 0; --r) {
+        if (isPicture(r))
+            first = r;
+        else if (m_source->kind(r) != RowKind::Gap)
+            break;
+    }
+    int last = row;
+    for (int r = row + 1; r < n; ++r) {
+        if (isPicture(r))
+            last = r;
+        else if (m_source->kind(r) != RowKind::Gap)
+            break;
+    }
+    return {first, last};
+}
+
+// Pictures move only if each of them, with a note over and under it, fits
+// an empty column: one taller is cut where columns end, in its place.
+bool ReadFlow::canMove(int row) const
+{
+    const int limit = qMax(1, m_geometry.height);
+    const int notes = 2 * m_source->noteHeight();
+    const int last = pictureGroup(row).second;
+    for (int r = row; r <= last; ++r) {
+        if (m_source->kind(r) == RowKind::Picture && m_source->height(r) + notes > limit)
+            return false;
+    }
+    return true;
+}
+
+// Moved pictures at the top of a column, from row on in its group, under a
+// note (from the page before if page, else from the column before). Those
+// that do not fit wait for the next column, with a note saying so: the row
+// returned, or -1 if all are placed.
+int ReadFlow::placePictures(int row, Column &column, bool page, bool lastColumn) const
+{
+    const int limit = qMax(1, m_geometry.height);
+    const int note = m_source->noteHeight();
+    const int last = pictureGroup(row).second;
+    column.segments.push_back({row, 0, 0, false, 0, Segment::Part::FromNote, page});
+    column.used += note;
+    int r = row;
+    bool any = false;
+    while (r <= last) {
+        // The gap rows before the next picture go with it.
+        int next = r;
+        int gaps = 0;
+        while (next <= last && m_source->kind(next) != RowKind::Picture)
+            gaps += m_source->height(next++);
+        if (next > last) {
+            r = next;
+            break;
+        }
+        if (!any)
+            gaps = 0; // (Not at the top of the column.)
+        const int h = m_source->height(next);
+        const bool more = next < last;
+        const int need = gaps + h + (more ? note : 0);
+        if (any && column.used + need > limit)
+            break;
+        if (any) {
+            for (int g = r; g < next; ++g) {
+                column.segments.push_back({g, 0, m_source->height(g)});
+                column.used += m_source->height(g);
+            }
+        }
+        column.segments.push_back({next, 0, h});
+        column.used += h;
+        any = true;
+        r = next + 1;
+    }
+    while (r <= last && m_source->kind(r) != RowKind::Picture)
+        ++r;
+    if (r > last) {
+        // All placed: the blank after the group, if it fits, before the text.
+        const int n = m_source->count();
+        for (int g = last + 1; g < n && m_source->kind(g) == RowKind::Gap; ++g) {
+            if (column.used + m_source->height(g) > limit)
+                break;
+            column.segments.push_back({g, 0, m_source->height(g)});
+            column.used += m_source->height(g);
+        }
+        return -1;
+    }
+    column.segments.push_back({r, 0, 0, false, 0, Segment::Part::OnNote, lastColumn});
+    column.used += note;
+    return r;
 }
 
 // One column from position: whole rows while they fit, else the deepest cut
 // that does, else the column ends early; a row taller than an empty column is
 // cut where the column ends. Returns where the next column starts.
-Position ReadFlow::fillColumn(Position position, Column &column) const
+Position ReadFlow::fillColumn(Position position, Column &column, int &pending) const
 {
     const int n = m_source->count();
     const int limit = qMax(1, m_geometry.height);
@@ -285,8 +402,23 @@ Position ReadFlow::fillColumn(Position position, Column &column) const
             y = 0;
             continue;
         }
+        // A picture after pictures moved on waits for them: the text stops.
+        if (kind == RowKind::Picture && pending >= 0)
+            break;
         const int header = repeatedHeader(m_source, row, kind, y);
         const int room = limit - column.used;
+        if (kind == RowKind::Picture && y == 0 && h > room && !column.segments.empty()
+            && m_source->chipHeight() > 0 && m_source->chipHeight() <= room && canMove(row)) {
+            // It moves to the top of the next column; a chip here, and what
+            // follows it fills the room.
+            const int last = pictureGroup(row).second;
+            column.segments.push_back({row, 0, 0, false, 0, Segment::Part::Chip});
+            column.used += m_source->chipHeight();
+            pending = row;
+            row = last + 1;
+            y = 0;
+            continue;
+        }
         if (h - y + header <= room) {
             column.segments.push_back({row, y, h, header > 0});
             column.used += h - y + header;
@@ -375,11 +507,13 @@ LineRange ReadFlow::lineRange(const Screen &screen) const
     const Segment *last = nullptr;
     for (const Column &column : screen.columns) {
         for (const Segment &s : column.segments) {
-            if (m_source->kind(s.row) == RowKind::Gap)
+            if (m_source->kind(s.row) == RowKind::Gap || s.part != Segment::Part::Row)
                 continue;
-            if (!first)
+            // (In document order: moved pictures come after text that follows them.)
+            if (!first || std::pair(s.row, s.yFrom) < std::pair(first->row, first->yFrom))
                 first = &s;
-            last = &s;
+            if (!last || std::pair(s.row, s.yTo) > std::pair(last->row, last->yTo))
+                last = &s;
         }
     }
     if (!first) {
@@ -405,6 +539,8 @@ int ReadFlow::lineOf(Position position) const
     const int n = m_source->count();
     if (n == 0)
         return 0;
+    if (position.floatRow >= 0 && position.floatRow < n)
+        return m_source->firstLine(position.floatRow);
     if (position.row >= n)
         return m_source->lastLine(n - 1);
     return m_source->sourceLineAt(position.row, position.y);
@@ -623,7 +759,9 @@ const Screen &ReadFlow::pageForward()
     Position start = oldEnd;
     Screen next;
     int available = 0;
-    keptStart(oldEnd, m_keptLines, &available);
+    // (Not when it starts with pictures moved on: they come first.)
+    if (oldEnd.floatRow < 0)
+        keptStart(oldEnd, m_keptLines, &available);
     for (int kept = available; kept >= 0; --kept) {
         start = keptStart(oldEnd, kept);
         if (kept > 0 && start <= m_screen.start)
@@ -679,6 +817,8 @@ const Screen &ReadFlow::nudge(int lines)
 {
     ensureScreen();
     Position start = m_screen.start;
+    if (start.floatRow >= 0) // (From the pictures, in their place.)
+        start = {start.floatRow, 0};
     for (; lines > 0 && !m_screen.atEnd; --lines) {
         // Not past the last line: the screen would empty out.
         const auto next = nextLine(start);

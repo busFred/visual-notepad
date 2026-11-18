@@ -56,6 +56,9 @@ public:
     int headerHeight(int row) override { return rows[row].header; }
     // As the visual view: a table's part may be one row.
     int minPieceLines(int row) override { return rows[row].kind == RowKind::Table ? 1 : 2; }
+    int chip = 0; // Pictures move if set (the chip's height; notes are as high).
+    int chipHeight() override { return chip; }
+    int noteHeight() override { return chip; }
 
     int nextLine() const { return rows.empty() ? 0 : rows.back().last + 1; }
 
@@ -71,6 +74,7 @@ public:
     int heading() { return plain(RowKind::Heading, 2 * lineHeight, 1); }
     int gap(int height = 5) { return plain(RowKind::Gap, height, 1); }
     int figure(int height, QList<int> tops = {0}) { return plain(RowKind::Unbreakable, height, 1, tops); }
+    int picture(int height) { return plain(RowKind::Picture, height, 1); }
     // A block of ordinary rows that is one line of the flow, whatever its height.
     int block(int height) { return plain(RowKind::Normal, height, 1); }
     // A table: a header row of headerHeight and body rows of one line.
@@ -130,6 +134,13 @@ QString describe(const Screen &screen, FakeSource &source)
     for (const Column &column : screen.columns) {
         QStringList parts;
         for (const Segment &s : column.segments) {
+            // Moved pictures: c chip, f (F: of the page) note over them, o (O) under.
+            if (s.part != Segment::Part::Row) {
+                const char *mark = s.part == Segment::Part::Chip ? "c" : s.part == Segment::Part::FromNote ? (s.page ? "F" : "f")
+                                                                                                         : (s.page ? "O" : "o");
+                parts.push_back(QLatin1String(mark) + QString::number(s.row));
+                continue;
+            }
             QString text = QString::number(s.row);
             if (s.yFrom != 0 || s.yTo != source.rows[s.row].height)
                 text += QStringLiteral("[%1-%2]").arg(s.yFrom).arg(s.yTo);
@@ -163,6 +174,10 @@ private slots:
     void tableHeaderRepeats();
     void tableCutsKeepOneRowEachSide();
     void tallTableRowBreaksBetweenItsLines();
+    void pictureMovesToTheNextColumn();
+    void pictureGroupMovesTogether();
+    void secondPictureWaitsForTheFirst();
+    void picturesStayWithoutChips();
     void pageForwardKeepsLines();
     void keptLinesSetting();
     void keptLinesSkipFiguresAndTallBlocks();
@@ -1060,3 +1075,80 @@ void TestReadFlow::touchesAboutAScreen()
 
 QTEST_APPLESS_MAIN(TestReadFlow)
 #include "test_readflow.moc"
+
+// A picture that does not fit the room left goes to the top of the next
+// column, under a note; a chip stays in its place and the text after it fills
+// the room.
+void TestReadFlow::pictureMovesToTheNextColumn()
+{
+    FakeSource source;
+    source.chip = 10;
+    source.para(6);     // 60
+    source.picture(50); // Room left: 40.
+    source.para(8);     // 80
+    ReadFlow flow(&source);
+    flow.setGeometry(geo(2, 100));
+    const Screen s = flow.fill({0, 0});
+    QCOMPARE(describe(s, source), QStringLiteral("0 c1 2[0-30] | f1 1 2[30-60]"));
+    QCOMPARE(s.columns[0].used, 60 + 10 + 30);
+    QCOMPARE(s.end.floatRow, -1);
+    // The range of lines is in document order.
+    QCOMPARE(flow.lineRange(s).first, 0);
+    QCOMPARE(flow.lineRange(s).last, source.rows[2].first + 5);
+}
+
+// Pictures with only gaps between them move together; what does not fit goes
+// on at the next page's top, before its text.
+void TestReadFlow::pictureGroupMovesTogether()
+{
+    FakeSource source;
+    source.chip = 10;
+    source.para(6);     // 0
+    source.picture(42); // 1
+    source.gap();       // 2
+    source.picture(42); // 3
+    source.gap();       // 4
+    source.picture(42); // 5
+    source.para(10);    // 6
+    ReadFlow flow(&source);
+    flow.setGeometry(geo(2, 100));
+    QCOMPARE(flow.pictureGroup(3), std::make_pair(1, 5));
+    const Screen first = flow.goTo({0, 0});
+    QCOMPARE(describe(first, source), QStringLiteral("0 c1 6[0-30] | f1 1 O3"));
+    QCOMPARE(first.end.floatRow, 3);
+    QVERIFY(!first.atEnd);
+    const Screen &next = flow.pageForward();
+    QVERIFY(!next.hasKept); // (The pictures come first: no kept lines.)
+    QCOMPARE(describe(next, source), QStringLiteral("F3 3 4 5 | 6[30-100]"));
+    QVERIFY(!next.atStart);
+    QCOMPARE(flow.lineRange(next).first, source.rows[3].first);
+    QCOMPARE(describe(flow.pageBack(), source), describe(first, source));
+}
+
+// A second picture while the first waits: the text stops there and it comes
+// after the first, in its place.
+void TestReadFlow::secondPictureWaitsForTheFirst()
+{
+    FakeSource source;
+    source.chip = 10;
+    source.para(5);     // 0: 50
+    source.picture(85); // 1: room 80
+    source.para(2);     // 2
+    source.picture(30); // 3
+    source.para(6);     // 4
+    ReadFlow flow(&source);
+    flow.setGeometry(geo(2, 130));
+    QCOMPARE(describe(flow.fill({0, 0}), source), QStringLiteral("0 c1 2 | f1 1 3"));
+}
+
+// A source with no chip (the source view): pictures move whole, as figures.
+void TestReadFlow::picturesStayWithoutChips()
+{
+    FakeSource source;
+    source.para(6);
+    source.picture(50);
+    source.para(8);
+    ReadFlow flow(&source);
+    flow.setGeometry(geo(2, 100));
+    QCOMPARE(describe(flow.fill({0, 0}), source), QStringLiteral("0 | 1 2[0-50]"));
+}

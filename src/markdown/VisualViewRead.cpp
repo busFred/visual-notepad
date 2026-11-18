@@ -7,9 +7,11 @@
 #include "../Settings.h"
 #include "../Theme.h"
 #include "../editor/ReadControls.h"
+#include "ImageViewer.h"
 #include "MarkdownModel.h"
 
 #include <QAbstractButton>
+#include <QApplication>
 #include <QFontMetricsF>
 #include <QKeyEvent>
 #include <QPainter>
@@ -83,17 +85,24 @@ public:
         const RenderedBlock *b = block(row);
         if (!b)
             return md::RowKind::Normal;
-        if (b->kind() == RenderedBlock::Kind::Image || b->kind() == RenderedBlock::Kind::Chip)
+        if (b->kind() == RenderedBlock::Kind::Chip)
             return md::RowKind::Unbreakable;
         if (b->breaks().table)
             return md::RowKind::Table;
         if (m_view->itemOfRow(row))
-            return md::RowKind::Normal;
+            return b->kind() == RenderedBlock::Kind::Image ? md::RowKind::Unbreakable : md::RowKind::Normal;
         const MarkdownModel::Span &span = m_view->m_model->spans()[info.span];
         const int blockIndex = span.block >= 0 ? span.block : span.previous;
         if (blockIndex < 0)
-            return md::RowKind::Normal;
-        switch (m_view->blockClass(blockIndex).kind) {
+            return b->kind() == RenderedBlock::Kind::Image ? md::RowKind::Unbreakable : md::RowKind::Normal;
+        const FoldKind fold = m_view->blockClass(blockIndex).kind;
+        // Pictures and diagrams move to the next column if they must (not
+        // equations, which stay with their text).
+        if (fold == FoldKind::Figure && b->firstPicture())
+            return md::RowKind::Picture;
+        if (b->kind() == RenderedBlock::Kind::Image)
+            return md::RowKind::Unbreakable;
+        switch (fold) {
         case FoldKind::Heading:
             return md::RowKind::Heading;
         case FoldKind::Table: // (One without a grid: merged cells.)
@@ -127,6 +136,14 @@ public:
     // A table's parts may be one row (or a few lines of a tall one): the
     // header repeated over each part says what it is.
     int minPieceLines(int row) override { return kind(row) == md::RowKind::Table ? 1 : 2; }
+
+    // A chip as a collapsed block's, and a line of small text.
+    int chipHeight() override
+    {
+        const RenderContext &ctx = m_view->renderContext();
+        return qCeil(RenderedBlock::createChip({QStringLiteral("Image"), {}}, ctx)->height());
+    }
+    int noteHeight() override { return qCeil(QFontMetricsF(m_view->readNoteFont()).height()) + 4; }
 
     int headerHeight(int row) override
     {
@@ -335,7 +352,9 @@ const md::Screen &VisualView::ensureReadScreen()
         return m_readFlow->screen();
     }
     const md::Screen &screen = m_readFlow->screen();
-    if (screen.start.row < int(m_rows.size()))
+    if (screen.start.floatRow >= 0 && screen.start.floatRow < int(m_rows.size()))
+        m_readLinePosition = linePositionAt(screen.start.floatRow, 0);
+    else if (screen.start.row < int(m_rows.size()))
         m_readLinePosition = linePositionAt(screen.start.row, screen.start.y);
     noteReadScreen();
     return screen;
@@ -589,7 +608,10 @@ bool VisualView::readScrollAt(const QPointF &point, qreal dx)
     const ReadHit hit = readHitAt(point, true);
     if (hit.index < 0)
         return false;
-    const int index = m_readFlow->screen().columns[hit.column].segments[hit.index].row;
+    const md::Segment &segment = m_readFlow->screen().columns[hit.column].segments[hit.index];
+    if (segment.part != md::Segment::Part::Row)
+        return false;
+    const int index = segment.row;
     const RenderedBlock *block = m_rows[index].row.rendered ? renderedForRow(m_rows[index].row) : nullptr;
     if (!block || block->contentWidth() <= readLayout().width)
         return false;
@@ -605,6 +627,8 @@ QRectF VisualView::readBarOf(const ReadHit &hit)
     if (hit.index < 0)
         return {};
     const md::Segment &s = m_readFlow->screen().columns[hit.column].segments[hit.index];
+    if (s.part != md::Segment::Part::Row)
+        return {};
     const Row r = m_rows[s.row].row;
     const RenderedBlock *block = r.rendered ? renderedForRow(r) : nullptr;
     const ReadLayout &l = readLayout();
@@ -713,8 +737,11 @@ int VisualView::rowAtPoint(const QPointF &point, QPointF *origin)
     const ReadHit hit = readHitAt(point, true);
     if (hit.index < 0)
         return -1;
+    const md::Segment &s = m_readFlow->screen().columns[hit.column].segments[hit.index];
+    if (s.part != md::Segment::Part::Row)
+        return -1; // (A chip, a note: no row's.)
     *origin = readOrigin(hit);
-    return m_readFlow->screen().columns[hit.column].segments[hit.index].row;
+    return s.row;
 }
 
 int VisualView::positionAt(const QPointF &point)
@@ -751,7 +778,7 @@ std::optional<QPointF> VisualView::rowOrigin(int line)
         qreal y = l.top;
         const auto &segments = screen.columns[c].segments;
         for (int i = 0; i < int(segments.size()); ++i) {
-            if (segments[i].row == index)
+            if (segments[i].row == index && segments[i].part == md::Segment::Part::Row)
                 return readOrigin({c, i, y, false});
             y += m_readFlow->drawnHeight(segments[i]);
         }
@@ -781,7 +808,15 @@ void VisualView::paintRead(QPaintEvent *event)
             continue;
         qreal y = l.top;
         qreal keptBottom = -1;
-        for (const md::Segment &s : screen.columns[c].segments) {
+        const auto &segments = screen.columns[c].segments;
+        for (int i = 0; i < int(segments.size()); ++i) {
+            const md::Segment &s = segments[i];
+            if (s.part != md::Segment::Part::Row) {
+                const qreal h = m_readFlow->drawnHeight(s);
+                paintReadPart(painter, segments, i, c + 1 == int(screen.columns.size()), QRectF(left, y, l.width, h));
+                y += h;
+                continue;
+            }
             const Row r = m_rows[s.row].row;
             const qreal rowHeight = m_readRows->height(s.row);
             if (s.repeatHeader) {
@@ -855,6 +890,141 @@ void VisualView::paintRead(QPaintEvent *event)
                              theme::color(theme::Role::divider));
         }
     }
+}
+
+QFont VisualView::readNoteFont()
+{
+    QFont font = renderContext().font;
+    font.setPointSizeF(font.pointSizeF() * 0.9);
+    return font;
+}
+
+// The pictures from row to the end of its group (a chip's), their count.
+static int picturesFrom(const md::ReadFlow &flow, md::RowSource &rows, int row)
+{
+    const int last = flow.pictureGroup(row).second;
+    int count = 0;
+    for (int r = row; r <= last; ++r) {
+        if (rows.kind(r) == md::RowKind::Picture)
+            ++count;
+    }
+    return count;
+}
+
+// What a chip says, and the notes over and under moved pictures.
+QString VisualView::readPartText(const std::vector<md::Segment> &segments, int index)
+{
+    const md::Segment &s = segments[index];
+    const auto [first, last] = m_readFlow->pictureGroup(s.row);
+    int total = 0;
+    int k = 0; // The picture's place in its group, from 1.
+    for (int r = first; r <= last; ++r) {
+        if (m_readRows->kind(r) != md::RowKind::Picture)
+            continue;
+        ++total;
+        if (r == s.row)
+            k = total;
+    }
+    const auto single = [this](int row) {
+        const RenderedBlock *block = m_rows[row].row.rendered ? renderedForRow(m_rows[row].row) : nullptr;
+        return block && block->kind() == RenderedBlock::Kind::Image ? tr("Diagram") : tr("Image");
+    };
+    switch (s.part) {
+    case md::Segment::Part::Chip: {
+        const int count = picturesFrom(*m_readFlow, *m_readRows, s.row);
+        return count == 1 ? single(s.row) : tr("%1 images").arg(count);
+    }
+    case md::Segment::Part::FromNote: {
+        const QString from = s.page ? tr("from the previous page") : tr("from the previous column");
+        int shown = 0;
+        for (int i = index + 1; i < int(segments.size()) && segments[i].part == md::Segment::Part::Row; ++i) {
+            if (m_readRows->kind(segments[i].row) == md::RowKind::Picture)
+                ++shown;
+        }
+        if (k == 1 && shown == total)
+            return total == 1 ? tr("%1 %2").arg(single(s.row), from) : tr("%1 images %2").arg(total).arg(from);
+        if (shown <= 1)
+            return tr("Image %1 of %2 %3").arg(k).arg(total).arg(from);
+        return tr("Images %1\u2013%2 of %3 %4").arg(k).arg(k + shown - 1).arg(total).arg(from);
+    }
+    case md::Segment::Part::OnNote: {
+        const QString where = s.page ? tr("on the next page") : tr("in the next column");
+        if (k == total)
+            return tr("Image %1 continues %2 \u203A").arg(k).arg(where);
+        return tr("Images %1\u2013%2 continue %3 \u203A").arg(k).arg(total).arg(where);
+    }
+    case md::Segment::Part::Row:
+        break;
+    }
+    return {};
+}
+
+void VisualView::paintReadPart(QPainter &painter, const std::vector<md::Segment> &segments, int index,
+                               bool lastColumn, const QRectF &rect)
+{
+    const md::Segment &s = segments[index];
+    const QString text = readPartText(segments, index);
+    if (s.part == md::Segment::Part::Chip) {
+        // As a collapsed block's chip, saying where the pictures went.
+        const QString where = lastColumn ? tr("\u00B7 on the next page") : tr("\u00B7 in the next column");
+        const auto chip = RenderedBlock::createChip({text, where}, renderContext());
+        painter.save();
+        chip->paint(painter, rect.topLeft(), rect.width(), {});
+        painter.restore();
+        return;
+    }
+    painter.save();
+    painter.setFont(readNoteFont());
+    RenderedBlock::drawSecondaryText(painter, rect.adjusted(0, 0, 0, -2),
+                                     Qt::AlignLeft | Qt::AlignBottom | Qt::TextSingleLine, text);
+    painter.restore();
+}
+
+int VisualView::readChipAt(const QPointF &point)
+{
+    if (!readActive() || ensureReadScreen().empty())
+        return -1;
+    const ReadHit hit = readHitAt(point, true);
+    if (hit.index < 0)
+        return -1;
+    const md::Segment &s = m_readFlow->screen().columns[hit.column].segments[hit.index];
+    if (s.part != md::Segment::Part::Chip)
+        return -1;
+    // On the chip's box, not beside it.
+    const auto chip = RenderedBlock::createChip({QStringLiteral("x"), {}}, renderContext());
+    const qreal top = hit.top + chip->chipRect().top();
+    if (point.y() < top || point.y() >= top + chip->chipRect().height() + 2 * 2)
+        return -1;
+    return s.row;
+}
+
+// The viewer, for the pictures of a chip's group (from the first of the
+// group, so it can step back to those shown in place), at the chip's.
+void VisualView::openMovedPictures(int row)
+{
+    const auto [first, last] = m_readFlow->pictureGroup(row);
+    std::vector<ImageViewer::Entry> pictures;
+    int index = 0;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    for (int r = first; r <= last; ++r) {
+        if (m_readRows->kind(r) != md::RowKind::Picture)
+            continue;
+        const RenderedBlock *block = m_rows[r].row.rendered ? renderedForRow(m_rows[r].row) : nullptr;
+        const auto picture = block ? block->firstPicture() : std::nullopt;
+        if (!picture)
+            continue;
+        QImage image = block->pictureImage(*picture);
+        if (image.isNull())
+            continue;
+        if (r == row)
+            index = int(pictures.size());
+        pictures.push_back({std::move(image), picture->title});
+    }
+    QApplication::restoreOverrideCursor();
+    if (pictures.empty())
+        return;
+    // Closes itself; the window is the parent so it stays on top of this tab.
+    (new ImageViewer(std::move(pictures), index, window()))->show();
 }
 
 // ---------------------------------------------------------------------------

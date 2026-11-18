@@ -8,9 +8,14 @@
 #include <QImage>
 #include <QPointF>
 
+#include <vector>
+
 namespace vn {
 
 class ZoomBar;
+namespace columns {
+class PageButton;
+}
 
 class ImageViewer : public QDialog
 {
@@ -18,6 +23,18 @@ class ImageViewer : public QDialog
 
 public:
     ImageViewer(const QImage &image, const QString &title, QWidget *parent = nullptr);
+    // Several pictures (pictures that go together): ‹ › at the sides, and
+    // Left / Right, step through them. Starts at `index`.
+    struct Entry
+    {
+        QImage image;
+        QString title;
+    };
+    ImageViewer(std::vector<Entry> pictures, int index, QWidget *parent = nullptr);
+
+    int index() const { return m_index; }
+    int count() const { return int(m_pictures.size()); }
+    void step(int by);
 
     // Display scale: logical pixels per image pixel.
     qreal scale() const { return m_scale; }
@@ -43,6 +60,8 @@ private:
     qreal lowestScale() const;
     void refresh(); // Repaint, and bring the controls up to date.
     void clampOffset();
+    void showIndex(int index);
+    void placeSteps();
 
     ZoomBar *m_bar;
     QImage m_image;
@@ -51,6 +70,10 @@ private:
     bool m_fitted = true; // Keep fitting when the window is resized.
     bool m_panning = false;
     QPointF m_lastPos;
+    std::vector<Entry> m_pictures; // Empty: one picture.
+    int m_index = 0;
+    columns::PageButton *m_back = nullptr;
+    columns::PageButton *m_forward = nullptr;
 };
 
 } // namespace vn

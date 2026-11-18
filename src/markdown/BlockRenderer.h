@@ -282,6 +282,8 @@ public:
     };
     // The picture at a point relative to the block's top-left; cheap.
     std::optional<Picture> pictureAt(const QPointF &point) const;
+    // The first picture it shows (a diagram's or an equation's own), if any.
+    std::optional<Picture> firstPicture() const;
     // It at full size; null if it cannot be read.
     QImage pictureImage(const Picture &picture) const;
 
@@ -362,6 +364,7 @@ public:
     const Breaks &breaks() const;
 
 private:
+    std::optional<Picture> pictureOfSource(const QString &source) const;
     static std::unique_ptr<RenderedBlock> create(const core::Block &block, const QString &source,
                                                  const RenderContext &context, bool item);
     static std::unique_ptr<RenderedBlock> build(const core::Block &block, const QString &source,

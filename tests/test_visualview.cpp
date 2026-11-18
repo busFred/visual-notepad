@@ -504,6 +504,7 @@ private Q_SLOTS:
     void readNudgesByButtonsWheelAndKeys();
     void longTablesRepeatTheirHeader();
     void readFiguresFitTheColumnHeight();
+    void readPicturesMoveToTheNextColumn();
     void findAndGoToLineShowTheirScreen();
     void readLineRangeIsTheScreens();
     void readModeClicks();
@@ -5383,7 +5384,7 @@ QRect TestVisualView::segmentOfLine(int line, int *column, int *index)
     const int row = view->rowIndexOf(line);
     for (int c = 0; c < int(screen.columns.size()); ++c) {
         for (int i = 0; i < int(screen.columns[c].segments.size()); ++i) {
-            if (screen.columns[c].segments[i].row != row)
+            if (screen.columns[c].segments[i].row != row || screen.columns[c].segments[i].part != md::Segment::Part::Row)
                 continue;
             if (column)
                 *column = c;
@@ -5783,6 +5784,82 @@ void TestVisualView::readFiguresFitTheColumnHeight()
     QVERIFY(!shown.isNull());
     QCOMPARE(m_view->readScreen().columns[c].segments[i].yFrom, 0);
     QVERIFY(shown.height() >= figure.rect.height());
+}
+
+// A picture that does not fit the room left moves to the next column with
+// the pictures right after it; a chip stays where they were and opens them
+// in the viewer, which steps through the group.
+void TestVisualView::readPicturesMoveToTheNextColumn()
+{
+    QTemporaryDir dir;
+    savePicture(dir, QStringLiteral("a.png"), 600, 400);
+    savePicture(dir, QStringLiteral("b.png"), 600, 400);
+    m_view->setBaseDirectory(dir.path());
+    const QString para = QStringLiteral("The model was trained on the two-year window and scored on the held-out cohort, "
+                                        "and most of the signal comes from routine chemistry and blood counts.\n\n");
+    // As many paragraphs before them as it takes for them not to fit.
+    int chipColumn = -1;
+    int chipIndex = -1;
+    QString text;
+    for (int before = 1; before <= 12 && chipColumn < 0; ++before) {
+        text.clear();
+        for (int i = 0; i < before; ++i)
+            text += QStringLiteral("Paragraph %1. ").arg(i) + para;
+        text += QStringLiteral("![first](a.png)\n\n![second](b.png)\n\n");
+        for (int i = 0; i < 12; ++i)
+            text += QStringLiteral("After %1. ").arg(i) + para;
+        m_view->setReadMode(false);
+        startReading(text, 1300, 700);
+        QTest::qWait(50);
+        m_view->grab();
+        const md::Screen &screen = m_view->readScreen();
+        for (int i = 0; i < int(screen.columns[0].segments.size()); ++i) {
+            if (screen.columns[0].segments[i].part == md::Segment::Part::Chip) {
+                chipColumn = 0;
+                chipIndex = i;
+            }
+        }
+    }
+    QVERIFY(chipColumn == 0);
+    const md::Screen &screen = m_view->readScreen();
+    QVERIFY(screen.columns.size() >= 2);
+    // The next column starts with the note and both pictures.
+    const auto &next = screen.columns[1].segments;
+    QVERIFY(next.size() >= 3);
+    QCOMPARE(next[0].part, md::Segment::Part::FromNote);
+    QVERIFY(!next[0].page);
+    QCOMPARE(next[1].part, md::Segment::Part::Row);
+    QCOMPARE(next[1].row, screen.columns[0].segments[chipIndex].row);
+    // The text after them fills the room under the chip.
+    QVERIFY(chipIndex + 1 < int(screen.columns[0].segments.size()));
+
+    // The chip: a pointing hand, and a click opens both, at the first.
+    const QRect chipBox = m_view->readSegmentRect(0, chipIndex);
+    QTest::qWait(1); // (Rects of parts have no height: the chip's is the part's top.)
+    const QPoint onChip(chipBox.left() + 20, chipBox.top() + 10);
+    QTest::mouseMove(m_view->viewport(), onChip);
+    QCOMPARE(m_view->viewport()->cursor().shape(), Qt::PointingHandCursor);
+    QVERIFY(m_view->window()->findChildren<ImageViewer *>().isEmpty());
+    QTest::mouseClick(m_view->viewport(), Qt::LeftButton, {}, onChip);
+    const auto viewers = m_view->window()->findChildren<ImageViewer *>();
+    QCOMPARE(viewers.size(), 1);
+    ImageViewer *viewer = viewers.first();
+    QCOMPARE(viewer->count(), 2);
+    // At the chip's picture (the first may have fitted where it was).
+    const int firstRow = static_cast<ProbeView *>(m_view)->rowIndexOf(lineHolding(text, QStringLiteral("![first]")));
+    const int at = screen.columns[0].segments[chipIndex].row == firstRow ? 0 : 1;
+    QCOMPARE(viewer->index(), at);
+    viewer->step(-1);
+    QCOMPARE(viewer->index(), 0);
+    viewer->step(1);
+    viewer->step(1);
+    QCOMPARE(viewer->index(), 1); // (No further.)
+    if (const QString shots = qEnvironmentVariable("VN_SCREENSHOT_DIR"); !shots.isEmpty()) {
+        m_view->grab().save(shots + QStringLiteral("/read-moved-pictures.png"));
+        viewer->grab().save(shots + QStringLiteral("/read-moved-pictures-viewer.png"));
+    }
+    viewer->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 }
 
 void TestVisualView::findAndGoToLineShowTheirScreen()
@@ -7087,3 +7164,4 @@ void TestVisualView::tableLayoutBreaksOnlyChangedColumns()
 
 QTEST_MAIN(TestVisualView)
 #include "test_visualview.moc"
+
