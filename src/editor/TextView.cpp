@@ -418,6 +418,7 @@ TextView::TextView(QTextDocument *document, QWidget *parent)
     setFont(theme::editorFont());
 
     m_lines.resize(m_doc->blockCount());
+    noteLongLines(0, m_doc->blockCount() - 1);
     m_carets.push_back(Caret());
     m_journal = Journal::of(m_doc, true);
     m_journal->views.push_back(this);
@@ -922,6 +923,8 @@ void TextView::onDocumentChanged(int from, int charsRemoved, int charsAdded)
     if (oldAffected < 0 || first + oldAffected > oldCount) {
         m_lines.clear();
         m_lines.resize(newCount);
+        m_hasLongLines = false;
+        noteLongLines(0, newCount - 1);
         m_liveLayouts = 0;
         invalidateFenceMarks();
         m_tableRun = {};
@@ -948,6 +951,7 @@ void TextView::onDocumentChanged(int from, int charsRemoved, int charsAdded)
             m_lines.insert(m_lines.begin() + first, std::make_move_iterator(fresh.begin()),
                            std::make_move_iterator(fresh.end()));
         }
+        noteLongLines(first, first + newAffected - 1);
         spliceFenceMarks(first, oldAffected, newAffected);
         spliceTableRun(first, oldAffected, newAffected);
         if (!pieced.empty())
@@ -1039,6 +1043,19 @@ void TextView::invalidateLayouts()
     restartSettling();
 }
 
+void TextView::noteLongLines(int first, int last)
+{
+    if (m_hasLongLines || first > last || m_doc->characterCount() <= LineLayout::piecesFrom)
+        return;
+    QTextBlock block = m_doc->findBlockByNumber(first);
+    for (int i = first; i <= last && block.isValid(); ++i, block = block.next()) {
+        if (block.length() - 1 > LineLayout::piecesFrom) {
+            m_hasLongLines = true;
+            return;
+        }
+    }
+}
+
 void TextView::restartSettling()
 {
     m_settleTimer.start(300, this);
@@ -1082,7 +1099,7 @@ void TextView::rowsMoved(int line, LineLayout *layout, int from, int delta)
 
 void TextView::ensureShownMeasured(bool bottom)
 {
-    if (m_settling || m_painting) return;
+    if (m_settling || m_painting || !m_hasLongLines) return;
     QScopedValueRollback settling(m_settling, true);
     if (m_columnsOn) { columnsScreen(); return; }
     qreal y = firstRowY();
@@ -2792,17 +2809,50 @@ void TextView::timerEvent(QTimerEvent *event)
         for (const QTextBlock &block : std::as_const(m_lazyBlocks)) {
             if (block.isValid()) lines.push_back(block.blockNumber());
         }
-        const int near = topLine();
+        // Where the reader is: the top of the view, or the column screen's
+        // start (its end too); Word Wrap off, the horizontal scroll.
+        md::Position start{topLine(), int(m_topOffset)};
+        md::Position end = start;
+        int pageRows = 0;
+        if (m_columnsOn) {
+            const md::Screen &screen = m_columns->flow.screen();
+            start = screen.start;
+            end = screen.end;
+            pageRows = m_columns->flow.geometry().columns * (m_columns->flow.geometry().height / m_lineHeight + 1);
+        }
+        const int near = start.row;
         std::sort(lines.begin(), lines.end(), [near](int a, int b) { return qAbs(a - near) < qAbs(b - near); });
+        const auto nearRow = [&](int line) {
+            if (!m_wordWrap)
+                return m_columnsOn ? 0 : horizontalScrollBar()->value();
+            return line == start.row ? start.y / m_lineHeight : line == end.row ? end.y / m_lineHeight : 0;
+        };
+        // Columns: the next and the previous page first, so turning to them
+        // does not measure on the spot.
+        const auto neighbourPages = [&] {
+            if (!m_columnsOn || !m_wordWrap || pageRows <= 0)
+                return false;
+            if (LineLayout *layout = layoutForLine(end.row); layout && layout->inPieces()) {
+                const int top = end.y / m_lineHeight;
+                if (layout->settleWindowStep(top, top + pageRows, -2).measured)
+                    return true;
+            }
+            if (LineLayout *layout = layoutForLine(start.row); layout && layout->inPieces()) {
+                const int bottom = start.y / m_lineHeight;
+                if (layout->settleWindowStep(qMax(0, bottom - pageRows), bottom, -2).measured)
+                    return true;
+            }
+            return false;
+        };
         bool pending = false;
         do {
-            bool measured = false;
+            bool measured = neighbourPages();
             for (int i : lines) {
+                if (measured) break;
                 if (i < 0 || i >= int(m_lines.size())) continue;
                 LineCache &cache = m_lines[i];
                 if (!cache.layout || cache.wrapWidth < 0 || !cache.layout->unmeasuredCount()) continue;
-                measured = cache.layout->settleOne(i == near ? int(m_topOffset / m_lineHeight) : 0);
-                if (measured) break;
+                measured = cache.layout->settleOne(nearRow(i));
             }
             pending = measured;
             if (!measured) break;

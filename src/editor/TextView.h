@@ -525,6 +525,11 @@ private:
     void ensureShownMeasured(bool bottom = false);
     void settleColumnsScreen();
     void restartSettling();
+    // Notes whether lines [first, last] include one long enough for pieces.
+    void noteLongLines(int first, int last);
+    // A line has been long enough for pieces (only then is there anything
+    // to settle; normal files skip the long-line scans).
+    bool m_hasLongLines = false;
     QBasicTimer m_settleTimer;
     QList<QTextBlock> m_lazyBlocks;
     bool m_settling = false;

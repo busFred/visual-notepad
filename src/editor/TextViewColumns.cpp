@@ -286,9 +286,12 @@ const md::Screen &TextView::columnsScreen()
         c.flow.reflow(c.settled);
     }
     c.settled = false;
+    if (!changed && !m_hasLongLines)
+        return c.flow.screen(); // Nothing to settle: as before long lines were laid out lazily.
     const md::Position start = c.flow.screen().start;
     const md::Position end = c.flow.screen().end;
-    settleColumnsScreen();
+    if (m_hasLongLines)
+        settleColumnsScreen();
     if (changed || start != c.flow.screen().start || end != c.flow.screen().end) noteColumns();
     return c.flow.screen();
 }
@@ -302,9 +305,10 @@ void TextView::settleColumnsScreen()
         const md::Screen screen = c.flow.screen();
         struct Window { int from, to; qreal right; };
         std::map<int, Window> windows;
+        const int width = columnLayout().width;
         for (int column = 0; column < int(screen.columns.size()); ++column) {
             for (const md::Segment &s : screen.columns[column].segments) {
-                const qreal right = columnOffset(column) + columnLayout().width + 2;
+                const qreal right = columnOffset(column) + width + 2;
                 const auto [it, inserted] = windows.try_emplace(s.row, Window{s.yFrom, s.yTo, right});
                 if (!inserted) {
                     it->second.from = qMin(it->second.from, s.yFrom);
@@ -821,8 +825,10 @@ int TextView::columnsRowAt(const QPointF &point, QPointF *origin)
 QRectF TextView::columnsCaretRect(int position, int *column)
 {
     const QTextBlock block = m_doc->findBlock(position);
-    if (LineLayout *layout = layoutForLine(block.blockNumber()))
-        layout->settleAround(position - block.position());
+    if (m_hasLongLines) {
+        if (LineLayout *layout = layoutForLine(block.blockNumber()))
+            layout->settleAround(position - block.position());
+    }
     const md::Screen &screen = columnsScreen();
     if (screen.empty())
         return {};
