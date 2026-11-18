@@ -747,6 +747,7 @@ const Screen &ReadFlow::reflow()
 
 const Screen &ReadFlow::goTo(Position position)
 {
+    m_rowCache.clear(); // (The rows may have changed since: a new start.)
     m_history.clear();
     return show(fill(position));
 }
