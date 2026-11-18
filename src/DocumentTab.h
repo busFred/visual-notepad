@@ -161,13 +161,17 @@ public:
     // Columns: the view switch (Scroll | Columns) of the status bar. A tab
     // chooses for itself: it opens in Scroll and nothing is saved. They show
     // in Source (TextView::setColumnsShown) and, locked, in the Visual Editor:
-    // read mode (VisualView::setReadMode). Where they cannot (the Visual
-    // Editor unlocked, Source / Visual) the tab shows Scroll, keeping the same
+    // read mode (VisualView::setReadMode); choosing them in the Visual Editor
+    // while editing locks it. Where they cannot (the Visual Editor unlocked,
+    // Source / Visual) the tab shows Scroll, keeping the same
     // line at the top and the caret at its start, and keeps the wish: columns
     // come back, from the caret's line, where they can again. A bar at the top
     // right sets the number of columns and their width; those are this tab's,
     // not saved; Preferences give where a new tab starts.
+    // The switch shows (not in Source / Visual).
     bool canShowColumns() const;
+    // Columns show if wished: Source, or the Visual Editor locked.
+    bool columnsShowNow() const;
     bool wantsColumns() const { return m_wantsColumns; }
     void setColumns(bool on);
     // Columns show (in Source, or read mode).
@@ -276,6 +280,7 @@ private:
     TextView *m_columnsView = nullptr;
     // Whether columns could show, as the status bar last heard.
     bool m_couldShowColumns = true;
+    bool m_lockingForColumns = false; // The switch is locking the Visual Editor.
 };
 
 } // namespace vn

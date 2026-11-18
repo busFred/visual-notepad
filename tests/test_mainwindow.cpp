@@ -1537,14 +1537,24 @@ void TestMainWindow::viewSwitchComesFirstAndHides()
     if (const QString file = qEnvironmentVariable("VN_SCREENSHOT"); !file.isEmpty())
         window.grab().save(QString(file).replace(QStringLiteral(".png"), QStringLiteral("-switch.png")));
 
-    // Markdown: the Visual Editor, unlocked, and Source / Visual hide it.
+    // Markdown: the Visual Editor shows it, editing too: Columns there locks it.
     QVERIFY(window.openFile(write(QStringLiteral("switch.md"), "# Title\n\nText.\n")));
     vn::DocumentTab *md = window.currentTab();
     md->setViewMode(vn::DocumentTab::ViewMode::Visual);
     setLocked(md, false);
-    QTRY_VERIFY(!window.findChild<QWidget *>(QStringLiteral("ViewSwitch"))->isVisible());
-    QCOMPARE(shownCells(window).value(0), QStringLiteral("ZoomStatus"));
-    QVERIFY(!md->canShowColumns());
+    QTRY_COMPARE(shownCells(window).value(0), QStringLiteral("ViewSwitch"));
+    QVERIFY(md->canShowColumns());
+    QVERIFY(scroll->isChecked() && !md->showsColumns());
+    columns->click();
+    QTRY_VERIFY(md->isReadMode());
+    QVERIFY(md->isReadOnly());
+    QVERIFY(columns->isChecked());
+    // Unlocked again: Scroll, editing.
+    setLocked(md, false);
+    QTRY_VERIFY(!md->showsColumns());
+    QVERIFY(scroll->isChecked());
+    md->setColumns(false);
+    // Source / Visual hides it.
     md->setViewMode(vn::DocumentTab::ViewMode::SourceVisual);
     QTRY_COMPARE(shownCells(window).value(0), QStringLiteral("ZoomStatus"));
     // Source, and the Visual Editor locked, show it.
@@ -1676,7 +1686,8 @@ void TestMainWindow::lockNoLongerForcesColumns()
     QCOMPARE(visual->topLine(), top);
     QCOMPARE(visual->textCursor().blockNumber(), top);
     QCOMPARE(visual->textCursor().positionInBlock(), 0);
-    QTRY_VERIFY(!window.findChild<QWidget *>(QStringLiteral("ViewSwitch"))->isVisible());
+    // The switch stays, showing Scroll (Columns would lock it again).
+    QTRY_VERIFY(viewButton(window, false)->isChecked());
 
     // Locked again: from the caret's line, which is on screen.
     QTextCursor caret(tab->document()->findBlockByNumber(top + 4));

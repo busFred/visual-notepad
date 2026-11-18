@@ -349,7 +349,9 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
         (m_viewMode == ViewMode::SourceVisual ? m_splitLocked : m_visualLocked) = locked;
         if (m_visual)
             m_visual->setReadOnly(locked);
-        updateColumns();
+        // (Locked by the switch: the line at the top stays there, as when
+        // columns are switched on.)
+        updateColumns(m_lockingForColumns);
     });
     connect(m_editor, &TextView::scrolled, this, [this] { syncScroll(m_editor, m_visual); });
     connect(m_editor, &TextView::selectionChanged, this, [this] { mirrorSelection(m_editor, m_visual); });
@@ -670,6 +672,13 @@ void DocumentTab::updateViews()
 
 bool DocumentTab::canShowColumns() const
 {
+    // Not beside the other half. In the Visual Editor, editing, choosing
+    // them locks it (see setColumns).
+    return !isMarkdown() || m_viewMode != ViewMode::SourceVisual;
+}
+
+bool DocumentTab::columnsShowNow() const
+{
     if (!isMarkdown() || m_viewMode == ViewMode::Source)
         return true;
     // Not while editing in the Visual Editor (pictures and tables would have
@@ -679,6 +688,14 @@ bool DocumentTab::canShowColumns() const
 
 void DocumentTab::setColumns(bool on)
 {
+    if (on && isMarkdown() && m_viewMode == ViewMode::Visual && !m_visualLocked) {
+        // Columns from the Visual Editor, editing: read mode, locked.
+        m_wantsColumns = true;
+        m_lockingForColumns = true;
+        m_pill->lockButton()->setChecked(true); // (Its handler shows them.)
+        m_lockingForColumns = false;
+        return;
+    }
     if (m_wantsColumns == on)
         return;
     m_wantsColumns = on;
@@ -735,7 +752,7 @@ void DocumentTab::updateColumns(bool switched)
 {
     const bool visual = isMarkdown() && m_viewMode == ViewMode::Visual;
     TextView *target = nullptr;
-    if (m_wantsColumns && canShowColumns() && (!visual || m_visual))
+    if (m_wantsColumns && columnsShowNow() && (!visual || m_visual))
         target = visual ? static_cast<TextView *>(m_visual) : m_editor;
     TextView *old = m_columnsView;
     if (target != old) {
@@ -791,8 +808,8 @@ void DocumentTab::updateColumns(bool switched)
     }
     updateReadBar();
     placeOverlays();
-    if (target != old || canShowColumns() != m_couldShowColumns) {
-        m_couldShowColumns = canShowColumns();
+    if (target != old || columnsShowNow() != m_couldShowColumns) {
+        m_couldShowColumns = columnsShowNow();
         Q_EMIT readStateChanged();
     }
 }
