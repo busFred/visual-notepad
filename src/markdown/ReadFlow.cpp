@@ -39,7 +39,7 @@ QList<int> tableCuts(const QList<int> &rowTops, int headerRows)
     QList<int> cuts;
     headerRows = qMax(0, headerRows);
     const int body = int(rowTops.size()) - headerRows;
-    for (int j = 2; body - j >= 2; ++j)
+    for (int j = 1; body - j >= 1; ++j)
         cuts.push_back(rowTops[headerRows + j]);
     return cuts;
 }
@@ -179,6 +179,9 @@ bool ReadFlow::keepable(Position position) const
     if (kind == RowKind::Unbreakable || kind == RowKind::Gap)
         return false;
     const QList<int> t = tops(position.row);
+    // Not a table's header: the part after it repeats it anyway.
+    if (kind == RowKind::Table && t.size() > 1 && position.y < t[1])
+        return false;
     const auto next = std::upper_bound(t.begin(), t.end(), position.y);
     const int bottom = next != t.end() ? *next : m_source->height(position.row);
     return (bottom - position.y) * 4 <= qMax(1, m_geometry.height);
@@ -317,7 +320,9 @@ Position ReadFlow::fillColumn(Position position, Column &column) const
             if (reach < h) {
                 const QList<int> t = tops(row);
                 const auto it = std::upper_bound(t.begin(), t.end(), reach);
-                if (it != t.begin() && *(it - 1) > y)
+                // (Not after a table's header alone: something of its body too.)
+                const int least = kind == RowKind::Table && y == 0 && t.size() > 1 ? t[1] : y;
+                if (it != t.begin() && *(it - 1) > least)
                     at = *(it - 1);
             }
             column.segments.push_back({row, y, at, header > 0});

@@ -4,6 +4,7 @@
 
 #include "vn_core_bridge/lib.h"
 
+#include <QColor>
 #include <QFont>
 #include <QHash>
 #include <QImage>
@@ -346,7 +347,8 @@ public:
     // from its top, in whole pixels: the tops of its visual lines (a table:
     // of its rows), and the legal cuts by the rules of md::paragraphCuts,
     // codeCuts and tableCuts (rich text also breaks between its paragraphs
-    // and list items, but not inside a table). Pictures have neither. Made
+    // and list items, but not inside a table; a table also between the lines
+    // of a tall row, where no cell has a line across). Pictures have neither. Made
     // once, when first asked for.
     struct Breaks
     {
@@ -355,6 +357,7 @@ public:
         bool table = false;  // The block is one table (see tableGrid).
         int headerTop = 0;   // Its header row, repeated over a part of it
         int headerHeight = 0; // that goes on in another column.
+        QColor lineColor;     // Of the table's lines: closes a part of it cut off.
     };
     const Breaks &breaks() const;
 

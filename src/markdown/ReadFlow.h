@@ -83,7 +83,8 @@ public:
 QList<int> paragraphCuts(const QList<int> &lineTops);
 // Code: at least 2 lines each side as well.
 QList<int> codeCuts(const QList<int> &lineTops);
-// Between body rows only, at least 2 body rows each side. rowTops are the tops
+// Between body rows, at least 1 body row each side (the renderer adds cuts
+// between the lines of a tall row). rowTops are the tops
 // of every row, the header rows (headerRows of them) first.
 QList<int> tableCuts(const QList<int> &rowTops, int headerRows = 1);
 

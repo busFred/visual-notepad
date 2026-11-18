@@ -124,6 +124,10 @@ public:
         return tops;
     }
 
+    // A table's parts may be one row (or a few lines of a tall one): the
+    // header repeated over each part says what it is.
+    int minPieceLines(int row) override { return kind(row) == md::RowKind::Table ? 1 : 2; }
+
     int headerHeight(int row) override
     {
         const RenderedBlock *b = block(row);
@@ -824,6 +828,18 @@ void VisualView::paintRead(QPaintEvent *event)
                                      document()->findBlockByNumber(r.firstLine).text());
                 }
                 painter.restore();
+            }
+            if (h > 0 && s.yTo < rowHeight && r.rendered) {
+                // A table cut here: its line closes the part.
+                const RenderedBlock *block = renderedForRow(r);
+                const RenderedBlock::TableGrid *grid = block ? block->tableGrid() : nullptr;
+                if (grid && block->breaks().table && block->breaks().lineColor.isValid()) {
+                    const qreal slide = readOffset(s.row);
+                    const qreal from = qMax<qreal>(left, left + grid->xs.front() - slide);
+                    const qreal to = qMin<qreal>(left + l.width, left + grid->xs.back() - slide);
+                    if (to > from)
+                        painter.fillRect(QRectF(from, y + h - 1, to - from, 1), block->breaks().lineColor);
+                }
             }
             if (s.keptTo > s.yFrom) {
                 // Lines kept from the page before are shown as any line: the

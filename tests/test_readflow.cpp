@@ -54,6 +54,8 @@ public:
     QList<int> cuts(int row) override { touched.insert(row); return rows[row].cuts; }
     QList<int> lineTops(int row) override { touched.insert(row); return rows[row].tops; }
     int headerHeight(int row) override { return rows[row].header; }
+    // As the visual view: a table's part may be one row.
+    int minPieceLines(int row) override { return rows[row].kind == RowKind::Table ? 1 : 2; }
 
     int nextLine() const { return rows.empty() ? 0 : rows.back().last + 1; }
 
@@ -159,7 +161,8 @@ private slots:
     void onePieceLinesForEveryLineCuts();
     void tableCutRule();
     void tableHeaderRepeats();
-    void tableCutsKeepTwoRowsEachSide();
+    void tableCutsKeepOneRowEachSide();
+    void tallTableRowBreaksBetweenItsLines();
     void pageForwardKeepsLines();
     void keptLinesSetting();
     void keptLinesSkipFiguresAndTallBlocks();
@@ -383,12 +386,12 @@ void TestReadFlow::tableCutRule()
 {
     // A header row of 20, then body rows of 10.
     const QList<int> five{0, 20, 30, 40, 50, 60};
-    QCOMPARE(tableCuts(five, 1), (QList<int>{40, 50}));
-    QCOMPARE(tableCuts({0, 20, 30, 40, 50}, 1), (QList<int>{40})); // 4 body rows: 2 + 2.
-    QCOMPARE(tableCuts({0, 20, 30, 40}, 1), QList<int>());          // 3: no cut.
+    QCOMPARE(tableCuts(five, 1), (QList<int>{30, 40, 50, 60}));
+    QCOMPARE(tableCuts({0, 20, 30}, 1), (QList<int>{30})); // 2 body rows: 1 + 1.
+    QCOMPARE(tableCuts({0, 20}, 1), QList<int>());         // 1: no cut.
     QCOMPARE(tableCuts({0}, 1), QList<int>());
     // Two header rows.
-    QCOMPARE(tableCuts({0, 10, 20, 30, 40, 50, 60}, 2), (QList<int>{40, 50}));
+    QCOMPARE(tableCuts({0, 10, 20, 30, 40}, 2), (QList<int>{30, 40}));
 }
 
 
@@ -419,37 +422,70 @@ void TestReadFlow::tableHeaderRepeats()
     QCOMPARE(describe(second.fill({1, 70}), after), QStringLiteral("h1[70-140]"));
 }
 
-void TestReadFlow::tableCutsKeepTwoRowsEachSide()
+void TestReadFlow::tableCutsKeepOneRowEachSide()
 {
     FakeSource source;
-    source.table(5); // 70 high; cuts at 40 and 50 only.
+    source.table(5); // 70 high; cuts at 30 to 60.
     ReadFlow flow(&source);
-    flow.setGeometry(geo(2, 55));
-    // Not at 60: that would leave one row.
-    QCOMPARE(describe(flow.fill({0, 0}), source), QStringLiteral("0[0-50] | h0[50-70]"));
-    flow.setGeometry(geo(2, 45));
-    QVERIFY(describe(flow.fill({0, 0}), source).startsWith(QStringLiteral("0[0-40] | h0[40")));
+    flow.setGeometry(geo(2, 65));
+    // The deepest: one row goes on.
+    QCOMPARE(describe(flow.fill({0, 0}), source), QStringLiteral("0[0-60] | h0[60-70]"));
+    flow.setGeometry(geo(2, 25));
+    // Never the header alone: one body row with it, cut where the column ends.
+    QVERIFY(describe(flow.fill({0, 0}), source).startsWith(QStringLiteral("0[0-25]")));
 
-    // A table of 3 rows has no cut: it moves whole.
+    // A table of one body row has no cut: it moves whole.
     FakeSource small;
     small.para(6);
-    small.table(3);
+    small.table(1);
     ReadFlow third(&small);
-    third.setGeometry(geo(2, 100));
+    third.setGeometry(geo(2, 70));
     QCOMPARE(describe(third.fill({0, 0}), small), QStringLiteral("0 | 1"));
 
-    // A part cut again in a later column keeps two rows as well.
+    // A part cut again in a later column has a row at least.
     FakeSource tall;
     tall.table(12);
     ReadFlow fourth(&tall);
-    fourth.setGeometry(geo(3, 65));
+    fourth.setGeometry(geo(3, 45));
     const Screen s = fourth.fill({0, 0});
     for (const Column &column : s.columns) {
         for (const Segment &part : column.segments) {
             const int rows = (part.yTo - std::max(part.yFrom, 20)) / lineHeight;
-            QVERIFY2(rows >= 2 || part.yTo == 140, qPrintable(describe(s, tall)));
+            QVERIFY2(rows >= 1, qPrintable(describe(s, tall)));
         }
     }
+}
+
+// A table whose one body row is taller than a column: the header and the
+// row's first lines, then the header again over the rest. Never the header
+// alone in a column.
+void TestReadFlow::tallTableRowBreaksBetweenItsLines()
+{
+    FakeSource source;
+    FakeRow r;
+    r.kind = RowKind::Table;
+    r.header = 20;
+    r.height = 20 + 15 * lineHeight; // One row of 15 lines: 170.
+    r.tops = {0, 20};
+    for (int i = 1; i < 15; ++i)
+        r.tops.push_back(20 + i * lineHeight);
+    r.cuts = r.tops.mid(3, 12); // Inside the row, 2 lines each side.
+    r.first = 0;
+    r.last = 2;
+    source.rows.push_back(r);
+    ReadFlow flow(&source);
+    flow.setGeometry(geo(2, 100));
+    QCOMPARE(describe(flow.fill({0, 0}), source), QStringLiteral("0[0-100] | h0[100-170]"));
+
+    // After a paragraph, with only the header's room left: the table starts the next column.
+    FakeSource after;
+    after.para(8);
+    after.rows.push_back(r);
+    after.rows.back().first = after.rows.back().last = after.nextLine();
+    ReadFlow second(&after);
+    second.setGeometry(geo(2, 100));
+    const QString d = describe(second.fill({0, 0}), after);
+    QVERIFY2(!d.contains(QStringLiteral("1[0-20]")), qPrintable(d));
 }
 
 void TestReadFlow::pageForwardKeepsLines()

@@ -3496,9 +3496,17 @@ std::optional<QRectF> RenderedBlock::tableCellRect(int row, int col) const
     const qreal edge = table->format().cellPadding() + 1.5;
     const qreal top = own.top() - edge;
     const qreal left = own.left() - edge;
-    const qreal bottom = row + 1 < table->rows() ? content(row + 1, col).top() - edge
-                         : row > 0              ? top + (own.top() - content(row - 1, col).top())
-                                                : own.bottom() + edge;
+    // (The last row: as far as the text of its fullest cell, and its padding.)
+    const auto lastBottom = [&] {
+        qreal b = own.bottom();
+        for (int c = 0; c < table->columns(); ++c) {
+            const QRectF r = content(row, c);
+            if (!r.isNull())
+                b = qMax(b, r.bottom());
+        }
+        return b + edge;
+    };
+    const qreal bottom = row + 1 < table->rows() ? content(row + 1, col).top() - edge : lastBottom();
     const qreal right = col + 1 < table->columns() ? content(row, col + 1).left() - edge : own.right() + edge;
     return QRectF(QPointF(left, top), QPointF(right, bottom)).translated(contentOffset());
 }
@@ -3586,6 +3594,63 @@ const RenderedBlock::Breaks &RenderedBlock::breaks() const
         b.headerTop = int(std::floor(grid->ys[0]));
         b.headerHeight = int(std::ceil(grid->ys[1])) - b.headerTop;
         b.cuts = md::tableCuts(b.lineTops, 1);
+        // A body row taller than a few lines may break between its lines
+        // too, where no cell has a line across the break: at least 2 lines of
+        // its fullest cell on each side.
+        const QTextTable *table = theTable();
+        for (int row = 1; table && row < grid->rows(); ++row) {
+            std::vector<std::pair<qreal, qreal>> lines; // Top, bottom.
+            int most = 0;
+            std::vector<std::vector<qreal>> tops(table->columns());
+            for (int col = 0; col < table->columns(); ++col) {
+                const QTextTableCell cell = table->cellAt(row, col);
+                if (!cell.isValid())
+                    continue;
+                for (QTextBlock block = cell.firstCursorPosition().block();
+                     block.isValid() && block.position() <= cell.lastPosition(); block = block.next()) {
+                    const QTextLayout *text = block.layout();
+                    const qreal y = top + layout->blockBoundingRect(block).top();
+                    for (int i = 0; text && i < text->lineCount(); ++i) {
+                        const QTextLine line = text->lineAt(i);
+                        lines.push_back({y + line.y(), y + line.y() + line.height()});
+                        tops[col].push_back(y + line.y());
+                    }
+                }
+                most = qMax(most, int(tops[col].size()));
+            }
+            if (most < 2)
+                continue;
+            for (const auto &[lineTop, lineBottom] : lines) {
+                Q_UNUSED(lineBottom);
+                const int cut = int(std::floor(lineTop));
+                if (cut <= std::ceil(grid->ys[row]) || cut >= grid->ys[row + 1])
+                    continue;
+                const bool across = std::any_of(lines.begin(), lines.end(), [cut](const auto &l) {
+                    return l.first < cut - 0.5 && l.second > cut + 0.5;
+                });
+                if (across)
+                    continue;
+                int above = 0, below = 0;
+                for (const auto &column : tops) {
+                    const int n = int(std::count_if(column.begin(), column.end(), [cut](qreal t) { return t < cut - 0.5; }));
+                    above = qMax(above, n);
+                    below = qMax(below, int(column.size()) - n);
+                }
+                if (above == 0)
+                    continue; // (The row's first line: its top is the row's.)
+                b.lineTops.push_back(cut);
+                if (above >= 2 && below >= 2)
+                    b.cuts.push_back(cut);
+            }
+        }
+        sorted(b.lineTops);
+        sorted(b.cuts);
+        if (table) {
+            const QTextTableCellFormat f = table->cellAt(0, 0).format().toTableCellFormat();
+            const QBrush brush = qvariant_cast<QBrush>(f.property(QTextFormat::TableCellBottomBorderBrush));
+            if (brush.style() == Qt::SolidPattern)
+                b.lineColor = brush.color();
+        }
         return b;
     }
     for (QTextBlock block = m_doc->begin(); block.isValid(); block = block.next()) {
