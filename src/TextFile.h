@@ -192,7 +192,7 @@ public:
     // its source now, with a view that just came to. Highlights the whole
     // document at once (or in slices, see setHighlightInSlices), without a
     // text change.
-    void syncHighlighting();
+    void syncHighlighting(bool afterPaint = false);
     // Whether highlighting in slices has more to do.
     bool isHighlightPending() const;
     // Big texts are highlighted a few milliseconds at a time from the event
@@ -256,6 +256,7 @@ private:
     QList<DocumentTab *> m_views;
     std::unique_ptr<load::Job> m_load;
     bool m_deferred = false;
+    bool m_loadingDeferred = false;
     bool m_indentationStale = false;
     QString m_path;
     QString m_error;

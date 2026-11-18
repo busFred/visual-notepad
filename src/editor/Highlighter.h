@@ -82,7 +82,7 @@ public:
 
     // Colours `doc` (at once, or the first slice now and the rest later) and
     // keeps it coloured while it is edited.
-    void attach(QTextDocument *doc);
+    void attach(QTextDocument *doc, bool afterPaint = false);
     // Drops the colours and stops colouring.
     void detach();
     QTextDocument *document() const { return m_doc; }
@@ -111,7 +111,7 @@ private:
     // in another one now.
     bool colour(const QTextBlock &block, bool inOrder);
     // Colours everything again: at once, or from the top in slices.
-    void recolourAll();
+    void recolourAll(bool afterPaint = false);
     void clearAll();
     void settle();
     void onContentsChange(int from, int charsRemoved, int charsAdded);

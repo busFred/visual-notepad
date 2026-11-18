@@ -212,7 +212,7 @@ void Highlighter::setVisibleLines(std::function<QList<std::pair<int, int>>()> li
     m_visibleLines = std::move(lines);
 }
 
-void Highlighter::attach(QTextDocument *doc)
+void Highlighter::attach(QTextDocument *doc, bool afterPaint)
 {
     if (m_doc == doc)
         return;
@@ -222,7 +222,7 @@ void Highlighter::attach(QTextDocument *doc)
     m_doc = doc;
     connect(doc, &QTextDocument::contentsChange, this, &Highlighter::onContentsChange);
     connect(doc, &QTextDocument::contentsChanged, this, &Highlighter::onContentsChanged);
-    recolourAll();
+    recolourAll(afterPaint);
 }
 
 void Highlighter::detach()
@@ -280,16 +280,16 @@ void Highlighter::settle()
     m_doc->markContentsDirty(0, 0);
 }
 
-void Highlighter::recolourAll()
+void Highlighter::recolourAll(bool afterPaint)
 {
     stopSlices();
     clearAll();
     const bool cold = isCold();
-    if (cold || slicesFor(m_doc->characterCount())) {
+    if (cold || (afterPaint && sliced()) || slicesFor(m_doc->characterCount())) {
         m_frontier = QTextCursor(m_doc);
         settle();
         Q_EMIT highlighted(0, m_doc->blockCount() - 1);
-        if (cold)
+        if (cold || (afterPaint && sliced()))
             SliceScheduler::instance().addAfterPaint(this);
         else
             runSlice(sliceBudget());

@@ -435,7 +435,11 @@ bool TextFile::loadDeferred()
 {
     m_deferred = false;
     const QString path = m_path;
-    if (load(path))
+    m_loadingDeferred = true;
+    const bool loaded = load(path);
+    m_loadingDeferred = false;
+    syncHighlighting(true);
+    if (loaded)
         return true;
     // Gone or unreadable since it was listed: the file stays empty, and
     // shows as deleted when it is.
@@ -744,7 +748,7 @@ void TextFile::updateHighlighting(bool highlightable)
     // no view yet waits for the first one that shows the source
     // (syncHighlighting()): one shown only as Visual never loads its syntax
     // definition, which takes 72 ms for Markdown.
-    const bool wanted = wantsHighlighting() && !(m_views.isEmpty() && Highlighter::isSliced());
+    const bool wanted = !m_loadingDeferred && wantsHighlighting() && !(m_views.isEmpty() && Highlighter::isSliced());
     if (wanted)
         m_highlighter->attach(m_doc);
     else
@@ -766,13 +770,13 @@ bool TextFile::wantsHighlighting() const
                || std::any_of(m_views.cbegin(), m_views.cend(), [](const DocumentTab *view) { return view->showsSource(); }));
 }
 
-void TextFile::syncHighlighting()
+void TextFile::syncHighlighting(bool afterPaint)
 {
     // Never detached here: switching back and forth would colour the whole
     // text again each time, and edits keep an attached highlighter current.
-    if (isHighlighting() || !wantsHighlighting())
+    if (m_loadingDeferred || isHighlighting() || !wantsHighlighting())
         return;
-    m_highlighter->attach(m_doc);
+    m_highlighter->attach(m_doc, afterPaint);
 }
 
 bool TextFile::isHighlightPending() const
