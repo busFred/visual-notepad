@@ -6,6 +6,7 @@
 // restoreSession. The next start without files on the command line restores.
 #pragma once
 
+#include <QHash>
 #include <QJsonArray>
 #include <QList>
 #include <QObject>
@@ -70,6 +71,9 @@ public:
     // Tests only: called on the helper thread before each backup file is
     // written, so a test can hold a write in flight.
     static void setBackupHook(std::function<void()> hook);
+    // Tests only: the character count from which a document is backed up
+    // only after a pause in typing (0: the default).
+    static void setBigDocumentChars(qint64 chars);
     // Writes the session now, e.g. after a tab was closed so its discarded
     // backup cannot be recovered. Within a SyncBatch, once when it ends.
     void sync();
@@ -114,6 +118,10 @@ private:
     std::unique_ptr<BackupJob> m_backup;
     // A backup out of date or missing was left to the next round.
     bool m_backupStale = false;
+    // Big documents are copied once their change serial is the one the
+    // previous round saw; true when a round left one for the next.
+    bool m_backupDeferred = false;
+    QHash<const TextFile *, quint64> m_bigSerials;
     bool m_quitting = false;
     bool m_dirty = false;
     bool m_started = false;

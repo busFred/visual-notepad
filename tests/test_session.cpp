@@ -60,6 +60,9 @@ private Q_SLOTS:
     void deferredTabsMoveAndCopy();
     void fileGoneBeforeItsTabIsShown();
     void backupIsWrittenOffTheWindowThread();
+    void bigDocumentIsBackedUpAfterPause();
+    void bigDocumentIsBackedUpAtQuitDuringPause();
+    void bigDocumentBesideASmallOneIsBackedUpWithoutMoreEdits();
     void editDuringBackupIsBackedUpNext();
     void saveSessionWaitsForBackup();
     void quitDuringBackupLeavesNoBackup();
@@ -139,6 +142,7 @@ void TestSession::init()
 void TestSession::cleanup()
 {
     SessionManager::setBackupHook({});
+    SessionManager::setBigDocumentChars(0);
     // A failed test must not leave the helper waiting.
     m_gate.release(100);
     closeWindows();
@@ -456,6 +460,71 @@ void TestSession::backupIsWrittenOffTheWindowThread()
     QVERIFY(!name.isEmpty());
     QCOMPARE(storedBackup(), name);
     QCOMPARE(read(SessionManager::dataDir() + QStringLiteral("/backups/") + name), QByteArray("one\nline two \xC3\xA9"));
+}
+
+// A big document is copied only after a round without an edit; typing keeps
+// postponing it, and the backup holds the latest text.
+void TestSession::bigDocumentIsBackedUpAfterPause()
+{
+    SessionManager::setBigDocumentChars(100);
+    MainWindow *window = makeWindow();
+    window->newFile();
+    DocumentTab *tab = window->tabs().at(0);
+    const QString big(200, u'x');
+    append(tab, big);
+    // Edits keep coming for longer than a round.
+    for (int i = 0; i < 6; ++i) {
+        QTest::qWait(500);
+        append(tab, QStringLiteral("y"));
+    }
+    QCOMPARE(backupCount(), 0);
+    QVERIFY(!SessionManager::instance().isBackingUp());
+    // The pause.
+    QTRY_VERIFY_WITH_TIMEOUT(backupsWritten(1), 8000);
+    const QString name = tab->file()->backupName();
+    QCOMPARE(storedBackup(), name);
+    QCOMPARE(read(SessionManager::dataDir() + QStringLiteral("/backups/") + name), (big + QStringLiteral("yyyyyy")).toUtf8());
+
+    // A small document is backed up at the first round, as before.
+    SessionManager::setBigDocumentChars(0);
+    window->newFile();
+    append(window->tabs().at(1), QStringLiteral("small"));
+    QTRY_VERIFY_WITH_TIMEOUT(backupsWritten(2), 3500);
+}
+
+// A big document and a small one edited together, then no more typing: the
+// small one goes first, and the big one follows a round later on its own.
+void TestSession::bigDocumentBesideASmallOneIsBackedUpWithoutMoreEdits()
+{
+    SessionManager::setBigDocumentChars(100);
+    MainWindow *window = makeWindow();
+    window->newFile();
+    window->newFile();
+    DocumentTab *big = window->tabs().at(0);
+    DocumentTab *small = window->tabs().at(1);
+    append(big, QString(200, u'x'));
+    append(small, QStringLiteral("small"));
+    // (Times are generous: the rounds are 2 s apart, on a busy machine too.)
+    QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(SessionManager::dataDir() + QStringLiteral("/backups/") + small->file()->backupName()), 10000);
+    QTRY_VERIFY_WITH_TIMEOUT(backupsWritten(2), 15000);
+    QCOMPARE(read(SessionManager::dataDir() + QStringLiteral("/backups/") + big->file()->backupName()),
+             QString(200, u'x').toUtf8());
+}
+
+// A quit in the middle of the pause still writes the backup.
+void TestSession::bigDocumentIsBackedUpAtQuitDuringPause()
+{
+    SessionManager::setBigDocumentChars(100);
+    MainWindow *window = makeWindow();
+    window->newFile();
+    DocumentTab *tab = window->tabs().at(0);
+    append(tab, QString(200, u'x'));
+    QTest::qWait(2500);
+    append(tab, QStringLiteral("z"));
+    QCOMPARE(backupCount(), 0);
+    QVERIFY(SessionManager::instance().saveSession().isEmpty());
+    QCOMPARE(backupCount(), 1);
+    QCOMPARE(read(SessionManager::dataDir() + QStringLiteral("/backups/") + tab->file()->backupName()), (QString(200, u'x') + u'z').toUtf8());
 }
 
 // An edit made while a write is in flight is not lost and does not make the

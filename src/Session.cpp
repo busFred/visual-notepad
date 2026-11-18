@@ -44,6 +44,16 @@ namespace {
 
 // At most this long between a change and its backup.
 constexpr int backupDelayMs = 2000;
+// A document of this many characters (UTF-16 units: at least as many bytes in
+// any encoding the app writes) is copied for its backup only after a pause in
+// typing, because the copy runs on the window thread.
+constexpr qint64 bigDocumentChars = 20'000'000;
+
+qint64 &bigDocumentThreshold()
+{
+    static qint64 chars = bigDocumentChars;
+    return chars;
+}
 
 QString &dataDirStorage()
 {
@@ -299,6 +309,11 @@ void SessionManager::setBackupHook(std::function<void()> hook)
     backupHook() = std::move(hook);
 }
 
+void SessionManager::setBigDocumentChars(qint64 chars)
+{
+    bigDocumentThreshold() = chars > 0 ? chars : bigDocumentChars;
+}
+
 void SessionManager::markDirty()
 {
     m_dirty = true;
@@ -351,8 +366,18 @@ void SessionManager::backupIfDirty()
     // completeBackup) and what changed meanwhile is left to the next round.
     if (m_backup)
         return;
-    if (!startBackup())
-        saveSession();
+    if (startBackup())
+        return;
+    if (m_backupDeferred) {
+        // Only big documents still being typed in are left: the session file
+        // is written with the older backups (a complete one each), and the
+        // next round looks again.
+        writeSession({}, false);
+        if (m_timer && !m_timer->isActive())
+            m_timer->start();
+        return;
+    }
+    saveSession();
 }
 
 void SessionManager::onCommitData(QSessionManager &)
@@ -378,6 +403,8 @@ bool SessionManager::startBackup()
         return false;
     auto job = std::make_unique<BackupJob>();
     QSet<const TextFile *> seen;
+    m_backupDeferred = false;
+    QHash<const TextFile *, quint64> bigSeen;
     for (MainWindow *window : std::as_const(m_windows)) {
         for (DocumentTab *tab : window->tabs()) {
             const bool untitled = tab->path().isEmpty();
@@ -389,6 +416,17 @@ bool SessionManager::startBackup()
             seen.insert(file);
             if (backupCurrent(file))
                 continue;
+            if (tab->document()->characterCount() >= bigDocumentThreshold()) {
+                // Copy only once it has not changed for a whole round: no
+                // edit for at least backupDelayMs. (A quit or a session
+                // save does not wait: saveSession() writes it.)
+                const quint64 now = file->changeSerial();
+                bigSeen.insert(file, now);
+                if (m_bigSerials.value(file, quint64(-1)) != now) {
+                    m_backupDeferred = true;
+                    continue;
+                }
+            }
             BackupItem item;
             item.file = file;
             item.name = file->backupName();
@@ -401,6 +439,7 @@ bool SessionManager::startBackup()
             job->items.append(std::move(item));
         }
     }
+    m_bigSerials = std::move(bigSeen);
     if (job->items.isEmpty())
         return false;
 
@@ -448,7 +487,7 @@ void SessionManager::completeBackup()
     // point at them. Text changed meanwhile is written next round, and until
     // then the session keeps the older backup of it.
     writeSession({}, false);
-    if (m_backupStale && m_timer && !m_timer->isActive())
+    if ((m_backupStale || m_backupDeferred) && m_timer && !m_timer->isActive())
         m_timer->start();
 }
 
@@ -599,7 +638,8 @@ QList<DocumentTab *> SessionManager::writeSession(const QList<DocumentTab *> &sk
         return failed;
     }
     removeStaleBackups(windows);
-    m_dirty = !failed.isEmpty() || m_backupStale;
+    // (A big document left for a pause in typing is still to be backed up.)
+    m_dirty = !failed.isEmpty() || m_backupStale || m_backupDeferred;
     return failed;
 }
 
