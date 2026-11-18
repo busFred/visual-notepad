@@ -1,6 +1,7 @@
 #include "LineLayout.h"
 
 #include <QPainter>
+#include <QFontMetricsF>
 #include <QTextBlock>
 #include <QTextBoundaryFinder>
 #include <QTextDocument>
@@ -121,6 +122,7 @@ struct LineLayout::Piece
     // Word Wrap off: the layout's width, and where a last tab starts in it
     // (-1 if the piece does not end with one); where the piece starts in
     // the row and how wide it is there (a last tab to its tab stop).
+    qreal em = -1; // Measured total advance in average-character units.
     qreal natural = 0;
     qreal tabX = -1;
     qreal x = 0;
@@ -352,6 +354,7 @@ qreal LineLayout::Line::cursorToX(int position) const
         const int k = l.pieceAtRow(m_row);
         return l.use(k)->lineAt(m_row - l.m_pieces[k].firstRow).cursorToX(position - l.layoutStart(k));
     }
+    l.settleAround(position);
     const int k = l.pieceAt(position);
     const Piece &p = l.m_pieces[k];
     const int local = qMax(0, position - l.layoutStart(k));
@@ -369,6 +372,7 @@ int LineLayout::Line::xToCursor(qreal x) const
         const int k = l.pieceAtRow(m_row);
         return l.layoutStart(k) + l.use(k)->lineAt(m_row - l.m_pieces[k].firstRow).xToCursor(x);
     }
+    l.settleTo(x);
     const int k = l.pieceAtX(x);
     const Piece &p = l.m_pieces[k];
     const qreal local = x - p.x;
@@ -402,6 +406,9 @@ void LineLayout::clearPieces()
     m_formatsEnd = 0;
     m_length = 0;
     m_live = 0;
+    m_unmeasured = 0;
+    m_em = m_chars = m_measuredWidth = 0;
+    m_measuredRows = 0;
     m_preeditPiece = -1;
     m_preedit.clear();
     m_preeditFormats.clear();
@@ -422,17 +429,19 @@ bool LineLayout::rebuild(const QTextBlock &block, const Setup &setup, LineLayout
         return false;
     };
     m_setup = setup;
+    m_ref = qMax<qreal>(0.01, QFontMetricsF(setup.font).averageCharWidth());
     m_formats = block.layout()->formats();
     for (const QTextLayout::FormatRange &f : std::as_const(m_formats))
         m_formatsEnd = qMax(m_formatsEnd, f.start + f.length);
     const int n = block.length() - 1;
     m_length = n;
 
-    const auto usable = [&](LineLayout *l) { return l && l->inPieces() && sameSetup(l->m_setup, setup); };
+    const auto usable = [&](LineLayout *l) { return l && l->inPieces(); };
     if (!usable(before))
         before = nullptr;
     if (!usable(after))
         after = nullptr;
+    // Keep stale pieces too; their measures become estimates below.
     // Their pieces as the text has them, without text being composed.
     if (before)
         before->setPreedit(0, {}, {});
@@ -448,6 +457,10 @@ bool LineLayout::rebuild(const QTextBlock &block, const Setup &setup, LineLayout
         for (Piece &p : before->m_pieces) {
             if (!unchanged && p.start + int(p.text.size()) > prefix - context)
                 break;
+            if (!sameSetup(before->m_setup, setup)) {
+                p.layout.reset();
+                p.measured = false;
+            }
             kept.push_back(std::move(p));
         }
     }
@@ -459,6 +472,10 @@ bool LineLayout::rebuild(const QTextBlock &block, const Setup &setup, LineLayout
             if (p.text.isNull()) // Taken above (the same line).
                 continue;
             if (unchanged || p.start >= from + context) {
+                if (!sameSetup(after->m_setup, setup)) {
+                    p.layout.reset();
+                    p.measured = false;
+                }
                 kept.push_back(std::move(p));
                 kept.back().start += n - after->m_length;
             }
@@ -509,21 +526,26 @@ bool LineLayout::rebuild(const QTextBlock &block, const Setup &setup, LineLayout
     }
     m_pieces = std::move(pieces);
 
-    // Laid out (measured) where new or coloured otherwise (the highlighter
-    // colours the start of a long line again at every edit, mostly the
-    // same); a whole line only measured, the view lays out what it shows.
-    const bool all = kept.empty();
+    for (const Piece &p : m_pieces) {
+        if (p.em >= 0) { m_em += p.em; m_chars += p.text.size(); }
+        if (!p.measured) ++m_unmeasured;
+    }
+    const bool fresh = !before && !after;
     for (int k = 0; k < int(m_pieces.size()); ++k) {
         Piece &p = m_pieces[k];
         m_clock = qMax(m_clock, p.used);
-        const bool had = p.layout != nullptr;
-        if (p.measured && (p.start >= formatsReach || formatsFor(p.start, int(p.text.size())) == p.formats)) {
-            if (had)
-                ++m_live;
-            continue;
+        if (p.measured) {
+            if (p.layout) ++m_live;
+            if (p.start < formatsReach && formatsFor(p.start, int(p.text.size())) != p.formats) {
+                if (p.layout) { p.layout.reset(); --m_live; }
+                p.measured = false;
+                ++m_unmeasured;
+            }
+        } else if ((!fresh && p.em < 0) || k == 0) {
+            layOut(k, !fresh);
+        } else {
+            estimate(p);
         }
-        p.layout.reset();
-        layOut(k, !all || had);
     }
     if (!finish())
         return fail();
@@ -589,15 +611,13 @@ void LineLayout::formatsChanged(const QTextBlock &block)
     for (const QTextLayout::FormatRange &f : std::as_const(m_formats))
         m_formatsEnd = qMax(m_formatsEnd, f.start + f.length);
     reach = qMax(reach, m_formatsEnd);
-    bool changed = false;
-    for (int k = 0; k < int(m_pieces.size()) && m_pieces[k].start < reach; ++k) {
-        Piece &p = m_pieces[k];
-        if (p.measured && formatsFor(p.start, int(p.text.size())) == p.formats)
-            continue;
-        changed = layOut(k, p.layout != nullptr) || changed;
+    for (Piece &p : m_pieces) {
+        if (p.start >= reach) break;
+        if (!p.measured || formatsFor(p.start, int(p.text.size())) == p.formats) continue;
+        if (p.layout) { p.layout.reset(); --m_live; }
+        p.measured = false; // Keep the old rows until shown.
+        ++m_unmeasured;
     }
-    if (changed)
-        place(0);
 }
 
 void LineLayout::setPreedit(int position, const QString &text, const QList<QTextLayout::FormatRange> &formats)
@@ -611,8 +631,7 @@ void LineLayout::setPreedit(int position, const QString &text, const QList<QText
         m_preeditPiece = -1;
         m_preedit.clear();
         m_preeditFormats.clear();
-        layOut(k, true);
-        place(0);
+        measure(k, true);
         return;
     }
     // The piece the caret is in (at a join, the one after).
@@ -640,9 +659,8 @@ void LineLayout::setPreedit(int position, const QString &text, const QList<QText
     m_preedit = text;
     m_preeditFormats = local;
     if (old >= 0 && old != k)
-        layOut(old, true);
-    layOut(k, true);
-    place(0);
+        measure(old, true);
+    measure(k, true);
     trim(maxLive);
 }
 
@@ -691,8 +709,7 @@ QTextLayout *LineLayout::use(int piece)
 {
     Piece &p = m_pieces[piece];
     if (!p.layout) {
-        if (layOut(piece, true))
-            place(0);
+        measure(piece, true);
         trim(maxLive);
     }
     p.used = ++m_clock;
@@ -731,6 +748,19 @@ bool LineLayout::layOut(int piece, bool keep)
     const int oldRows = p.rows;
     const qreal oldNatural = p.natural;
     const qreal oldTabX = p.tabX;
+    if (!p.measured) {
+        --m_unmeasured;
+        qreal advance = 0;
+        for (int i = 0; i < rows; ++i) advance += layout->lineAt(i).naturalTextWidth();
+        if (p.em >= 0) { m_em -= p.em; m_chars -= p.text.size(); }
+        p.em = advance / m_ref;
+        m_em += p.em;
+        m_chars += p.text.size();
+        m_measuredWidth += advance;
+        m_measuredRows += qMax(1, rows);
+        if (m_setup.wrap && m_measuredRows > 0 && m_setup.wrapWidth > 0)
+            m_fill = qBound<qreal>(0.1, m_measuredWidth / (m_measuredRows * m_setup.wrapWidth), 1.0);
+    }
     p.rows = qMax(1, rows);
     p.measured = true;
     if (!m_setup.wrap && rows > 0) {
@@ -748,6 +778,124 @@ bool LineLayout::layOut(int piece, bool keep)
         --m_live;
     }
     return p.rows != oldRows || p.natural != oldNatural || p.tabX != oldTabX;
+}
+
+void LineLayout::estimate(Piece &p)
+{
+    const qreal width = (p.em >= 0 ? p.em : p.text.size() * (m_chars > 0 ? m_em / m_chars : 1)) * m_ref;
+    p.tabX = -1;
+    p.natural = width;
+    p.rows = m_setup.wrap ? qMax(1, qCeil(width / qMax<qreal>(1, m_setup.wrapWidth * m_fill))) : 1;
+}
+
+bool LineLayout::resetup(const QTextBlock &block, const Setup &setup)
+{
+    if (!inPieces() || m_pieces.empty() || block.length() - 1 != m_length) return false;
+#ifndef QT_NO_DEBUG
+    const QString text = block.text();
+    for (const Piece &p : m_pieces)
+        Q_ASSERT(QStringView(text).mid(p.start, p.text.size()) == p.text);
+#endif
+    Setup geometry = setup;
+    geometry.lineHeight = m_setup.lineHeight;
+    geometry.linePad = m_setup.linePad;
+    const bool metricsOnly = sameSetup(m_setup, geometry);
+    const bool oldRows = m_setup.font == setup.font && m_setup.wrap == setup.wrap
+        && m_setup.wrapWidth == setup.wrapWidth;
+    m_setup = setup;
+    m_ref = qMax<qreal>(0.01, QFontMetricsF(setup.font).averageCharWidth());
+    m_live = 0;
+    m_measuredWidth = 0;
+    m_measuredRows = 0;
+    for (Piece &p : m_pieces) {
+        p.layout.reset();
+        if (!metricsOnly) {
+            p.measured = false;
+            if (!oldRows) estimate(p);
+        }
+    }
+    m_unmeasured = int(std::count_if(m_pieces.begin(), m_pieces.end(), [](const Piece &p) { return !p.measured; }));
+    place(0);
+    ++m_generation;
+    formatsChanged(block);
+    return true;
+}
+
+void LineLayout::measure(int k, bool keep)
+{
+    const int oldEnd = m_pieces[k].firstRow + m_pieces[k].rows;
+    const int oldRows = m_pieces[k].rows;
+    const bool unmeasured = !m_pieces[k].measured;
+    const bool changed = layOut(k, keep);
+    if (changed || unmeasured) {
+        place(k);
+        ++m_generation;
+        const int delta = m_setup.wrap ? m_pieces[k].rows - oldRows : 0;
+        if (m_listener) m_listener(this, oldEnd, delta);
+    }
+}
+
+int LineLayout::windowAnchor(int top, int end) const
+{
+    if (m_pieces.empty()) return 0;
+    const int first = pieceAtRow(qMax(0, top - 2));
+    const int last = pieceAtRow(qMax(top, end + 1));
+    for (int k = first; k <= last; ++k)
+        if (m_pieces[k].measured) return m_pieces[k].start;
+    return m_pieces[pieceAtRow(qMax(0, top))].start;
+}
+
+LineLayout::Settlement LineLayout::settleWindowStep(int top, int end, int anchor)
+{
+    if (!inPieces() || m_pieces.empty() || !m_setup.wrap) return {};
+    const int first = pieceAtRow(qMax(0, top - 2));
+    const int last = pieceAtRow(qMax(top, end + 1));
+    const int anchored = anchor == -2 ? first : anchor == INT_MAX ? int(m_pieces.size())
+        : pieceAt(anchor == -1 ? windowAnchor(top, end) : anchor);
+    for (int k = first; k <= last; ++k) {
+        if (m_pieces[k].measured) continue;
+        const int oldEnd = m_pieces[k].firstRow + m_pieces[k].rows;
+        const int oldRows = m_pieces[k].rows;
+        measure(k, true);
+        trim(maxLive);
+        return {true, k < anchored && oldEnd > top ? m_pieces[k].rows - oldRows : 0};
+    }
+    return {};
+}
+
+void LineLayout::settleAround(int position)
+{
+    if (!inPieces() || m_pieces.empty()) return;
+    const int k = pieceAt(position);
+    if (!m_setup.wrap) {
+        for (int i = 0; i <= k; ++i)
+            if (!m_pieces[i].measured) measure(i, false);
+    } else {
+        for (int i = qMax(0, k - 1); i <= qMin(k + 1, int(m_pieces.size()) - 1); ++i)
+            if (!m_pieces[i].measured) measure(i, false);
+    }
+    trim(maxLive);
+}
+
+void LineLayout::settleTo(qreal x)
+{
+    if (!inPieces() || m_setup.wrap) return;
+    for (int k = 0; k < int(m_pieces.size()) && m_pieces[k].x <= x; ++k)
+        if (!m_pieces[k].measured) measure(k, false);
+}
+
+bool LineLayout::settleOne(int nearRow)
+{
+    if (!inPieces() || m_pieces.empty() || !m_unmeasured) return false;
+    const int near = m_setup.wrap ? pieceAtRow(nearRow) : pieceAtX(nearRow);
+    for (int d = 0; d < int(m_pieces.size()); ++d) {
+        for (int k : {near + d, near - d}) {
+            if (k < 0 || k >= int(m_pieces.size()) || m_pieces[k].measured) continue;
+            measure(k, false);
+            return true;
+        }
+    }
+    return false;
 }
 
 void LineLayout::trim(int keep)
@@ -850,6 +998,7 @@ LineLayout::Line LineLayout::lineForTextPosition(int position)
         return {};
     if (!m_setup.wrap)
         return {this, 0};
+    settleAround(position);
     const int k = pieceAt(position);
     const QTextLine line = use(k)->lineForTextPosition(position - layoutStart(k));
     return line.isValid() ? Line(this, m_pieces[k].firstRow + line.lineNumber()) : Line();

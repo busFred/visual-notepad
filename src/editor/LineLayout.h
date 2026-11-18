@@ -32,6 +32,7 @@
 #include <QTextLayout>
 #include <QTextOption>
 
+#include <functional>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -115,6 +116,23 @@ public:
     void setPreedit(int position, const QString &text, const QList<QTextLayout::FormatRange> &formats);
     bool hasPreedit() const { return m_preeditPiece >= 0; }
 
+    // Reuse text and cuts across changes of width/font/options.
+    bool resetup(const QTextBlock &block, const Setup &setup);
+    using Listener = std::function<void(LineLayout *, int, int)>;
+    void setListener(Listener listener) { m_listener = std::move(listener); }
+    struct Settlement { bool measured = false; int extraTopRows = 0; };
+    // A stable text anchor for repeated settlement of a window.
+    int windowAnchor(int topRow, int endRow) const;
+    // anchor: text position; -1 = automatic, -2 = top, INT_MAX = bottom.
+    Settlement settleWindowStep(int topRow, int endRow, int anchor = -1);
+    void settleAround(int position);
+    void settleTo(qreal x);
+    bool settleOne(int nearRow);
+    int unmeasuredCount() const { return m_unmeasured; }
+    quint64 generation() const { return m_generation; }
+    bool wraps() const { return m_setup.wrap; }
+    qreal lineHeight() const { return m_setup.lineHeight; }
+
     int length() const { return m_length; } // Without the text being composed.
     // Where the pieces start (for tests).
     QList<int> pieceStarts() const;
@@ -146,6 +164,8 @@ private:
     // Lays the piece out and takes its measures (keeping the layout or
     // not); true if they changed.
     bool layOut(int piece, bool keep);
+    void measure(int piece, bool keep);
+    void estimate(Piece &piece);
     void trim(int keep);
     // Positions and rows from the piece on.
     void place(int from);
@@ -156,6 +176,11 @@ private:
     std::unique_ptr<QTextLayout> m_whole;
     std::vector<Piece> m_pieces;
     Setup m_setup;
+    Listener m_listener;
+    qreal m_ref = 1, m_fill = 0.9;
+    qreal m_em = 0, m_chars = 0, m_measuredWidth = 0;
+    int m_measuredRows = 0, m_unmeasured = 0;
+    quint64 m_generation = 0;
     QList<QTextLayout::FormatRange> m_formats; // The block's, from the highlighter.
     int m_formatsEnd = 0;
     int m_length = 0;
