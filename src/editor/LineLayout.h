@@ -161,6 +161,9 @@ private:
     int pieceAtRow(int row) const;
     // The piece laid out (and recently used).
     QTextLayout *use(int piece);
+    // Word Wrap on: the row's line in its piece, laid out (a row past the
+    // piece's measured rows gives its last one).
+    QTextLine rowLine(int row, int *piece = nullptr);
     // Lays the piece out and takes its measures (keeping the layout or
     // not); true if they changed.
     bool layOut(int piece, bool keep);

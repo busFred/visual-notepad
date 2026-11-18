@@ -304,8 +304,9 @@ int LineLayout::Line::textStart() const
         return l.m_whole->lineAt(m_row).textStart();
     if (!l.m_setup.wrap)
         return 0;
-    const int k = l.pieceAtRow(m_row);
-    return l.layoutStart(k) + l.use(k)->lineAt(m_row - l.m_pieces[k].firstRow).textStart();
+    int k = 0;
+    const QTextLine line = l.rowLine(m_row, &k);
+    return l.layoutStart(k) + line.textStart();
 }
 
 int LineLayout::Line::textLength() const
@@ -315,8 +316,7 @@ int LineLayout::Line::textLength() const
         return l.m_whole->lineAt(m_row).textLength();
     if (!l.m_setup.wrap)
         return l.m_length + (l.m_preeditPiece >= 0 ? int(l.m_preedit.size()) : 0);
-    const int k = l.pieceAtRow(m_row);
-    return l.use(k)->lineAt(m_row - l.m_pieces[k].firstRow).textLength();
+    return l.rowLine(m_row).textLength();
 }
 
 qreal LineLayout::Line::y() const
@@ -332,8 +332,7 @@ qreal LineLayout::Line::ascent() const
     LineLayout &l = *m_layout;
     if (l.m_whole)
         return l.m_whole->lineAt(m_row).ascent();
-    const int k = l.m_setup.wrap ? l.pieceAtRow(m_row) : 0;
-    return l.use(k)->lineAt(l.m_setup.wrap ? m_row - l.m_pieces[k].firstRow : 0).ascent();
+    return (l.m_setup.wrap ? l.rowLine(m_row) : l.use(0)->lineAt(0)).ascent();
 }
 
 qreal LineLayout::Line::naturalTextWidth() const
@@ -343,8 +342,7 @@ qreal LineLayout::Line::naturalTextWidth() const
         return l.m_whole->lineAt(m_row).naturalTextWidth();
     if (!l.m_setup.wrap)
         return l.width();
-    const int k = l.pieceAtRow(m_row);
-    return l.use(k)->lineAt(m_row - l.m_pieces[k].firstRow).naturalTextWidth();
+    return l.rowLine(m_row).naturalTextWidth();
 }
 
 qreal LineLayout::Line::cursorToX(int position) const
@@ -353,8 +351,9 @@ qreal LineLayout::Line::cursorToX(int position) const
     if (l.m_whole)
         return l.m_whole->lineAt(m_row).cursorToX(position);
     if (l.m_setup.wrap) {
-        const int k = l.pieceAtRow(m_row);
-        return l.use(k)->lineAt(m_row - l.m_pieces[k].firstRow).cursorToX(position - l.layoutStart(k));
+        int k = 0;
+        const QTextLine line = l.rowLine(m_row, &k);
+        return line.cursorToX(position - l.layoutStart(k));
     }
     const int at = l.pieceAt(position);
     if (at > 0 && position == l.layoutStart(at)) {
@@ -378,8 +377,9 @@ int LineLayout::Line::xToCursor(qreal x) const
     if (l.m_whole)
         return l.m_whole->lineAt(m_row).xToCursor(x);
     if (l.m_setup.wrap) {
-        const int k = l.pieceAtRow(m_row);
-        return l.layoutStart(k) + l.use(k)->lineAt(m_row - l.m_pieces[k].firstRow).xToCursor(x);
+        int k = 0;
+        const QTextLine line = l.rowLine(m_row, &k);
+        return l.layoutStart(k) + line.xToCursor(x);
     }
     l.settleTo(x);
     const int k = l.pieceAtX(x);
@@ -715,6 +715,18 @@ int LineLayout::pieceAtRow(int row) const
     const auto it = std::upper_bound(m_pieces.begin(), m_pieces.end(), row,
                                      [](int value, const Piece &p) { return value < p.firstRow; });
     return qMax(0, int(it - m_pieces.begin()) - 1);
+}
+
+QTextLine LineLayout::rowLine(int row, int *piece)
+{
+    // The row was counted with the piece's measures as they were: laying an
+    // estimated piece out may give it fewer rows. The row stays in its piece.
+    const int k = pieceAtRow(row);
+    QTextLayout *layout = use(k);
+    if (piece)
+        *piece = k;
+    const int last = qMax(0, layout->lineCount() - 1);
+    return layout->lineAt(qBound(0, row - m_pieces[k].firstRow, last));
 }
 
 QTextLayout *LineLayout::use(int piece)

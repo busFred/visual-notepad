@@ -180,6 +180,8 @@ private Q_SLOTS:
     void longLineEditsAfterResize();
     void longLineWrapOffMeasuresOnlyShown();
     void longLineResizeIsFast();
+    void longLineRowsPastEstimateAfterResetup();
+    void longLineBoxSelectAfterResize();
 
 private:
     void setText(const QString &text);
@@ -216,6 +218,8 @@ private:
     // neither focused: the same pixels.
     void compareWithFreshView(int line);
     void compareWithSettledLongLine();
+    // The view's long first line laid out exactly, every piece measured.
+    std::unique_ptr<vn::LineLayout> exactFirstLine(ProbeView &view);
 
     QTextDocument *m_doc = nullptr;
     TextView *m_view = nullptr;
@@ -3264,6 +3268,19 @@ void TestTextView::longLineTypingIsFast()
 }
 
 
+std::unique_ptr<vn::LineLayout> TestTextView::exactFirstLine(ProbeView &view)
+{
+    auto exact = std::make_unique<vn::LineLayout>();
+    QTextOption option;
+    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    option.setTabStopDistance(QFontMetricsF(view.font()).horizontalAdvance(u' ') * 4);
+    const vn::LineLayout::Setup setup{view.font(), option, true, view.widthForText(), qreal(view.rowHeight()), 0};
+    if (!exact->build(view.document()->firstBlock(), setup))
+        return nullptr;
+    while (exact->settleOne(0)) {}
+    return exact;
+}
+
 void TestTextView::compareWithSettledLongLine()
 {
     auto *probe = static_cast<ProbeView *>(m_view);
@@ -3418,12 +3435,36 @@ void TestTextView::longLineCaretMovesAfterResize()
     }
     m_view->setCursors(carets, 0);
     m_view->resize(470, 400);
-    const auto original = m_view->cursors();
-    QTest::keyClick(m_view, Qt::Key_Down);
-    QTest::keyClick(m_view, Qt::Key_Up);
-    const auto moved = m_view->cursors();
-    QCOMPARE(moved.size(), original.size());
-    for (int i = 0; i < moved.size(); ++i) QCOMPARE(moved[i].position(), original[i].position());
+    // The same moves in a view whose line is laid out whole first.
+    QTextDocument doc;
+    doc.setDocumentLayout(new vn::DocumentLayout(&doc));
+    doc.setPlainText(m_doc->toPlainText());
+    ProbeView fresh(&doc);
+    fresh.resize(m_view->size());
+    fresh.setFont(m_view->font());
+    fresh.setWordWrap(true);
+    fresh.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&fresh));
+    for (int position : exactFirstLine(fresh)->pieceStarts()) {
+        QTextCursor c(&doc); c.setPosition(position); fresh.setTextCursor(c);
+    }
+    QList<QTextCursor> freshCarets;
+    for (int position : {450000, 650000}) {
+        QTextCursor c(&doc); c.setPosition(position); freshCarets.append(c);
+    }
+    fresh.setCursors(freshCarets, 0);
+    const auto positions = [](const QList<QTextCursor> &cursors) {
+        QList<int> list;
+        for (const QTextCursor &c : cursors) list.append(c.position());
+        return list;
+    };
+    const auto original = positions(m_view->cursors());
+    for (Qt::Key key : {Qt::Key_Down, Qt::Key_Down, Qt::Key_Up, Qt::Key_Up}) {
+        QTest::keyClick(m_view, key);
+        QTest::keyClick(&fresh, key);
+        QCOMPARE(positions(m_view->cursors()), positions(fresh.cursors()));
+    }
+    QCOMPARE(positions(m_view->cursors()), original);
 }
 
 void TestTextView::longLineFindAfterZoom()
@@ -3487,6 +3528,81 @@ void TestTextView::longLineResizeIsFast()
     }
     QVERIFY2(timer.elapsed() < 20 * 15, qPrintable(QString::number(timer.elapsed())));
 }
+
+
+void TestTextView::longLineRowsPastEstimateAfterResetup()
+{
+    // Rows counted from estimates may be past what a piece really has once
+    // it is measured: asking for them gives the piece's last row.
+    QTextDocument doc;
+    doc.setPlainText(longLine(QStringLiteral("alpha, WWW iii 12345 words "), 400000));
+    vn::LineLayout::Setup setup{m_view->font(), {}, true, 430, 20, 0};
+    setup.option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    vn::LineLayout layout;
+    QVERIFY(layout.build(doc.firstBlock(), setup));
+    while (layout.settleOne(0)) {}
+    for (int width = 429; width > 200; width -= 3) {
+        setup.wrapWidth = width;
+        QVERIFY(layout.resetup(doc.firstBlock(), setup));
+        const vn::LineLayout::Line last = layout.lineAt(layout.lineCount() - 1);
+        QVERIFY(last.isValid());
+        const int start = last.textStart();
+        QVERIFY(start >= 0 && start < layout.length());
+        QVERIFY(start + last.textLength() <= layout.length());
+        QVERIFY(last.xToCursor(50) >= start);
+        QVERIFY(last.cursorToX(start) >= 0);
+        QVERIFY(last.naturalTextWidth() >= 0);
+        QVERIFY(last.ascent() > 0);
+    }
+
+    // A piece the highlighter coloured again keeps its old rows until laid
+    // out: a bold piece's rows, more than it has plain.
+    QTextLayout::FormatRange bold;
+    bold.start = 0;
+    bold.length = 10000;
+    bold.format.setFontWeight(QFont::Black);
+    bold.format.setFontLetterSpacing(150);
+    doc.firstBlock().layout()->setFormats({bold});
+    setup.wrapWidth = 430;
+    QVERIFY(layout.resetup(doc.firstBlock(), setup));
+    while (layout.settleOne(0)) {}
+    const int boldEnd = layout.lineForTextPosition(9999).lineNumber();
+    doc.firstBlock().layout()->setFormats({});
+    layout.formatsChanged(doc.firstBlock());
+    QVERIFY(layout.unmeasuredCount() > 0);
+    const vn::LineLayout::Line row = layout.lineAt(boldEnd);
+    QVERIFY(row.isValid());
+    QVERIFY(row.textStart() >= 0 && row.textStart() < layout.length());
+}
+
+void TestTextView::longLineBoxSelectAfterResize()
+{
+    setText(longLine(QStringLiteral("alpha, WWW iii 12345 words "), 1000000));
+    m_view->setWordWrap(true);
+    m_view->resize(600, 400);
+    auto *probe = static_cast<ProbeView *>(m_view);
+    constexpr int anchor = 650000;
+    QTextCursor c(m_doc); c.setPosition(anchor); m_view->setTextCursor(c);
+    m_view->grab();
+    const Qt::KeyboardModifiers mods = Qt::ShiftModifier | Qt::AltModifier;
+    boxSelect(QPoint(150, 200), QPoint(150, 200), mods);
+    QCOMPARE(m_view->cursorCount(), 1);
+    for (int step = 1; step <= 40; ++step) {
+        m_view->resize(600 - step * 7, 400);
+        m_view->grab();
+        boxSelect(QPoint(150, 220), QPoint(150, 220), mods);
+        // The box still starts on the wrapped row holding the anchor.
+        const auto exact = exactFirstLine(*probe);
+        QVERIFY(exact);
+        const QList<QTextCursor> carets = m_view->cursors();
+        QCOMPARE(carets.size(), 1);
+        const vn::LineLayout::Line row = exact->lineForTextPosition(anchor);
+        const int start = carets.first().anchor();
+        QVERIFY2(start >= row.textStart() && start <= row.textStart() + row.textLength(),
+                 qPrintable(QStringLiteral("step %1: %2 not in [%3, +%4]").arg(step).arg(start).arg(row.textStart()).arg(row.textLength())));
+    }
+}
+
 
 QTEST_MAIN(TestTextView)
 #include "test_textview.moc"

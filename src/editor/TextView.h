@@ -762,6 +762,7 @@ private:
         int block = 0;
         int subLine = 0;
         qreal x = 0;
+        int position = 0; // In the block: finds the wrapped line again after a long line's rows change.
     };
     ColumnAnchor m_columnAnchor;
     CaretState m_columnResult; // Carets the last box selection produced.

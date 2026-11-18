@@ -1480,6 +1480,11 @@ LineLayout *TextView::layoutForLine(int line)
                 layout->settleAround(position);
                 m_topOffset = layout->lineForTextPosition(position).lineNumber() * m_lineHeight + remainder;
             }
+            if (m_columnAnchorValid && m_columnAnchor.block == line) {
+                // Its row was counted with the old width's rows.
+                const LineLayout::Line anchorLine = layout->lineForTextPosition(m_columnAnchor.position);
+                m_columnAnchor.subLine = anchorLine.isValid() ? anchorLine.lineNumber() : 0;
+            }
             listenToLayout(line);
             restartSettling();
         }
@@ -2432,7 +2437,8 @@ void TextView::mousePressEvent(QMouseEvent *event)
             const QTextBlock block = m_doc->findBlock(anchor);
             LineLayout *layout = layoutForLine(block.blockNumber());
             const LineLayout::Line line = layout->lineForTextPosition(anchor - block.position());
-            m_columnAnchor = {block.blockNumber(), line.isValid() ? line.lineNumber() : 0, cursorX(anchor)};
+            m_columnAnchor = {block.blockNumber(), line.isValid() ? line.lineNumber() : 0, cursorX(anchor),
+                              anchor - block.position()};
             m_columnAnchorValid = true;
         }
         m_columnDragging = true;
