@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <tuple>
@@ -41,6 +42,7 @@ class ProbeView : public TextView
 public:
     using TextView::TextView;
     qreal left() const { return textLeft(); }
+    qreal widthForText() const { return textWidth(); }
     int rowHeight() const { return lineHeight(); }
     int positionAtPoint(const QPointF &point) { return positionAt(point); }
     bool bounds(int line, qreal *top, qreal *bottom) { return lineBounds(line, top, bottom); }
@@ -169,6 +171,15 @@ private Q_SLOTS:
     void emptyInputMethodEventKeepsTheScroll();
     void longLineInColumns();
     void longLineTypingIsFast();
+    void longLineResetupKeepsPiecesAndSettlesExact();
+    void longLineRebuildKeepsEstimates();
+    void longLineEstimatesShowExactScreen();
+    void longLineWheelUpIntoEstimatesKeepsScreen();
+    void longLineCaretMovesAfterResize();
+    void longLineFindAfterZoom();
+    void longLineEditsAfterResize();
+    void longLineWrapOffMeasuresOnlyShown();
+    void longLineResizeIsFast();
 
 private:
     void setText(const QString &text);
@@ -204,6 +215,7 @@ private:
     // The view against a new one on the same text, carets and scroll,
     // neither focused: the same pixels.
     void compareWithFreshView(int line);
+    void compareWithSettledLongLine();
 
     QTextDocument *m_doc = nullptr;
     TextView *m_view = nullptr;
@@ -292,6 +304,7 @@ void TestTextView::compareWithFreshView(int line)
     doc.setPlainText(m_doc->toPlainText());
     ProbeView fresh(&doc);
     fresh.resize(m_view->size());
+    fresh.setFont(m_view->font());
     fresh.setWordWrap(m_view->wordWrap());
     fresh.show();
     QVERIFY(QTest::qWaitForWindowExposed(&fresh));
@@ -3181,6 +3194,38 @@ void TestTextView::longLineInColumns()
             m_view->columnsPageForward();
             m_view->grab();
         }
+        if (wrap) {
+            QFont zoom = m_view->font(); zoom.setPointSizeF(14); m_view->setFont(zoom);
+            m_view->columnsToStart();
+            m_view->clearFocus();
+            QTextDocument doc;
+            doc.setDocumentLayout(new vn::DocumentLayout(&doc));
+            doc.setPlainText(m_doc->toPlainText());
+            ProbeView fresh(&doc);
+            fresh.setFont(zoom); fresh.resize(m_view->size()); fresh.setColumnChars(50);
+            fresh.setColumnsShown(true, 0); fresh.show();
+            for (int join : joinsOf(doc.findBlockByNumber(10))) {
+                QTextCursor caret(doc.findBlockByNumber(10));
+                caret.setPosition(caret.position() + join); fresh.setTextCursor(caret);
+            }
+            QTextCursor caret(&doc); caret.setPosition(m_view->textCursor().position());
+            fresh.setTextCursor(caret); fresh.clearFocus(); fresh.columnsToStart();
+            QCoreApplication::processEvents(); // Place the controls queued by the font change.
+            for (QWidget *view : {static_cast<QWidget *>(m_view), static_cast<QWidget *>(&fresh)})
+                for (QWidget *child : view->findChildren<QWidget *>()) child->setAttribute(Qt::WA_UnderMouse, false);
+            for (int direction : {1, -1}) {
+                for (int page = 0; page < 5; ++page) {
+                    const auto expected = fresh.viewport()->grab().toImage();
+                    const auto actual = m_view->viewport()->grab().toImage();
+                    QCOMPARE(actual, expected);
+                    if (direction > 0) { fresh.columnsPageForward(); m_view->columnsPageForward(); }
+                    else { fresh.columnsPageBack(); m_view->columnsPageBack(); }
+                }
+            }
+            fresh.columnsToEnd(); m_view->columnsToEnd();
+            QCOMPARE(fresh.viewport()->grab().toImage(), m_view->viewport()->grab().toImage());
+            QCOMPARE(m_view->columnLineRange().second, m_doc->blockCount() - 1);
+        }
         m_view->columnsToStart();
         m_view->setColumnsShown(false);
         QTest::keyClick(m_view, Qt::Key_Z, Qt::ControlModifier);
@@ -3216,6 +3261,231 @@ void TestTextView::longLineTypingIsFast()
         QVERIFY2(fastest < 20 * 60, qPrintable(QString::number(fastest)));
     }
     QCOMPARE(m_doc->firstBlock().text(), line);
+}
+
+
+void TestTextView::compareWithSettledLongLine()
+{
+    auto *probe = static_cast<ProbeView *>(m_view);
+    const int top = probe->positionAtPoint(QPointF(probe->left(), 0));
+    const qreal remainder = std::fmod(m_view->scrollPixels(), probe->rowHeight());
+    const QImage image = m_view->viewport()->grab().toImage();
+    QTextDocument doc;
+    doc.setDocumentLayout(new vn::DocumentLayout(&doc));
+    doc.setPlainText(m_doc->toPlainText());
+    ProbeView fresh(&doc);
+    fresh.setFont(m_view->font());
+    fresh.resize(m_view->size());
+    fresh.setWordWrap(true);
+    fresh.show();
+    // Force every piece to be asked for in the reference, without an idle
+    // timer or the production view's estimates deciding its row numbers.
+    vn::LineLayout exact;
+    QTextOption option;
+    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    option.setTabStopDistance(QFontMetricsF(fresh.font()).horizontalAdvance(u' ') * 4);
+    vn::LineLayout::Setup setup{fresh.font(), option, true,
+        fresh.widthForText(), qreal(fresh.rowHeight()), 0};
+    QVERIFY(exact.build(doc.firstBlock(), setup));
+    while (exact.settleOne(0)) {}
+    const int row = exact.lineForTextPosition(top).lineNumber();
+    // Ask the reference view for every piece too, then restore its carets.
+    for (int position : exact.pieceStarts()) {
+        QTextCursor c(&doc); c.setPosition(position); fresh.setTextCursor(c);
+    }
+    QList<QTextCursor> carets;
+    for (const QTextCursor &c : m_view->cursors()) {
+        QTextCursor copy(&doc); copy.setPosition(c.anchor()); copy.setPosition(c.position(), QTextCursor::KeepAnchor);
+        carets.append(copy);
+    }
+    fresh.setCursors(carets, 0);
+    fresh.clearFocus();
+    fresh.scrollToLinePosition((row * fresh.rowHeight() + remainder) / (exact.lineCount() * qreal(fresh.rowHeight())));
+    QCOMPARE(fresh.positionAtPoint(QPointF(fresh.left(), 0)), top);
+    QCOMPARE(fresh.viewport()->grab().toImage(), image);
+}
+
+void TestTextView::longLineResetupKeepsPiecesAndSettlesExact()
+{
+    QTextDocument doc;
+    doc.setPlainText(longLine(QStringLiteral("words, ii WWW 1234 \t"), 100000));
+    vn::LineLayout lazy;
+    vn::LineLayout::Setup setup{m_view->font(), {}, true, 430, 20, 0};
+    setup.option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    setup.option.setTabStopDistance(40);
+    QVERIFY(lazy.build(doc.firstBlock(), setup));
+    QVERIFY(lazy.unmeasuredCount() > 0);
+    const auto starts = lazy.pieceStarts();
+    for (int step = 0; step < 4; ++step) {
+        setup.wrapWidth = 300 + step * 53;
+        setup.font.setPointSizeF(10 + step);
+        QVERIFY(lazy.resetup(doc.firstBlock(), setup));
+        QCOMPARE(lazy.pieceStarts(), starts);
+        while (lazy.settleOne(0)) {}
+        QCOMPARE(lazy.unmeasuredCount(), 0);
+        vn::LineLayout fresh;
+        QVERIFY(fresh.build(doc.firstBlock(), setup));
+        while (fresh.settleOne(0)) {}
+        QCOMPARE(lazy.lineCount(), fresh.lineCount());
+        for (int row = 0; row < fresh.lineCount(); ++row)
+            QCOMPARE(lazy.lineAt(row).textStart(), fresh.lineAt(row).textStart());
+        setup.lineHeight += 2;
+        QVERIFY(lazy.resetup(doc.firstBlock(), setup));
+        QCOMPARE(lazy.unmeasuredCount(), 0);
+        QCOMPARE(lazy.lineCount(), fresh.lineCount());
+    }
+}
+
+void TestTextView::longLineRebuildKeepsEstimates()
+{
+    QTextDocument doc;
+    doc.setPlainText(longLine(QStringLiteral("alpha beta WWW iii "), 100000));
+    vn::LineLayout::Setup setup{m_view->font(), {}, true, 430, 20, 0};
+    setup.option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    vn::LineLayout before;
+    QVERIFY(before.build(doc.firstBlock(), setup));
+    before.settleAround(60000);
+    const auto starts = before.pieceStarts();
+    const int count = before.lineCount(), pending = before.unmeasuredCount();
+    QVERIFY(pending > 0);
+    vn::LineLayout after;
+    QVERIFY(after.rebuild(doc.firstBlock(), setup, &before, before.length(), nullptr, 0));
+    QCOMPARE(after.unmeasuredCount(), pending);
+    QCOMPARE(after.lineCount(), count);
+    QCOMPARE(after.pieceStarts(), starts);
+    setup.wrapWidth = 300; // An edit may receive pieces with a stale setup too.
+    vn::LineLayout changed;
+    QVERIFY(changed.rebuild(doc.firstBlock(), setup, &after, after.length(), nullptr, 0));
+    QCOMPARE(changed.pieceStarts(), starts);
+    QCOMPARE(changed.unmeasuredCount(), int(starts.size()));
+}
+
+void TestTextView::longLineEstimatesShowExactScreen()
+{
+    // Capture without an event-loop wait: the 300 ms idle timer cannot help.
+    setText(longLine(QStringLiteral("alpha, WWW iii 12345 words "), 1000000));
+    m_view->setWordWrap(true);
+    auto *probe = static_cast<ProbeView *>(m_view);
+    QTextCursor cursor(m_doc);
+    cursor.setPosition(650000);
+    m_view->setTextCursor(cursor);
+    m_view->clearFocus();
+    for (int step = 0; step < 8; ++step) {
+        const int before = probe->positionAtPoint(QPointF(probe->left(), 0));
+        if (step % 2 == 0) m_view->resize(550 + (step / 2) * 43, 400);
+        else { QFont f = m_view->font(); f.setPointSizeF(11 + step / 2); m_view->setFont(f); }
+        const QImage immediate = m_view->viewport()->grab().toImage();
+        compareWithSettledLongLine();
+        const int top = probe->positionAtPoint(QPointF(probe->left(), 0));
+        // The prior top character remains on the first row (a wider row may
+        // start slightly before it).
+        const int next = probe->positionAtPoint(QPointF(probe->left(), probe->rowHeight()));
+        QVERIFY2(top <= before && before < next, qPrintable(QStringLiteral("step %1: %2 <= %3 < %4").arg(step).arg(top).arg(before).arg(next)));
+        QTest::qWait(900);
+        QCOMPARE(probe->positionAtPoint(QPointF(probe->left(), 0)), top);
+        QCOMPARE(m_view->viewport()->grab().toImage(), immediate);
+    }
+}
+
+void TestTextView::longLineWheelUpIntoEstimatesKeepsScreen()
+{
+    setText(longLine(QStringLiteral("alpha beta WWW iii words, "), 1000000));
+    m_view->setWordWrap(true);
+    auto *probe = static_cast<ProbeView *>(m_view);
+    QTextCursor c(m_doc); c.setPosition(700000); m_view->setTextCursor(c);
+    m_view->resize(470, 400);
+    m_view->clearFocus();
+    for (int i = 0; i < 30; ++i) {
+        QWheelEvent wheel(QPointF(200, 100), QPointF(200, 100), {}, QPoint(0, 120),
+                          Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(m_view->viewport(), &wheel);
+    }
+    const int top = probe->positionAtPoint(QPointF(probe->left(), 2));
+    const auto image = m_view->viewport()->grab().toImage();
+    compareWithSettledLongLine();
+    QTest::qWait(900);
+    QCOMPARE(probe->positionAtPoint(QPointF(probe->left(), 2)), top);
+    QCOMPARE(m_view->viewport()->grab().toImage(), image);
+}
+
+void TestTextView::longLineCaretMovesAfterResize()
+{
+    setText(longLine(QStringLiteral("alpha beta words 12345 "), 1000000));
+    m_view->setWordWrap(true);
+    QList<QTextCursor> carets;
+    for (int position : {450000, 650000}) {
+        QTextCursor c(m_doc); c.setPosition(position); carets.append(c);
+    }
+    m_view->setCursors(carets, 0);
+    m_view->resize(470, 400);
+    const auto original = m_view->cursors();
+    QTest::keyClick(m_view, Qt::Key_Down);
+    QTest::keyClick(m_view, Qt::Key_Up);
+    const auto moved = m_view->cursors();
+    QCOMPARE(moved.size(), original.size());
+    for (int i = 0; i < moved.size(); ++i) QCOMPARE(moved[i].position(), original[i].position());
+}
+
+void TestTextView::longLineFindAfterZoom()
+{
+    setText(longLine(QStringLiteral("alpha beta words "), 800000) + QStringLiteral("unique-match"));
+    QFont f = m_view->font(); f.setPointSizeF(16); m_view->setFont(f);
+    selectRange(m_doc->characterCount() - 13, m_doc->characterCount() - 1);
+    m_view->ensureCursorVisible();
+    m_view->grab();
+    QVERIFY(static_cast<ProbeView *>(m_view)->caretRectangle().intersects(m_view->viewport()->rect()));
+}
+
+void TestTextView::longLineEditsAfterResize()
+{
+    setText(longLine(QStringLiteral("alpha beta words "), 1000000));
+    QTextCursor c(m_doc); c.setPosition(650000); m_view->setTextCursor(c);
+    m_view->resize(470, 400);
+    type(QStringLiteral("inserted "));
+    compareWithFreshView(0);
+}
+
+void TestTextView::longLineWrapOffMeasuresOnlyShown()
+{
+    QTextDocument doc;
+    doc.setPlainText(longLine(QStringLiteral("alpha beta words "), 1000000));
+    vn::LineLayout layout;
+    vn::LineLayout::Setup setup{m_view->font(), {}, false, 1e7, 20, 0};
+    QVERIFY(layout.build(doc.firstBlock(), setup));
+    setup.font.setPointSizeF(16);
+    QVERIFY(layout.resetup(doc.firstBlock(), setup));
+    const int before = layout.unmeasuredCount();
+    layout.settleTo(600);
+    QVERIFY(layout.unmeasuredCount() < before);
+    QVERIFY(layout.unmeasuredCount() >= before - 2);
+    vn::LineLayout fresh;
+    QVERIFY(fresh.build(doc.firstBlock(), setup));
+    while (fresh.settleOne(0)) {}
+    for (int x = 0; x < 600; x += 7)
+        QCOMPARE(layout.lineAt(0).xToCursor(x), fresh.lineAt(0).xToCursor(x));
+    setText(doc.toPlainText());
+    m_view->setWordWrap(false);
+    m_view->setFont(setup.font);
+    m_view->grab();
+    compareWithFreshView(0);
+    QTextCursor selection(m_doc);
+    selection.setPosition(m_doc->characterCount() - 1);
+    selection.setPosition(0, QTextCursor::KeepAnchor); // Keep the caret at the shown end.
+    m_view->setTextCursor(selection);
+    m_view->grab(); // Painting the clipped selection must not settle the next piece.
+}
+
+void TestTextView::longLineResizeIsFast()
+{
+    setText(longLine(QStringLiteral("alpha beta words "), 1000000));
+    m_view->setWordWrap(true);
+    m_view->grab();
+    ThreadCpuTimer timer;
+    for (int step = 0; step < 20; ++step) {
+        m_view->resize(500 + step * 3, 400);
+        m_view->grab();
+    }
+    QVERIFY2(timer.elapsed() < 20 * 15, qPrintable(QString::number(timer.elapsed())));
 }
 
 QTEST_MAIN(TestTextView)

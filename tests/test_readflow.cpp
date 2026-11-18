@@ -163,6 +163,7 @@ class TestReadFlow : public QObject
 private slots:
     void wholeRowsFill();
     void adjustPositionsKeepsPlaces();
+    void adjustPositionsInvalidatesRowCache();
     void backwardScreenKeepsEndAfterAdjustment();
     void cutAtDeepestFit();
     void unbreakableTallerThanColumn();
@@ -1103,6 +1104,7 @@ void TestReadFlow::adjustPositionsKeepsPlaces()
     const auto original = flow.screen().start;
     flow.pageForward();
     const auto end = flow.screen().end;
+    const int kept = flow.screen().columns.front().segments.front().keptTo;
     source.rows[0].height += 30;
     source.rows[0].tops = topsOf(103);
     source.rows[0].cuts = paragraphCuts(source.rows[0].tops);
@@ -1112,8 +1114,23 @@ void TestReadFlow::adjustPositionsKeepsPlaces()
     flow.reflow();
     QCOMPARE(flow.screen().start.y, shifted);
     QVERIFY(flow.screen().hasKept);
+    QCOMPARE(flow.screen().columns.front().segments.front().keptTo, kept + 30);
     flow.pageBack();
     QCOMPARE(flow.screen().start.y, original.y + 30);
+}
+
+void TestReadFlow::adjustPositionsInvalidatesRowCache()
+{
+    FakeSource source; source.para(100, 1);
+    ReadFlow flow(&source); flow.setGeometry(geo(2, 80));
+    flow.goTo({0, 200}); // Caches the old tops.
+    source.rows[0].height += 30;
+    for (int &top : source.rows[0].tops) if (top >= 200) top += 30;
+    source.rows[0].cuts = paragraphCuts(source.rows[0].tops);
+    flow.adjustPositions([](Position &p) { if (p.row == 0 && p.y >= 200) p.y += 30; });
+    // No reflow: adjustPositions itself must forget the cached tops.
+    flow.nudge(-1);
+    QCOMPARE(flow.screen().start.y, 190);
 }
 
 void TestReadFlow::backwardScreenKeepsEndAfterAdjustment()
