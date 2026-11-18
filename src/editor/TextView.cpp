@@ -920,7 +920,7 @@ void TextView::onDocumentChanged(int from, int charsRemoved, int charsAdded)
         m_lines.clear();
         m_lines.resize(newCount);
         m_liveLayouts = 0;
-        m_fenceMarksValid = false;
+        invalidateFenceMarks();
         m_tableRun = {};
         m_htmlRun = {};
     } else {

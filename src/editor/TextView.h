@@ -36,6 +36,8 @@ class QImage;
 class QMenu;
 class QTextDocument;
 
+class FenceProbe; // (tests)
+
 namespace vn {
 
 namespace md {
@@ -636,8 +638,11 @@ private:
     HtmlRun m_htmlRun;
     TableWindow htmlTableWindow(int line);
     // Whether fenced code is open where `line` starts (see m_fenceMarks).
+    friend class ::FenceProbe;
     bool inFencedCode(int line);
-    void rebuildFenceMarks();
+    void invalidateFenceMarks();
+    void scanFenceMarks(int upTo, int budgetMs);
+    void scheduleFenceScan();
     void spliceFenceMarks(int first, int oldAffected, int newAffected);
     void addTableMenu(QMenu *menu);
 
@@ -774,7 +779,8 @@ private:
     Qt::KeyboardModifier m_multiCursorModifier = Qt::AltModifier;
     // The lines that open or close fenced code (three or more backticks or
     // tildes after any quote markers; see core/src/format.rs), in order,
-    // for the whole document. Made when first needed, then kept up to date
+    // for the lines scanned so far: in idle time after a change, or up to a
+    // line when it is asked about, then kept up to date
     // by onDocumentChanged. Pairing them says whether a line is in a fence.
     struct FenceMark
     {
@@ -786,7 +792,8 @@ private:
     // The mark of a line, if it is one; as the core's scan reads it.
     static std::optional<FenceMark> fenceMarkOf(int line, const QString &text);
     std::vector<FenceMark> m_fenceMarks;
-    bool m_fenceMarksValid = false;
+    int m_fenceScanned = 0; // Lines from the top that m_fenceMarks covers.
+    bool m_fenceScanPending = false;
     md::TableInfo m_tableInfo;
     struct TableTarget
     {

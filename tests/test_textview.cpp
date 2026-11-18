@@ -51,6 +51,13 @@ public:
     }
 };
 
+// Lets the fence test ask a view whether a line is inside fenced code.
+class FenceProbe
+{
+public:
+    static bool inFence(TextView *view, int line) { return view->inFencedCode(line); }
+};
+
 // Counts what the view's viewport is asked to paint.
 class PaintSpy : public QObject
 {
@@ -112,6 +119,7 @@ private Q_SLOTS:
     void lineCacheFollowsEdits();
     void caretBlinkRepaintsOnlyTheCaret();
     void longLinePaintsTheSameInStrips();
+    void fenceStateAfterEdits();
     void surroundSelection();
     void surroundRepeatsAndMultiCaret();
     void surroundPairsDependOnLanguage();
@@ -1524,6 +1532,103 @@ static void useTestSettings()
     vn::Settings::instance().useFile(dir.filePath(QStringLiteral("settings.ini")));
 }
 Q_COREAPP_STARTUP_FUNCTION(useTestSettings)
+
+// The fence state of every line, by scanning the whole document afresh (the
+// rules of core/src/format.rs: a fence opens at a mark and closes at the next
+// mark of the same character, at least as long, with nothing after it).
+static QList<bool> scanFences(const QTextDocument &doc)
+{
+    QList<bool> in;
+    QChar openCh;
+    int openRun = 0;
+    bool open = false;
+    for (QTextBlock b = doc.begin(); b.isValid(); b = b.next()) {
+        in.append(open);
+        const QString t = b.text();
+        qsizetype i = 0;
+        while (i < t.size() && (t.at(i) == u' ' || t.at(i) == u'>'))
+            ++i;
+        if (i >= t.size() || (t.at(i) != u'`' && t.at(i) != u'~'))
+            continue;
+        const QChar ch = t.at(i);
+        qsizetype run = i;
+        while (run < t.size() && t.at(run) == ch)
+            ++run;
+        if (run - i < 3)
+            continue;
+        bool closes = true;
+        for (qsizetype k = run; k < t.size(); ++k)
+            closes = closes && t.at(k).isSpace();
+        if (!open) {
+            open = true;
+            openCh = ch;
+            openRun = int(run - i);
+        } else if (ch == openCh && run - i >= openRun && closes) {
+            open = false;
+        }
+    }
+    return in;
+}
+
+void TestTextView::fenceStateAfterEdits()
+{
+    m_view->setMarkdownEditing(true);
+    const QStringList pieces = {
+        QStringLiteral("```"), QStringLiteral("````"), QStringLiteral("~~~"), QStringLiteral("~~~~~"),
+        QStringLiteral("```cpp"), QStringLiteral("  ```"), QStringLiteral("> ```"), QStringLiteral("- ```"),
+        QStringLiteral(">   ~~~  "), QStringLiteral("``"), QStringLiteral("text"), QStringLiteral("| a | b |"),
+        QStringLiteral(""), QStringLiteral("``` x"), QStringLiteral("\t```"),
+    };
+    QRandomGenerator rng(12345);
+    const auto line = [&] { return pieces.at(int(rng.bounded(quint32(pieces.size())))); };
+    QStringList lines;
+    for (int i = 0; i < 400; ++i)
+        lines << line();
+    setText(lines.join(u'\n'));
+    const auto check = [&](const char *what) {
+        const QList<bool> want = scanFences(*m_doc);
+        QCOMPARE(int(want.size()), m_doc->blockCount());
+        // Asked in a mixed order, so that the scan is made in steps.
+        for (int n = 0; n < 40; ++n) {
+            const int l = int(rng.bounded(quint32(want.size())));
+            QVERIFY2(FenceProbe::inFence(m_view, l) == want.at(l), what);
+        }
+        for (int l = 0; l < want.size(); ++l)
+            QVERIFY2(FenceProbe::inFence(m_view, l) == want.at(l), what);
+    };
+    check("initial");
+    for (int step = 0; step < 300; ++step) {
+        const int blocks = m_doc->blockCount();
+        QTextCursor c(m_doc);
+        const int kind = int(rng.bounded(6u));
+        c.setPosition(m_doc->findBlockByNumber(int(rng.bounded(quint32(blocks)))).position());
+        if (kind == 0) {
+            c.insertText(line() + u'\n');
+        } else if (kind == 1) {
+            c.movePosition(QTextCursor::NextBlock, QTextCursor::KeepAnchor, 1 + int(rng.bounded(40u)));
+            c.removeSelectedText();
+        } else if (kind == 2) {
+            c.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
+            c.insertText(line());
+        } else if (kind == 3) {
+            c.insertText(QStringList{line(), line(), line()}.join(u'\n') + u'\n');
+        } else if (kind == 4) {
+            m_doc->undo();
+        } else {
+            m_doc->redo();
+        }
+        if (rng.bounded(3u) == 0)
+            QCoreApplication::processEvents(); // (Lets the idle scan go on.)
+        if (rng.bounded(4u) == 0 || step % 25 == 0)
+            check("after an edit");
+    }
+    check("end");
+    // A scan finished in idle time gives the same answers.
+    QTRY_VERIFY(m_view->isVisible());
+    for (int i = 0; i < 200; ++i)
+        QCoreApplication::processEvents();
+    check("after idle");
+}
 
 void TestTextView::surroundSelection()
 {

@@ -4,9 +4,11 @@
 // step and does nothing in a read-only view or outside a table.
 #include "TextView.h"
 
+#include <QElapsedTimer>
 #include <QMenu>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QTimer>
 
 #include <algorithm>
 #include <optional>
@@ -58,27 +60,73 @@ std::optional<TextView::FenceMark> TextView::fenceMarkOf(int line, const QString
     return FenceMark{line, ch, int(run - i), closes};
 }
 
-void TextView::rebuildFenceMarks()
+void TextView::invalidateFenceMarks()
 {
     m_fenceMarks.clear();
-    for (QTextBlock block = m_doc->begin(); block.isValid(); block = block.next()) {
-        if (const auto mark = fenceMarkOf(block.blockNumber(), block.text()))
+    m_fenceScanned = 0;
+    scheduleFenceScan();
+}
+
+void TextView::scanFenceMarks(int upTo, int budgetMs)
+{
+    // Marks are made from the first unscanned line on, until `upTo` lines are
+    // done or the time is up (budgetMs < 0: no limit).
+    upTo = qMin(upTo, m_doc->blockCount());
+    if (m_fenceScanned >= upTo)
+        return;
+    QElapsedTimer timer;
+    timer.start();
+    QTextBlock block = m_doc->findBlockByNumber(m_fenceScanned);
+    int n = m_fenceScanned;
+    for (; block.isValid() && n < upTo; block = block.next(), ++n) {
+        if (const auto mark = fenceMarkOf(n, block.text()))
             m_fenceMarks.push_back(*mark);
+        if (budgetMs >= 0 && (n & 255) == 255 && timer.elapsed() >= budgetMs) {
+            ++n;
+            break;
+        }
     }
-    m_fenceMarksValid = true;
+    m_fenceScanned = n;
+}
+
+void TextView::scheduleFenceScan()
+{
+    if (m_fenceScanPending || !m_markdown || m_fenceScanned >= m_doc->blockCount())
+        return;
+    m_fenceScanPending = true;
+    QTimer::singleShot(0, this, [this] {
+        m_fenceScanPending = false;
+        if (!m_markdown)
+            return;
+        // A little at a time, so that typing is not held up; whatever is not
+        // done by the time a line is asked about is done then.
+        scanFenceMarks(m_doc->blockCount(), 3);
+        scheduleFenceScan();
+    });
 }
 
 void TextView::spliceFenceMarks(int first, int oldAffected, int newAffected)
 {
     // Lines [first, first + oldAffected) were replaced by newAffected lines.
-    if (!m_fenceMarksValid)
+    // Only lines before m_fenceScanned have marks.
+    if (first >= m_fenceScanned) {
+        scheduleFenceScan();
         return;
+    }
     const auto byLine = [](const FenceMark &mark, int line) { return mark.line < line; };
     const auto lo = std::lower_bound(m_fenceMarks.begin(), m_fenceMarks.end(), first, byLine);
+    if (first + oldAffected > m_fenceScanned) {
+        // The edit reaches the end of the scanned part: scan on from its start.
+        m_fenceMarks.erase(lo, m_fenceMarks.end());
+        m_fenceScanned = first;
+        scheduleFenceScan();
+        return;
+    }
     const auto hi = std::lower_bound(lo, m_fenceMarks.end(), first + oldAffected, byLine);
     const auto at = m_fenceMarks.erase(lo, hi);
     for (auto it = at; it != m_fenceMarks.end(); ++it)
         it->line += newAffected - oldAffected;
+    m_fenceScanned += newAffected - oldAffected;
     std::vector<FenceMark> fresh;
     QTextBlock block = m_doc->findBlockByNumber(first);
     for (int n = 0; n < newAffected && block.isValid(); ++n, block = block.next()) {
@@ -86,12 +134,12 @@ void TextView::spliceFenceMarks(int first, int oldAffected, int newAffected)
             fresh.push_back(*mark);
     }
     m_fenceMarks.insert(at, fresh.begin(), fresh.end());
+    scheduleFenceScan();
 }
 
 bool TextView::inFencedCode(int line)
 {
-    if (!m_fenceMarksValid)
-        rebuildFenceMarks();
+    scanFenceMarks(line, -1);
     // The core's rules (format.rs): a fence opens at a mark and closes at
     // the next mark of the same character, at least as long, on its own.
     const FenceMark *open = nullptr;
