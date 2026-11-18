@@ -725,6 +725,15 @@ void ReadFlow::ensureScreen()
         reflow();
 }
 
+void ReadFlow::adjustPositions(const std::function<void(Position &)> &adjust)
+{
+    m_rowCache.clear(); // Tops and cuts depend on the now-settled row counts.
+    adjust(m_screen.start);
+    adjust(m_screen.end);
+    if (m_keptUntil) adjust(*m_keptUntil);
+    for (Step &step : m_history) { adjust(step.from); adjust(step.to); }
+}
+
 const Screen &ReadFlow::reflow()
 {
     m_rowCache.clear();
@@ -733,7 +742,10 @@ const Screen &ReadFlow::reflow()
         m_history.clear();
     // The same rows: the same place. Others: the place of the same source line.
     const Position from = same ? m_screen.start : positionOfLine(m_startLine);
-    m_screen = fill(from);
+    const bool backward = same && m_screen.backward;
+    const Position end = m_screen.end;
+    m_screen = fill(backward ? startingBefore(end, std::nullopt) : from);
+    m_screen.backward = backward;
     m_screenKey = m_geometry.key();
     m_hasScreen = true;
     if (same && m_keptUntil)
@@ -767,7 +779,9 @@ const Screen &ReadFlow::toEnd()
     m_history.clear();
     if (m_source->count() == 0)
         return show(fill({0, 0}));
-    return show(fill(startingBefore(endOfDocument(), std::nullopt)));
+    Screen screen = fill(startingBefore(endOfDocument(), std::nullopt));
+    screen.backward = true;
+    return show(std::move(screen));
 }
 
 const Screen &ReadFlow::pageForward()
@@ -835,7 +849,9 @@ const Screen &ReadFlow::pageBack()
             break;
         }
     }
-    return show(fill(startingBefore(end, m_screen.start)));
+    Screen screen = fill(startingBefore(end, m_screen.start));
+    screen.backward = true;
+    return show(std::move(screen));
 }
 
 const Screen &ReadFlow::nudge(int lines)

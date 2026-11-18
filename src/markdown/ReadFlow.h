@@ -15,6 +15,7 @@
 #include <QList>
 
 #include <compare>
+#include <functional>
 #include <optional>
 #include <list>
 #include <vector>
@@ -160,6 +161,7 @@ struct Screen
     Position end;                // The place the next column would start at.
     bool atStart = true;         // Nothing before start.
     bool atEnd = true;           // Nothing from end on.
+    bool backward = false;      // Refill from the end after estimated heights settle.
     bool hasKept = false;        // Some segment has kept lines.
 
     bool empty() const { return columns.empty() || columns.front().segments.empty(); }
@@ -202,6 +204,8 @@ public:
     // from the same source line. Lines kept by the page turn that made the
     // screen stay marked when it is filled from the same place.
     const Screen &reflow();
+    // Geometry stayed the same, but lazy measurement moved places within rows.
+    void adjustPositions(const std::function<void(Position &)> &adjust);
     // The moves. Each returns the screen it shows; one that cannot move (page
     // forward at the end) shows the same screen again.
     // Keeps the last N lines, marked kept: lines of text only, so none of a

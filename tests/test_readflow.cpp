@@ -162,6 +162,8 @@ class TestReadFlow : public QObject
 
 private slots:
     void wholeRowsFill();
+    void adjustPositionsKeepsPlaces();
+    void backwardScreenKeepsEndAfterAdjustment();
     void cutAtDeepestFit();
     void unbreakableTallerThanColumn();
     void unbreakableMovesToNextColumn();
@@ -1090,6 +1092,49 @@ void TestReadFlow::touchesAboutAScreen()
     source.touched.clear();
     flow.toStart();
     QVERIFY2(source.touched.size() < 200, qPrintable(QString::number(source.touched.size())));
+}
+
+
+void TestReadFlow::adjustPositionsKeepsPlaces()
+{
+    FakeSource source; source.para(100, 1);
+    ReadFlow flow(&source); flow.setGeometry(geo(2, 80));
+    flow.goTo({0, 200});
+    const auto original = flow.screen().start;
+    flow.pageForward();
+    const auto end = flow.screen().end;
+    source.rows[0].height += 30;
+    source.rows[0].tops = topsOf(103);
+    source.rows[0].cuts = paragraphCuts(source.rows[0].tops);
+    flow.adjustPositions([](Position &p) { if (p.row == 0 && p.y >= 200) p.y += 30; });
+    QCOMPARE(flow.screen().end.y, end.y + 30);
+    const int shifted = flow.screen().start.y;
+    flow.reflow();
+    QCOMPARE(flow.screen().start.y, shifted);
+    QVERIFY(flow.screen().hasKept);
+    flow.pageBack();
+    QCOMPARE(flow.screen().start.y, original.y + 30);
+}
+
+void TestReadFlow::backwardScreenKeepsEndAfterAdjustment()
+{
+    FakeSource source; source.para(100, 1);
+    ReadFlow flow(&source); flow.setGeometry(geo(2, 80));
+    flow.toEnd();
+    QVERIFY(flow.screen().backward);
+    source.rows[0].height += 30;
+    source.rows[0].tops = topsOf(103);
+    source.rows[0].cuts = paragraphCuts(source.rows[0].tops);
+    flow.adjustPositions([](Position &p) { if (p.row == 0) p.y += 30; });
+    flow.reflow();
+    QVERIFY(flow.screen().atEnd);
+    QCOMPARE(flow.screen().end.row, 1);
+    flow.pageBack();
+    QVERIFY(flow.screen().backward);
+    const auto end = flow.screen().end;
+    flow.adjustPositions([](Position &p) { if (p.row == 0) p.y += 20; });
+    flow.reflow();
+    QCOMPARE(flow.screen().end.y, end.y + 20);
 }
 
 QTEST_APPLESS_MAIN(TestReadFlow)
