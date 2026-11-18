@@ -41,6 +41,7 @@
 #include <QtMath>
 
 #include <algorithm>
+#include <limits>
 #include <functional>
 #include <atomic>
 #include <deque>
@@ -3620,19 +3621,25 @@ const RenderedBlock::Breaks &RenderedBlock::breaks() const
             }
             if (most < 2)
                 continue;
+            std::sort(lines.begin(), lines.end());
+            for (auto &column : tops)
+                std::sort(column.begin(), column.end());
+            size_t crossed = 0;
+            qreal furthestBottom = -std::numeric_limits<qreal>::infinity();
             for (const auto &[lineTop, lineBottom] : lines) {
                 Q_UNUSED(lineBottom);
                 const int cut = int(std::floor(lineTop));
                 if (cut <= std::ceil(grid->ys[row]) || cut >= grid->ys[row + 1])
                     continue;
-                const bool across = std::any_of(lines.begin(), lines.end(), [cut](const auto &l) {
-                    return l.first < cut - 0.5 && l.second > cut + 0.5;
-                });
-                if (across)
+                while (crossed < lines.size() && lines[crossed].first < cut - 0.5) {
+                    furthestBottom = qMax(furthestBottom, lines[crossed].second);
+                    ++crossed;
+                }
+                if (furthestBottom > cut + 0.5)
                     continue;
                 int above = 0, below = 0;
                 for (const auto &column : tops) {
-                    const int n = int(std::count_if(column.begin(), column.end(), [cut](qreal t) { return t < cut - 0.5; }));
+                    const int n = int(std::lower_bound(column.begin(), column.end(), cut - 0.5) - column.begin());
                     above = qMax(above, n);
                     below = qMax(below, int(column.size()) - n);
                 }
