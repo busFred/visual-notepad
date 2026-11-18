@@ -217,6 +217,7 @@ const TextView::ColumnLayout &TextView::columnLayout()
     l.width = qBound(1, qRound(m_columns->chars * charWidth), qMax(1, room - l.textLeft));
     l.fit = qMax(1, (room + l.gap) / (l.columnWidth() + l.gap));
     l.count = m_columns->wanted > 0 ? qMin(m_columns->wanted, l.fit) : l.fit;
+    l.gap = columns::spreadGap(size.width(), l.count, l.columnWidth());
     const int total = l.count * l.columnWidth() + (l.count - 1) * l.gap;
     l.left = (size.width() - total) / 2;
     l.top = columns::topRoom;
@@ -839,6 +840,11 @@ void TextView::paintColumns(QPaintEvent *event)
                                                                               columnsCharWidth()),
                                           offset, m_columns->barDrag.active && m_columns->barDrag.column == c);
         }
+    }
+    // A thin line down the middle of each gap.
+    for (int c = 1; c < int(screen.columns.size()); ++c) {
+        painter.fillRect(QRect(columns::dividerX(l.columnLeft(c), l.gap), l.top, 1, l.height),
+                         theme::color(theme::Role::divider));
     }
     if (paintedFirst >= 0)
         trimLayouts(paintedFirst, paintedLast);

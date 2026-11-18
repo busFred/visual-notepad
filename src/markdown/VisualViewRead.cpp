@@ -263,6 +263,7 @@ const VisualView::ReadLayout &VisualView::readLayout() const
     l.width = qBound(1, qRound(m_readChars * charWidth), room);
     l.fit = qMax(1, (room + l.gap) / (l.width + l.gap));
     l.count = m_readColumns > 0 ? qMin(m_readColumns, l.fit) : l.fit;
+    l.gap = columns::spreadGap(size.width(), l.count, l.width);
     const int total = l.count * l.width + (l.count - 1) * l.gap;
     l.left = (size.width() - total) / 2;
     l.top = readTop;
@@ -764,6 +765,11 @@ void VisualView::paintRead(QPaintEvent *event)
     painter.fillRect(event->rect(), background);
     const md::Screen &screen = ensureReadScreen();
     const ReadLayout &l = readLayout();
+    // A thin line down the middle of each gap.
+    for (int c = 1; c < int(screen.columns.size()); ++c) {
+        painter.fillRect(QRect(columns::dividerX(l.left + c * (l.width + l.gap), l.gap), l.top, 1, l.height),
+                         theme::color(theme::Role::divider));
+    }
     for (int c = 0; c < int(screen.columns.size()); ++c) {
         const qreal left = l.left + c * (l.width + l.gap);
         const QRectF band(left - readMargin, 0, l.width + 2 * readMargin, viewport()->height());

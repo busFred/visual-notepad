@@ -8,6 +8,7 @@
 #include "markdown/MathRenderer.h"
 #include "Theme.h"
 #include "editor/DocumentLayout.h"
+#include "editor/ReadControls.h"
 #include "markdown/BlockRenderer.h"
 #include "markdown/BlockViewer.h"
 #include "markdown/ImageViewer.h"
@@ -5439,7 +5440,7 @@ void TestVisualView::readModeKeepsThePlace()
 void TestVisualView::readColumnsFollowWidthCharactersAndZoom()
 {
     // As the view works it out: characters of the text font at the zoom, the
-    // room left by the page arrows, 40 px between columns.
+    // room left by the page arrows, at least 40 px between columns.
     const auto charWidth = [this] {
         QFont body = theme::textFont();
         body.setPointSizeF(body.pointSizeF() * m_view->font().pointSizeF() / theme::editorFont().pointSizeF());
@@ -5460,7 +5461,11 @@ void TestVisualView::readColumnsFollowWidthCharactersAndZoom()
     const QRect firstColumn = m_view->readColumnRect(0);
     const QRect lastColumn = m_view->readColumnRect(m_view->readColumnCount() - 1);
     QVERIFY(qAbs(firstColumn.left() - (m_view->viewport()->width() - lastColumn.right() - 1)) <= 1);
-    QCOMPARE(m_view->readColumnRect(1).left() - firstColumn.right() - 1, 40);
+    // The spare room is shared: a gap is at least 40 and no narrower than a side.
+    const int gap = m_view->readColumnRect(1).left() - firstColumn.right() - 1;
+    QVERIFY(gap >= 40);
+    QVERIFY2(gap + 1 >= firstColumn.left() || firstColumn.left() <= 56 + 1, qPrintable(QString::number(gap)));
+    QCOMPARE(gap, columns::spreadGap(m_view->viewport()->width(), m_view->readColumnCount(), firstColumn.width()));
     // The text is laid out at the column's width.
     QCOMPARE(static_cast<ProbeView *>(m_view)->columnWidth(), qreal(firstColumn.width()));
 

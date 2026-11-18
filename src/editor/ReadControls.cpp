@@ -7,6 +7,17 @@
 
 namespace vn::columns {
 
+int spreadGap(int viewWidth, int count, int columnWidth)
+{
+    if (count < 2)
+        return gap;
+    const int spare = qMax(0, viewWidth - count * columnWidth);
+    const int even = spare / (count + 1);
+    if (even >= sideRoom)
+        return qMax(gap, even);
+    return qMax(gap, (spare - 2 * sideRoom) / (count - 1));
+}
+
 PageButton::PageButton(Direction direction, bool round, QWidget *parent)
     : QAbstractButton(parent)
     , m_direction(direction)

@@ -336,7 +336,7 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
                  : defaultMode == QLatin1String("split") ? ViewMode::SourceVisual
                                                          : ViewMode::Visual;
     m_sourceZoom = m_visualZoom = Settings::instance().number(key::zoom);
-    m_readColumns = qBound(0, Settings::instance().number(key::readColumns), 4);
+    m_readColumns = qBound(0, Settings::instance().number(key::readColumns), 99);
     m_readChars = qBound(50, Settings::instance().number(key::readChars), 100);
     applySettings();
     connect(&Settings::instance(), &Settings::changed, this, &DocumentTab::onSettingChanged);
