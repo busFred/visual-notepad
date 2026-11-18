@@ -102,17 +102,51 @@ Position ReadFlow::skipGaps(Position position) const
     return position;
 }
 
+ReadFlow::RowCache &ReadFlow::cachedRow(int row) const
+{
+    auto it = std::find_if(m_rowCache.begin(), m_rowCache.end(), [row](const RowCache &entry) { return entry.row == row; });
+    if (it == m_rowCache.end()) {
+        m_rowCache.push_front(RowCache{.row = row});
+        if (m_rowCache.size() > 8)
+            m_rowCache.pop_back();
+    } else {
+        m_rowCache.splice(m_rowCache.begin(), m_rowCache, it);
+    }
+    return m_rowCache.front();
+}
+
 // A row's line tops: sorted, inside the row, and the row's own top first (a
 // row can always start at its top, even if text starts lower).
 QList<int> ReadFlow::tops(int row) const
 {
+    RowCache &entry = cachedRow(row);
+    if (entry.hasTops)
+        return entry.tops;
     const int h = m_source->height(row);
     QList<int> t = m_source->lineTops(row);
     std::sort(t.begin(), t.end());
     t.erase(std::remove_if(t.begin(), t.end(), [h](int y) { return y <= 0 || y >= h; }), t.end());
     t.erase(std::unique(t.begin(), t.end()), t.end());
     t.prepend(0);
+    entry.tops = t;
+    entry.hasTops = true;
     return t;
+}
+
+// The legal cuts of a row, kept to inside it.
+QList<int> ReadFlow::legalCuts(int row, RowKind kind, int h) const
+{
+    if (kind == RowKind::Unbreakable || kind == RowKind::Picture || kind == RowKind::Gap)
+        return {};
+    RowCache &entry = cachedRow(row);
+    if (entry.hasCuts)
+        return entry.cuts;
+    QList<int> cuts = m_source->cuts(row);
+    std::sort(cuts.begin(), cuts.end());
+    cuts.erase(std::remove_if(cuts.begin(), cuts.end(), [h](int c) { return c <= 0 || c >= h; }), cuts.end());
+    entry.cuts = cuts;
+    entry.hasCuts = true;
+    return cuts;
 }
 
 // The next line top after position, over rows (gap rows have no lines).
@@ -228,17 +262,6 @@ namespace {
 int repeatedHeader(RowSource *source, int row, RowKind kind, int y)
 {
     return kind == RowKind::Table && y > 0 ? qMax(0, source->headerHeight(row)) : 0;
-}
-
-// The legal cuts of a row, kept to inside it.
-QList<int> legalCuts(RowSource *source, int row, RowKind kind, int h)
-{
-    if (kind == RowKind::Unbreakable || kind == RowKind::Picture || kind == RowKind::Gap)
-        return {};
-    QList<int> cuts = source->cuts(row);
-    std::sort(cuts.begin(), cuts.end());
-    cuts.erase(std::remove_if(cuts.begin(), cuts.end(), [h](int c) { return c <= 0 || c >= h; }), cuts.end());
-    return cuts;
 }
 
 // A piece of a row between two cuts has at least 2 lines (table rows) in it:
@@ -426,7 +449,7 @@ Position ReadFlow::fillColumn(Position position, Column &column, int &pending) c
             y = 0;
             continue;
         }
-        const QList<int> cuts = legalCuts(m_source, row, kind, h);
+        const QList<int> cuts = legalCuts(row, kind, h);
         int cut = 0;
         if (!cuts.isEmpty()) {
             const QList<int> t = tops(row);
@@ -617,7 +640,7 @@ Position ReadFlow::backwardStart(Position end) const
             }
             const int h = m_source->height(row);
             const int header = kind == RowKind::Table ? qMax(0, m_source->headerHeight(row)) : 0;
-            const QList<int> cuts = legalCuts(m_source, row, kind, h);
+            const QList<int> cuts = legalCuts(row, kind, h);
             const QList<int> t = cuts.isEmpty() ? QList<int>() : tops(row);
             const int least = m_source->minPieceLines(row);
             int cut = -1;
@@ -704,6 +727,7 @@ void ReadFlow::ensureScreen()
 
 const Screen &ReadFlow::reflow()
 {
+    m_rowCache.clear();
     const bool same = m_hasScreen && m_screenKey == m_geometry.key();
     if (!same)
         m_history.clear();

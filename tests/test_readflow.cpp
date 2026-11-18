@@ -193,7 +193,26 @@ private slots:
     void lineRange();
     void startAndEnd();
     void touchesAboutAScreen();
+    void cachedRowsFollowReflow();
 };
+
+void TestReadFlow::cachedRowsFollowReflow()
+{
+    FakeSource source;
+    source.para(30);
+    ReadFlow flow(&source);
+    flow.setGeometry(geo(1, 80));
+    flow.nudge(3);
+    source.rows[0].height = 240;
+    source.rows[0].tops = topsOf(24);
+    source.rows[0].cuts = paragraphCuts(source.rows[0].tops);
+    const auto start = flow.reflow().start;
+    ReadFlow fresh(&source);
+    fresh.setGeometry(geo(1, 80));
+    QCOMPARE(describe(flow.screen(), source), describe(fresh.goTo(start), source));
+    QCOMPARE(describe(flow.nudge(1), source), describe(fresh.nudge(1), source));
+    QCOMPARE(describe(flow.pageForward(), source), describe(fresh.pageForward(), source));
+}
 
 void TestReadFlow::wholeRowsFill()
 {

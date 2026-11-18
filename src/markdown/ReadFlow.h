@@ -16,6 +16,7 @@
 
 #include <compare>
 #include <optional>
+#include <list>
 #include <vector>
 
 namespace vn::md {
@@ -238,6 +239,14 @@ private:
     Position endOfDocument() const;
     Position skipGaps(Position position) const;
     QList<int> tops(int row) const;
+    QList<int> legalCuts(int row, RowKind kind, int height) const;
+    struct RowCache {
+        int row;
+        QList<int> tops, cuts;
+        bool hasTops = false, hasCuts = false;
+    };
+    RowCache &cachedRow(int row) const;
+    mutable std::list<RowCache> m_rowCache;
     std::optional<Position> nextLine(Position position) const;
     std::optional<Position> prevLine(Position position) const;
     Position forward(Position position, int lines) const;
