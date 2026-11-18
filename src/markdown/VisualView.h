@@ -781,6 +781,8 @@ private:
     qint64 m_renderKiB = 0;
     int m_rendersRevision = -1;
     qreal m_rendersWidth = -1;
+    QFont m_rendersFont, m_rendersCodeFont; // What they were made with (see reflowRenders).
+    bool m_fontChanged = false;             // A new font: the renders are laid out again for it.
     bool m_rendersOverflow = false;
     qreal m_rendersDpr = -1;
     qreal m_rendersFigureHeight = -1;

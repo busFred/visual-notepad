@@ -328,13 +328,16 @@ public:
     // Memory use in KiB (about, but not under), for caches.
     int cost() const;
 
-    // The block for a column of another width (RenderContext::width; the
+    // The block for a column of another width (RenderContext::width) or font
+    // size (RenderContext::font and codeFont, the same but for the size; the
     // rest of the context as it was made with), made by laying the same
     // text out again rather than from the start: text and tables, code
     // boxes and their parts. False, and the block as it was, when more than
     // the layout depends on the width (pictures and figures fit the column,
     // formulas shrink to it) or the block is quick to make again (pictures,
-    // formulas, diagrams, chips): create() it.
+    // formulas, diagrams, chips): create() it. For a new font size also
+    // false for text that sets sizes of its own (headings, footnotes, font
+    // sizes and em lengths in the HTML): it is made again.
     bool reflow(const RenderContext &context);
 
     // Where source lines start in the rendering: (line offset from the
@@ -400,6 +403,8 @@ private:
     Figure m_diagramFigure; // Of a diagram (m_diagramCode not null), without its rectangle.
     Part m_part; // Of a code box; the whole box by default.
     bool m_reflows = false;   // See reflow().
+    bool m_followsFont = false; // Rich text whose HTML sets no size (see reflow()).
+    QFont m_font, m_codeFont;   // The fonts it was laid out with.
     bool m_fitsTable = false; // The block is a table fitted to the column (RenderContext::overflow),
     QVariant m_tableConstraints; // and its column widths before.
     int m_sourceLines = 0;    // Of a code box, for its line anchors.

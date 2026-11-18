@@ -745,8 +745,8 @@ void VisualView::resetRenders()
     m_renderKiB = 0;
 }
 
-// A new width (and nothing else new): the renders at hand are laid out
-// again at it where that is all the width changes (RenderedBlock::reflow),
+// A new width or font size (and nothing else new): the renders at hand are
+// laid out again at it where that is all it changes (RenderedBlock::reflow),
 // which takes a fraction of making them, and filed in the cache under their
 // new key; the others are made again when asked for. (Renders the cache has
 // at the old width stay there for it.)
@@ -755,6 +755,8 @@ void VisualView::reflowRenders()
     const RenderContext &ctx = renderContext();
     RenderContext before = ctx;
     before.width = m_rendersWidth;
+    before.font = m_rendersFont;
+    before.codeFont = m_rendersCodeFont;
     before.figureWidth = qMin(before.width, figureColumns * QFontMetricsF(before.font).averageCharWidth());
     m_renderKeys.clear();
     std::erase_if(m_renderOrder, [&](int line) {
@@ -2805,9 +2807,15 @@ const VisualView::Render *VisualView::rendered(const Row &r)
         m_rendersWidth = width;
         m_rendersDpr = dpr;
         m_rendersOverflow = readActive();
-    } else if (m_rendersWidth != width) {
+        m_rendersFont = bodyFont();
+        m_rendersCodeFont = font();
+        m_fontChanged = false;
+    } else if (m_rendersWidth != width || m_fontChanged) {
         reflowRenders();
         m_rendersWidth = width;
+        m_rendersFont = bodyFont();
+        m_rendersCodeFont = font();
+        m_fontChanged = false;
     }
     if (m_rendersFigureHeight != figureBoxHeight() || m_rendersFigureRevision != m_figureRevision) {
         dropFigureRenders();
@@ -3066,7 +3074,7 @@ const RenderedBlock *VisualView::renderedForRow(const Row &r)
 
 const VisualView::Render *VisualView::memoized(const Row &r) const
 {
-    if (m_rendersRevision != m_model->revision() || m_rendersWidth != textWidth()
+    if (m_fontChanged || m_rendersRevision != m_model->revision() || m_rendersWidth != textWidth()
         || m_rendersDpr != devicePixelRatioF() || m_rendersOverflow != readActive()
         || m_rendersFigureHeight != figureBoxHeight()
         || m_rendersFigureRevision != m_figureRevision)
@@ -4329,8 +4337,16 @@ void VisualView::focusOutEvent(QFocusEvent *event)
 
 void VisualView::changeEvent(QEvent *event)
 {
-    if (event->type() == QEvent::FontChange)
-        clearRenderCache();
+    if (event->type() == QEvent::FontChange) {
+        // The renders at hand are laid out again at the new size where they
+        // can be (reflowRenders, when one is asked for); the rest is made
+        // again. (The cache's are the old size's.)
+        m_contextValid = false;
+        m_itemMemo.clear();
+        m_cache.clear();
+        m_pendingKeys.clear();
+        m_fontChanged = true;
+    }
     TextView::changeEvent(event);
 }
 

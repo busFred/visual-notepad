@@ -518,6 +518,8 @@ private Q_SLOTS:
     void tableViewerIsTheRealTable();
     void tableGridLooksAsQtDrawsIt();
     void reflowedBlocksAreMadeBlocks();
+    void zoomedBlocksLookAsFreshOnes_data();
+    void zoomedBlocksLookAsFreshOnes();
     void tableLayoutIsQtsLayout();
     void tableLayoutBreaksOnlyChangedColumns();
     void equationViewerIsDrawnAsShapes();
@@ -7159,6 +7161,71 @@ void TestVisualView::tableLayoutBreaksOnlyChangedColumns()
         }
         QCOMPARE(TableLayout::cellsBroken() - before, changed * cells.height());
         QVERIFY(changed < cells.width()); // (The first two columns keep their widths.)
+    }
+}
+
+
+void TestVisualView::zoomedBlocksLookAsFreshOnes_data()
+{
+    QTest::addColumn<bool>("read");
+    QTest::newRow("scrolling") << false;
+    QTest::newRow("read mode") << true;
+}
+
+// A zoom step lays the blocks at hand out again with the new font instead of
+// making them from their HTML (RenderedBlock::reflow); what it shows must be
+// what a view made at that zoom shows.
+void TestVisualView::zoomedBlocksLookAsFreshOnes()
+{
+    QFETCH(bool, read);
+    QString text = QStringLiteral("# Heading one\n\nSome *emphasis*, `inline code` and **bold** text that goes on for a while so that it wraps in the column.\n\n");
+    text += QStringLiteral("## Heading two\n\n| A | B | C |\n|:--|:-:|--:|\n");
+    for (int i = 0; i < 12; ++i)
+        text += QStringLiteral("| cell %1 | a longer cell with several words in it, %1 | `code` %1 |\n").arg(i);
+    text += QStringLiteral("\n| Wide1 | Wide2 | Wide3 |\n|---|---|---|\n| %1 | %2 | x |\n\n").arg(QString(60, u'a'), QString(90, u'b'));
+    text += QStringLiteral("```cpp\nint main() {\n    return 0; // a comment\n}\n```\n\n");
+    text += QStringLiteral("- one\n- two with **bold**\n  - nested\n- three\n\n1. first\n2. second\n\n> A quote that\n> runs two lines.\n\n");
+    text += QStringLiteral("- [ ] task\n- [x] done\n\nA formula $x^2 + y$ inline.\n\n$$\\frac{a}{b}$$\n\n![missing](missing.png)\n\n");
+    text += QStringLiteral("<p style=\"margin-left: 2em\">raw html with em</p>\n\n<p>Text with <small>small</small> and <font size=\"5\">font</font>.</p>\n\n");
+    text += QStringLiteral("Footnote ref[^1].\n\n[^1]: The note.\n\n---\n\nLast paragraph. Lorem ipsum dolor sit amet, consectetur adipiscing elit.\n");
+    if (read)
+        startReading(text, 2400, 900);
+    else {
+        m_view->resize(900, 5200); // (Tall enough to need no scroll bar at any step.)
+        setDocument(text, 0);
+        m_view->setReadOnly(true);
+    }
+    const QFont base = m_view->font();
+    const auto shot = [](QWidget *view) {
+        view->repaint();
+        return static_cast<QAbstractScrollArea *>(view)->viewport()->grab().toImage();
+    };
+    // Up, further up, back down, past the start size: the same blocks are
+    // laid out again at each step.
+    const qreal steps[] = {1.25, 1.5, 1.0, 0.8, 1.25};
+    for (const qreal factor : steps) {
+        QFont zoomed = base;
+        zoomed.setPointSizeF(base.pointSizeF() * factor);
+        m_view->setFont(zoomed);
+        m_view->grab();
+        QCoreApplication::processEvents();
+        m_view->grab();
+        const QImage steppedImage = shot(m_view);
+        ProbeView fresh(m_model);
+        fresh.resize(m_view->size());
+        fresh.setReadOnly(true);
+        if (read)
+            fresh.setReadMode(true);
+        fresh.setFont(zoomed);
+        fresh.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fresh));
+        fresh.grab();
+        const QImage freshImage = shot(&fresh);
+        QVERIFY(!steppedImage.isNull());
+        // (Read mode draws its small page cues over the edges by where the
+        // view has been, not by the font: left out.)
+        const QRect text = read ? QRect(45, 50, steppedImage.width() - 90, steppedImage.height() - 100) : steppedImage.rect();
+        QVERIFY2(steppedImage.copy(text) == freshImage.copy(text), qPrintable(QStringLiteral("zoom %1").arg(factor)));
     }
 }
 

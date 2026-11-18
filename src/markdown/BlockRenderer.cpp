@@ -1140,6 +1140,76 @@ bool mayLoadPictures(QByteArrayView html)
     return false;
 }
 
+// Whether a block made from this HTML looks the same at another font size
+// once its text is laid out again (RenderedBlock::reflow): nothing in a tag
+// that Qt resolves against the font when it reads the HTML (an em length in
+// a style, a font size), or sizes a font at all. A
+// tag's attributes are skipped by their quotes, so text that happens to say
+// "size" does not count. The letters Qt folds to ASCII ones (long s, Kelvin
+// sign) count as the plain ones, so a tag holding them is not trusted.
+bool htmlFollowsFont(QByteArrayView html)
+{
+    // (The width, height, cellspacing and cellpadding attributes take plain
+    // pixels or percentages; only a style has lengths in em.)
+    static constexpr QLatin1StringView words[] = {"style"_L1, "size"_L1, "font"_L1, "big"_L1, "small"_L1};
+    const char *text = html.data();
+    const qsizetype size = html.size();
+    for (qsizetype i = 0; i < size; ++i) {
+        if (text[i] != '<')
+            continue;
+        const qsizetype start = i;
+        char quote = 0;
+        for (++i; i < size; ++i) {
+            const char c = text[i];
+            if (quote) {
+                if (c == quote)
+                    quote = 0;
+            } else if (c == '"' || c == '\'') {
+                quote = c;
+            } else if (c == '>') {
+                break;
+            }
+        }
+        const QByteArrayView tag = html.sliced(start, qMin(i, size) - start);
+        for (qsizetype k = 0; k < tag.size(); ++k) {
+            const char c = tag[k];
+            if (c == '\xC5' || c == '\xE2') {
+                if (tag.sliced(k).startsWith("\xC5\xBF") || tag.sliced(k).startsWith("\xE2\x84\xAA"))
+                    return false;
+                continue;
+            }
+            for (const QLatin1StringView word : words) {
+                if (tag.size() - k >= word.size() && qstrnicmp(tag.data() + k, word.data(), size_t(word.size())) == 0)
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Whether no format of the document (character, block, table or cell) names
+// a font size, so that every text in it takes the document's default font
+// as it is: headings, footnotes, <font size> and the like do not.
+bool formatsFollowFont(const QTextDocument &doc)
+{
+    for (const QTextFormat &format : doc.allFormats()) {
+        if (format.hasProperty(QTextFormat::FontPointSize) || format.hasProperty(QTextFormat::FontPixelSize)
+            || format.hasProperty(QTextFormat::FontSizeAdjustment))
+            return false;
+    }
+    return true;
+}
+
+// Whether the fonts differ only in their size (points).
+bool sameButSize(const QFont &a, const QFont &b)
+{
+    if (a.pointSizeF() <= 0 || b.pointSizeF() <= 0)
+        return a == b;
+    QFont c = a;
+    c.setPointSizeF(b.pointSizeF());
+    return c == b;
+}
+
 // Rich text with images resolved here: math placeholders, files, and
 // downloads when the user agreed to them. A listing document only collects
 // the web addresses Qt asks for: every picture is a blank stand-in, so
@@ -2812,6 +2882,8 @@ std::unique_ptr<RenderedBlock> RenderedBlock::createPart(const QString &source, 
     auto result = std::unique_ptr<RenderedBlock>(new RenderedBlock);
     RenderedBlock &r = *result;
     r.m_width = context.width;
+    r.m_font = context.font;
+    r.m_codeFont = context.codeFont;
     r.m_kind = Kind::Code;
     r.m_part = part;
     if (part.first && part.strip)
@@ -2947,6 +3019,8 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
     auto result = std::unique_ptr<RenderedBlock>(new RenderedBlock);
     RenderedBlock &r = *result;
     r.m_width = context.width;
+    r.m_font = context.font;
+    r.m_codeFont = context.codeFont;
     const QString lang = QString::fromUtf8(block.lang.data(), block.lang.size()).trimmed();
     const QString text = QString::fromUtf8(block.text.data(), block.text.size());
 
@@ -3087,6 +3161,7 @@ std::unique_ptr<RenderedBlock> RenderedBlock::build(const core::Block &block, co
         r.m_pictureBytes = doc->pictureBytes() // Resolved by the layout (and the dry paint).
                            + doc->mathElements() * qsizetype(sizeof(QPainterPath::Element));
         r.m_reflows = block.inline_math.empty() && !r.m_pending && r.m_pictureBytes == 0 && !asksForPictures(*doc);
+        r.m_followsFont = r.m_reflows && !item && htmlFollowsFont(QByteArrayView(block.html.data(), qsizetype(block.html.size())));
         r.m_doc = std::move(doc);
         r.collectLineAnchors(0);
         return result;
@@ -3128,6 +3203,23 @@ bool RenderedBlock::reflow(const RenderContext &context)
 {
     if (!m_reflows || !m_doc || (m_kind != Kind::Rich && m_kind != Kind::Code))
         return false;
+    // A new font size is taken where the text follows the font as it is
+    // (code, and text whose HTML and formats set no size): its layout is
+    // made again with the font, and so are the strip and the tables' cached
+    // measurements (TableLayout starts over with a new default font).
+    const bool zoomed = context.font != m_font || context.codeFont != m_codeFont;
+    if (zoomed) {
+        const bool follows = m_kind == Kind::Code || (m_followsFont && !m_item.made && formatsFollowFont(*m_doc));
+        if (!follows || !sameButSize(context.font, m_font) || !sameButSize(context.codeFont, m_codeFont))
+            return false;
+        m_font = context.font;
+        m_codeFont = context.codeFont;
+        m_doc->setDefaultFont(m_kind == Kind::Code ? context.codeFont : context.font);
+        if (m_strip > 0)
+            m_strip = stripHeight(context);
+        if (m_ownGrid)
+            m_ownGrid->placed = {};
+    }
     m_width = context.width;
     m_tableGrid.reset();
     m_breaks.reset();
