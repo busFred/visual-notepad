@@ -235,6 +235,7 @@ void TextView::columnsRowsChanged(bool renumbered)
     if (renumbered)
         ++m_columns->revision;
     m_columns->dirty = true;
+    m_columns->settled = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -282,8 +283,9 @@ const md::Screen &TextView::columnsScreen()
         }
     } else if (c.dirty) {
         c.dirty = false;
-        c.flow.reflow();
+        c.flow.reflow(c.settled);
     }
+    c.settled = false;
     const md::Position start = c.flow.screen().start;
     const md::Position end = c.flow.screen().end;
     settleColumnsScreen();
@@ -344,7 +346,8 @@ void TextView::settleColumnsScreen()
         // In particular, do not discard its large tops/cuts cache then.
         if (!c.dirty) return;
         c.dirty = false;
-        c.flow.reflow();
+        c.settled = false;
+        c.flow.reflow(true);
     }
 #ifndef QT_NO_DEBUG
     qWarning("Long-line column settlement reached its pass limit");

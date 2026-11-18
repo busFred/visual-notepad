@@ -1075,6 +1075,7 @@ void TextView::rowsMoved(int line, LineLayout *layout, int from, int delta)
         };
         m_columns->flow.adjustPositions(adjust); // Also invalidates cached tops/cuts.
         adjust(m_columns->key.start);
+        if (!m_columns->dirty) m_columns->settled = true;
         m_columns->dirty = true;
     }
 }

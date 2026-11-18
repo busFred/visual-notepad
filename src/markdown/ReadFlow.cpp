@@ -745,7 +745,7 @@ void ReadFlow::adjustPositions(const std::function<void(Position &)> &adjust)
     for (Step &step : m_history) { adjust(step.from); adjust(step.to); }
 }
 
-const Screen &ReadFlow::reflow()
+const Screen &ReadFlow::reflow(bool settled)
 {
     m_rowCache.clear();
     const bool same = m_hasScreen && m_screenKey == m_geometry.key();
@@ -753,9 +753,11 @@ const Screen &ReadFlow::reflow()
         m_history.clear();
     // The same rows: the same place. Others: the place of the same source line.
     const Position from = same ? m_screen.start : positionOfLine(m_startLine);
+    // A screen made from its end (to the end, a page back) whose estimated
+    // heights settled keeps its end; any other reflow keeps its start.
     const bool backward = same && m_screen.backward;
     const Position end = m_screen.end;
-    m_screen = fill(backward ? startingBefore(end, std::nullopt) : from);
+    m_screen = fill(backward && settled ? startingBefore(end, std::nullopt) : from);
     m_screen.backward = backward;
     m_screenKey = m_geometry.key();
     m_hasScreen = true;

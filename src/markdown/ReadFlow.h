@@ -202,8 +202,11 @@ public:
     // Fills again after the rows changed under the same geometry (a render
     // finished, an edit): from the same place if the revision is the same, else
     // from the same source line. Lines kept by the page turn that made the
-    // screen stay marked when it is filled from the same place.
-    const Screen &reflow();
+    // screen stay marked when it is filled from the same place. settled: the
+    // rows changed only as estimated heights of long lines settled; a screen
+    // made from its end (to the end, a page back) is then filled back from
+    // its end, so what was at the bottom stays there.
+    const Screen &reflow(bool settled = false);
     // Geometry stayed the same, but lazy measurement moved places within rows.
     void adjustPositions(const std::function<void(Position &)> &adjust);
     // The moves. Each returns the screen it shows; one that cannot move (page

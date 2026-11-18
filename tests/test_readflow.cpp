@@ -165,6 +165,7 @@ private slots:
     void adjustPositionsKeepsPlaces();
     void adjustPositionsInvalidatesRowCache();
     void backwardScreenKeepsEndAfterAdjustment();
+    void reflowAfterBackwardMoveKeepsStart();
     void cutAtDeepestFit();
     void unbreakableTallerThanColumn();
     void unbreakableMovesToNextColumn();
@@ -1143,15 +1144,41 @@ void TestReadFlow::backwardScreenKeepsEndAfterAdjustment()
     source.rows[0].tops = topsOf(103);
     source.rows[0].cuts = paragraphCuts(source.rows[0].tops);
     flow.adjustPositions([](Position &p) { if (p.row == 0) p.y += 30; });
-    flow.reflow();
+    flow.reflow(true);
     QVERIFY(flow.screen().atEnd);
     QCOMPARE(flow.screen().end.row, 1);
     flow.pageBack();
     QVERIFY(flow.screen().backward);
     const auto end = flow.screen().end;
     flow.adjustPositions([](Position &p) { if (p.row == 0) p.y += 20; });
-    flow.reflow();
+    flow.reflow(true);
     QCOMPARE(flow.screen().end.y, end.y + 20);
+}
+
+void TestReadFlow::reflowAfterBackwardMoveKeepsStart()
+{
+    // Rows that change for other reasons (an image or a sum rendered, new
+    // colours) keep the screen's start after a move to the end or a page back.
+    {
+        FakeSource source; source.singles(60);
+        ReadFlow flow(&source); flow.setGeometry(geo(2, 100));
+        flow.toEnd();
+        const Position start = flow.screen().start;
+        QCOMPARE(start.row, 40);
+        source.rows[50].height = 20; source.rows[50].tops = {0, 10};
+        flow.reflow();
+        QCOMPARE(flow.screen().start, start);
+        QVERIFY(flow.screen().backward); // A later settlement still keeps the end.
+    }
+    {
+        FakeSource source; source.singles(60);
+        ReadFlow flow(&source); flow.setGeometry(geo(2, 100));
+        flow.goTo({0, 0}); flow.goTo({30, 0}); flow.pageBack();
+        const Position start = flow.screen().start;
+        source.rows[15].height = 30; source.rows[15].tops = {0, 10, 20};
+        flow.reflow();
+        QCOMPARE(flow.screen().start, start);
+    }
 }
 
 QTEST_APPLESS_MAIN(TestReadFlow)
