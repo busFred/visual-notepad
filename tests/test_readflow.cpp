@@ -198,6 +198,7 @@ private slots:
     void startAndEnd();
     void touchesAboutAScreen();
     void cachedRowsFollowReflow();
+    void evenRowsKeepTheirListsAcrossSettling();
 };
 
 void TestReadFlow::cachedRowsFollowReflow()
@@ -1132,6 +1133,69 @@ void TestReadFlow::adjustPositionsInvalidatesRowCache()
     // No reflow: adjustPositions itself must forget the cached tops.
     flow.nudge(-1);
     QCOMPARE(flow.screen().start.y, 190);
+}
+
+// A source that says its rows' lines are evenly spaced (a long source line).
+class EvenSource : public FakeSource
+{
+public:
+    int lineStep(int) override { return lineHeight; }
+};
+
+static std::vector<Position> pagesOf(ReadFlow &flow, int turns)
+{
+    std::vector<Position> out;
+    flow.toStart();
+    for (int i = 0; i < turns; ++i) {
+        out.push_back(flow.screen().start);
+        out.push_back(flow.screen().end);
+        flow.pageForward();
+    }
+    return out;
+}
+
+void TestReadFlow::evenRowsKeepTheirListsAcrossSettling()
+{
+    EvenSource even;
+    FakeSource plain;
+    for (FakeSource *source : {static_cast<FakeSource *>(&even), &plain}) {
+        source->para(3);
+        source->para(2000, 1);
+        source->para(4);
+        FakeRow &r = source->rows[1];
+        r.cuts = r.tops.mid(1); // Every line (as the source view's columns).
+    }
+    ReadFlow a(&even), b(&plain);
+    a.setGeometry(geo(3, 400));
+    b.setGeometry(geo(3, 400));
+    QVERIFY(pagesOf(a, 12) == pagesOf(b, 12));
+    // The long row settles: three lines more, then two fewer; no reflow in between.
+    for (const int lines : {2003, 2001, 1999, 120, 2500}) {
+        for (FakeSource *source : {static_cast<FakeSource *>(&even), &plain}) {
+            FakeRow &r = source->rows[1];
+            r.height = lines * lineHeight;
+            r.tops = topsOf(lines);
+            r.cuts = r.tops.mid(1);
+        }
+        a.goTo({1, 40 * lineHeight});
+        b.goTo({1, 40 * lineHeight});
+        QVERIFY(a.screen().start == b.screen().start);
+        QVERIFY(a.screen().end == b.screen().end);
+        a.pageForward();
+        b.pageForward();
+        QVERIFY(a.screen().start == b.screen().start);
+        QVERIFY(a.screen().end == b.screen().end);
+        a.nudge(1);
+        b.nudge(1);
+        QVERIFY(a.screen().start == b.screen().start);
+        a.toEnd();
+        b.toEnd();
+        QVERIFY(a.screen().start == b.screen().start);
+        QVERIFY(a.screen().end == b.screen().end);
+        a.pageBack();
+        b.pageBack();
+        QVERIFY(a.screen().start == b.screen().start);
+    }
 }
 
 void TestReadFlow::backwardScreenKeepsEndAfterAdjustment()

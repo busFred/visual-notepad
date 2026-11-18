@@ -84,6 +84,11 @@ int TextView::ColumnRows::rowForLine(int line)
     return qBound(0, line, count() - 1);
 }
 
+int TextView::ColumnRows::lineStep(int)
+{
+    return m_view->m_lineHeight;
+}
+
 QList<int> TextView::ColumnRows::lineTops(int row)
 {
     LineLayout *layout = m_view->layoutForLine(row);

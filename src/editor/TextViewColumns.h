@@ -32,6 +32,7 @@ public:
     int firstLine(int row) override { return row; }
     int lastLine(int row) override { return row; }
     int rowForLine(int line) override;
+    int lineStep(int row) override;
     QList<int> lineTops(int row) override;
     QList<int> cuts(int row) override;
     int minPieceLines(int row) override

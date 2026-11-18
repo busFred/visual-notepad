@@ -115,10 +115,51 @@ ReadFlow::RowCache &ReadFlow::cachedRow(int row) const
     return m_rowCache.front();
 }
 
+// Rows with this many lines or more keep their even lists between reflows.
+static constexpr int minEvenLines = 256;
+
+// The tops and cuts of a row of evenly spaced lines, brought up to the
+// current height; null if the row is not one.
+const ReadFlow::EvenRow *ReadFlow::evenRow(int row, int height) const
+{
+    const int step = m_source->lineStep(row);
+    if (step <= 0 || height < step * minEvenLines)
+        return nullptr;
+    const int lines = (height + step - 1) / step;
+    auto it = std::find_if(m_evenRows.begin(), m_evenRows.end(), [row](const EvenRow &e) { return e.row == row; });
+    if (it == m_evenRows.end()) {
+        m_evenRows.push_front(EvenRow{.row = row});
+        if (m_evenRows.size() > 4)
+            m_evenRows.pop_back();
+        it = m_evenRows.begin();
+    } else {
+        m_evenRows.splice(m_evenRows.begin(), m_evenRows, it);
+    }
+    EvenRow &e = m_evenRows.front();
+    if (e.step != step) {
+        e.step = step;
+        e.lines = 0;
+        e.tops.clear();
+        e.cuts.clear();
+    }
+    if (e.lines != lines) {
+        e.tops.resize(lines);
+        e.cuts.resize(lines - 1);
+        for (int i = qMin(e.lines, lines - 1); i < lines; ++i) {
+            e.tops[i] = i * step;
+            if (i > 0) e.cuts[i - 1] = i * step;
+        }
+        e.lines = lines;
+    }
+    return &e;
+}
+
 // A row's line tops: sorted, inside the row, and the row's own top first (a
 // row can always start at its top, even if text starts lower).
 QList<int> ReadFlow::tops(int row) const
 {
+    if (const EvenRow *even = evenRow(row, m_source->height(row)))
+        return even->tops;
     RowCache &entry = cachedRow(row);
     if (entry.hasTops)
         return entry.tops;
@@ -147,6 +188,8 @@ QList<int> ReadFlow::legalCuts(int row, RowKind kind, int h) const
 {
     if (kind == RowKind::Unbreakable || kind == RowKind::Picture || kind == RowKind::Gap)
         return {};
+    if (const EvenRow *even = evenRow(row, h))
+        return even->cuts;
     RowCache &entry = cachedRow(row);
     if (entry.hasCuts)
         return entry.cuts;

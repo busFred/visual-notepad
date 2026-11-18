@@ -73,6 +73,11 @@ public:
     // The top of each visual line, sorted (a table: each row). Used to nudge by
     // a line, to keep lines on a page turn, and to cut a row that is too tall.
     virtual QList<int> lineTops(int row) { Q_UNUSED(row); return {0}; }
+    // A row with very many evenly spaced lines (a long source line) says the
+    // spacing: its lineTops are 0, step, 2*step, ... below its height and its
+    // cuts the same without 0. Then the flow keeps those lists across a change
+    // of height instead of building them again (0: not such a row).
+    virtual int lineStep(int row) { Q_UNUSED(row); return 0; }
     // A table's header row, repeated where the table continues in a column.
     virtual int headerHeight(int row) { Q_UNUSED(row); return 0; }
     // The fewest lines a piece of a row cut twice may have (a row cut in
@@ -253,6 +258,15 @@ private:
         bool hasTops = false, hasCuts = false;
     };
     RowCache &cachedRow(int row) const;
+    // The lists of rows with evenly spaced lines (see RowSource::lineStep): kept
+    // as long as the spacing holds and resized when the height changes, so they
+    // outlive reflow() and a long row settling.
+    struct EvenRow {
+        int row = -1, step = 0, lines = 0;
+        QList<int> tops, cuts;
+    };
+    mutable std::list<EvenRow> m_evenRows;
+    const EvenRow *evenRow(int row, int height) const;
     mutable std::list<RowCache> m_rowCache;
     std::optional<Position> nextLine(Position position) const;
     std::optional<Position> prevLine(Position position) const;

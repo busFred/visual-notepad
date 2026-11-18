@@ -2760,6 +2760,8 @@ void TextView::changeEvent(QEvent *event)
 void TextView::resizeEvent(QResizeEvent *event)
 {
     QAbstractScrollArea::resizeEvent(event);
+    // Idle measuring waits for the resizing to stop.
+    if (m_settleTimer.isActive()) restartSettling();
     if (m_wordWrap)
         rowsMayHaveChanged();
     updateScrollBars();
