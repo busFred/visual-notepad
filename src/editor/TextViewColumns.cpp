@@ -297,7 +297,6 @@ void TextView::settleColumnsScreen()
     // Never recurse via row measurements or caret geometry.
     static constexpr int maxPasses = 8;
     for (int pass = 0; pass < maxPasses; ++pass) {
-        bool changed = false;
         const md::Screen screen = c.flow.screen();
         struct Window { int from, to; qreal right; };
         std::map<int, Window> windows;
@@ -316,9 +315,7 @@ void TextView::settleColumnsScreen()
             LineLayout *layout = layoutForLine(row);
             if (!layout || !layout->inPieces()) continue;
             if (!m_wordWrap) {
-                const auto generation = layout->generation();
                 layout->settleTo(window.right);
-                changed |= generation != layout->generation();
                 continue;
             }
             const int span = (window.to - window.from + m_lineHeight - 1) / m_lineHeight;
@@ -331,7 +328,6 @@ void TextView::settleColumnsScreen()
                 const int top = start ? oldStart.y / m_lineHeight : window.from / m_lineHeight;
                 const auto step = layout->settleWindowStep(top, top + span, anchor);
                 if (!step.measured) break;
-                changed = true;
                 if (step.extraTopRows) {
                     const md::Position kept = screen.backward ? oldEnd : oldStart;
                     const auto adjust = [&](md::Position &p) {
@@ -344,7 +340,9 @@ void TextView::settleColumnsScreen()
                 }
             }
         }
-        if (!changed && !c.dirty) return;
+        // Exact measurement with the same row count leaves the flow valid.
+        // In particular, do not discard its large tops/cuts cache then.
+        if (!c.dirty) return;
         c.dirty = false;
         c.flow.reflow();
     }

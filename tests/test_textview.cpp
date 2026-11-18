@@ -3373,7 +3373,7 @@ void TestTextView::longLineEstimatesShowExactScreen()
     for (int step = 0; step < 8; ++step) {
         const int before = probe->positionAtPoint(QPointF(probe->left(), 0));
         if (step % 2 == 0) m_view->resize(550 + (step / 2) * 43, 400);
-        else { QFont f = m_view->font(); f.setPointSizeF(11 + step / 2); m_view->setFont(f); }
+        else { QFont f = m_view->font(); f.setPointSizeF(QList<int>{11, 14, 9, 16}.at(step / 2)); m_view->setFont(f); }
         const QImage immediate = m_view->viewport()->grab().toImage();
         compareWithSettledLongLine();
         const int top = probe->positionAtPoint(QPointF(probe->left(), 0));
