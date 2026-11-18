@@ -1072,6 +1072,7 @@ void DocumentTab::updateAccent()
 void DocumentTab::applyViewSettings(TextView *view)
 {
     Settings &s = Settings::instance();
+    view->beginSettingsUpdate();
     view->setFont(zoomedEditorFont(view));
     view->setShowWhitespace(s.flag(key::drawWhitespace));
     view->setTabWidth(indentation().tabSize);
@@ -1089,6 +1090,7 @@ void DocumentTab::applyViewSettings(TextView *view)
         view->setHighlightCurrentLine(s.flag(key::highlightCurrentLine));
         view->setWordWrap(s.flag(key::wordWrap));
     }
+    view->endSettingsUpdate();
 }
 
 int DocumentTab::zoom() const

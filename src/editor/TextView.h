@@ -61,6 +61,8 @@ public:
     void setTabWidth(int columns);
     void setInsertSpaces(bool on);
     void setLineSpacing(qreal factor);
+    void beginSettingsUpdate();
+    void endSettingsUpdate();
     void setCommentMarker(const QString &marker);
     bool isReadOnly() const { return m_readOnly; }
     void setReadOnly(bool on);
@@ -403,6 +405,7 @@ protected:
     bool lineBounds(int line, qreal *top, qreal *bottom);
     // Forgets cached row heights and repaints.
     void relayout();
+    void requestRelayout();
 
     bool event(QEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
@@ -755,6 +758,8 @@ private:
 
     // Options.
     bool m_wordWrap = true;
+    bool m_settingsUpdate = false;
+    bool m_relayoutPending = false;
     bool m_lineNumbers = true;
     bool m_showWhitespace = false;
     bool m_highlightCurrentLine = true;

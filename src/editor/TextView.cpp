@@ -448,19 +448,23 @@ void TextView::setWordWrap(bool on)
         return;
     m_wordWrap = on;
     horizontalScrollBar()->setValue(0);
-    relayout();
+    requestRelayout();
 }
 
 void TextView::setLineNumbersVisible(bool on)
 {
+    if (m_lineNumbers == on)
+        return;
     m_lineNumbers = on;
-    relayout();
+    requestRelayout();
 }
 
 void TextView::setShowWhitespace(bool on)
 {
+    if (m_showWhitespace == on)
+        return;
     m_showWhitespace = on;
-    relayout();
+    requestRelayout();
 }
 
 void TextView::setHighlightCurrentLine(bool on)
@@ -471,8 +475,11 @@ void TextView::setHighlightCurrentLine(bool on)
 
 void TextView::setTabWidth(int columns)
 {
-    m_tabWidth = qMax(1, columns);
-    relayout();
+    columns = qMax(1, columns);
+    if (m_tabWidth == columns)
+        return;
+    m_tabWidth = columns;
+    requestRelayout();
 }
 
 void TextView::setMarkdownEditing(bool on)
@@ -533,9 +540,34 @@ void TextView::setInsertSpaces(bool on)
 
 void TextView::setLineSpacing(qreal factor)
 {
-    m_lineSpacing = qBound(1.0, factor, 3.0);
+    factor = qBound(1.0, factor, 3.0);
+    if (m_lineSpacing == factor)
+        return;
+    m_lineSpacing = factor;
     updateMetrics();
-    relayout();
+    requestRelayout();
+}
+
+void TextView::beginSettingsUpdate()
+{
+    Q_ASSERT(!m_settingsUpdate);
+    m_settingsUpdate = true;
+}
+
+void TextView::endSettingsUpdate()
+{
+    Q_ASSERT(m_settingsUpdate);
+    m_settingsUpdate = false;
+    if (std::exchange(m_relayoutPending, false))
+        relayout();
+}
+
+void TextView::requestRelayout()
+{
+    if (m_settingsUpdate)
+        m_relayoutPending = true;
+    else
+        relayout();
 }
 
 void TextView::setCommentMarker(const QString &marker)
@@ -2560,7 +2592,7 @@ void TextView::changeEvent(QEvent *event)
     QAbstractScrollArea::changeEvent(event);
     if (event->type() == QEvent::FontChange) {
         updateMetrics();
-        relayout();
+        requestRelayout();
     }
 }
 
