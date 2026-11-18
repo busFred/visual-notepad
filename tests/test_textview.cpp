@@ -182,6 +182,7 @@ private Q_SLOTS:
     void longLineResizeIsFast();
     void longLineRowsPastEstimateAfterResetup();
     void longLineBoxSelectAfterResize();
+    void longLineHiddenZoomThenEditKeepsTop();
 
 private:
     void setText(const QString &text);
@@ -3603,6 +3604,39 @@ void TestTextView::longLineBoxSelectAfterResize()
     }
 }
 
+void TestTextView::longLineHiddenZoomThenEditKeepsTop()
+{
+    // A second view on the document, zoomed while hidden, then the text is
+    // edited in the first: shown again, it keeps its top text.
+    // (Below a screen of short lines: nothing lays the long one out again
+    // while the view is hidden.)
+    QString shortLines;
+    for (int i = 0; i < 100; ++i) shortLines += QStringLiteral("short line\n");
+    setText(shortLines + longLine(QStringLiteral("alpha, WWW iii 12345 words "), 1000000));
+    const int base = int(shortLines.size());
+    m_view->setWordWrap(true);
+    ProbeView other(m_doc);
+    other.resize(500, 400);
+    other.setWordWrap(true);
+    other.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&other));
+    QTextCursor c(m_doc); c.setPosition(base + 650000); other.setTextCursor(c);
+    other.clearFocus();
+    other.grab();
+    const int before = other.positionAtPoint(QPointF(other.left(), 0));
+    other.hide();
+    QFont zoom = other.font(); zoom.setPointSizeF(15); other.setFont(zoom);
+    // (After the top: an edit before it may cut its pieces again, and rows
+    // start at the joins.)
+    QTextCursor edit(m_doc); edit.setPosition(base + 900000); m_view->setTextCursor(edit);
+    type(QStringLiteral("x"));
+    other.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&other));
+    other.grab();
+    const int top = other.positionAtPoint(QPointF(other.left(), 0));
+    const int next = other.positionAtPoint(QPointF(other.left(), other.rowHeight()));
+    QVERIFY2(top <= before && before < next, qPrintable(QStringLiteral("%1 <= %2 < %3").arg(top).arg(before).arg(next)));
+}
 
 QTEST_MAIN(TestTextView)
 #include "test_textview.moc"

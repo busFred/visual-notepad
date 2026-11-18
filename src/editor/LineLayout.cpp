@@ -812,6 +812,11 @@ void LineLayout::estimate(Piece &p)
     p.rows = m_setup.wrap ? qMax(1, qCeil(width / qMax<qreal>(1, m_setup.wrapWidth * m_fill))) : 1;
 }
 
+bool LineLayout::hasSetup(const Setup &setup) const
+{
+    return sameSetup(m_setup, setup);
+}
+
 bool LineLayout::resetup(const QTextBlock &block, const Setup &setup)
 {
     if (!inPieces() || m_pieces.empty() || block.length() - 1 != m_length) return false;

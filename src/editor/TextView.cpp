@@ -1006,16 +1006,22 @@ void TextView::keepPieces(int first, int newAffected, std::vector<std::unique_pt
         }
         if (!before && !after)
             continue;
+        // Pieces laid out for another width or font (a hidden view zoomed)
+        // stay so, marked stale: when shown, layoutForLine() lays them out
+        // again keeping the text at the top, as it would without the edit.
+        const LineLayout *old = before ? before : after;
+        const LineLayout::Setup setup = layoutSetup(wrapWidth);
+        const bool stale = !old->hasSetup(setup);
         auto layout = std::make_unique<LineLayout>();
-        if (!layout->rebuild(block, layoutSetup(wrapWidth), before, prefix, after, suffix))
+        if (!layout->rebuild(block, stale ? LineLayout::Setup(old->setup()) : setup, before, prefix, after, suffix))
             continue;
-        if (!m_wordWrap)
+        if (!m_wordWrap && !stale)
             m_maxLineWidth = qMax(m_maxLineWidth, layout->width());
         LineCache &cache = m_lines[line];
         if (!cache.layout)
             ++m_liveLayouts;
         cache.layout = std::move(layout);
-        cache.wrapWidth = wrapWidth;
+        cache.wrapWidth = stale ? -2 : wrapWidth;
         listenToLayout(line);
     }
 }

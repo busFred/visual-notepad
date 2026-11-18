@@ -131,6 +131,8 @@ public:
     int unmeasuredCount() const { return m_unmeasured; }
     quint64 generation() const { return m_generation; }
     bool wraps() const { return m_setup.wrap; }
+    const Setup &setup() const { return m_setup; }
+    bool hasSetup(const Setup &setup) const;
     qreal lineHeight() const { return m_setup.lineHeight; }
 
     int length() const { return m_length; } // Without the text being composed.
