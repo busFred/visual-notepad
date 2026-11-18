@@ -17,6 +17,7 @@
 #include <QElapsedTimer>
 #include <QPointer>
 #include <QTextCursor>
+#include <QTextBlock>
 #include <QTextLayout>
 
 #include <QSet>
@@ -519,6 +520,15 @@ private:
     void onDocumentChanged(int from, int charsRemoved, int charsAdded);
     void updateMetrics();
     void invalidateLayouts();
+    void listenToLayout(int line);
+    void rowsMoved(int line, LineLayout *layout, int fromRow, int delta);
+    void ensureShownMeasured(bool bottom = false);
+    void settleColumnsScreen();
+    void restartSettling();
+    QBasicTimer m_settleTimer;
+    QList<QTextBlock> m_lazyBlocks;
+    bool m_settling = false;
+    bool m_painting = false;
     // Drops cached layouts far from [firstLine, lastLine] once too many are live.
     void trimLayouts(int firstLine, int lastLine);
     void shiftSearchRanges(int from, int charsRemoved, int charsAdded);

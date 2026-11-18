@@ -75,6 +75,7 @@ struct TextView::Columns
     int startLine = 0;
     // The rows changed under the same numbering (colours, heights).
     bool dirty = false;
+    bool settling = false;
     // How far each column's lines are scrolled sideways (Word Wrap off).
     std::vector<qreal> offsets;
     struct BarDrag

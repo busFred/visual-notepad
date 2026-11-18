@@ -31,10 +31,13 @@
 #include <QTextDocument>
 
 #include <QSet>
+#include <QElapsedTimer>
+#include <QScopedValueRollback>
 #include <QtMath>
 
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <tuple>
 
 namespace vn {
@@ -928,7 +931,7 @@ void TextView::onDocumentChanged(int from, int charsRemoved, int charsAdded)
         std::vector<std::unique_ptr<LineLayout>> pieced;
         for (int i = first; i < first + oldAffected; ++i) {
             LineCache &line = m_lines[i];
-            if (line.layout && line.layout->inPieces() && line.wrapWidth == (m_wordWrap ? textWidth() : hugeWidth)) {
+            if (line.layout && line.layout->inPieces()) {
                 pieced.resize(oldAffected);
                 pieced[i - first] = std::move(line.layout);
                 --m_liveLayouts;
@@ -1009,6 +1012,7 @@ void TextView::keepPieces(int first, int newAffected, std::vector<std::unique_pt
             ++m_liveLayouts;
         cache.layout = std::move(layout);
         cache.wrapWidth = wrapWidth;
+        listenToLayout(line);
     }
 }
 
@@ -1022,10 +1026,88 @@ void TextView::updateMetrics()
 
 void TextView::invalidateLayouts()
 {
-    for (LineCache &line : m_lines)
-        line.layout.reset();
     m_liveLayouts = 0;
+    for (LineCache &line : m_lines) {
+        if (line.layout && line.layout->inPieces()) {
+            line.wrapWidth = -2;
+            ++m_liveLayouts;
+        } else {
+            line.layout.reset();
+        }
+    }
     m_maxLineWidth = 0;
+    restartSettling();
+}
+
+void TextView::restartSettling()
+{
+    m_settleTimer.start(300, this);
+}
+
+void TextView::listenToLayout(int line)
+{
+    const QTextBlock block = m_doc->findBlockByNumber(line);
+    m_lazyBlocks.removeIf( [](const QTextBlock &b) { return !b.isValid(); });
+    if (!m_lazyBlocks.contains(block)) m_lazyBlocks.append(block);
+    m_lines[line].layout->setListener([this, block](LineLayout *layout, int from, int delta) {
+        if (block.isValid()) rowsMoved(block.blockNumber(), layout, from, delta);
+    });
+}
+
+void TextView::rowsMoved(int line, LineLayout *layout, int from, int delta)
+{
+    Q_ASSERT(!m_painting);
+    if (!m_wordWrap) m_maxLineWidth = qMax(m_maxLineWidth, layout->width());
+    if (!delta) return;
+    const auto shift = [&](int topRow, qreal &offset) {
+        if (row(topRow).firstLine == line && offset >= from * m_lineHeight)
+            offset += delta * m_lineHeight;
+    };
+    if (!m_columnsOn) shift(m_topRow, m_topOffset);
+    for (auto *history : {&m_cursorUndo, &m_cursorRedo})
+        for (CursorHistoryEntry &entry : *history) shift(entry.topRow, entry.topOffset);
+    if (m_columnAnchorValid && m_columnAnchor.block == line && m_columnAnchor.subLine >= from)
+        m_columnAnchor.subLine += delta;
+    if (m_columns) {
+        const auto adjust = [&](md::Position &p) {
+            if (p.row == line && p.y >= from * m_lineHeight) p.y += delta * m_lineHeight;
+        };
+        m_columns->flow.adjustPositions(adjust); // Also invalidates cached tops/cuts.
+        adjust(m_columns->key.start);
+        m_columns->dirty = true;
+    }
+}
+
+void TextView::ensureShownMeasured(bool bottom)
+{
+    if (m_settling || m_painting) return;
+    QScopedValueRollback settling(m_settling, true);
+    if (m_columnsOn) { columnsScreen(); return; }
+    qreal y = firstRowY();
+    for (int r = m_topRow; r < rowCount() && y < viewport()->height(); ++r) {
+        const Row info = row(r);
+        if (info.rendered) { y += rowHeight(r); continue; }
+        LineLayout *layout = layoutForLine(info.firstLine);
+        if (!layout || !layout->inPieces()) { y += rowHeight(r); continue; }
+        if (!m_wordWrap) {
+            layout->settleTo(horizontalScrollBar()->value() + textWidth());
+        } else {
+            y = r == m_topRow ? firstRowY() : y;
+            const int anchor = bottom ? INT_MAX : r == m_topRow
+                ? layout->windowAnchor(qMax(0, qFloor(-y / m_lineHeight)),
+                                       qCeil((viewport()->height() - y) / m_lineHeight)) : -2;
+            for (;;) {
+                y = r == m_topRow ? firstRowY() : y;
+                const int top = qMax(0, qFloor(-y / m_lineHeight));
+                const int end = qCeil((viewport()->height() - y) / m_lineHeight);
+                const auto step = layout->settleWindowStep(top, end, anchor);
+                if (!step.measured) break;
+                if (r == m_topRow) m_topOffset += step.extraTopRows * m_lineHeight;
+            }
+        }
+        y = r == m_topRow ? firstRowY() : y;
+        y += qMax(1, layout->lineCount()) * m_lineHeight;
+    }
 }
 
 void TextView::trimLayouts(int firstLine, int lastLine)
@@ -1263,6 +1345,7 @@ void TextView::scrollToLinePosition(qreal position)
 {
     std::tie(m_topRow, m_topOffset) = placeOfLinePosition(position);
     normalizeScroll();
+    ensureShownMeasured();
     updateScrollBars();
     viewport()->update();
 }
@@ -1297,8 +1380,13 @@ bool TextView::isAtScrollEnd()
 
 void TextView::scrollToEnd()
 {
+    const Row last = row(rowCount() - 1);
+    if (!last.rendered) {
+        if (LineLayout *layout = layoutForLine(last.firstLine)) layout->settleAround(layout->length());
+    }
     m_topRow = rowCount() - 1;
     m_topOffset = maxLastRowOffset();
+    ensureShownMeasured(true);
     updateScrollBars();
     viewport()->update();
 }
@@ -1331,6 +1419,7 @@ int TextView::rowAtPoint(const QPointF &point, QPointF *origin)
 
 int TextView::rowAt(qreal y, qreal *top)
 {
+    ensureShownMeasured();
     qreal rowY = firstRowY();
     const int rows = rowCount();
     for (int r = m_topRow; r < rows; ++r) {
@@ -1369,6 +1458,30 @@ LineLayout *TextView::layoutForLine(int line)
         }
         return formats;
     };
+    if (cache.layout && cache.layout->inPieces() && cache.wrapWidth != wrapWidth) {
+        LineLayout *layout = cache.layout.get();
+        const bool keepTop = !m_columnsOn && m_wordWrap && layout->wraps()
+            && row(m_topRow).firstLine == line;
+        int position = 0;
+        qreal remainder = 0;
+        if (keepTop) {
+            const qreal oldHeight = layout->lineHeight();
+            const int oldRow = qBound(0, int(m_topOffset / oldHeight), layout->lineCount() - 1);
+            // Measuring the containing piece may adjust places after it.
+            position = layout->lineAt(oldRow).textStart();
+            remainder = std::fmod(m_topOffset, oldHeight);
+        }
+        layout->setListener({});
+        if (layout->resetup(block, layoutSetup(wrapWidth))) {
+            cache.wrapWidth = wrapWidth;
+            if (keepTop) {
+                layout->settleAround(position);
+                m_topOffset = layout->lineForTextPosition(position).lineNumber() * m_lineHeight + remainder;
+            }
+            listenToLayout(line);
+            restartSettling();
+        }
+    }
     if (cache.layout && cache.layout->inPieces() && cache.wrapWidth == wrapWidth) {
         // In pieces: only the piece being composed in is laid out again.
         if (hasPreedit || cache.layout->hasPreedit()) {
@@ -1377,6 +1490,7 @@ LineLayout *TextView::layoutForLine(int line)
             if (!m_wordWrap)
                 m_maxLineWidth = qMax(m_maxLineWidth, cache.layout->width());
         }
+        if (!m_wordWrap) m_maxLineWidth = qMax(m_maxLineWidth, cache.layout->width());
         return cache.layout.get();
     }
     if (cache.layout && cache.wrapWidth == wrapWidth && !hasPreedit)
@@ -1393,6 +1507,8 @@ LineLayout *TextView::layoutForLine(int line)
         if (!m_wordWrap)
             m_maxLineWidth = qMax(m_maxLineWidth, layout->width());
         cache.wrapWidth = wrapWidth;
+        listenToLayout(line);
+        restartSettling();
         return layout;
     }
     QTextLayout *layout = cache.layout->whole();
@@ -1568,6 +1684,7 @@ bool TextView::rowTop(int index, qreal *top)
 
 bool TextView::lineBounds(int line, qreal *top, qreal *bottom)
 {
+    ensureShownMeasured();
     const int index = rowOfLine(line);
     qreal y = 0;
     if (!rowTop(index, &y))
@@ -1579,6 +1696,7 @@ bool TextView::lineBounds(int line, qreal *top, qreal *bottom)
 
 QRectF TextView::caretRect(int position)
 {
+    ensureShownMeasured();
     if (m_columnsOn)
         return columnsCaretRect(position);
     const QTextBlock block = m_doc->findBlock(position);
@@ -1591,6 +1709,9 @@ QRectF TextView::caretRect(int position)
         return QRectF(textLeft(), top, 2, rowHeight(rowIndex));
     LineLayout *layout = layoutForLine(block.blockNumber());
     const int pos = position - block.position();
+    layout->settleAround(pos);
+    ensureShownMeasured();
+    if (!rowTop(rowIndex, &top)) return {};
     const LineLayout::Line line = layout->lineForTextPosition(pos);
     if (!line.isValid())
         return QRectF(textLeft(), top, 2, m_lineHeight);
@@ -1609,6 +1730,7 @@ qreal TextView::cursorX(int position)
 
 int TextView::positionAt(const QPointF &point)
 {
+    ensureShownMeasured();
     if (m_columnsOn)
         return columnsPositionAt(point);
     qreal y = firstRowY();
@@ -1712,6 +1834,7 @@ void TextView::ensureCursorVisible()
         else if (x > h->value() + width - m_charWidth)
             h->setValue(int(x - width + m_charWidth * 4));
     }
+    ensureShownMeasured();
     viewport()->update();
 }
 
@@ -1730,6 +1853,7 @@ void TextView::centerCursor()
     }
     m_topRow = topRow;
     m_topOffset = 0;
+    ensureShownMeasured();
     updateScrollBars();
     viewport()->update();
 }
@@ -1902,15 +2026,18 @@ void TextView::paintSourceLine(QPainter &painter, int lineNo, const QPointF &ori
             int pos = caret.position - blockStart;
             if (!m_preedit.isEmpty() && &caret == &m_carets[m_primary])
                 pos += m_preedit.size();
-            layout->drawCursor(&painter, origin, pos, 2);
+            if (pos >= shownStart && (pos < shownStop || (pos == shownStop && pos >= layout->length())))
+                layout->drawCursor(&painter, origin, pos, 2);
         }
     }
 }
 
 void TextView::paintEvent(QPaintEvent *event)
 {
+    ensureShownMeasured();
     if (m_columnsOn)
         return paintColumns(event);
+    QScopedValueRollback painting(m_painting, true);
     QPainter painter(viewport());
     const QRect area = event->rect();
     painter.fillRect(area, theme::color(theme::Role::editor));
@@ -1982,6 +2109,8 @@ void TextView::paintEvent(QPaintEvent *event)
 
 bool TextView::event(QEvent *event)
 {
+    if (event->type() == QEvent::Show) restartSettling();
+    if (event->type() == QEvent::Hide) m_settleTimer.stop();
     if (event->type() == QEvent::ShortcutOverride) {
         // Keep plain typing, Tab and editing keys in the editor even if a
         // window shortcut uses them.
@@ -2387,6 +2516,7 @@ void TextView::selectByUnit(const QPointF &point, bool extend)
 
 bool TextView::sourceLineAt(const QPointF &point, int *block, int *subLine)
 {
+    ensureShownMeasured();
     qreal y = firstRowY();
     const int rows = rowCount();
     int r = m_topRow;
@@ -2567,6 +2697,7 @@ void TextView::wheelEvent(QWheelEvent *event)
     // Scroll by pixels across rows of different heights.
     m_topOffset -= dy;
     normalizeScroll();
+    ensureShownMeasured();
     updateScrollBars();
     viewport()->update();
     event->accept();
@@ -2644,7 +2775,35 @@ void TextView::updateBlinkingCarets()
 
 void TextView::timerEvent(QTimerEvent *event)
 {
-    if (event->timerId() == m_blink.timerId()) {
+    if (event->timerId() == m_settleTimer.timerId()) {
+        m_settleTimer.stop();
+        if (!isVisible()) return;
+        ensureShownMeasured();
+        QElapsedTimer slice;
+        slice.start();
+        std::vector<int> lines;
+        for (const QTextBlock &block : std::as_const(m_lazyBlocks)) {
+            if (block.isValid()) lines.push_back(block.blockNumber());
+        }
+        const int near = topLine();
+        std::sort(lines.begin(), lines.end(), [near](int a, int b) { return qAbs(a - near) < qAbs(b - near); });
+        bool pending = false;
+        do {
+            bool measured = false;
+            for (int i : lines) {
+                if (i < 0 || i >= int(m_lines.size())) continue;
+                LineCache &cache = m_lines[i];
+                if (!cache.layout || cache.wrapWidth < 0 || !cache.layout->unmeasuredCount()) continue;
+                measured = cache.layout->settleOne(i == near ? int(m_topOffset / m_lineHeight) : 0);
+                if (measured) break;
+            }
+            pending = measured;
+            if (!measured) break;
+        } while (slice.elapsed() < 5);
+        if (pending) m_settleTimer.start(10, this);
+        if (m_columnsOn && m_columns->dirty) columnsScreen();
+        updateScrollBars();
+    } else if (event->timerId() == m_blink.timerId()) {
         m_caretOn = !m_caretOn;
         updateBlinkingCarets();
     } else if (event->timerId() == m_autoScroll.timerId()) {
@@ -2786,6 +2945,7 @@ bool TextView::moveVertically(Caret &caret, int direction, QTextCursor::MoveMode
     QTextBlock block = m_doc->findBlock(caret.position);
     LineLayout *layout = layoutForLine(block.blockNumber());
     const int pos = caret.position - block.position();
+    layout->settleAround(pos);
     LineLayout::Line line = layout->lineForTextPosition(pos);
     if (caret.desiredX < 0)
         caret.desiredX = line.isValid() ? line.cursorToX(pos) : 0;
@@ -2801,6 +2961,7 @@ bool TextView::moveVertically(Caret &caret, int direction, QTextCursor::MoveMode
         return false;
     }
     layout = layoutForLine(block.blockNumber());
+    layout->settleAround(direction < 0 ? layout->length() : 0);
     const LineLayout::Line next = layout->lineAt(direction < 0 ? layout->lineCount() - 1 : 0);
     caret.setPosition(block.position() + next.xToCursor(caret.desiredX), mode);
     return true;
@@ -3085,6 +3246,7 @@ void TextView::scrollPage(bool forward)
     const int lines = qMax(1, viewport()->height() / m_lineHeight - 2);
     m_topOffset += (forward ? 1 : -1) * lines * m_lineHeight;
     normalizeScroll();
+    ensureShownMeasured();
     updateScrollBars();
     viewport()->update();
     Q_EMIT scrolled();

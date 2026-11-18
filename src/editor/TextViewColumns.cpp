@@ -21,6 +21,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QPainter>
+#include <QScopedValueRollback>
 #include <QScrollBar>
 #include <QTextBlock>
 #include <QTimer>
@@ -28,6 +29,7 @@
 #include <QtMath>
 
 #include <algorithm>
+#include <climits>
 #include <optional>
 
 namespace vn {
@@ -244,6 +246,8 @@ const md::Screen &TextView::columnsScreen()
     if (!m_columnsOn)
         return none;
     Columns &c = *m_columns;
+    if (c.settling || m_painting) return c.flow.screen();
+    QScopedValueRollback settling(c.settling, true);
     const ColumnLayout &l = columnLayout();
     md::Geometry geometry;
     geometry.columns = l.count;
@@ -252,6 +256,7 @@ const md::Screen &TextView::columnsScreen()
     geometry.gap = l.gap;
     geometry.revision = c.revision;
     const md::Geometry &was = c.flow.geometry();
+    const bool changed = c.needsStart || c.dirty || !(was.key() == geometry.key());
     // Another layout (not just other rows): what was wide may not be.
     const bool layoutChanged = was.columns != geometry.columns || was.width != geometry.width
                                || was.height != geometry.height;
@@ -278,11 +283,74 @@ const md::Screen &TextView::columnsScreen()
     } else if (c.dirty) {
         c.dirty = false;
         c.flow.reflow();
-    } else {
-        return c.flow.screen();
     }
-    noteColumns();
+    const md::Position start = c.flow.screen().start;
+    const md::Position end = c.flow.screen().end;
+    settleColumnsScreen();
+    if (changed || start != c.flow.screen().start || end != c.flow.screen().end) noteColumns();
     return c.flow.screen();
+}
+
+void TextView::settleColumnsScreen()
+{
+    Columns &c = *m_columns;
+    // Never recurse via row measurements or caret geometry.
+    static constexpr int maxPasses = 8;
+    for (int pass = 0; pass < maxPasses; ++pass) {
+        bool changed = false;
+        const md::Screen screen = c.flow.screen();
+        struct Window { int from, to; qreal right; };
+        std::map<int, Window> windows;
+        for (int column = 0; column < int(screen.columns.size()); ++column) {
+            for (const md::Segment &s : screen.columns[column].segments) {
+                const qreal right = columnOffset(column) + columnLayout().width;
+                const auto [it, inserted] = windows.try_emplace(s.row, Window{s.yFrom, s.yTo, right});
+                if (!inserted) {
+                    it->second.from = qMin(it->second.from, s.yFrom);
+                    it->second.to = qMax(it->second.to, s.yTo);
+                    it->second.right = qMax(it->second.right, right);
+                }
+            }
+        }
+        for (const auto &[row, window] : windows) {
+            LineLayout *layout = layoutForLine(row);
+            if (!layout || !layout->inPieces()) continue;
+            if (!m_wordWrap) {
+                const auto generation = layout->generation();
+                layout->settleTo(window.right);
+                changed |= generation != layout->generation();
+                continue;
+            }
+            const int span = (window.to - window.from + m_lineHeight - 1) / m_lineHeight;
+            const bool start = row == screen.start.row;
+            const int anchor = screen.backward ? INT_MAX : start
+                ? layout->windowAnchor(window.from / m_lineHeight, window.to / m_lineHeight) : -2;
+            for (;;) {
+                const md::Position oldStart = c.flow.screen().start;
+                const md::Position oldEnd = c.flow.screen().end;
+                const int top = start ? oldStart.y / m_lineHeight : window.from / m_lineHeight;
+                const auto step = layout->settleWindowStep(top, top + span, anchor);
+                if (!step.measured) break;
+                changed = true;
+                if (step.extraTopRows) {
+                    const md::Position kept = screen.backward ? oldEnd : oldStart;
+                    const auto adjust = [&](md::Position &p) {
+                        // Only the window's anchor needs the extra correction;
+                        // places after the piece already moved in the listener.
+                        if (p.row == row && p == kept) p.y += step.extraTopRows * m_lineHeight;
+                    };
+                    c.flow.adjustPositions(adjust);
+                    adjust(c.key.start);
+                }
+            }
+        }
+        if (!changed && !c.dirty) return;
+        c.dirty = false;
+        c.flow.reflow();
+    }
+#ifndef QT_NO_DEBUG
+    qWarning("Long-line column settlement reached its pass limit");
+#endif
 }
 
 void TextView::columnsMoved(bool keepOffsets)
@@ -751,10 +819,12 @@ int TextView::columnsRowAt(const QPointF &point, QPointF *origin)
 
 QRectF TextView::columnsCaretRect(int position, int *column)
 {
+    const QTextBlock block = m_doc->findBlock(position);
+    if (LineLayout *layout = layoutForLine(block.blockNumber()))
+        layout->settleAround(position - block.position());
     const md::Screen &screen = columnsScreen();
     if (screen.empty())
         return {};
-    const QTextBlock block = m_doc->findBlock(position);
     const int lineNo = block.blockNumber();
     LineLayout *layout = layoutForLine(lineNo);
     if (!layout)
@@ -786,6 +856,7 @@ void TextView::paintColumns(QPaintEvent *event)
     QPainter painter(viewport());
     painter.fillRect(event->rect(), theme::color(theme::Role::editor));
     const md::Screen &screen = columnsScreen();
+    QScopedValueRollback painting(m_painting, true);
     const ColumnLayout &l = columnLayout();
     const LinePaintState state = linePaintState();
     const int gutter = gutterWidth();
