@@ -398,9 +398,10 @@ void TestTextView::touchTapStopsAFlickWithoutClicking()
     auto touch = QTest::touchEvent(view, QTest::createTouchDevice(), false);
     const QPoint start(110, 300);
     const QPoint end = start - QPoint(0, 120);
+    // No waits between the moves: a fast finger, which a busy test machine
+    // can't make look slow (too slow a finger flicks nothing).
     touch.press(0, start).commit();
     touch.move(0, start - QPoint(0, 60)).commit();
-    QTest::qWait(20);
     touch.move(0, end).commit();
     touch.release(0, end).commit();
     // At once, while the flick moves the page (touchDragScrollsWithoutSelecting
