@@ -14,8 +14,12 @@
 namespace vn {
 
 ExternalFiles::ExternalFiles(QApplication &app)
+    : m_dialogWait(new QTimer(this))
 {
     app.installEventFilter(this);
+    m_dialogWait->setSingleShot(true);
+    m_dialogWait->setInterval(100);
+    connect(m_dialogWait, &QTimer::timeout, this, [this] { dispatch(); });
 }
 
 bool ExternalFiles::eventFilter(QObject *watched, QEvent *event)
@@ -57,6 +61,14 @@ void ExternalFiles::finishStartup()
     dispatch();
 }
 
+QStringList ExternalFiles::takeWaiting()
+{
+    QStringList files;
+    while (!m_requests.isEmpty())
+        files += m_requests.dequeue();
+    return files;
+}
+
 MainWindow *ExternalFiles::lastActiveWindow() const
 {
     const QList<MainWindow *> windows = SessionManager::instance().windows();
@@ -79,6 +91,13 @@ void ExternalFiles::dispatch()
     // Opening a file can run a dialog. Finish this launch before the next.
     const QScopedValueRollback dispatching(m_dispatching, true);
     while (!m_requests.isEmpty()) {
+        // A dialog asks (whether to save before a window or the app closes,
+        // say): the files wait for it, rather than open in a window about to
+        // go. (If the app then quits, main() hands them to a new launch.)
+        if (QApplication::activeModalWidget()) {
+            m_dialogWait->start();
+            return;
+        }
         const QStringList files = m_requests.dequeue();
         MainWindow *window = nullptr;
         if (!files.isEmpty() && Settings::instance().text(key::externalFilesWindow) == QLatin1String("active"))

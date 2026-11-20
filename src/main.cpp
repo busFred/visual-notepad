@@ -11,6 +11,7 @@
 #include <QApplication>
 #include <QDir>
 #include <QIcon>
+#include <QProcess>
 #include <QCommandLineParser>
 
 #include <cstring>
@@ -92,7 +93,6 @@ int main(int argc, char *argv[])
     vn::ExternalFiles externalFiles(app);
     vn::InstanceChannel instance;
     QObject::connect(&instance, &vn::InstanceChannel::requested, &externalFiles, &vn::ExternalFiles::request);
-    instance.setAccepting([] { return !QApplication::activeModalWidget(); });
     // Only the process that owns the session's lock reads or writes the
     // session. A running copy that doesn't take the files (stuck, quitting,
     // a dialog open) still owns it: then run on our own, as opening the files
@@ -133,5 +133,13 @@ int main(int argc, char *argv[])
     }
 
     externalFiles.finishStartup();
-    return app.exec();
+    const int code = app.exec();
+    // Files handed over while a dialog asked, and then the app quit: they
+    // were taken (the launch was told so), so a new launch opens them, once
+    // this one has let go of the channel and the session.
+    if (const QStringList waiting = externalFiles.takeWaiting(); !waiting.isEmpty()) {
+        instance.release();
+        QProcess::startDetached(QCoreApplication::applicationFilePath(), QStringList{QStringLiteral("--")} + waiting);
+    }
+    return code;
 }

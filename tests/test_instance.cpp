@@ -14,6 +14,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMessageBox>
 #include <QProcess>
 #include <QTemporaryDir>
 #include <QTest>
@@ -31,6 +32,7 @@ private Q_SLOTS:
     void protocol();
     void routing();
     void routesPendingFile();
+    void waitsForADialog();
 #ifdef Q_OS_LINUX
     void simultaneousLaunches();
     void unreachableCopyKeepsItsSession();
@@ -240,6 +242,41 @@ void TestInstance::simultaneousLaunches()
     QCOMPARE(primary.exitCode(), 0);
 }
 #endif
+
+// Files handed over while a dialog asks (such as whether to save before a
+// window closes) wait for it; if the app quits first, they are what a new
+// launch is given.
+void TestInstance::waitsForADialog()
+{
+    ExternalFiles router(*qApp);
+    Settings::instance().reset(key::externalFilesWindow);
+    const QString path = write(QStringLiteral("waiting.txt"));
+    MainWindow window;
+    window.show();
+    QCoreApplication::processEvents();
+    QEvent activate(QEvent::WindowActivate);
+    QCoreApplication::sendEvent(&window, &activate);
+    router.finishStartup();
+
+    auto dialog = std::make_unique<QMessageBox>(QMessageBox::Question, QStringLiteral("Save?"), QStringLiteral("Save?"));
+    dialog->setWindowModality(Qt::ApplicationModal);
+    dialog->show();
+    QTRY_VERIFY(QApplication::activeModalWidget());
+    router.request({path});
+    QTest::qWait(250);
+    QCOMPARE(window.tabCount(), 0);
+    dialog.reset();
+    QTRY_COMPARE(window.tabCount(), 1);
+    QCOMPARE(window.currentTab()->path(), path);
+
+    dialog = std::make_unique<QMessageBox>(QMessageBox::Question, QStringLiteral("Save?"), QStringLiteral("Save?"));
+    dialog->setWindowModality(Qt::ApplicationModal);
+    dialog->show();
+    QTRY_VERIFY(QApplication::activeModalWidget());
+    router.request({path, path});
+    QCOMPARE(router.takeWaiting(), (QStringList{path, path}));
+    QVERIFY(router.takeWaiting().isEmpty());
+}
 
 #ifdef Q_OS_LINUX
 // Two launches on one session whose channels can't meet: the second's
