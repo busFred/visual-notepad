@@ -67,8 +67,9 @@ QSize viewerWindowSize(const QSizeF &natural, const QSize &padding, const QWidge
     QSize cap(900, 650);
     if (const QWidget *parent = window->parentWidget())
         cap = parent->window()->size() * 4 / 5;
+    // (Less than the whole screen: the title bar and frame come on top.)
     if (const QScreen *screen = window->screen())
-        cap = cap.boundedTo(screen->availableGeometry().size());
+        cap = cap.boundedTo(screen->availableGeometry().size() * 9 / 10);
     cap = cap.expandedTo(window->minimumSize());
     QSizeF content = natural;
     // Only ever smaller: a small picture opens at its real size.

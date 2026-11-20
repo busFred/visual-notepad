@@ -32,6 +32,8 @@ ImageViewer::ImageViewer(const QImage &image, const QString &title, QWidget *par
 
     // The controls float over the bottom of the picture.
     m_bar = new ZoomBar(this);
+    // Never narrower than the bar, which a small picture's window would cut.
+    setMinimumWidth(qMax(minimumWidth(), m_bar->sizeHint().width() + int(2 * margin)));
     // The content is centred, so leave room on both sides of the floating bar.
     resize(viewerWindowSize(QSizeF(m_image.size()) / devicePixelRatioF(), QSize(int(2 * margin), int(2 * (margin + m_bar->height()))), this));
 

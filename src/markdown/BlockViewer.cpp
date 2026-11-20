@@ -172,6 +172,8 @@ BlockViewer::BlockViewer(std::unique_ptr<RenderedBlock> block, const QString &ti
 
     // The controls float over the bottom of the block.
     m_bar = new ZoomBar(m_canvas->viewport());
+    // Never narrower than the bar, which a small block's window would cut.
+    setMinimumWidth(qMax(minimumWidth(), m_bar->sizeHint().width() + int(2 * margin)));
     // The content is centred, so leave room on both sides of the floating bar.
     resize(viewerWindowSize(m_block->contentSize(), QSize(int(2 * margin), int(2 * (margin + m_bar->height()))), this));
 
