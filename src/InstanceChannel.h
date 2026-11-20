@@ -22,7 +22,11 @@ class InstanceChannel : public QObject
     Q_OBJECT
 
 public:
-    enum class StartResult { Listening, Forwarded, Failed };
+    // Listening: this copy owns the session and takes other launches' files.
+    // Alone: it owns the session but has no channel to offer.
+    // Forwarded: a running copy took the files; this one should exit.
+    // Failed: a running copy has the session but didn't take the files.
+    enum class StartResult { Listening, Alone, Forwarded, Failed };
 
     InstanceChannel();
     StartResult start(const QStringList &files);

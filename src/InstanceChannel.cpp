@@ -2,6 +2,7 @@
 
 #include "Settings.h"
 
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDeadlineTimer>
 #include <QDir>
@@ -10,6 +11,7 @@
 #include <QFileInfo>
 #include <QLocalSocket>
 #include <QRandomGenerator>
+#include <QStandardPaths>
 #include <QStringDecoder>
 #include <QThread>
 #include <QTimer>
@@ -35,6 +37,8 @@ constexpr qsizetype headerSize = magic.size() + sizeof(quint32);
 constexpr qsizetype maxPayload = 256 * 1024;
 constexpr int timeoutMs = 5000;
 constexpr int maxReaders = 16;
+// What the running copy answers once a request is in its queue.
+constexpr char received = 'K';
 
 // A random key kept in the user's own settings folder, which other users
 // cannot read: it makes the channel's name one they cannot guess, so they
@@ -80,8 +84,66 @@ QString serverName()
     identity += '\0';
     identity += qgetenv("VN_INSTANCE_NAME");
     const QByteArray hash = QCryptographicHash::hash(identity, QCryptographicHash::Sha256).toHex();
-    return QStringLiteral("visnotepad-") + QString::fromLatin1(hash.first(32));
+    const QString name = QStringLiteral("visnotepad-") + QString::fromLatin1(hash.first(32));
+#ifdef Q_OS_UNIX
+    // A path in the user's runtime folder, which only they can enter (Qt
+    // makes it so, or gives none), not a bare name: Qt would put that in the
+    // shared temporary folder, where the socket's name shows and another user
+    // could take it once this user's copy has quit.
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+    if (dir.isEmpty())
+        return {};
+    const QString path = QDir(dir).filePath(name);
+    // (A socket's path must fit in sockaddr_un: 104 bytes on macOS.)
+    return QFile::encodeName(path).size() < 100 ? path : QString();
+#else
+    return name;
+#endif
 }
+
+#ifdef Q_OS_WIN
+// The SID of the user a token belongs to, as bytes; empty if unknown.
+QByteArray tokenUser(HANDLE token)
+{
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    if (size == 0)
+        return {};
+    QByteArray buffer(int(size), Qt::Uninitialized);
+    if (!GetTokenInformation(token, TokenUser, buffer.data(), size, &size))
+        return {};
+    const PSID sid = reinterpret_cast<const TOKEN_USER *>(buffer.constData())->User.Sid;
+    if (!IsValidSid(sid))
+        return {};
+    return QByteArray(static_cast<const char *>(sid), int(GetLengthSid(sid)));
+}
+
+QByteArray processUser(HANDLE process)
+{
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(process, TOKEN_QUERY, &token))
+        return {};
+    const QByteArray user = tokenUser(token);
+    CloseHandle(token);
+    return user;
+}
+
+// Pipe names are one namespace for all users, and anyone can list them: the
+// copy that made this pipe must be this user's, or it gets no paths.
+bool serverIsOurs(const QLocalSocket &socket)
+{
+    ULONG pid = 0;
+    if (!GetNamedPipeServerProcessId(reinterpret_cast<HANDLE>(socket.socketDescriptor()), &pid))
+        return false;
+    const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process)
+        return false;
+    const QByteArray theirs = processUser(process);
+    CloseHandle(process);
+    const QByteArray ours = processUser(GetCurrentProcess());
+    return !ours.isEmpty() && theirs == ours;
+}
+#endif
 
 bool isAbsoluteFilePath(const QString &path)
 {
@@ -130,6 +192,10 @@ bool sendRequest(QLocalSocket &socket, const QStringList &files)
         return false;
     }
 #ifdef Q_OS_WIN
+    if (!serverIsOurs(socket)) {
+        qWarning("The Visual Notepad channel belongs to another user.");
+        return false;
+    }
     // The shell may have granted this launch permission to take focus.
     AllowSetForegroundWindow(ASFW_ANY);
 #endif
@@ -140,8 +206,16 @@ bool sendRequest(QLocalSocket &socket, const QStringList &files)
         if (!socket.waitForBytesWritten(int(deadline.remainingTime())) && socket.bytesToWrite() > 0)
             return false;
     }
+    // Only an answer says the files are on their way: a copy that is stuck,
+    // quitting or too busy to read takes the bytes and drops them.
+    while (socket.bytesAvailable() < 1) {
+        if (!socket.waitForReadyRead(int(deadline.remainingTime())))
+            return false;
+    }
+    char answer = 0;
+    const bool ok = socket.read(&answer, 1) == 1 && answer == received;
     socket.disconnectFromServer();
-    return true;
+    return ok;
 }
 
 } // namespace
@@ -185,48 +259,60 @@ std::optional<QStringList> instanceRequest::decode(QByteArrayView message)
 
 InstanceChannel::InstanceChannel()
     : m_name(serverName())
-    , m_lock(QFileInfo(Settings::instance().fileName()).dir().filePath(m_name + QStringLiteral(".lock")))
+    // The lock goes with the session it guards, in the settings folder (the
+    // name's own folder may be missing: then the lock alone decides).
+    , m_lock(QFileInfo(Settings::instance().fileName())
+                 .dir()
+                 .filePath((m_name.isEmpty() ? QStringLiteral("visnotepad") : QFileInfo(m_name).fileName())
+                           + QStringLiteral(".lock")))
 {
     m_lock.setStaleLockTime(0);
     m_server.setSocketOptions(QLocalServer::UserAccessOption);
     connect(&m_server, &QLocalServer::newConnection, this, &InstanceChannel::acceptConnections);
+    // A copy on its way out takes no more files: launches from now on get no
+    // answer and start on their own.
+    connect(qApp, &QCoreApplication::aboutToQuit, this, [this] { m_server.close(); });
 }
 
 InstanceChannel::StartResult InstanceChannel::start(const QStringList &files)
 {
     QElapsedTimer elapsed;
     elapsed.start();
-    // Running on our own after a failure: the lock must not hold back the
-    // launches after this one.
+    // Another copy has the lock but didn't take the request: run on our own,
+    // without the lock, so that it holds back no launch after this one.
     const auto failed = [this] {
         if (m_lock.isLocked())
             m_lock.unlock();
         return StartResult::Failed;
     };
     for (;;) {
-        QLocalSocket socket;
-        socket.connectToServer(m_name);
-        if (socket.state() == QLocalSocket::ConnectedState || socket.waitForConnected(100)) {
-            if (sendRequest(socket, files))
-                return StartResult::Forwarded;
-            qWarning("Could not send the launch request to Visual Notepad.");
-            return failed();
-        }
-
-        if (m_lock.isLocked()) {
-            // Hold the election lock before probing again and removing a
-            // stale socket. A slow or concurrent primary keeps its lock.
-            if (socket.error() == QLocalSocket::ServerNotFoundError
-                || socket.error() == QLocalSocket::ConnectionRefusedError) {
-                QLocalServer::removeServer(m_name);
-                if (m_server.listen(m_name))
-                    return StartResult::Listening;
-                qWarning() << m_server.errorString();
-            } else {
-                qWarning() << socket.errorString();
+        if (!m_name.isEmpty()) {
+            QLocalSocket socket;
+            socket.connectToServer(m_name);
+            if (socket.state() == QLocalSocket::ConnectedState || socket.waitForConnected(100)) {
+                if (sendRequest(socket, files))
+                    return StartResult::Forwarded;
+                qWarning("Could not send the launch request to Visual Notepad.");
+                return failed();
             }
-            return failed();
+            if (m_lock.isLocked()) {
+                // Hold the election lock before probing again and removing a
+                // stale socket. A slow or concurrent primary keeps its lock.
+                if (socket.error() == QLocalSocket::ServerNotFoundError
+                    || socket.error() == QLocalSocket::ConnectionRefusedError) {
+                    QLocalServer::removeServer(m_name);
+                    if (m_server.listen(m_name))
+                        return StartResult::Listening;
+                    qWarning() << m_server.errorString();
+                } else {
+                    qWarning() << socket.errorString();
+                }
+            }
         }
+        // The lock is ours but there is no channel to offer: the session is
+        // still ours alone, and later launches run on their own.
+        if (m_lock.isLocked())
+            return StartResult::Alone;
         if (m_lock.tryLock())
             continue;
         if (m_lock.error() != QLockFile::LockFailedError || elapsed.hasExpired(timeoutMs)) {
@@ -267,8 +353,13 @@ void InstanceChannel::acceptConnections()
             if (socket->bytesAvailable() < size)
                 return;
             const auto files = instanceRequest::decode(socket->read(size));
-            socket->disconnectFromServer();
-            socket->deleteLater();
+            // Answered before the files open: opening can show a dialog,
+            // which would keep the launch waiting past its timeout.
+            if (files) {
+                socket->write(&received, 1);
+                socket->flush();
+            }
+            socket->disconnectFromServer(); // (After the answer is written; then deleted.)
             if (files)
                 Q_EMIT requested(*files);
         };

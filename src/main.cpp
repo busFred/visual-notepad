@@ -12,7 +12,10 @@
 #include <QApplication>
 #include <QDir>
 #include <QIcon>
+#include <QTemporaryDir>
 #include <QCommandLineParser>
+
+#include <optional>
 
 #include <cstring>
 
@@ -93,12 +96,25 @@ int main(int argc, char *argv[])
     vn::ExternalFiles externalFiles(app);
     vn::InstanceChannel instance;
     QObject::connect(&instance, &vn::InstanceChannel::requested, &externalFiles, &vn::ExternalFiles::request);
-    // Only the process that owns the channel can read or write the session.
-    // If no channel can be had (a socket the system refuses, a running copy
-    // that doesn't answer), run on our own as before the channel existed:
-    // opening the files matters more than sharing one process.
-    if (instance.start(files) == vn::InstanceChannel::StartResult::Forwarded)
+    // Only the process that owns the channel's lock reads or writes the
+    // session. A running copy that doesn't take the files (stuck, quitting)
+    // still owns it: then run on our own, as opening the files matters more
+    // than sharing one process, with a session of our own that goes when we
+    // do, so as not to overwrite that copy's session or prune its backups.
+    // (What is unsaved here is not recovered after a crash.)
+    std::optional<QTemporaryDir> ownSession;
+    switch (instance.start(files)) {
+    case vn::InstanceChannel::StartResult::Forwarded:
         return 0;
+    case vn::InstanceChannel::StartResult::Failed:
+        ownSession.emplace();
+        if (ownSession->isValid())
+            vn::SessionManager::setDataDir(ownSession->path());
+        break;
+    case vn::InstanceChannel::StartResult::Listening:
+    case vn::InstanceChannel::StartResult::Alone:
+        break;
+    }
 
     vn::math::setWorkerProgram(QCoreApplication::applicationFilePath());
     vn::theme::apply(app);
