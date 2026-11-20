@@ -65,13 +65,26 @@ QByteArray readKey(const QString &path)
         return {};
     const QByteArray key = file.read(65);
     file.close();
-#ifdef Q_OS_UNIX
-    // One others could read is no secret any more. (Not on Windows, where
-    // these bits don't say who may read: the folder's ACL does.)
-    if (file.permissions() & (QFileDevice::ReadGroup | QFileDevice::ReadOther))
+    if (key.size() != 64)
         return {};
+#ifdef Q_OS_UNIX
+    // One others could read is no secret any more: replaced. (Not on
+    // Windows, where these bits don't say who may read: the folder's ACL
+    // does.) Unless the filesystem keeps no permissions (a FAT drive, some
+    // network mounts): then every key would look so, and replacing it would
+    // only change the channel's name at every launch.
+    constexpr QFileDevice::Permissions others = QFileDevice::ReadGroup | QFileDevice::ReadOther;
+    if (file.permissions() & others) {
+        QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        if (QFile(path).permissions() & others)
+            return key;
+        // (Gone, so that the launch making the new one doesn't take this
+        // one back now that it looks private.)
+        QFile::remove(path);
+        return {};
+    }
 #endif
-    return key.size() == 64 ? key : QByteArray();
+    return key;
 }
 
 QByteArray instanceKey()

@@ -188,16 +188,19 @@ void TestInstance::routesPendingFile()
 #ifdef Q_OS_LINUX
 void TestInstance::simultaneousLaunches_data()
 {
-    QTest::addColumn<bool>("cutShortKey");
-    QTest::newRow("no key yet") << false;
+    QTest::addColumn<int>("oldKey"); // 0: none, 1: cut short, 2: whole but readable by others
+    QTest::newRow("no key yet") << 0;
     // (Left empty by a crash: both launches must still agree on its new one.)
-    QTest::newRow("cut-short key") << true;
+    QTest::newRow("cut-short key") << 1;
+    // (No secret any more: replaced by a new one, the user's alone.)
+    QTest::newRow("exposed key") << 2;
 }
 
 void TestInstance::simultaneousLaunches()
 {
-    QFETCH(bool, cutShortKey);
-    const QString tag = cutShortKey ? QStringLiteral("-cut") : QString();
+    QFETCH(int, oldKey);
+    const QString tag = QStringLiteral("-%1").arg(oldKey);
+    const QByteArray exposed(64, 'a');
     const QString firstPath = write(QStringLiteral("launch1%1.txt").arg(tag));
     const QString secondPath = write(QStringLiteral("launch2%1.txt").arg(tag));
     QVERIFY(!firstPath.isEmpty());
@@ -206,10 +209,15 @@ void TestInstance::simultaneousLaunches()
     // XDG directories isolate both settings and recovery files of the children.
     const QString data = m_dir.filePath(QStringLiteral("launch-data") + tag);
     const QString config = m_dir.filePath(QStringLiteral("launch-config") + tag);
-    if (cutShortKey) {
+    if (oldKey != 0) {
         QVERIFY(QDir().mkpath(config + QStringLiteral("/visnotepad")));
-        QFile empty(config + QStringLiteral("/visnotepad/instance.key"));
-        QVERIFY(empty.open(QIODevice::WriteOnly));
+        QFile key(config + QStringLiteral("/visnotepad/instance.key"));
+        QVERIFY(key.open(QIODevice::WriteOnly));
+        if (oldKey == 2) {
+            QCOMPARE(key.write(exposed), exposed.size());
+            key.close();
+            QVERIFY(key.setPermissions(key.permissions() | QFileDevice::ReadGroup | QFileDevice::ReadOther));
+        }
     }
     auto environment = QProcessEnvironment::systemEnvironment();
     environment.insert(QStringLiteral("XDG_CONFIG_HOME"), config);
@@ -237,7 +245,9 @@ void TestInstance::simultaneousLaunches()
     QVERIFY(key.exists());
     QCOMPARE(key.permissions() & (QFileDevice::ReadGroup | QFileDevice::ReadOther), QFileDevice::Permissions());
     QVERIFY(key.open(QIODevice::ReadOnly));
-    QCOMPARE(key.readAll().size(), 64);
+    const QByteArray made = key.readAll();
+    QCOMPARE(made.size(), 64);
+    QVERIFY(made != exposed);
 
     QProcess version;
     version.setProcessEnvironment(environment);
