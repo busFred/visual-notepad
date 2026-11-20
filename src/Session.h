@@ -9,6 +9,7 @@
 #include <QHash>
 #include <QJsonArray>
 #include <QList>
+#include <QElapsedTimer>
 #include <QObject>
 #include <QString>
 
@@ -45,10 +46,11 @@ public:
 
     // True while the final quit is closing windows: closeEvent must not prompt.
     bool isQuitting() const { return m_quitting; }
-    // Whether a signal ended the app (SIGTERM, SIGHUP, SIGINT), not the user.
-    // (Not set by a session manager's save request: that can be cancelled,
-    // and Qt says nothing when it is.)
-    bool endedBySystem() const { return m_endedBySystem; }
+    // Whether the system ended the app, not the user: a signal (SIGTERM,
+    // SIGHUP, SIGINT), or a session manager's request to save shortly before.
+    // (Only shortly: such a request can be cancelled, and Qt says nothing
+    // when it is.)
+    bool endedBySystem() const;
 
     // File > Quit: asks about unsaved changes, saves the session, then closes
     // every window. Returns false if the user cancelled.
@@ -132,6 +134,7 @@ private:
     QHash<const TextFile *, quint64> m_bigSerials;
     bool m_quitting = false;
     bool m_endedBySystem = false;
+    QElapsedTimer m_saveRequested; // Since the session manager's last request to save.
     bool m_dirty = false;
     bool m_started = false;
     int m_syncDeferred = 0;

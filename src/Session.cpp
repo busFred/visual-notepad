@@ -381,8 +381,14 @@ void SessionManager::backupIfDirty()
     saveSession();
 }
 
+bool SessionManager::endedBySystem() const
+{
+    return m_endedBySystem || (m_saveRequested.isValid() && m_saveRequested.elapsed() < 60'000);
+}
+
 void SessionManager::onCommitData(QSessionManager &)
 {
+    m_saveRequested.start();
     // Never cancel the shutdown. The work is safe in backups and comes back
     // on the next start, so closing the windows must not ask about it.
     if (!enabled() || m_windows.isEmpty())
@@ -663,6 +669,7 @@ bool SessionManager::prepareQuit()
     // The user quits (Quit, or the last window closed): whatever a logout or
     // shutdown that was then cancelled left.
     m_endedBySystem = false;
+    m_saveRequested.invalidate();
     // A normal quit asks; recovery is only for closes that could not.
     QList<DocumentTab *> tabs;
     QSet<const TextFile *> asked;
