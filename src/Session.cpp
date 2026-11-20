@@ -247,7 +247,7 @@ QString SessionManager::dataDir()
 
 bool SessionManager::enabled() const
 {
-    return hotExit() || Settings::instance().flag(key::restoreSession);
+    return m_persistent && (hotExit() || Settings::instance().flag(key::restoreSession));
 }
 
 void SessionManager::registerWindow(MainWindow *window)

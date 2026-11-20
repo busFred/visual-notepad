@@ -103,13 +103,17 @@ int main(int argc, char *argv[])
     // do, so as not to overwrite that copy's session or prune its backups.
     // (What is unsaved here is not recovered after a crash.)
     std::optional<QTemporaryDir> ownSession;
+    bool sessionOwned = true;
     switch (instance.start(files)) {
     case vn::InstanceChannel::StartResult::Forwarded:
         return 0;
     case vn::InstanceChannel::StartResult::Failed:
+        sessionOwned = false;
         ownSession.emplace();
         if (ownSession->isValid())
             vn::SessionManager::setDataDir(ownSession->path());
+        else // (No temporary folder: then no session at all.)
+            vn::SessionManager::instance().setPersistent(false);
         break;
     case vn::InstanceChannel::StartResult::Listening:
     case vn::InstanceChannel::StartResult::Alone:
@@ -124,7 +128,8 @@ int main(int argc, char *argv[])
     auto &session = vn::SessionManager::instance();
     session.start();
     if (files.isEmpty()) {
-        if (!session.restore()) {
+        // (Nothing to restore in a session not ours.)
+        if (!sessionOwned || !session.restore()) {
             auto *window = new vn::MainWindow;
             window->setAttribute(Qt::WA_DeleteOnClose);
             window->newFile();

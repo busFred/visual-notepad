@@ -87,6 +87,9 @@ public:
     };
     // Backups, the logout/shutdown hook and, on Unix, SIGTERM/SIGHUP/SIGINT.
     void start();
+    // Off: nothing of the session is read or written, for a process that
+    // runs beside the copy that owns it (see main.cpp).
+    void setPersistent(bool on) { m_persistent = on; }
 
 private:
     SessionManager();
@@ -111,6 +114,7 @@ private:
     void completeBackup();
     void removeStaleBackups(const QJsonArray &windows);
     bool enabled() const;
+    bool m_persistent = true;
 
     QList<MainWindow *> m_windows;
     QJsonArray m_carried;
