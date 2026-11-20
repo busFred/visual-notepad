@@ -5,8 +5,10 @@
 #include "Encodings.h"
 #include "Settings.h"
 #include "Theme.h"
+#include "TouchScrollArea.h"
 
 #include <QAbstractButton>
+#include <QAbstractItemView>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QFontDialog>
@@ -347,6 +349,7 @@ PreferencesDialog::PreferencesDialog(QWidget *parent)
     frameLayout->setSpacing(0);
 
     m_categories = new QListWidget(frame);
+    touch::enableKineticScrolling(m_categories);
     m_categories->setObjectName(QStringLiteral("PrefCategories"));
     m_categories->setFixedWidth(110);
     m_categories->setFrameShape(QFrame::NoFrame);
@@ -463,6 +466,7 @@ void PreferencesDialog::endPage(const QString &category, const QString &pageId)
     scroll->setWidgetResizable(true);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setWidget(m_pageWidget);
+    touch::enableKineticScrolling(scroll);
     m_stack->addWidget(scroll);
     m_categories->addItem(category);
     m_pageIds.append(pageId);
@@ -515,6 +519,7 @@ void PreferencesDialog::addSwitch(const QString &label, const char *settingKey)
 void PreferencesDialog::addCombo(const QString &label, const char *settingKey, const QList<ComboItem> &items)
 {
     auto *combo = new QComboBox;
+    touch::enableKineticScrolling(combo->view());
     combo->setObjectName(QString::fromLatin1(settingKey));
     combo->setMinimumWidth(140);
     combo->setFixedHeight(26);

@@ -60,6 +60,8 @@ private Q_SLOTS:
     void cleanup();
 
     void switchWritesSetting();
+    void touchOperatesSwitch();
+    void touchFlickScrollsShortcuts();
     void typingSwitchesDefaultOn();
     void externalChangeUpdatesSwitch();
     void spaceTogglesSwitch();
@@ -114,6 +116,43 @@ void TestPreferences::cleanup()
     if (QWidget *w = prefsWindow())
         w->close();
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+
+void TestPreferences::touchOperatesSwitch()
+{
+    auto *toggle = find<QAbstractButton>(QString::fromLatin1(key::lineNumbers));
+    QVERIFY(toggle && toggle->isVisible());
+    const bool before = toggle->isChecked();
+    auto touch = QTest::touchEvent(toggle, QTest::createTouchDevice(), false);
+    const QPoint start(7, toggle->height() / 2);
+    const QPoint end(toggle->width() - 7, start.y());
+    touch.press(0, start).commit();
+    touch.move(0, end).commit();
+    touch.release(0, end).commit();
+    QCOMPARE(toggle->isChecked(), !before);
+}
+
+void TestPreferences::touchFlickScrollsShortcuts()
+{
+    PreferencesDialog::showPage(nullptr, QStringLiteral("shortcuts"));
+    auto *stack = prefsWindow()->findChild<QStackedWidget *>();
+    auto *scroll = qobject_cast<QScrollArea *>(stack->currentWidget());
+    QVERIFY(scroll && scroll->verticalScrollBar()->maximum() > 300);
+    auto *bar = scroll->verticalScrollBar();
+    QWidget *view = scroll->viewport();
+    auto touch = QTest::touchEvent(view, QTest::createTouchDevice(), false);
+    const QPoint start(22, 260);
+    const QPoint end = start - QPoint(0, 130);
+    touch.press(0, start).commit();
+    QTest::qWait(25);
+    touch.move(0, start - QPoint(0, 50)).commit();
+    QTest::qWait(25);
+    touch.move(0, end).commit();
+    QTest::qWait(20);
+    const int dragged = bar->value();
+    QVERIFY(dragged > 0);
+    touch.release(0, end).commit();
+    QTRY_VERIFY(bar->value() > dragged + 20);
 }
 
 void TestPreferences::switchWritesSetting()

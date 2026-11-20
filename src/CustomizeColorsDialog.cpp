@@ -1,7 +1,9 @@
 #include "CustomizeColorsDialog.h"
 
 #include "Settings.h"
+#include "TouchScrollArea.h"
 
+#include <QAbstractItemView>
 #include <QColorDialog>
 #include <QComboBox>
 #include <QApplication>
@@ -493,6 +495,7 @@ CustomizeColorsDialog::CustomizeColorsDialog(QWidget *parent)
     // Item, then its two colours underneath, each with its theme default
     // beside it when changed.
     m_itemCombo = new QComboBox;
+    touch::enableKineticScrolling(m_itemCombo->view());
     m_itemCombo->setObjectName(QStringLiteral("ItemCombo"));
     m_itemCombo->setMinimumWidth(200);
     for (const Item &item : std::as_const(m_items))

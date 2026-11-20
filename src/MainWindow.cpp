@@ -7,6 +7,7 @@
 #include "Session.h"
 #include "Settings.h"
 #include "Theme.h"
+#include "TouchScrollArea.h"
 #include "editor/FindBar.h"
 #include "editor/TableSizePicker.h"
 #include "editor/TextView.h"
@@ -929,6 +930,7 @@ void MainWindow::wireGroup(EditorGroup *group)
 void MainWindow::createOutline()
 {
     m_outline = new QTreeWidget(this);
+    touch::enableKineticScrolling(m_outline);
     m_outline->setHeaderHidden(true);
     m_outline->setIndentation(14);
     connect(m_outline, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem *item) {
