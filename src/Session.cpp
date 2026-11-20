@@ -661,6 +661,9 @@ void SessionManager::removeStaleBackups(const QJsonArray &windows)
 
 bool SessionManager::prepareQuit()
 {
+    // The user quits (Quit, or the last window closed): whatever a logout or
+    // shutdown that was then cancelled left.
+    m_endedBySystem = false;
     // A normal quit asks; recovery is only for closes that could not.
     QList<DocumentTab *> tabs;
     QSet<const TextFile *> asked;
@@ -680,8 +683,6 @@ bool SessionManager::prepareQuit()
 
 bool SessionManager::quit()
 {
-    // The user quits: whatever a logout that was then cancelled left.
-    m_endedBySystem = false;
     if (!prepareQuit())
         return false;
     m_quitting = true;
