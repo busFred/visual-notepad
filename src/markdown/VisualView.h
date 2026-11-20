@@ -909,7 +909,7 @@ private:
 
     bool m_readMode = false;
     int m_readColumns = 0;
-    int m_readChars = 70;
+    int m_readChars = 75;
     std::unique_ptr<md::RowSource> m_readRows; // A ReadRows.
     std::unique_ptr<md::ReadFlow> m_readFlow;
     int m_readRevision = 0;     // Of m_rows, for md::Geometry.
