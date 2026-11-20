@@ -57,20 +57,29 @@ QByteArray instanceKey()
     QLockFile lock(path + QStringLiteral(".lock"));
     if (!lock.tryLock(timeoutMs))
         return {};
+    constexpr QFileDevice::Permissions ownerOnly = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
     QFile file(path);
     if (file.open(QIODevice::ReadOnly)) {
         const QByteArray key = file.read(65);
         file.close();
-        if (key.size() == 64)
+#ifdef Q_OS_UNIX
+        // One others could read is no secret any more. (Not on Windows,
+        // where these bits don't say who may read: the folder's ACL does.)
+        const bool exposed = file.permissions() & (QFileDevice::ReadGroup | QFileDevice::ReadOther);
+#else
+        const bool exposed = false;
+#endif
+        if (key.size() == 64 && !exposed)
             return key;
     }
     QByteArray key(32, Qt::Uninitialized);
     QRandomGenerator::system()->generate(key.begin(), key.end());
     key = key.toHex();
-    QSaveFile replacement(path); // (Whole or not at all.)
-    if (!replacement.open(QIODevice::WriteOnly) || replacement.write(key) != key.size() || !replacement.commit())
+    // Whole or not at all, and the user's alone before it holds the key.
+    QSaveFile replacement(path);
+    if (!replacement.open(QIODevice::WriteOnly) || !replacement.setPermissions(ownerOnly)
+        || replacement.write(key) != key.size() || !replacement.commit())
         return {};
-    QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     return key;
 }
 
