@@ -56,6 +56,7 @@ private:
     void endPage(const QString &category, const QString &pageId);
     void addHeading(const QString &text);
     QWidget *addRow(const QString &label, QWidget *control);
+    void addInfo(QWidget *row, const QString &text);
     void addSwitch(const QString &label, const char *key);
     void addCombo(const QString &label, const char *key, const QList<ComboItem> &items);
     void addTextInput(const QString &label, const char *key, const QString &placeholder);

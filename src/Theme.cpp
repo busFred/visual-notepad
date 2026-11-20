@@ -306,8 +306,8 @@ QMenu::indicator:unchecked { image: none; }
 QMenu::right-arrow { image: url(:/vn/icons/chevron-right.svg); width: 8px; height: 8px; right: 8px; }
 
 /* The zoom cell's popup: a menu-coloured panel with a slider. */
-#ZoomPopup, #ReadPopup, #ReadChipPreview { background: @menu; border: 1px solid @divider; border-radius: 3px; }
-#ZoomPopup QLabel, #ReadPopup QLabel { color: @text; }
+#ZoomPopup, #ReadPopup, #ReadChipPreview, #PrefInfoPopup { background: @menu; border: 1px solid @divider; border-radius: 3px; }
+#ZoomPopup QLabel, #ReadPopup QLabel, #PrefInfoPopup QLabel { color: @text; }
 #ZoomPopup QToolButton#ZoomStep, #ReadPopup QToolButton#ZoomStep { border: none; border-radius: 3px; padding: 0 5px; color: @text; }
 #ZoomPopup QToolButton#ZoomStep:hover, #ReadPopup QToolButton#ZoomStep:hover { background: @panelTitle; }
 #ZoomPopup QSlider::groove:horizontal, #ReadPopup QSlider::groove:horizontal { height: 4px; border-radius: 2px; background: @divider; }

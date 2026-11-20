@@ -25,6 +25,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QScreen>
+#include <QGuiApplication>
 #include <QScrollArea>
 #include <QSet>
 #include <QSignalBlocker>
@@ -503,6 +504,38 @@ QWidget *PreferencesDialog::addRow(const QString &label, QWidget *control)
     return row;
 }
 
+void PreferencesDialog::addInfo(QWidget *row, const QString &text)
+{
+    auto *layout = qobject_cast<QHBoxLayout *>(row->layout());
+    auto *label = qobject_cast<QLabel *>(layout->itemAt(0)->widget());
+    layout->setStretch(0, 0);
+    auto *info = new QToolButton(row);
+    info->setObjectName(QStringLiteral("PrefInfo"));
+    info->setText(QStringLiteral("ⓘ"));
+    info->setAccessibleName(tr("More information"));
+    info->setAutoRaise(true);
+    layout->insertWidget(1, info);
+    layout->insertStretch(2, 1);
+    connect(info, &QToolButton::clicked, this, [this, info, text] {
+        auto *popup = new QFrame(this, Qt::Popup);
+        popup->setObjectName(QStringLiteral("PrefInfoPopup"));
+        popup->setAttribute(Qt::WA_DeleteOnClose);
+        auto *box = new QVBoxLayout(popup);
+        auto *message = new QLabel(text, popup);
+        message->setWordWrap(true);
+        message->setMaximumWidth(300);
+        box->addWidget(message);
+        popup->adjustSize();
+        const QRect screen = info->screen()->availableGeometry();
+        QPoint at = info->mapToGlobal(QPoint(0, info->height()));
+        at.setX(qBound(screen.left(), at.x(), qMax(screen.left(), screen.right() - popup->width() + 1)));
+        at.setY(qBound(screen.top(), at.y(), qMax(screen.top(), screen.bottom() - popup->height() + 1)));
+        popup->move(at);
+        popup->show();
+    });
+    Q_UNUSED(label);
+}
+
 void PreferencesDialog::addSwitch(const QString &label, const char *settingKey)
 {
     auto *toggle = new Switch;
@@ -749,23 +782,17 @@ void PreferencesDialog::addReadModeRows()
     auto *columns = new QSpinBox;
     columns->setObjectName(QString::fromLatin1(key::readColumns));
     columns->setRange(0, 99);
-    columns->setSpecialValueText(tr("Auto"));
+    columns->setSpecialValueText(tr("As many as fit"));
     columns->setKeyboardTracking(false);
     columns->setFixedHeight(26);
     columns->setMinimumWidth(110);
-    addRow(tr("Columns"), columns);
+    addInfo(addRow(tr("Columns"), columns), tr("A new tab starts with as many columns as fit at the window's width, font size and zoom. After that, the count stays until you change it."));
     connect(columns, &QSpinBox::valueChanged, this,
             [](int count) { Settings::instance().setValue(key::readColumns, count); });
     track(key::readColumns, [columns] {
         const QSignalBlocker blocker(columns);
         columns->setValue(Settings::instance().number(key::readColumns));
     });
-    auto *note = new QLabel(tr("Auto uses as many columns as fit at the current window width, font size and zoom."));
-    note->setObjectName(QStringLiteral("PrefMuted"));
-    note->setWordWrap(true);
-    note->setContentsMargins(rowIndent + 14, 0, 0, 4);
-    m_page->addWidget(note);
-
     auto *spin = new QSpinBox;
     spin->setObjectName(QString::fromLatin1(key::readChars));
     spin->setRange(50, 100);
@@ -807,9 +834,7 @@ void PreferencesDialog::addPictureCacheRow()
     spin->setKeyboardTracking(false); // one change when typing is done, not one per digit
     spin->setFixedHeight(26);
     spin->setMinimumWidth(110);
-    spin->setToolTip(hint);
-    QWidget *row = addRow(tr("Picture cache size"), spin);
-    row->setToolTip(hint);
+    addInfo(addRow(tr("Picture cache size"), spin), hint);
     connect(spin, &QSpinBox::valueChanged, this,
             [](int mib) { Settings::instance().setValue(key::pictureCacheMiB, mib); });
     track(key::pictureCacheMiB, [spin] {
@@ -817,11 +842,7 @@ void PreferencesDialog::addPictureCacheRow()
         spin->setValue(Settings::instance().number(key::pictureCacheMiB));
     });
 
-    auto *note = new QLabel(hint);
-    note->setObjectName(QStringLiteral("PrefMuted"));
-    note->setWordWrap(true);
-    note->setContentsMargins(rowIndent, 0, 0, 4);
-    m_page->addWidget(note);
+
 }
 
 void PreferencesDialog::addMacroTable()

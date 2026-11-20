@@ -262,26 +262,19 @@ void TestPreferences::readModeRows()
     auto *columns = find<QSpinBox>(key::readColumns);
     QVERIFY(columns);
     QCOMPARE(columns->value(), 0);
-    QCOMPARE(columns->text(), QStringLiteral("Auto"));
+    QCOMPARE(columns->text(), QStringLiteral("As many as fit"));
     QVERIFY(columns->maximum() > 4);
     columns->setValue(2);
     QCOMPARE(Settings::instance().number(key::readColumns), 2);
     columns->setValue(7);
     QCOMPARE(Settings::instance().number(key::readColumns), 7);
-    const QLabel *note = nullptr;
-    for (const QLabel *label : window->findChildren<QLabel *>(QStringLiteral("PrefMuted"))) {
-        if (label->text().startsWith(QLatin1String("Auto uses as many columns as fit")))
-            note = label;
-    }
-    QVERIFY(note);
-    QCOMPARE(note->text(),
-             QStringLiteral("Auto uses as many columns as fit at the current window width, font size and zoom."));
-    // Indented 14 px past the row's label.
-    const QLabel *label = columns->parentWidget()->findChild<QLabel *>(QString(), Qt::FindDirectChildrenOnly);
-    QVERIFY(label);
-    QCOMPARE(QString(label->text()).remove(u'&'), QStringLiteral("Columns")); // (A mnemonic is added.)
-    QCOMPARE(note->mapTo(window, note->contentsRect().topLeft()).x(),
-             label->mapTo(window, QPoint(0, 0)).x() + 14);
+    auto *info = columns->parentWidget()->findChild<QToolButton *>(QStringLiteral("PrefInfo"));
+    QVERIFY(info);
+    info->click();
+    auto *popup = window->findChild<QFrame *>(QStringLiteral("PrefInfoPopup"));
+    QVERIFY(popup && popup->isVisible());
+    QVERIFY(popup->findChild<QLabel *>()->text().startsWith(QStringLiteral("A new tab starts")));
+    popup->close();
 
     // Characters per column: 50 to 100 in steps of 5.
     auto *chars = find<QSpinBox>(key::readChars);
