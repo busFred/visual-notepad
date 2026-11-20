@@ -87,7 +87,7 @@ private Q_SLOTS:
     void lineSpacingChangesRenderedHeight();
     void encodingRows();
     void showPageSelectsCategory();
-    void markdownPageFitsWithoutScrolling();
+    void initialSizeKeepsButtonsVisible();
     void singleInstance();
     void screenshots();
 };
@@ -725,19 +725,23 @@ void TestPreferences::showPageSelectsCategory()
     QCOMPARE(list->currentItem()->text(), QStringLiteral("Markdown"));
 }
 
-void TestPreferences::markdownPageFitsWithoutScrolling()
+void TestPreferences::initialSizeKeepsButtonsVisible()
 {
     PreferencesDialog::showPage(nullptr, QStringLiteral("markdown"));
     QWidget *window = prefsWindow();
     QVERIFY(window);
+    QVERIFY(window->height() <= 520);
+    const QRect available = window->screen()->availableGeometry();
+    QVERIFY(window->height() <= available.height() - 120);
+    QVERIFY(available.contains(window->frameGeometry()));
     auto *stack = window->findChild<QStackedWidget *>();
-    auto *scroll = qobject_cast<QScrollArea *>(stack->currentWidget());
-    QVERIFY(scroll);
-    QTRY_VERIFY(scroll->viewport()->height() > 0);
-    if (scroll->viewport()->height() < scroll->widget()->sizeHint().height()
-        && window->height() >= window->screen()->availableGeometry().height() - 80)
-        QSKIP("The screen is too short for the whole page.");
-    QCOMPARE(scroll->verticalScrollBar()->maximum(), 0);
+    QVERIFY(qobject_cast<QScrollArea *>(stack->currentWidget()));
+    for (const QString &name : {QStringLiteral("help"), QStringLiteral("close")}) {
+        auto *button = find<QAbstractButton>(name);
+        QVERIFY(button);
+        QVERIFY(button->isVisible());
+        QVERIFY(window->rect().contains(QRect(button->mapTo(window, QPoint()), button->size())));
+    }
 }
 
 void TestPreferences::singleInstance()

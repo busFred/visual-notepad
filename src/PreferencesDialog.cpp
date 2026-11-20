@@ -335,7 +335,6 @@ PreferencesDialog::PreferencesDialog(QWidget *parent)
     setWindowTitle(tr("Visual Notepad Preferences"));
     setAttribute(Qt::WA_DeleteOnClose);
     setModal(false);
-    resize(640, 470);
 
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(12, 12, 12, 12);
@@ -394,16 +393,15 @@ PreferencesDialog::PreferencesDialog(QWidget *parent)
 
     m_categories->setCurrentRow(0);
 
-    // Open tall enough that the Markdown page, the longest one people visit
-    // often, needs no scrolling (within the screen).
-    if (auto *markdown = qobject_cast<QScrollArea *>(m_stack->widget(int(m_pageIds.indexOf(QStringLiteral("markdown")))))) {
-        markdown->setMinimumHeight(markdown->widget()->sizeHint().height());
-        int height = qMax(this->height(), layout()->minimumSize().height());
-        markdown->setMinimumHeight(0);
-        if (const QScreen *screen = this->screen())
-            height = qMin(height, screen->availableGeometry().height() - 80);
-        resize(width(), height);
+    // Leave room for window decorations and the taskbar; pages can scroll.
+    if (const QScreen *screen = this->screen()) {
+        const QRect available = screen->availableGeometry();
+        resize(qMin(640, available.width()), qMin(520, available.height() - 120));
+        move(available.center() - rect().center());
+    } else {
+        resize(640, 520);
     }
+
 }
 
 void PreferencesDialog::closeEvent(QCloseEvent *event)
