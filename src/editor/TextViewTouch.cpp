@@ -90,12 +90,15 @@ bool TextView::handleTouch(QTouchEvent *event)
             const QPointF delta = m_touchLast - at;
             const qreal speed = delta.y() / qMax<qint64>(8, now - m_touchLastMove);
             m_touchVelocity = qBound(-maxVelocity, speed, maxVelocity);
-            m_touchLastMove = now;
             m_touchLast = at;
             if (m_touchPageLineHeight == 0 && !m_wordWrap)
                 horizontalScrollBar()->setValue(horizontalScrollBar()->value() + qRound(delta.x()));
             if (delta.y() != 0)
                 touchScrollBy(delta.y());
+            // Once the move is done: laying out what scrolled in is no pause
+            // of the finger's (on a slow machine it could pass for one and
+            // keep a flick from starting).
+            m_touchLastMove = m_touchTime.elapsed();
         }
         if (type == QEvent::TouchEnd) {
             const TouchMode mode = m_touchMode;
