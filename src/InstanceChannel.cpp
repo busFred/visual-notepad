@@ -52,28 +52,39 @@ constexpr char received = 'K';
 // cannot take the name first and receive the paths this user opens. Made,
 // or remade when cut short (by a crash or a power cut), under a lock of its
 // own, so that launches at once all read the one key.
+// The key at `path` if it is whole and the user's alone, else empty.
+QByteArray readKey(const QString &path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+    const QByteArray key = file.read(65);
+    file.close();
+#ifdef Q_OS_UNIX
+    // One others could read is no secret any more. (Not on Windows, where
+    // these bits don't say who may read: the folder's ACL does.)
+    if (file.permissions() & (QFileDevice::ReadGroup | QFileDevice::ReadOther))
+        return {};
+#endif
+    return key.size() == 64 ? key : QByteArray();
+}
+
 QByteArray instanceKey()
 {
     const QString path = QFileInfo(Settings::instance().fileName()).dir().filePath(QStringLiteral("instance.key"));
+    // Nearly always there and whole: read without the lock, which launches
+    // at once (one per file opened together) would otherwise queue on. (A
+    // key is only ever put in place whole, by QSaveFile.)
+    if (const QByteArray key = readKey(path); !key.isEmpty())
+        return key;
     QDir().mkpath(QFileInfo(path).absolutePath());
     QLockFile lock(path + QStringLiteral(".lock"));
     if (!lock.tryLock(timeoutMs))
         return {};
+    // Another launch may have made it while this one waited.
+    if (const QByteArray key = readKey(path); !key.isEmpty())
+        return key;
     constexpr QFileDevice::Permissions ownerOnly = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
-    QFile file(path);
-    if (file.open(QIODevice::ReadOnly)) {
-        const QByteArray key = file.read(65);
-        file.close();
-#ifdef Q_OS_UNIX
-        // One others could read is no secret any more. (Not on Windows,
-        // where these bits don't say who may read: the folder's ACL does.)
-        const bool exposed = file.permissions() & (QFileDevice::ReadGroup | QFileDevice::ReadOther);
-#else
-        const bool exposed = false;
-#endif
-        if (key.size() == 64 && !exposed)
-            return key;
-    }
     QByteArray key(32, Qt::Uninitialized);
     QRandomGenerator::system()->generate(key.begin(), key.end());
     key = key.toHex();

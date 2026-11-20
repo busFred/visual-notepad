@@ -19,6 +19,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 
@@ -38,6 +39,7 @@ private Q_SLOTS:
     void simultaneousLaunches_data();
     void simultaneousLaunches();
     void unreachableCopyKeepsItsSession();
+    void manyLaunchesAtOnce();
 #endif
 
 private:
@@ -372,6 +374,57 @@ void TestInstance::unreachableCopyKeepsItsSession()
     QCOMPARE(sessionPaths(), QStringList{firstPath});
     first.terminate();
     QVERIFY(first.waitForFinished());
+}
+#endif
+
+#ifdef Q_OS_LINUX
+// Files opened together from a file manager start one launch each, all at
+// once: every one of them must reach the copy that won, none time out on
+// the way (such as queuing on the key's lock) and run on its own.
+void TestInstance::manyLaunchesAtOnce()
+{
+    constexpr int count = 8;
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(QStringLiteral("XDG_CONFIG_HOME"), m_dir.filePath(QStringLiteral("many-config")));
+    const QString data = m_dir.filePath(QStringLiteral("many-data"));
+    environment.insert(QStringLiteral("XDG_DATA_HOME"), data);
+    environment.insert(QStringLiteral("VN_INSTANCE_NAME"), QStringLiteral("many"));
+    std::vector<std::unique_ptr<QProcess>> launches;
+    QStringList paths;
+    for (int i = 0; i < count; ++i) {
+        paths.append(write(QStringLiteral("many%1.txt").arg(i)));
+        auto launch = std::make_unique<QProcess>();
+        launch->setProcessEnvironment(environment);
+        launches.push_back(std::move(launch));
+    }
+    for (int i = 0; i < count; ++i)
+        launches[i]->start(QStringLiteral(VN_APP_PATH), {paths[i]});
+    for (const auto &launch : launches)
+        QVERIFY2(launch->waitForStarted(), qPrintable(launch->errorString()));
+    const auto running = [&] {
+        return std::count_if(launches.begin(), launches.end(),
+                             [](const auto &launch) { return launch->state() != QProcess::NotRunning; });
+    };
+    QTRY_COMPARE_WITH_TIMEOUT(running(), 1, 15000);
+    for (const auto &launch : launches) {
+        if (launch->state() == QProcess::NotRunning)
+            QCOMPARE(launch->exitCode(), 0);
+    }
+    // All the files in the one window of the one copy.
+    const auto sessionTabs = [&data] {
+        QFile session(data + QStringLiteral("/visnotepad/visnotepad/session.json"));
+        if (!session.open(QIODevice::ReadOnly))
+            return -1;
+        const auto windows = QJsonDocument::fromJson(session.readAll()).object().value(QStringLiteral("windows")).toArray();
+        return windows.size() == 1 ? int(windows.at(0).toObject().value(QStringLiteral("tabs")).toArray().size()) : -1;
+    };
+    QTRY_COMPARE_WITH_TIMEOUT(sessionTabs(), count, 10000);
+    for (const auto &launch : launches) {
+        if (launch->state() != QProcess::NotRunning) {
+            launch->terminate();
+            QVERIFY(launch->waitForFinished());
+        }
+    }
 }
 #endif
 
