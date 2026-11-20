@@ -424,6 +424,11 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
+    // Paged views scroll in lines and use a sideways touch swipe to turn a page.
+    virtual qreal touchPageLineHeight();
+    virtual void touchTurnPage(bool forward);
+    virtual void touchNudge(int lines);
+    virtual bool touchTapActivates(const QPointF &point);
     void focusInEvent(QFocusEvent *event) override;
     void focusOutEvent(QFocusEvent *event) override;
     void changeEvent(QEvent *event) override;
@@ -438,6 +443,7 @@ protected:
 private:
     bool handleTouch(QTouchEvent *event);
     void touchFlickTick();
+    bool touchScrollBy(qreal pixels);
     bool scrollByPixels(qreal pixels);
 
     // Columns of source lines; see setColumnsShown (TextViewColumns.cpp).
@@ -863,12 +869,14 @@ private:
     bool m_scrollBarsHidden = false;
 
     // Touch scrolling keeps pixels within a row, like the wheel.
-    enum class TouchMode { Idle, Tap, Scroll, Select, Ignore };
+    enum class TouchMode { Idle, Tap, Scroll, Swipe, Select, Ignore };
     TouchMode m_touchMode = TouchMode::Idle;
     QPointF m_touchStart, m_touchLast;
     QElapsedTimer m_touchTime;
     qint64 m_touchLastMove = 0;
     qreal m_touchVelocity = 0;
+    qreal m_touchPageLineHeight = 0;
+    qreal m_touchLineRemainder = 0;
     QBasicTimer m_touchFlick;
     touch::DoubleTap m_touchTap;
 

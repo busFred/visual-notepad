@@ -1438,6 +1438,33 @@ bool VisualView::readKey(QKeyEvent *event)
     }
 }
 
+qreal VisualView::touchPageLineHeight()
+{
+    return readActive() ? readLineHeight() : TextView::touchPageLineHeight();
+}
+
+void VisualView::touchTurnPage(bool forward)
+{
+    if (readActive())
+        forward ? readPageForward() : readPageBack();
+    else
+        TextView::touchTurnPage(forward);
+}
+
+void VisualView::touchNudge(int lines)
+{
+    if (readActive())
+        readNudge(lines);
+    else
+        TextView::touchNudge(lines);
+}
+
+bool VisualView::touchTapActivates(const QPointF &point)
+{
+    // Picture chips handle each tap through the existing click handler.
+    return readActive() && readChipAt(point) >= 0;
+}
+
 void VisualView::wheelEvent(QWheelEvent *event)
 {
     // Ctrl+wheel zooms as anywhere.

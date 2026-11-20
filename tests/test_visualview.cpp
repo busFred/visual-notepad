@@ -503,6 +503,7 @@ private Q_SLOTS:
     void copiedTabKeepsItsFolds();
     void blocksStartCollapsedWhenAsked();
     void readModeKeepsThePlace();
+    void touchSwipeTurnsReadPages();
     void readColumnsFollowWidthCharactersAndZoom();
     void pageTurnsGreyKeptLinesOnlyGoingForward();
     void readNudgesByButtonsWheelAndKeys();
@@ -5431,6 +5432,25 @@ QRect TestVisualView::segmentOfLine(int line, int *column, int *index)
         }
     }
     return {};
+}
+
+void TestVisualView::touchSwipeTurnsReadPages()
+{
+    startReading(QStringLiteral("A paragraph for testing a page turn.\n\n").repeated(150), 760, 380);
+    const auto first = m_view->readScreen().start;
+    QWidget *view = m_view->viewport();
+    auto touch = QTest::touchEvent(view, QTest::createTouchDevice(), false);
+    const QPoint start(450, 150);
+    const QPoint end(220, 150);
+    touch.press(0, start).commit();
+    touch.move(0, end).commit();
+    touch.release(0, end).commit();
+    QVERIFY(m_view->readScreen().start != first);
+    touch.press(0, end).commit();
+    touch.move(0, start).commit();
+    touch.release(0, start).commit();
+    QCOMPARE(m_view->readScreen().start, first);
+    QVERIFY(!m_view->hasSelection());
 }
 
 void TestVisualView::readModeKeepsThePlace()

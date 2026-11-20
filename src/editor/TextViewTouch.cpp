@@ -46,6 +46,8 @@ bool TextView::handleTouch(QTouchEvent *event)
         m_touchTime.start();
         m_touchLastMove = 0;
         m_touchVelocity = 0;
+        m_touchPageLineHeight = touchPageLineHeight();
+        m_touchLineRemainder = 0;
     }
     if (m_touchMode == TouchMode::Idle)
         return false;
@@ -74,6 +76,8 @@ bool TextView::handleTouch(QTouchEvent *event)
                 m_dragOrigin = wordAt(positionAt(m_touchStart));
                 m_dragging = true;
                 setCaretRanges({m_dragOrigin}, 0);
+            } else if (m_touchPageLineHeight > 0 && qAbs(movement.x()) > qAbs(movement.y())) {
+                m_touchMode = TouchMode::Swipe;
             } else {
                 m_touchMode = TouchMode::Scroll;
             }
@@ -87,9 +91,10 @@ bool TextView::handleTouch(QTouchEvent *event)
             m_touchVelocity = qBound(-maxVelocity, speed, maxVelocity);
             m_touchLastMove = now;
             m_touchLast = at;
-            if (!m_wordWrap)
+            if (m_touchPageLineHeight == 0 && !m_wordWrap)
                 horizontalScrollBar()->setValue(horizontalScrollBar()->value() + qRound(delta.x()));
-            scrollByPixels(delta.y());
+            if (delta.y() != 0)
+                touchScrollBy(delta.y());
         }
         if (type == QEvent::TouchEnd) {
             const TouchMode mode = m_touchMode;
@@ -99,10 +104,14 @@ bool TextView::handleTouch(QTouchEvent *event)
                 if (now >= touch::holdTime) {
                     m_touchTap.reset();
                     touch::postContextMenu(viewport(), global);
-                } else if (m_touchTap.tap(global)) {
-                    setFocus(Qt::MouseFocusReason);
-                    setCaretRanges({wordAt(positionAt(at))}, 0);
                 } else {
+                    if (touchTapActivates(at))
+                        m_touchTap.reset();
+                    else if (m_touchTap.tap(global)) {
+                        setFocus(Qt::MouseFocusReason);
+                        setCaretRanges({wordAt(positionAt(at))}, 0);
+                        return true;
+                    }
                     const QPointer<QWidget> target = viewport();
                     touch::sendMouse(target, QEvent::MouseButtonPress, global, event);
                     if (target)
@@ -110,6 +119,11 @@ bool TextView::handleTouch(QTouchEvent *event)
                 }
             } else if (mode == TouchMode::Select) {
                 touch::sendMouse(viewport(), QEvent::MouseButtonRelease, point.globalPosition(), event);
+            } else if (mode == TouchMode::Swipe) {
+                if (qAbs(movement.x()) >= qMax(36, 4 * QApplication::startDragDistance())
+                    && qAbs(movement.x()) > qAbs(movement.y())) {
+                    touchTurnPage(movement.x() < 0);
+                }
             } else if (mode == TouchMode::Scroll && now - m_touchLastMove < flickPause
                        && qAbs(m_touchVelocity) >= minVelocity) {
                 m_touchTime.restart();
@@ -122,11 +136,29 @@ bool TextView::handleTouch(QTouchEvent *event)
     return true;
 }
 
+bool TextView::touchTapActivates(const QPointF &)
+{
+    return false;
+}
+
+bool TextView::touchScrollBy(qreal pixels)
+{
+    if (m_touchPageLineHeight == 0)
+        return scrollByPixels(pixels);
+
+    m_touchLineRemainder += pixels;
+    const int lines = int(m_touchLineRemainder / m_touchPageLineHeight);
+    m_touchLineRemainder -= lines * m_touchPageLineHeight;
+    if (lines != 0)
+        touchNudge(lines);
+    return true; // An animation tick can be smaller than a line.
+}
+
 void TextView::touchFlickTick()
 {
     const qreal dt = m_touchTime.restart();
     const qreal decay = std::exp(-dt / flickTime);
-    const bool moved = scrollByPixels(m_touchVelocity * flickTime * (1 - decay));
+    const bool moved = touchScrollBy(m_touchVelocity * flickTime * (1 - decay));
     m_touchVelocity *= decay;
     if (!moved || qAbs(m_touchVelocity) < minVelocity)
         m_touchFlick.stop();

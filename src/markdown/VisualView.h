@@ -248,6 +248,10 @@ protected:
     void resizeEvent(QResizeEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
+    qreal touchPageLineHeight() override;
+    void touchTurnPage(bool forward) override;
+    void touchNudge(int lines) override;
+    bool touchTapActivates(const QPointF &point) override;
     qreal textWidth() const override;
     int rowAtPoint(const QPointF &point, QPointF *origin) override;
     int positionAt(const QPointF &point) override;

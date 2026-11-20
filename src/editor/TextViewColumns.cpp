@@ -1023,6 +1023,23 @@ bool TextView::columnsKey(QKeyEvent *event)
     }
 }
 
+qreal TextView::touchPageLineHeight()
+{
+    return m_columnsOn ? m_lineHeight : 0;
+}
+
+void TextView::touchTurnPage(bool forward)
+{
+    if (m_columnsOn)
+        columnsPage(forward, false, false);
+}
+
+void TextView::touchNudge(int lines)
+{
+    if (m_columnsOn)
+        columnsNudge(lines);
+}
+
 void TextView::columnsWheel(QWheelEvent *event)
 {
     Columns &c = *m_columns;

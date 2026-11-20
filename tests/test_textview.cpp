@@ -89,6 +89,7 @@ private Q_SLOTS:
     void touchHoldOpensContextMenu();
     void touchHoldAndDragSelectsText();
     void touchPinchLeavesDocumentAlone();
+    void touchSwipeTurnsSourceColumnPages();
     void mouseDragStillSelects();
     void columnsShowLinesInColumns();
     void columnsNumberEachColumnsLines();
@@ -457,6 +458,26 @@ void TestTextView::touchPinchLeavesDocumentAlone()
     QCOMPARE(m_view->textCursor().position(), 0);
     QCOMPARE(m_view->scrollPixels(), qreal(0));
     QVERIFY(zoom.isEmpty());
+}
+
+void TestTextView::touchSwipeTurnsSourceColumnPages()
+{
+    setText(QStringLiteral("alpha beta gamma\n").repeated(150));
+    m_view->setColumnsShown(true);
+    QWidget *view = m_view->viewport();
+    auto touch = QTest::touchEvent(view, QTest::createTouchDevice(), false);
+    const qreal first = m_view->topLinePosition();
+    const QPoint start(300, 100);
+    const QPoint end(150, 100);
+    touch.press(0, start).commit();
+    touch.move(0, end).commit();
+    touch.release(0, end).commit();
+    QVERIFY(m_view->topLinePosition() > first);
+    touch.press(0, end).commit();
+    touch.move(0, start).commit();
+    touch.release(0, start).commit();
+    QCOMPARE(m_view->topLinePosition(), first);
+    QVERIFY(!m_view->hasSelection());
 }
 
 void TestTextView::mouseDragStillSelects()
