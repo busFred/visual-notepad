@@ -6087,6 +6087,19 @@ void TestVisualView::readChipPreview()
     QTRY_COMPARE(viewers().size(), 1);
     QCOMPARE(viewers().first()->count(), 2);
     closeViewer();
+
+    // The same with touch events as a screen sends them, through the view's
+    // own touch handling: the first tap shows, the second opens.
+    auto finger = QTest::touchEvent(viewport, QTest::createTouchDevice(), false);
+    finger.press(0, chip).commit();
+    finger.release(0, chip).commit();
+    QTRY_VERIFY(visible());
+    QVERIFY(viewers().isEmpty());
+    finger.press(0, chip).commit();
+    finger.release(0, chip).commit();
+    QTRY_COMPARE(viewers().size(), 1);
+    QTRY_VERIFY(!visible());
+    closeViewer();
 }
 
 void TestVisualView::readLineRangeIsTheScreens()

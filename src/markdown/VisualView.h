@@ -872,7 +872,8 @@ private:
     std::optional<ReadChip> readChipForPress(const QPointF &point);
     bool readChipPressed(QMouseEvent *event);
     bool readChipHovered(QMouseEvent *event);
-    void showReadChipPreview(ReadChip chip, bool touch);
+    // Whether it showed anything (a glow or a preview).
+    bool showReadChipPreview(ReadChip chip, bool touch);
     void clearReadChipPreview();
     void invalidateReadChips();
     void paintReadPictureGlow(QPainter &painter, const QRect &dirty);

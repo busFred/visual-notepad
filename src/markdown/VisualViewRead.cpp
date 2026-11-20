@@ -1147,12 +1147,12 @@ bool VisualView::readChipPressed(QMouseEvent *event)
         if (isTouchMouse(event)) {
             if (const auto chip = readChipForPress(event->position())) {
                 event->accept();
-                if (m_readPreviewTouch && m_readPreviewRow == chip->row) {
-                    const int row = chip->row;
+                const int row = chip->row;
+                // The second tap, or a first with nothing to show (pictures
+                // no longer decoded): what a click does.
+                if ((m_readPreviewTouch && m_readPreviewRow == row) || !showReadChipPreview(*chip, true)) {
                     clearReadChipPreview();
                     openMovedPictures(row);
-                } else {
-                    showReadChipPreview(*chip, true);
                 }
                 return true;
             }
@@ -1189,7 +1189,7 @@ bool VisualView::eventFilter(QObject *watched, QEvent *event)
     return TextView::eventFilter(watched, event);
 }
 
-void VisualView::showReadChipPreview(ReadChip chip, bool touch)
+bool VisualView::showReadChipPreview(ReadChip chip, bool touch)
 {
     clearReadChipPreview();
     m_readPreviewRow = chip.row;
@@ -1239,20 +1239,21 @@ void VisualView::showReadChipPreview(ReadChip chip, bool touch)
     // A group can continue on the next page after filling the remaining columns.
     const int next = screen.end.floatRow;
     if (next < chip.row || next > chip.lastRow)
-        return;
+        return !m_readPictureGlow.isEmpty();
     QList<QImage> pictures;
     for (int row = next; row <= chip.lastRow; ++row) {
         if (const RenderedBlock *block = cachedBlock(row))
             pictures.append(block->picturePreviews());
     }
     if (pictures.isEmpty())
-        return;
+        return !m_readPictureGlow.isEmpty();
     if (!m_readChipPreview)
         m_readChipPreview = new ReadChipPreview(this);
     const QRect box(viewport()->mapToGlobal(chip.box.topLeft().toPoint()), chip.box.size().toSize());
     const QScreen *screenAtChip = QGuiApplication::screenAt(box.center());
     m_readChipPreview->showPictures(std::move(pictures), box,
                                    (screenAtChip ? screenAtChip : viewport()->screen())->availableGeometry());
+    return true;
 }
 
 void VisualView::clearReadChipPreview()
