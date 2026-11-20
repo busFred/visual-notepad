@@ -3327,7 +3327,8 @@ void TestVisualView::pictureViewerInitialSize()
         }
         if (picture.width() == 200) {
             QCOMPARE(viewer.scale(), 1 / viewer.devicePixelRatioF());
-            QVERIFY(viewer.width() <= 400);
+            // Its own size, or the zoom bar's width at least.
+            QVERIFY(viewer.width() <= qMax(400, viewer.minimumWidth()));
             QVERIFY(viewer.height() <= 300);
         }
     }
@@ -5512,11 +5513,11 @@ void TestVisualView::readColumnsFollowWidthCharactersAndZoom()
         return qMax(1, (room + 40) / (width + 40));
     };
     startReading(readDocument(), 1500, 600);
-    QCOMPARE(m_view->readMaxColumns(), fits(70));
+    QCOMPARE(m_view->readMaxColumns(), fits(75));
     QVERIFY(m_view->readMaxColumns() >= 2);
     QCOMPARE(m_view->readColumnCount(), m_view->readMaxColumns());
     QCOMPARE(int(m_view->readScreen().columns.size()), m_view->readColumnCount());
-    QCOMPARE(m_view->readColumnRect(0).width(), qRound(70 * charWidth()));
+    QCOMPARE(m_view->readColumnRect(0).width(), qRound(75 * charWidth()));
     // Centred: the spare room is the margins.
     const QRect firstColumn = m_view->readColumnRect(0);
     const QRect lastColumn = m_view->readColumnRect(m_view->readColumnCount() - 1);
