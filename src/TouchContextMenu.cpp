@@ -72,7 +72,8 @@ protected:
             } else if (target && held) {
                 postContextMenu(target, at);
             } else if (target) {
-                sendMouse(target, QEvent::MouseButtonPress, at, finger);
+                // A second tap is a double click, as a text field selects a word with.
+                sendMouse(target, m_tap.tap(at) ? QEvent::MouseButtonDblClick : QEvent::MouseButtonPress, at, finger);
                 if (target)
                     sendMouse(target, QEvent::MouseButtonRelease, at, finger);
             }
@@ -88,6 +89,7 @@ private:
     QPointF m_start, m_last;
     bool m_dragging = false;
     bool m_ignored = false;
+    DoubleTap m_tap;
 };
 
 // Qt's text controls supply their own right-click menus. Treat them like
@@ -110,8 +112,10 @@ protected:
             enableContextMenu(edit->viewport());
         else if (auto *edit = qobject_cast<QPlainTextEdit *>(widget))
             enableContextMenu(edit->viewport());
-        else if (qobject_cast<QLineEdit *>(widget) || qobject_cast<QAbstractSpinBox *>(widget)
-                 || widget->contextMenuPolicy() == Qt::ActionsContextMenu
+        // (Not spin boxes: a finger held on their arrows repeats the step.)
+        else if (qobject_cast<QAbstractSpinBox *>(widget))
+            return false;
+        else if (qobject_cast<QLineEdit *>(widget) || widget->contextMenuPolicy() == Qt::ActionsContextMenu
                  || widget->contextMenuPolicy() == Qt::CustomContextMenu)
             enableContextMenu(widget);
         return false;
