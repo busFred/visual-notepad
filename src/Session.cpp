@@ -680,6 +680,8 @@ bool SessionManager::prepareQuit()
 
 bool SessionManager::quit()
 {
+    // The user quits: whatever a logout that was then cancelled left.
+    m_endedBySystem = false;
     if (!prepareQuit())
         return false;
     m_quitting = true;
