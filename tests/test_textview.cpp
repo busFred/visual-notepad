@@ -376,7 +376,8 @@ void TestTextView::touchDragScrollsWithoutSelecting()
     auto touch = QTest::touchEvent(view, device, false);
     const QPoint start(110, 300);
     touch.press(0, start).commit();
-    QTest::qWait(20);
+    // Moved at once: a finger held still for half a second before moving
+    // selects instead, and a busy test machine can stretch a wait into that.
     touch.move(0, start - QPoint(0, 60)).commit();
     QTest::qWait(20);
     const QPoint end = start - QPoint(0, 120);
