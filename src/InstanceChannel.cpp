@@ -1,5 +1,6 @@
 #include "InstanceChannel.h"
 
+#include "Session.h"
 #include "Settings.h"
 
 #include <QCoreApplication>
@@ -145,6 +146,16 @@ bool serverIsOurs(const QLocalSocket &socket)
 }
 #endif
 
+// The lock goes with the session it guards: one per session folder,
+// whatever the channel's name came to (a runtime folder that differs or is
+// missing, a new key), so that two copies never both own one session.
+QString lockPath()
+{
+    const QString dir = SessionManager::dataDir();
+    QDir().mkpath(dir);
+    return QDir(dir).filePath(QStringLiteral("instance.lock"));
+}
+
 bool isAbsoluteFilePath(const QString &path)
 {
     if (path.contains(QChar::Null))
@@ -259,12 +270,7 @@ std::optional<QStringList> instanceRequest::decode(QByteArrayView message)
 
 InstanceChannel::InstanceChannel()
     : m_name(serverName())
-    // The lock goes with the session it guards, in the settings folder (the
-    // name's own folder may be missing: then the lock alone decides).
-    , m_lock(QFileInfo(Settings::instance().fileName())
-                 .dir()
-                 .filePath((m_name.isEmpty() ? QStringLiteral("visnotepad") : QFileInfo(m_name).fileName())
-                           + QStringLiteral(".lock")))
+    , m_lock(lockPath())
 {
     m_lock.setStaleLockTime(0);
     m_server.setSocketOptions(QLocalServer::UserAccessOption);

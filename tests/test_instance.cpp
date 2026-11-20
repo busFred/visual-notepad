@@ -33,6 +33,7 @@ private Q_SLOTS:
     void routesPendingFile();
 #ifdef Q_OS_LINUX
     void simultaneousLaunches();
+    void unreachableCopyKeepsItsSession();
 #endif
 
 private:
@@ -229,6 +230,61 @@ void TestInstance::simultaneousLaunches()
     QVERIFY(primary.waitForFinished());
     QCOMPARE(primary.exitStatus(), QProcess::NormalExit);
     QCOMPARE(primary.exitCode(), 0);
+}
+#endif
+
+#ifdef Q_OS_LINUX
+// Two launches on one session whose channels can't meet: the second's
+// runtime folder is too deep for a socket path, so it has no channel name at
+// all. It runs on its own, and the first's session stays the first's alone:
+// the lock is the session's, not the channel's.
+void TestInstance::unreachableCopyKeepsItsSession()
+{
+    const QString firstPath = write(QStringLiteral("own1.txt"));
+    const QString secondPath = write(QStringLiteral("own2.txt"));
+    const QString data = m_dir.filePath(QStringLiteral("own-data"));
+    const auto environment = [&](const QString &runtime) {
+        QDir().mkpath(runtime);
+        QFile::setPermissions(runtime, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert(QStringLiteral("XDG_CONFIG_HOME"), m_dir.filePath(QStringLiteral("own-config")));
+        environment.insert(QStringLiteral("XDG_DATA_HOME"), data);
+        environment.insert(QStringLiteral("XDG_RUNTIME_DIR"), runtime);
+        environment.insert(QStringLiteral("VN_INSTANCE_NAME"), QStringLiteral("own-session"));
+        return environment;
+    };
+    QProcess first;
+    first.setProcessEnvironment(environment(m_dir.filePath(QStringLiteral("run-a"))));
+    first.start(QStringLiteral(VN_APP_PATH), {firstPath});
+    QVERIFY2(first.waitForStarted(), qPrintable(first.errorString()));
+    const auto sessionPaths = [&data] {
+        QStringList paths;
+        QFile session(data + QStringLiteral("/visnotepad/visnotepad/session.json"));
+        if (!session.open(QIODevice::ReadOnly))
+            return paths;
+        for (const QJsonValue &window : QJsonDocument::fromJson(session.readAll()).object().value(QStringLiteral("windows")).toArray()) {
+            for (const QJsonValue &tab : window.toObject().value(QStringLiteral("tabs")).toArray())
+                paths.append(tab.toObject().value(QStringLiteral("path")).toString());
+        }
+        return paths;
+    };
+    QTRY_COMPARE_WITH_TIMEOUT(sessionPaths(), QStringList{firstPath}, 10000);
+
+    QProcess second;
+    second.setProcessEnvironment(environment(m_dir.filePath(QStringLiteral("run-b/") + QString(110, u'd'))));
+    second.start(QStringLiteral(VN_APP_PATH), {secondPath});
+    QVERIFY2(second.waitForStarted(), qPrintable(second.errorString()));
+    // It waits out the lock, then opens its file itself and stays.
+    QTest::qWait(8000);
+    QCOMPARE(second.state(), QProcess::Running);
+    QCOMPARE(first.state(), QProcess::Running);
+    QCOMPARE(sessionPaths(), QStringList{firstPath});
+
+    second.terminate();
+    QVERIFY(second.waitForFinished());
+    QCOMPARE(sessionPaths(), QStringList{firstPath});
+    first.terminate();
+    QVERIFY(first.waitForFinished());
 }
 #endif
 
