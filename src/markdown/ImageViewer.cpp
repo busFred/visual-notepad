@@ -6,6 +6,7 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QScreen>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -27,16 +28,28 @@ ImageViewer::ImageViewer(const QImage &image, const QString &title, QWidget *par
     setWindowTitle(title);
     setAttribute(Qt::WA_DeleteOnClose);
     setCursor(Qt::OpenHandCursor);
-    QSize size(900, 650);
-    if (parent) {
-        const QSize host = parent->window()->size();
-        size = QSize(qMax(480, host.width() * 4 / 5), qMax(360, host.height() * 4 / 5));
-    }
-    resize(size);
     setMinimumSize(320, 180);
 
     // The controls float over the bottom of the picture.
     m_bar = new ZoomBar(this);
+    // The content is centred, so leave room on both sides of the floating bar.
+    const QSize padding(int(2 * margin), int(2 * (margin + m_bar->height())));
+    QSize cap(900, 650);
+    if (parent)
+        cap = parent->window()->size() * 4 / 5;
+    if (const QScreen *screen = this->screen())
+        cap = cap.boundedTo(screen->availableGeometry().size());
+    cap = cap.expandedTo(minimumSize());
+    QSizeF content = QSizeF(m_image.size()) / devicePixelRatioF();
+    if (!content.isEmpty()) {
+        content.scale(QSizeF((cap - padding).expandedTo(QSize(1, 1))), Qt::KeepAspectRatio);
+        const QSizeF natural = QSizeF(m_image.size()) / devicePixelRatioF();
+        if (content.width() > natural.width())
+            content = natural;
+    }
+    resize((QSize(int(std::ceil(content.width())), int(std::ceil(content.height()))) + padding)
+               .expandedTo(minimumSize()).boundedTo(cap));
+
     connect(m_bar, &ZoomBar::fitRequested, this, [this] { fit(); });
     connect(m_bar, &ZoomBar::zoomOutRequested, this, [this] { zoomAt(windowCentre(), 1 / 1.25); });
     connect(m_bar, &ZoomBar::zoomInRequested, this, [this] { zoomAt(windowCentre(), 1.25); });
@@ -49,7 +62,7 @@ ImageViewer::ImageViewer(const QImage &image, const QString &title, QWidget *par
 }
 
 ImageViewer::ImageViewer(std::vector<Entry> pictures, int index, QWidget *parent)
-    : ImageViewer(pictures.empty() ? QImage() : pictures.front().image, QString(), parent)
+    : ImageViewer(pictures.empty() ? QImage() : pictures[qBound(0, index, int(pictures.size()) - 1)].image, QString(), parent)
 {
     m_pictures = std::move(pictures);
     if (m_pictures.size() > 1) {
@@ -121,7 +134,7 @@ qreal ImageViewer::fitScale() const
     if (m_image.isNull())
         return 1;
     const qreal w = qMax<qreal>(1, width() - 2 * margin);
-    const qreal h = qMax<qreal>(1, height() - 2 * margin);
+    const qreal h = qMax<qreal>(1, height() - 2 * (margin + m_bar->height()));
     // Small pictures stay at their real size rather than blow up.
     return std::min({w / m_image.width(), h / m_image.height(), 1 / devicePixelRatioF()});
 }

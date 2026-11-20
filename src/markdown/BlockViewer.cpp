@@ -9,6 +9,7 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QScreen>
 #include <QScrollBar>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -151,12 +152,6 @@ BlockViewer::BlockViewer(std::unique_ptr<RenderedBlock> block, const QString &ti
     setAttribute(Qt::WA_DeleteOnClose);
     // A window to move about and size: it has its maximise button.
     setWindowFlag(Qt::WindowMaximizeButtonHint);
-    QSize size(900, 650);
-    if (parent) {
-        const QSize host = parent->window()->size();
-        size = QSize(qMax(480, host.width() * 4 / 5), qMax(360, host.height() * 4 / 5));
-    }
-    resize(size);
     setMinimumSize(320, 180);
 
     auto *layout = new QVBoxLayout(this);
@@ -166,6 +161,24 @@ BlockViewer::BlockViewer(std::unique_ptr<RenderedBlock> block, const QString &ti
 
     // The controls float over the bottom of the block.
     m_bar = new ZoomBar(m_canvas->viewport());
+    // The content is centred, so leave room on both sides of the floating bar.
+    const QSize padding(int(2 * margin), int(2 * (margin + m_bar->height())));
+    QSize cap(900, 650);
+    if (parent)
+        cap = parent->window()->size() * 4 / 5;
+    if (const QScreen *screen = this->screen())
+        cap = cap.boundedTo(screen->availableGeometry().size());
+    cap = cap.expandedTo(minimumSize());
+    QSizeF content = m_block->contentSize();
+    if (!content.isEmpty()) {
+        content.scale(QSizeF((cap - padding).expandedTo(QSize(1, 1))), Qt::KeepAspectRatio);
+        const QSizeF natural = m_block->contentSize();
+        if (content.width() > natural.width())
+            content = natural;
+    }
+    resize((QSize(int(std::ceil(content.width())), int(std::ceil(content.height()))) + padding)
+               .expandedTo(minimumSize()).boundedTo(cap));
+
     connect(m_bar, &ZoomBar::fitRequested, this, [this] { fit(); });
     connect(m_bar, &ZoomBar::zoomOutRequested, this, [this] { zoomAt(viewCentre(), 1 / 1.25); });
     connect(m_bar, &ZoomBar::zoomInRequested, this, [this] { zoomAt(viewCentre(), 1.25); });
@@ -206,7 +219,7 @@ qreal BlockViewer::fitScale() const
     if (size.isEmpty())
         return 1;
     const qreal w = qMax<qreal>(1, m_canvas->viewport()->width() - 2 * margin);
-    const qreal h = qMax<qreal>(1, m_canvas->viewport()->height() - 2 * margin);
+    const qreal h = qMax<qreal>(1, m_canvas->viewport()->height() - 2 * (margin + (m_bar ? m_bar->height() : 0)));
     // Smaller than the window stays at its real size rather than blow up.
     return std::min({w / size.width(), h / size.height(), 1.0});
 }

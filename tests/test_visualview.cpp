@@ -42,6 +42,7 @@
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QScopeGuard>
+#include <QScreen>
 #include <QSlider>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -484,6 +485,7 @@ private Q_SLOTS:
     void codeBlocksArePaintedAsTheStockHighlighterDoes();
     void renderCostCountsPicturesAndText();
     void clickEnlargesPicture();
+    void pictureViewerInitialSize();
     void figuresFitTheirBox();
     void figureBoxFollowsTheViewHeight();
     void formulasAreNotFigures();
@@ -3293,6 +3295,35 @@ void TestVisualView::renderCostCountsPicturesAndText()
     const QByteArray utf8 = body.toUtf8();
     code.text = rust::String(utf8.constData(), utf8.size());
     QVERIFY(RenderedBlock::create(code, fenced, ctx)->cost() > 400);
+}
+
+void TestVisualView::pictureViewerInitialSize()
+{
+    QWidget host;
+    host.resize(1600, 1000);
+    host.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&host));
+    for (const QSize picture : {QSize(1200, 300), QSize(4000, 3000), QSize(200, 100)}) {
+        ImageViewer viewer(QImage(picture, QImage::Format_RGB32), QString(), &host);
+        viewer.setAttribute(Qt::WA_DeleteOnClose, false);
+        viewer.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&viewer));
+        const QSize cap = (host.size() * 4 / 5).boundedTo(viewer.screen()->availableGeometry().size());
+        QVERIFY(viewer.width() <= cap.width());
+        QVERIFY(viewer.height() <= cap.height());
+        if (picture.width() == 1200)
+            QVERIFY(viewer.height() < cap.height() / 2);
+        if (picture.width() == 4000) {
+            QVERIFY(viewer.scale() < 1 / viewer.devicePixelRatioF());
+            const QSizeF shown = QSizeF(picture) * viewer.scale();
+            QVERIFY(qAbs(shown.width() / shown.height() - 4.0 / 3.0) < 0.001);
+        }
+        if (picture.width() == 200) {
+            QCOMPARE(viewer.scale(), 1 / viewer.devicePixelRatioF());
+            QVERIFY(viewer.width() <= 400);
+            QVERIFY(viewer.height() <= 300);
+        }
+    }
 }
 
 void TestVisualView::clickEnlargesPicture()
