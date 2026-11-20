@@ -165,7 +165,9 @@ public:
     void scrollToEnd();
     // Puts the leader's top line position at this view's top (the end at the
     // end), for split views of the same document.
-    void followScroll(TextView &leader);
+    void followScroll(TextView &leader, bool atMiddle = false);
+    // The source line position at the middle of the viewport (as topLinePosition() has it).
+    qreal middleLinePosition();
     // Pixels between the top of the content and the top of the viewport.
     // Walks every row above, so it is meant for tests.
     qreal scrollPixels();

@@ -52,6 +52,7 @@ private Q_SLOTS:
     void splitIsTheDefaultMode();
     void splitLocksOnlyThePreview();
     void lineSpacingSetting();
+    void syncAnchorMiddleKeepsTheSameLine();
     void tabIndentsItem();
     void formatIsOneUndoStep();
     void formatKeepsCaretLine();
@@ -335,6 +336,41 @@ void TestMarkdownEditing::lineSpacingSetting()
     QCOMPARE(lineStep(), pixels);
     QCOMPARE(static_cast<QWidget *>(view)->inputMethodQuery(Qt::ImCursorRectangle).toRect().height(), pixels);
     Settings::instance().reset(key::lineSpacing);
+}
+
+// With "Middle of the view" the line at one half's middle is the line at the
+// other's, whichever half scrolls.
+void TestMarkdownEditing::syncAnchorMiddleKeepsTheSameLine()
+{
+    QString text;
+    for (int i = 0; i < 400; ++i)
+        text += QStringLiteral("line %1\n\n").arg(i);
+    DocumentTab *tab = makeTab({}, text);
+    tab->resize(900, 500);
+    tab->show();
+    tab->setViewMode(DocumentTab::ViewMode::SourceVisual);
+    QVERIFY(QTest::qWaitForWindowExposed(tab));
+    Settings::instance().setValue(key::syncAnchor, QStringLiteral("middle"));
+    const auto restore = qScopeGuard([] { Settings::instance().reset(key::syncAnchor); });
+    TextView *source = tab->sourceView();
+    TextView *visual = tab->visualView();
+    // (The scroll bar is what the user drags; its value is the top row.)
+    source->verticalScrollBar()->setValue(300);
+    QCoreApplication::processEvents();
+    const qreal sourceMiddle = source->middleLinePosition();
+    QVERIFY(sourceMiddle > 300);
+    QVERIFY2(qAbs(visual->middleLinePosition() - sourceMiddle) < 0.6,
+             qPrintable(QStringLiteral("%1 vs %2").arg(visual->middleLinePosition()).arg(sourceMiddle)));
+    // And the other way round, by the Visual view.
+    visual->verticalScrollBar()->setValue(60);
+    QCoreApplication::processEvents();
+    QVERIFY2(qAbs(source->middleLinePosition() - visual->middleLinePosition()) < 0.6,
+             qPrintable(QStringLiteral("%1 vs %2").arg(source->middleLinePosition()).arg(visual->middleLinePosition())));
+    // At the top the middles still agree (the other view starts where it can).
+    source->verticalScrollBar()->setValue(0);
+    QCoreApplication::processEvents();
+    QVERIFY(qAbs(visual->middleLinePosition() - source->middleLinePosition()) < 0.6);
+    QVERIFY(visual->topLinePosition() >= 0);
 }
 
 void TestMarkdownEditing::tabIndentsItem()

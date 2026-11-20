@@ -416,11 +416,11 @@ void DocumentTab::ensureVisualView()
 void DocumentTab::syncScroll(TextView *from, TextView *to)
 {
     // Keep both halves of Source / Visual at the same source position,
-    // fractions of a line included.
+    // fractions of a line included: at their tops, or their middles.
     if (m_syncingScroll || !to || !to->isVisible() || !from->isVisible())
         return;
     m_syncingScroll = true;
-    to->followScroll(*from);
+    to->followScroll(*from, Settings::instance().text(key::syncAnchor) == QLatin1String("middle"));
     m_syncingScroll = false;
 }
 

@@ -36,6 +36,7 @@ const QHash<QString, QVariant> &defaults()
         {key::multiCursorModifier, QStringLiteral("alt")},
         {key::defaultMode, QStringLiteral("split")},
         {key::highlightActiveBlock, true},
+        {key::syncAnchor, QStringLiteral("top")},
         {key::blocksStartCollapsed, false},
         {key::readColumns, 0},
         {key::readChars, 75},

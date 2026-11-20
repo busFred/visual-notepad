@@ -1424,12 +1424,38 @@ void TextView::scrollToEnd()
     viewport()->update();
 }
 
-void TextView::followScroll(TextView &leader)
+qreal TextView::middleLinePosition()
 {
-    if (leader.isAtScrollEnd() && leader.m_topRow > 0)
+    const qreal middle = viewport()->height() / 2.0;
+    qreal rowY = -m_topOffset;
+    const int rows = rowCount();
+    for (int r = m_topRow; r < rows; ++r) {
+        const qreal h = rowHeight(r);
+        if (middle < rowY + h)
+            return linePositionAt(r, middle - rowY);
+        rowY += h;
+    }
+    return m_doc->blockCount(); // (The document ends above the middle.)
+}
+
+void TextView::followScroll(TextView &leader, bool atMiddle)
+{
+    if (leader.isAtScrollEnd() && leader.m_topRow > 0) {
         scrollToEnd();
-    else
+    } else if (atMiddle) {
+        // The same line at this view's middle: put its place that far down.
+        // Near the start the top clamps to the first line (normalizeScroll),
+        // so the line sits higher than the middle there, as the leader's did.
+        const auto [index, y] = placeOfLinePosition(leader.middleLinePosition());
+        m_topRow = index;
+        m_topOffset = y - viewport()->height() / 2.0;
+        normalizeScroll();
+        ensureShownMeasured();
+        updateScrollBars();
+        viewport()->update();
+    } else {
         scrollToLinePosition(leader.topLinePosition());
+    }
 }
 
 qreal TextView::scrollPixels()

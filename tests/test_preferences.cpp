@@ -89,6 +89,7 @@ private Q_SLOTS:
     void lineSpacingWritesKey();
     void lineSpacingChangesRenderedHeight();
     void oldLineSpacingsAreConverted();
+    void syncAnchorRow();
     void encodingRows();
     void showPageSelectsCategory();
     void initialSizeKeepsButtonsVisible();
@@ -105,7 +106,7 @@ void TestPreferences::init()
 {
     Settings::instance().resetAllShortcuts();
     for (const char *k : {key::lineNumbers, key::tabWidth, key::autoSave, key::mathMacros, key::zoom, key::fontFamily,
-                          key::fontSize, key::textFontFamily, key::textFontSize, key::textLineHeight, key::lineSpacing,
+                          key::fontSize, key::textFontFamily, key::textFontSize, key::textLineHeight, key::lineSpacing, key::syncAnchor,
                           key::guessEncoding, key::legacyEncoding, key::encoding, key::autoClose, key::autoSurround, key::pictureCacheMiB})
         Settings::instance().reset(k);
     PreferencesDialog::showPage(nullptr, QStringLiteral("editor"));
@@ -721,6 +722,18 @@ void TestPreferences::oldLineSpacingsAreConverted()
     Settings::instance().useFile(dir.filePath(QStringLiteral("fresh.ini")));
     QCOMPARE(Settings::instance().value(key::lineSpacing).toDouble(), 1.35);
     QCOMPARE(Settings::instance().value(key::textLineHeight).toDouble(), 1.6);
+}
+
+void TestPreferences::syncAnchorRow()
+{
+    PreferencesDialog::showPage(nullptr, QStringLiteral("markdown"));
+    auto *combo = find<QComboBox>(key::syncAnchor);
+    QVERIFY(combo);
+    QCOMPARE(combo->count(), 2);
+    QCOMPARE(combo->currentText(), QStringLiteral("Top of the view"));
+    combo->setCurrentIndex(combo->findText(QStringLiteral("Middle of the view")));
+    QCOMPARE(Settings::instance().text(key::syncAnchor), QStringLiteral("middle"));
+    Settings::instance().reset(key::syncAnchor);
 }
 
 void TestPreferences::lineSpacingChangesRenderedHeight()

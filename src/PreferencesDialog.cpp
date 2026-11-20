@@ -680,6 +680,9 @@ void PreferencesDialog::buildMarkdownPage()
               {tr("Source / Visual"), QStringLiteral("split")},
               {tr("Visual Editor"), QStringLiteral("visual")}});
     addSwitch(tr("Highlight the block being edited"), key::highlightActiveBlock);
+    // Which line stays level in both halves of Source / Visual when one scrolls.
+    addCombo(tr("Line up Source and Visual at"), key::syncAnchor,
+             {{tr("Top of the view"), QStringLiteral("top")}, {tr("Middle of the view"), QStringLiteral("middle")}});
     // Tables, figures, equations and code blocks, when a document opens.
     addCombo(tr("Blocks start"), key::blocksStartCollapsed,
              {{tr("Expanded"), false}, {tr("Collapsed"), true}});

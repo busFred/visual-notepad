@@ -40,6 +40,7 @@ inline constexpr char multiCursorModifier[] = "editor/multiCursorModifier"; // "
 // Markdown
 inline constexpr char defaultMode[] = "markdown/defaultMode"; // "source" | "split" | "visual"
 inline constexpr char highlightActiveBlock[] = "markdown/highlightActiveBlock";
+inline constexpr char syncAnchor[] = "markdown/syncAnchor"; // where Source and Visual line up: "top" | "middle"
 inline constexpr char blocksStartCollapsed[] = "markdown/blocksStartCollapsed"; // tables, figures, equations, code
 // Read mode (Visual mode, locked): where a tab starts; its bar changes the tab only.
 inline constexpr char readColumns[] = "markdown/readColumns";       // 0 = as many as fit, else 1 to 4
