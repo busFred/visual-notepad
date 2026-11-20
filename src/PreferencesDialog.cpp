@@ -397,10 +397,10 @@ PreferencesDialog::PreferencesDialog(QWidget *parent)
     m_categories->setCurrentRow(0);
 
     // Leave room for window decorations and the taskbar; pages can scroll.
+    // (Qt places it over the window it was opened from, within the screen.)
     if (const QScreen *screen = this->screen()) {
         const QRect available = screen->availableGeometry();
         resize(qMin(640, available.width()), qMin(520, available.height() - 120));
-        move(available.center() - rect().center());
     } else {
         resize(640, 520);
     }
