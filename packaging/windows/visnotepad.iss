@@ -1,7 +1,7 @@
 ; Inno Setup script for Visual Notepad. Build with:
-;   iscc /DAppVersion=0.0.18 /DSourceDir=<deployed folder> /DOutputDir=<dir> visnotepad.iss
+;   iscc /DAppVersion=0.0.19 /DSourceDir=<deployed folder> /DOutputDir=<dir> visnotepad.iss
 #ifndef AppVersion
-  #define AppVersion "0.0.18"
+  #define AppVersion "0.0.19"
 #endif
 #ifndef SourceDir
   #error SourceDir must point at the deployed application folder
