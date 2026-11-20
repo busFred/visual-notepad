@@ -17,6 +17,8 @@
 #include <QImage>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QScopeGuard>
+#include <QScrollBar>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -319,14 +321,19 @@ void TestMarkdownEditing::lineSpacingSetting()
         view->setTextCursor(c);
         return static_cast<QWidget *>(view)->inputMethodQuery(Qt::ImCursorRectangle).toRect().top() - first;
     };
-    // As TextView::updateMetrics: the fractional font height, rounded up.
-    const qreal fontHeight = QFontMetricsF(view->font()).height();
+    // As VS Code: the factor times the font size in pixels, rounded.
+    const int pixels = QFontInfo(view->font()).pixelSize();
     Settings::instance().reset(key::lineSpacing);
-    QCOMPARE(Settings::instance().value(key::lineSpacing).toDouble(), 1.4);
+    QCOMPARE(Settings::instance().value(key::lineSpacing).toDouble(), 1.35);
     const int normal = lineStep();
-    QVERIFY2(normal == qCeil(fontHeight * 1.4), qPrintable(QStringLiteral("%1 vs %2").arg(normal).arg(fontHeight)));
+    QVERIFY2(normal == qRound(pixels * 1.35), qPrintable(QStringLiteral("%1 vs %2").arg(normal).arg(pixels)));
     Settings::instance().setValue(key::lineSpacing, 2.0);
-    QVERIFY2(lineStep() == qCeil(fontHeight * 2.0), qPrintable(QStringLiteral("%1 vs %2").arg(lineStep()).arg(fontHeight)));
+    QVERIFY2(lineStep() == qRound(pixels * 2.0), qPrintable(QStringLiteral("%1 vs %2").arg(lineStep()).arg(pixels)));
+    // Tighter than the font's own ascent and descent: the lines still step
+    // by the line height, and the caret is a line high.
+    Settings::instance().setValue(key::lineSpacing, 1.0);
+    QCOMPARE(lineStep(), pixels);
+    QCOMPARE(static_cast<QWidget *>(view)->inputMethodQuery(Qt::ImCursorRectangle).toRect().height(), pixels);
     Settings::instance().reset(key::lineSpacing);
 }
 

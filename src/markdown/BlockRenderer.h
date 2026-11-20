@@ -39,7 +39,7 @@ struct RenderContext
     QString baseDirectory; // For relative image paths.
     QFont font;            // Body text.
     QFont codeFont;
-    qreal lineHeight = 1.6; // Multiple of the font height, for text.
+    qreal lineHeight = 1.6; // Share of the font's own line height, for text (VisualView works it out from the font-size setting).
     qreal width = 600;
     qreal devicePixelRatio = 1;
     QString mermaidTheme;

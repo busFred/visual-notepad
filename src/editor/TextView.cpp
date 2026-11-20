@@ -22,6 +22,7 @@
 #include <QPointer>
 #include <QMimeData>
 #include <QPainter>
+#include <QFontInfo>
 #include <QPen>
 #include <QScrollBar>
 #include <QStyleHints>
@@ -1030,7 +1031,12 @@ void TextView::keepPieces(int first, int newAffected, std::vector<std::unique_pt
 void TextView::updateMetrics()
 {
     const QFontMetricsF fm(font());
-    m_lineHeight = qCeil(fm.height() * m_lineSpacing);
+    // As VS Code counts it: the factor times the font size in pixels, not
+    // times the font's own line height (which differs from font to font).
+    m_lineHeight = qMax(1, qRound(QFontInfo(font()).pixelSize() * m_lineSpacing));
+    // Centres the text in its line. Below 1.2 or so the font's ascent and
+    // descent are taller than the line: this is then negative, and the text
+    // reaches into the neighbouring lines (as a browser lets it).
     m_linePad = (m_lineHeight - fm.height()) / 2;
     m_charWidth = fm.horizontalAdvance(QLatin1Char(' '));
 }

@@ -1,9 +1,14 @@
 #include "Settings.h"
 
+#include "Theme.h"
+
 #include <QHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFontInfo>
+#include <QFontMetricsF>
+#include <QGuiApplication>
 #include <QSettings>
 
 #include <algorithm>
@@ -25,7 +30,7 @@ const QHash<QString, QVariant> &defaults()
         {key::insertSpaces, true},
         {key::detectIndentation, true},
         {key::wordWrap, true},
-        {key::lineSpacing, 1.4},
+        {key::lineSpacing, 1.35},
         {key::autoClose, true},
         {key::autoSurround, true},
         {key::multiCursorModifier, QStringLiteral("alt")},
@@ -41,7 +46,7 @@ const QHash<QString, QVariant> &defaults()
         {key::frontMatter, QStringLiteral("table")},
         {key::textFontFamily, QString()},
         {key::textFontSize, 0},
-        {key::textLineHeight, 1.4},
+        {key::textLineHeight, 1.6},
         {key::renderMath, true},
         {key::mathMacros, QVariantMap()},
         {key::mermaidTheme, QStringLiteral("auto")},
@@ -99,6 +104,7 @@ void Settings::useFile(const QString &path)
 {
     delete m_store;
     m_store = new QSettings(path, QSettings::IniFormat, this);
+    m_spacingMigrated = false;
     makePrivate();
     migrate();
 }
@@ -147,6 +153,38 @@ void Settings::migrate()
     }
 }
 
+// What the preference lists offer (see PreferencesDialog): an old value is
+// moved to the nearest of these.
+static constexpr double lineHeightChoices[] = {1.0, 1.2, 1.35, 1.5, 1.6, 1.8, 2.0};
+
+void Settings::migrateLineSpacing() const
+{
+    if (m_spacingMigrated || !qGuiApp)
+        return;
+    // Set first: the fonts below read settings too.
+    m_spacingMigrated = true;
+    const auto convert = [this](const char *oldKey, const char *newKey, const QFont &font) {
+        if (!m_store->contains(QLatin1String(oldKey)))
+            return;
+        const QFontMetricsF metrics(font);
+        const int pixels = QFontInfo(font).pixelSize();
+        // The old number counted the font's line height; the new one counts
+        // its size. An old value stays the same line height on screen.
+        const double wanted = m_store->value(QLatin1String(oldKey)).toDouble() * (pixels > 0 ? metrics.height() / pixels : 1.2);
+        double best = lineHeightChoices[0];
+        for (const double choice : lineHeightChoices) {
+            if (qAbs(choice - wanted) < qAbs(best - wanted))
+                best = choice;
+        }
+        // (A value the user already chose with this version is kept.)
+        if (!m_store->contains(QLatin1String(newKey)) && best != defaults().value(QLatin1String(newKey)).toDouble())
+            m_store->setValue(QLatin1String(newKey), best);
+        m_store->remove(QLatin1String(oldKey));
+    };
+    convert(key::legacyLineSpacing, key::lineSpacing, theme::editorFont());
+    convert(key::legacyTextLineHeight, key::textLineHeight, theme::textFont());
+}
+
 QVariant Settings::defaultValue(const char *key) const
 {
     return defaults().value(QLatin1String(key));
@@ -154,6 +192,8 @@ QVariant Settings::defaultValue(const char *key) const
 
 QVariant Settings::value(const char *key) const
 {
+    if (!m_spacingMigrated && (qstrcmp(key, key::lineSpacing) == 0 || qstrcmp(key, key::textLineHeight) == 0))
+        migrateLineSpacing();
     const QVariant fallback = defaultValue(key);
     QVariant stored = m_store->value(QLatin1String(key), fallback);
     // INI files store everything as strings; convert back to the default's type.

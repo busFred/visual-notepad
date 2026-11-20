@@ -572,7 +572,8 @@ void PreferencesDialog::buildEditorPage()
     addCombo(tr("Line spacing"), key::lineSpacing,
              {{QStringLiteral("1.0"), 1.0},
               {QStringLiteral("1.2"), 1.2},
-              {QStringLiteral("1.4"), 1.4},
+              {QStringLiteral("1.35"), 1.35},
+              {QStringLiteral("1.5"), 1.5},
               {QStringLiteral("1.6"), 1.6},
               {QStringLiteral("1.8"), 1.8},
               {QStringLiteral("2.0"), 2.0}});
@@ -690,8 +691,10 @@ void PreferencesDialog::buildMarkdownPage()
     addFontRow(tr("Text font"), QStringLiteral("textFont"), key::textFontFamily, key::textFontSize, &theme::textFont,
                false);
     addCombo(tr("Line spacing"), key::textLineHeight,
-             {{QStringLiteral("1.2"), 1.2},
-              {QStringLiteral("1.4"), 1.4},
+             {{QStringLiteral("1.0"), 1.0},
+              {QStringLiteral("1.2"), 1.2},
+              {QStringLiteral("1.35"), 1.35},
+              {QStringLiteral("1.5"), 1.5},
               {QStringLiteral("1.6"), 1.6},
               {QStringLiteral("1.8"), 1.8},
               {QStringLiteral("2.0"), 2.0}});

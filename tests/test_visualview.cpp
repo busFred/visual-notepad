@@ -4450,7 +4450,7 @@ void TestVisualView::gapsFollowTheMarkdownLineHeight()
     const auto expected = [&](qreal factor) {
         QFont body = theme::textFont();
         body.setPointSizeF(body.pointSizeF() * m_view->font().pointSizeF() / theme::editorFont().pointSizeF());
-        return QFontMetricsF(body).height() * factor * 0.6;
+        return qRound(QFontInfo(body).pixelSize() * factor) * 0.6;
     };
     settings.setValue(key::textLineHeight, 1.2);
     const qreal tight = gap();

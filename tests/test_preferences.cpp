@@ -19,6 +19,7 @@
 #include <QTest>
 #include <QTextDocument>
 #include <QScreen>
+#include <QSettings>
 #include <QStackedWidget>
 #include <QScrollBar>
 #include <QScopeGuard>
@@ -87,6 +88,7 @@ private Q_SLOTS:
     void textFontResetRestoresDefault();
     void lineSpacingWritesKey();
     void lineSpacingChangesRenderedHeight();
+    void oldLineSpacingsAreConverted();
     void encodingRows();
     void showPageSelectsCategory();
     void initialSizeKeepsButtonsVisible();
@@ -103,7 +105,7 @@ void TestPreferences::init()
 {
     Settings::instance().resetAllShortcuts();
     for (const char *k : {key::lineNumbers, key::tabWidth, key::autoSave, key::mathMacros, key::zoom, key::fontFamily,
-                          key::fontSize, key::textFontFamily, key::textFontSize, key::textLineHeight,
+                          key::fontSize, key::textFontFamily, key::textFontSize, key::textLineHeight, key::lineSpacing,
                           key::guessEncoding, key::legacyEncoding, key::encoding, key::autoClose, key::autoSurround, key::pictureCacheMiB})
         Settings::instance().reset(k);
     PreferencesDialog::showPage(nullptr, QStringLiteral("editor"));
@@ -674,14 +676,51 @@ void TestPreferences::lineSpacingWritesKey()
     PreferencesDialog::showPage(nullptr, QStringLiteral("markdown"));
     auto *combo = find<QComboBox>(key::textLineHeight);
     QVERIFY(combo);
-    QCOMPARE(combo->count(), 5);
-    QCOMPARE(combo->currentText(), QStringLiteral("1.4"));
-    QCOMPARE(Settings::instance().value(key::textLineHeight).toDouble(), 1.4);
+    QCOMPARE(combo->count(), 7);
+    QCOMPARE(combo->currentText(), QStringLiteral("1.6"));
+    QCOMPARE(Settings::instance().value(key::textLineHeight).toDouble(), 1.6);
     combo->setCurrentIndex(combo->findText(QStringLiteral("2.0")));
     QCOMPARE(Settings::instance().value(key::textLineHeight).toDouble(), 2.0);
     // Reading it back (stored as text in the INI file) selects the same item.
     Settings::instance().setValue(key::textLineHeight, 1.2);
     QCOMPARE(combo->currentText(), QStringLiteral("1.2"));
+}
+
+// The old values counted the font's own line height, the new ones count its
+// size: a stored old value becomes the same look, on the nearest listed value.
+void TestPreferences::oldLineSpacingsAreConverted()
+{
+    const QString before = Settings::instance().fileName();
+    const auto restore = qScopeGuard([&] { Settings::instance().useFile(before); });
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("settings.ini"));
+    {
+        QSettings old(path, QSettings::IniFormat);
+        old.setValue(QStringLiteral("editor/lineSpacing"), 1.0);
+        old.setValue(QStringLiteral("markdown/textLineHeight"), 2.0);
+    }
+    Settings::instance().useFile(path);
+    const auto nearest = [](const QFont &font, double old) {
+        const double wanted = old * QFontMetricsF(font).height() / QFontInfo(font).pixelSize();
+        double best = 1.0;
+        for (const double c : {1.0, 1.2, 1.35, 1.5, 1.6, 1.8, 2.0}) {
+            if (qAbs(c - wanted) < qAbs(best - wanted))
+                best = c;
+        }
+        return best;
+    };
+    QCOMPARE(Settings::instance().value(key::lineSpacing).toDouble(), nearest(theme::editorFont(), 1.0));
+    QCOMPARE(Settings::instance().value(key::textLineHeight).toDouble(), nearest(theme::textFont(), 2.0));
+    // The old keys are gone, so the conversion happens once.
+    Settings::instance().sync();
+    QSettings file(path, QSettings::IniFormat);
+    QVERIFY(!file.contains(QStringLiteral("editor/lineSpacing")));
+    QVERIFY(!file.contains(QStringLiteral("markdown/textLineHeight")));
+    // A file with no old values gets the new defaults.
+    Settings::instance().useFile(dir.filePath(QStringLiteral("fresh.ini")));
+    QCOMPARE(Settings::instance().value(key::lineSpacing).toDouble(), 1.35);
+    QCOMPARE(Settings::instance().value(key::textLineHeight).toDouble(), 1.6);
 }
 
 void TestPreferences::lineSpacingChangesRenderedHeight()

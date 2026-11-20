@@ -800,7 +800,7 @@ private:
     bool m_insertSpaces = true;
     bool m_readOnly = false;
     int m_tabWidth = 4;
-    qreal m_lineSpacing = 1.5;
+    qreal m_lineSpacing = 1.35; // times the font size
     QString m_commentMarker;
     qreal m_leftMargin = 4;
     qreal m_rightMargin = 8;

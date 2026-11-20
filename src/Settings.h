@@ -28,7 +28,12 @@ inline constexpr char tabWidth[] = "editor/tabWidth";
 inline constexpr char insertSpaces[] = "editor/insertSpaces";
 inline constexpr char detectIndentation[] = "editor/detectIndentation"; // per file, from its content
 inline constexpr char wordWrap[] = "editor/wordWrap";
-inline constexpr char lineSpacing[] = "editor/lineSpacing"; // multiple of the font height
+// Line height as VS Code counts it: a multiple of the font size in pixels (the
+// line is round(size x factor) high), not of the font's own line height, which
+// is 1.2x the size for some fonts and 1.33x for others. Replaces
+// "editor/lineSpacing" (below), which Settings converts on first use.
+inline constexpr char lineSpacing[] = "editor/lineHeightFactor";
+inline constexpr char legacyLineSpacing[] = "editor/lineSpacing"; // old: multiple of the font's line height
 inline constexpr char autoClose[] = "editor/autoClose";     // brackets and quotes
 inline constexpr char autoSurround[] = "editor/autoSurround"; // wrap selections when typing a bracket or quote
 inline constexpr char multiCursorModifier[] = "editor/multiCursorModifier"; // "alt" | "ctrl"
@@ -46,7 +51,9 @@ inline constexpr char typographer[] = "markdown/typographer";
 inline constexpr char frontMatter[] = "markdown/frontMatter"; // "hide" | "code" | "table"
 inline constexpr char textFontFamily[] = "markdown/textFontFamily"; // "" = system UI font
 inline constexpr char textFontSize[] = "markdown/textFontSize";     // points; 0 = UI size x 1.15
-inline constexpr char textLineHeight[] = "markdown/textLineHeight"; // multiple of the font height
+// As lineSpacing, for the Visual view's text: a multiple of the text font size.
+inline constexpr char textLineHeight[] = "markdown/textLineHeightFactor";
+inline constexpr char legacyTextLineHeight[] = "markdown/textLineHeight"; // old: multiple of the font's line height
 inline constexpr char renderMath[] = "markdown/renderMath";
 inline constexpr char mathMacros[] = "markdown/mathMacros"; // QVariantMap command -> expansion
 inline constexpr char mermaidTheme[] = "markdown/mermaidTheme"; // "auto" | "base" | "default" | ...
@@ -150,6 +157,11 @@ private:
     QStringList m_batched;
     // Renames values written by older versions.
     void makePrivate();
+    // Turns the old line spacings (multiples of the font's line height) into
+    // the new ones (multiples of the font size) the first time either is read.
+    // It needs the fonts, so it cannot run when the settings are made.
+    void migrateLineSpacing() const;
+    mutable bool m_spacingMigrated = false;
     void migrate();
     QSettings *m_store;
 };

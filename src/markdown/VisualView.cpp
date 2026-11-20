@@ -2450,11 +2450,24 @@ QFont VisualView::bodyFont() const
     return body;
 }
 
+qreal VisualView::bodyLineHeightRatio(const QFont &font) const
+{
+    // The setting counts the font size (as in VS Code), but rendered text
+    // takes its line height as a share of the font's own line height: the
+    // share that makes a line round(size x factor) pixels high.
+    const int pixels = QFontInfo(font).pixelSize();
+    const qreal height = QFontMetricsF(font).height();
+    const qreal factor = Settings::instance().value(key::textLineHeight).toDouble();
+    return pixels > 0 && height > 0 ? qRound(pixels * factor) / height : factor;
+}
+
 qreal VisualView::bodyLineHeight() const
 {
     // What a line of a rendered paragraph takes (the editor's font and
-    // spacing have no say in the rendered view).
-    return QFontMetricsF(bodyFont()).height() * Settings::instance().value(key::textLineHeight).toDouble();
+    // spacing have no say in the rendered view): the factor times the font
+    // size, as the rendered text's line height has it (see context()).
+    const QFont font = bodyFont();
+    return QFontMetricsF(font).height() * bodyLineHeightRatio(font);
 }
 
 RenderContext VisualView::context() const
@@ -2463,7 +2476,7 @@ RenderContext VisualView::context() const
     ctx.baseDirectory = m_baseDirectory;
     ctx.codeFont = font();
     ctx.font = bodyFont();
-    ctx.lineHeight = Settings::instance().value(key::textLineHeight).toDouble();
+    ctx.lineHeight = bodyLineHeightRatio(ctx.font);
     ctx.width = textWidth();
     ctx.devicePixelRatio = devicePixelRatioF();
     ctx.mermaidTheme = Settings::instance().text(key::mermaidTheme);
