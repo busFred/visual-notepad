@@ -17,6 +17,7 @@
 #include <QListWidget>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QtMath>
 #include <QTextDocument>
 #include <QScreen>
 #include <QSettings>
@@ -689,7 +690,8 @@ void TestPreferences::lineSpacingWritesKey()
 }
 
 // The old values counted the font's own line height, the new ones count its
-// size: a stored old value becomes the same look, on the nearest listed value.
+// size: a stored old value becomes the same look, on a listed value if one is
+// within 0.05, else as it is (rounded to hundredths).
 void TestPreferences::oldLineSpacingsAreConverted()
 {
     const QString before = Settings::instance().fileName();
@@ -703,17 +705,25 @@ void TestPreferences::oldLineSpacingsAreConverted()
         old.setValue(QStringLiteral("markdown/textLineHeight"), 2.0);
     }
     Settings::instance().useFile(path);
-    const auto nearest = [](const QFont &font, double old) {
-        const double wanted = old * QFontMetricsF(font).height() / QFontInfo(font).pixelSize();
-        double best = 1.0;
+    const auto converted = [](double old, qreal base, const QFont &font) {
+        const double wanted = old * base / QFontInfo(font).pixelSize();
+        double best = qRound(wanted * 100) / 100.0;
         for (const double c : {1.0, 1.2, 1.35, 1.5, 1.6, 1.8, 2.0}) {
-            if (qAbs(c - wanted) < qAbs(best - wanted))
+            if (qAbs(c - wanted) <= 0.05)
                 best = c;
         }
         return best;
     };
-    QCOMPARE(Settings::instance().value(key::lineSpacing).toDouble(), nearest(theme::editorFont(), 1.0));
-    QCOMPARE(Settings::instance().value(key::textLineHeight).toDouble(), nearest(theme::textFont(), 2.0));
+    const QFont editor = theme::editorFont();
+    const QFont text = theme::textFont();
+    const QFontMetricsF textMetrics(text);
+    const qreal textBase = qCeil(textMetrics.ascent() + textMetrics.descent() + textMetrics.leading());
+    QCOMPARE(Settings::instance().value(key::lineSpacing).toDouble(),
+             converted(1.0, QFontMetricsF(editor).height(), editor));
+    // 2.0 of old is more than any listed value: kept, not cut to 2.0.
+    const double big = Settings::instance().value(key::textLineHeight).toDouble();
+    QCOMPARE(big, converted(2.0, textBase, text));
+    QVERIFY(big > 2.0);
     // The old keys are gone, so the conversion happens once.
     Settings::instance().sync();
     QSettings file(path, QSettings::IniFormat);

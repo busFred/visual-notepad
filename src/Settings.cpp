@@ -155,8 +155,8 @@ void Settings::migrate()
     }
 }
 
-// What the preference lists offer (see PreferencesDialog): an old value is
-// moved to the nearest of these.
+// What the preference lists offer (see PreferencesDialog): an old value close
+// to one of these becomes it, any other is kept as it is (the list shows it).
 static constexpr double lineHeightChoices[] = {1.0, 1.2, 1.35, 1.5, 1.6, 1.8, 2.0};
 
 void Settings::migrateLineSpacing() const
@@ -173,9 +173,10 @@ void Settings::migrateLineSpacing() const
         // The old number counted the font's line height; the new one counts
         // its size. An old value stays the same line height on screen.
         const double wanted = m_store->value(QLatin1String(oldKey)).toDouble() * (pixels > 0 ? base / pixels : 1.2);
-        double best = lineHeightChoices[0];
+        // (Rounded off, so as not to show fonts' fractions in the list.)
+        double best = qRound(wanted * 100) / 100.0;
         for (const double choice : lineHeightChoices) {
-            if (qAbs(choice - wanted) < qAbs(best - wanted))
+            if (qAbs(choice - wanted) <= 0.05)
                 best = choice;
         }
         // (A value the user already chose with this version is kept.)
