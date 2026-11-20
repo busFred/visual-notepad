@@ -43,7 +43,7 @@ inline constexpr char highlightActiveBlock[] = "markdown/highlightActiveBlock";
 inline constexpr char syncAnchor[] = "markdown/syncAnchor"; // where Source and Visual line up: "top" | "middle"
 inline constexpr char blocksStartCollapsed[] = "markdown/blocksStartCollapsed"; // tables, figures, equations, code
 // Read mode (Visual mode, locked): where a tab starts; its bar changes the tab only.
-inline constexpr char readColumns[] = "markdown/readColumns";       // 0 = as many as fit, else 1 to 4
+inline constexpr char readColumns[] = "markdown/readColumns";       // 0 = as many as fit (once, when a tab opens), else a count
 inline constexpr char readChars[] = "markdown/readChars";           // characters per column, 50 to 100
 inline constexpr char readKeptLines[] = "markdown/readKeptLines";   // lines kept on a page turn, 0 to 5
 inline constexpr char breaks[] = "markdown/breaks";

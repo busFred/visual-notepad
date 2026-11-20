@@ -17,6 +17,8 @@
 #include <QListWidget>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
+#include <QMessageBox>
 #include <QtMath>
 #include <QTextDocument>
 #include <QScreen>
@@ -92,6 +94,7 @@ private Q_SLOTS:
     void oldLineSpacingsAreConverted();
     void offListNumericValueIsSorted();
     void preferenceResetButton();
+    void macrosResetAsksFirst();
     void syncAnchorRow();
     void encodingRows();
     void showPageSelectsCategory();
@@ -274,7 +277,7 @@ void TestPreferences::readModeRows()
     info->click();
     auto *popup = window->findChild<QFrame *>(QStringLiteral("PrefInfoPopup"));
     QVERIFY(popup && popup->isVisible());
-    QVERIFY(popup->findChild<QLabel *>()->text().startsWith(QStringLiteral("A new tab starts")));
+    QVERIFY(popup->findChild<QLabel *>()->text().startsWith(QStringLiteral("With \u201cAs many as fit\u201d")));
     popup->close();
 
     // Characters per column: 50 to 100 in steps of 5.
@@ -691,6 +694,27 @@ void TestPreferences::lineSpacingWritesKey()
     // Reading it back (stored as text in the INI file) selects the same item.
     Settings::instance().setValue(key::textLineHeight, 1.2);
     QCOMPARE(combo->currentText(), QStringLiteral("1.2"));
+}
+
+// Resetting the macros removes all of them, so it asks; Cancel keeps them.
+void TestPreferences::macrosResetAsksFirst()
+{
+    auto &settings = Settings::instance();
+    const auto restore = qScopeGuard([&settings] { settings.reset(key::mathMacros); });
+    settings.setValue(key::mathMacros, QVariantMap{{QStringLiteral("\\R"), QStringLiteral("\\mathbb{R}")}});
+    PreferencesDialog::showPage(nullptr, QStringLiteral("markdown"));
+    auto *reset = prefsWindow()->findChild<QToolButton *>(QStringLiteral("macrosReset"));
+    QVERIFY(reset && reset->isVisibleTo(prefsWindow()));
+    for (const auto answer : {QMessageBox::Cancel, QMessageBox::Yes}) {
+        QTimer::singleShot(0, [answer] {
+            // (Its button, as a click: the question reports the button clicked.)
+            if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget()))
+                box->button(answer)->click();
+        });
+        reset->click();
+        QCOMPARE(settings.value(key::mathMacros).toMap().isEmpty(), answer == QMessageBox::Yes);
+    }
+    QVERIFY(!reset->isVisibleTo(prefsWindow()));
 }
 
 void TestPreferences::preferenceResetButton()

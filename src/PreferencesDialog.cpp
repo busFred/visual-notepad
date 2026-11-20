@@ -503,7 +503,8 @@ QWidget *PreferencesDialog::addRow(const QString &label, QWidget *control)
     return row;
 }
 
-void PreferencesDialog::addReset(QWidget *row, QWidget *control, const char *settingKey, const char *secondKey, const QString &name)
+void PreferencesDialog::addReset(QWidget *row, QWidget *control, const char *settingKey, const char *secondKey,
+                                 const QString &name, const QString &confirm)
 {
     auto *button = smallButton({}, name.isEmpty() ? QString::fromLatin1(settingKey) + QStringLiteral("Reset") : name);
     QSizePolicy policy = button->sizePolicy();
@@ -521,7 +522,11 @@ void PreferencesDialog::addReset(QWidget *row, QWidget *control, const char *set
     };
     icon();
     connect(&theme::notifier(), &theme::Notifier::changed, button, icon);
-    connect(button, &QToolButton::clicked, this, [settingKey, secondKey] {
+    connect(button, &QToolButton::clicked, this, [this, settingKey, secondKey, confirm] {
+        if (!confirm.isEmpty()
+            && QMessageBox::question(this, windowTitle(), confirm, QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel)
+                   != QMessageBox::Yes)
+            return;
         const Settings::ChangeBatch batch;
         Settings::instance().reset(settingKey);
         if (secondKey)
@@ -532,7 +537,7 @@ void PreferencesDialog::addReset(QWidget *row, QWidget *control, const char *set
         const QVariant def = settings.defaultValue(settingKey);
         button->setVisible(settings.value(settingKey) != def ||
                            (secondKey && settings.value(secondKey) != settings.defaultValue(secondKey)));
-        QString shown = def.toString();
+        QString shown = def.toString().isEmpty() ? tr("empty") : def.toString();
         if (auto *combo = qobject_cast<QComboBox *>(control)) {
             const int index = combo->findData(def);
             if (index >= 0)
@@ -820,7 +825,7 @@ void PreferencesDialog::buildMarkdownPage()
 void PreferencesDialog::addReadModeRows()
 {
     addHeading(tr("Read mode"));
-    // Auto (0) or a count. No fixed top: a count wider than the window
+    // As many as fit (0) or a count. No fixed top: a count wider than the window
     // allows gets what fits, so a very wide screen can use many.
     auto *columns = new QSpinBox;
     columns->setObjectName(QString::fromLatin1(key::readColumns));
@@ -831,7 +836,7 @@ void PreferencesDialog::addReadModeRows()
     columns->setMinimumWidth(110);
     QWidget *columnsRow = addRow(tr("Columns"), columns);
     addReset(columnsRow, columns, key::readColumns);
-    addInfo(columnsRow, tr("A new tab starts with as many columns as fit at the window's width, font size and zoom. After that, the count stays until you change it."));
+    addInfo(columnsRow, tr("With \u201cAs many as fit\u201d, a new tab starts with as many columns as fit at the window's width, font size and zoom. After that, the count stays until you change it."));
     connect(columns, &QSpinBox::valueChanged, this,
             [](int count) { Settings::instance().setValue(key::readColumns, count); });
     track(key::readColumns, [columns] {
@@ -892,7 +897,9 @@ void PreferencesDialog::addPictureCacheRow()
 
 void PreferencesDialog::addMacroTable()
 {
-    addRow(tr("Macros"), nullptr);
+    // (All of them at once, so it asks first.)
+    addReset(addRow(tr("Macros"), nullptr), nullptr, key::mathMacros, nullptr, QStringLiteral("macrosReset"),
+             tr("Remove all your math macros?"));
 
     auto *table = new QWidget;
     table->setObjectName(QStringLiteral("macroTable"));

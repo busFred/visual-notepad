@@ -56,7 +56,9 @@ private:
     void endPage(const QString &category, const QString &pageId);
     void addHeading(const QString &text);
     QWidget *addRow(const QString &label, QWidget *control);
-    void addReset(QWidget *row, QWidget *control, const char *key, const char *secondKey = nullptr, const QString &name = {});
+    // confirm: asked first (a reset that removes much at once).
+    void addReset(QWidget *row, QWidget *control, const char *key, const char *secondKey = nullptr,
+                  const QString &name = {}, const QString &confirm = {});
     void addInfo(QWidget *row, const QString &text);
     void addSwitch(const QString &label, const char *key);
     void addCombo(const QString &label, const char *key, const QList<ComboItem> &items);
