@@ -273,7 +273,9 @@ bool instanceRequest::isFresh(qint64 sent, qint64 now)
     // Well inside the time the launch waits for its answer (timeoutMs from
     // before it sent): one older has been given up on, and its files opened
     // by the launch itself.
-    return qAbs(now - sent) < timeoutMs - 1000;
+    // (As a range: a difference of extreme times would overflow.)
+    constexpr qint64 window = timeoutMs - 1000;
+    return sent > now - window && sent < now + window;
 }
 
 QByteArray instanceRequest::encode(const QStringList &files, qint64 sent)
@@ -339,15 +341,22 @@ InstanceChannel::StartResult InstanceChannel::start(const QStringList &files)
             m_lock.unlock();
         return StartResult::Failed;
     };
+    // The copy that had the channel went (its lock with it) while taking the
+    // request: this launch takes over, without asking that channel again.
+    bool takeOver = false;
     for (;;) {
         if (!m_name.isEmpty()) {
             QLocalSocket socket;
-            const Probe probe = connectTo(socket, m_name);
+            const Probe probe = takeOver ? Probe::Absent : connectTo(socket, m_name);
             if (probe == Probe::Connected) {
                 switch (sendRequest(socket, files)) {
                 case Sent::Taken:
                     return StartResult::Forwarded;
                 case Sent::NotTaken:
+                    if (m_lock.isLocked() || m_lock.tryLock()) {
+                        takeOver = true;
+                        continue;
+                    }
                     qWarning("Could not send the launch request to Visual Notepad.");
                     return failed();
                 case Sent::NotOurs:

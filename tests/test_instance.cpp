@@ -19,6 +19,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <limits>
 #include <memory>
 
 using namespace vn;
@@ -85,6 +86,8 @@ void TestInstance::protocol()
     QVERIFY(isFresh(10'000, 10'000 + 3'000));
     QVERIFY(!isFresh(10'000, 10'000 + 4'500));
     QVERIFY(!isFresh(10'000 + 4'500, 10'000)); // (A clock set back.)
+    QVERIFY(!isFresh(std::numeric_limits<qint64>::min(), 10'000));
+    QVERIFY(!isFresh(std::numeric_limits<qint64>::max(), 10'000));
 
     QByteArray malformed = message;
     malformed[4] = 3; // Unknown protocol version.
