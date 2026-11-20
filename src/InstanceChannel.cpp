@@ -6,8 +6,10 @@
 #include <QDeadlineTimer>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
 #include <QLocalSocket>
+#include <QRandomGenerator>
 #include <QStringDecoder>
 #include <QThread>
 #include <QTimer>
@@ -34,14 +36,46 @@ constexpr qsizetype maxPayload = 256 * 1024;
 constexpr int timeoutMs = 5000;
 constexpr int maxReaders = 16;
 
+// A random key kept in the user's own settings folder, which other users
+// cannot read: it makes the channel's name one they cannot guess, so they
+// cannot take the name first and receive the paths this user opens. Made
+// once, atomically, so that two first launches agree on it.
+QByteArray instanceKey()
+{
+    const QString path = QFileInfo(Settings::instance().fileName()).dir().filePath(QStringLiteral("instance.key"));
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile file(path);
+    if (file.open(QIODevice::WriteOnly | QIODevice::NewOnly, QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
+        QByteArray key(32, Qt::Uninitialized);
+        QRandomGenerator::system()->generate(key.begin(), key.end());
+        key = key.toHex();
+        if (file.write(key) == key.size() && file.flush())
+            return key;
+        file.remove();
+        return {};
+    }
+    // Made by another launch, which may still be writing it.
+    QDeadlineTimer deadline(timeoutMs);
+    do {
+        if (file.open(QIODevice::ReadOnly)) {
+            const QByteArray key = file.read(64);
+            file.close();
+            if (key.size() == 64)
+                return key;
+        }
+        QThread::msleep(10);
+    } while (!deadline.hasExpired());
+    return {};
+}
+
 QString serverName()
 {
     QByteArray identity = QFileInfo(Settings::instance().fileName()).absolutePath().toUtf8();
     identity += '\0';
+    identity += instanceKey();
+    identity += '\0';
 #ifdef Q_OS_UNIX
     identity += QByteArray::number(::geteuid());
-#else
-    identity += qgetenv("USERNAME");
 #endif
     identity += '\0';
     identity += qgetenv("VN_INSTANCE_NAME");
@@ -162,6 +196,13 @@ InstanceChannel::StartResult InstanceChannel::start(const QStringList &files)
 {
     QElapsedTimer elapsed;
     elapsed.start();
+    // Running on our own after a failure: the lock must not hold back the
+    // launches after this one.
+    const auto failed = [this] {
+        if (m_lock.isLocked())
+            m_lock.unlock();
+        return StartResult::Failed;
+    };
     for (;;) {
         QLocalSocket socket;
         socket.connectToServer(m_name);
@@ -169,7 +210,7 @@ InstanceChannel::StartResult InstanceChannel::start(const QStringList &files)
             if (sendRequest(socket, files))
                 return StartResult::Forwarded;
             qWarning("Could not send the launch request to Visual Notepad.");
-            return StartResult::Failed;
+            return failed();
         }
 
         if (m_lock.isLocked()) {
@@ -184,13 +225,13 @@ InstanceChannel::StartResult InstanceChannel::start(const QStringList &files)
             } else {
                 qWarning() << socket.errorString();
             }
-            return StartResult::Failed;
+            return failed();
         }
         if (m_lock.tryLock())
             continue;
         if (m_lock.error() != QLockFile::LockFailedError || elapsed.hasExpired(timeoutMs)) {
             qWarning("Could not reach or start the Visual Notepad instance.");
-            return StartResult::Failed;
+            return failed();
         }
         QThread::msleep(20);
     }

@@ -196,6 +196,13 @@ void TestInstance::simultaneousLaunches()
     QCOMPARE(primary.state(), QProcess::Running);
     QCOMPARE(forwarded.exitStatus(), QProcess::NormalExit);
     QVERIFY2(forwarded.exitCode() == 0, forwarded.readAllStandardError().constData());
+    // The two first launches agreed on one key (else both would be primaries,
+    // above), kept where only this user can read it.
+    QFile key(m_dir.filePath(QStringLiteral("launch-config/visnotepad/instance.key")));
+    QVERIFY(key.exists());
+    QCOMPARE(key.permissions() & (QFileDevice::ReadGroup | QFileDevice::ReadOther), QFileDevice::Permissions());
+    QVERIFY(key.open(QIODevice::ReadOnly));
+    QCOMPARE(key.readAll().size(), 64);
 
     QProcess version;
     version.setProcessEnvironment(environment);
