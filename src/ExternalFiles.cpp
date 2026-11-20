@@ -77,7 +77,7 @@ QList<QStringList> ExternalFiles::commandLines(const QList<QStringList> &request
     QList<QStringList> launches;
     for (const QStringList &files : requests) {
         if (files.isEmpty()) {
-            launches.append(QStringList());
+            launches.append({QStringLiteral("--new-window")});
             continue;
         }
         QStringList arguments{QStringLiteral("--")};

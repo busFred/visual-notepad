@@ -83,6 +83,11 @@ int main(int argc, char *argv[])
     parser.addHelpOption();
     parser.addVersionOption();
     parser.addPositionalArgument(QStringLiteral("files"), QStringLiteral("Files to open."), QStringLiteral("[files...]"));
+    // A new untitled window, not the last session: what a launch handed on
+    // at quit asked for (see ExternalFiles::commandLines).
+    QCommandLineOption newWindow(QStringLiteral("new-window"), QStringLiteral("Open a new window, without the last session."));
+    newWindow.setFlags(QCommandLineOption::HiddenFromHelp);
+    parser.addOption(newWindow);
     parser.process(app);
 
     // Resolve paths in the launching process, which may have a different
@@ -114,8 +119,8 @@ int main(int argc, char *argv[])
     auto &session = vn::SessionManager::instance();
     session.start();
     if (files.isEmpty()) {
-        // (Nothing to restore in a session not ours.)
-        if (!sessionOwned || !session.restore()) {
+        // (Nothing to restore in a session not ours, nor when asked for a new window.)
+        if (!sessionOwned || parser.isSet(newWindow) || !session.restore()) {
             auto *window = new vn::MainWindow;
             window->setAttribute(Qt::WA_DeleteOnClose);
             window->newFile();

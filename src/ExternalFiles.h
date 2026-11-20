@@ -28,7 +28,8 @@ public:
     QList<QStringList> takeWaiting();
     // Command lines that make `requests` again, each well inside the shortest
     // system limit (Windows': 32,767 characters): "--" then files, a
-    // request's files split over as many as they need; none for a new window.
+    // request's files split over as many as they need; --new-window for one
+    // that asked for a new window.
     static QList<QStringList> commandLines(const QList<QStringList> &requests);
 
 protected:

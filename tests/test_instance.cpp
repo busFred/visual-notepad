@@ -306,7 +306,7 @@ void TestInstance::waitsForADialog()
     // As command lines: each request its own, the new window's empty, and a
     // long one split so that none is near the system's limit.
     QCOMPARE(ExternalFiles::commandLines(waiting),
-             (QList<QStringList>{{QStringLiteral("--"), path, path}, {}}));
+             (QList<QStringList>{{QStringLiteral("--"), path, path}, {QStringLiteral("--new-window")}}));
     QStringList many;
     for (int i = 0; i < 2000; ++i)
         many.append(m_dir.filePath(QStringLiteral("file-%1.txt").arg(i)));
