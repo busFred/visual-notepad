@@ -65,6 +65,9 @@ QList<QStringList> ExternalFiles::takeWaiting()
 {
     QList<QStringList> requests(m_requests.cbegin(), m_requests.cend());
     m_requests.clear();
+    // (Finder's last files, not yet made a request.)
+    if (!m_finderFiles.isEmpty())
+        requests.append(std::exchange(m_finderFiles, {}));
     return requests;
 }
 

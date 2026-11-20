@@ -45,6 +45,8 @@ public:
 
     // True while the final quit is closing windows: closeEvent must not prompt.
     bool isQuitting() const { return m_quitting; }
+    // Whether the system ended the app (logout, shutdown, a signal), not the user.
+    bool endedBySystem() const { return m_endedBySystem; }
 
     // File > Quit: asks about unsaved changes, saves the session, then closes
     // every window. Returns false if the user cancelled.
@@ -127,6 +129,7 @@ private:
     bool m_backupDeferred = false;
     QHash<const TextFile *, quint64> m_bigSerials;
     bool m_quitting = false;
+    bool m_endedBySystem = false;
     bool m_dirty = false;
     bool m_started = false;
     int m_syncDeferred = 0;

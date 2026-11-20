@@ -138,7 +138,10 @@ int main(int argc, char *argv[])
     // were taken (their launches were told so), so new launches make them,
     // once this one has let go of the channel and the session. The first
     // takes them over; the others hand theirs to it.
-    if (const QList<QStringList> waiting = externalFiles.takeWaiting(); !waiting.isEmpty()) {
+    // (Not when the system ends the app: logout or shutdown is no time to
+    // start it again.)
+    const QList<QStringList> waiting = externalFiles.takeWaiting();
+    if (!waiting.isEmpty() && !vn::SessionManager::instance().endedBySystem()) {
         instance.release();
         for (const QStringList &arguments : vn::ExternalFiles::commandLines(waiting)) {
             if (!QProcess::startDetached(QCoreApplication::applicationFilePath(), arguments))
