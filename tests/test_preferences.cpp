@@ -241,7 +241,7 @@ void TestPreferences::readModeRows()
     // Characters per column: 50 to 100 in steps of 5.
     auto *chars = find<QSpinBox>(key::readChars);
     QVERIFY(chars);
-    QCOMPARE(chars->value(), 70);
+    QCOMPARE(chars->value(), 75);
     QCOMPARE(chars->minimum(), 50);
     QCOMPARE(chars->maximum(), 100);
     QCOMPARE(chars->singleStep(), 5);

@@ -33,7 +33,7 @@ const QHash<QString, QVariant> &defaults()
         {key::highlightActiveBlock, true},
         {key::blocksStartCollapsed, false},
         {key::readColumns, 0},
-        {key::readChars, 70},
+        {key::readChars, 75},
         {key::readKeptLines, 2},
         {key::breaks, false},
         {key::linkify, true},

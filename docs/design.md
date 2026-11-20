@@ -82,6 +82,8 @@ no bevels. Values live in `src/Theme.h`.
   zoom, line ending, encoding, language (clickable), sizing grip. Zoom is
   per tab and, in Source / Visual, per half: the half last clicked has a 2 px
   accent line, and the keys, Ctrl+wheel and the cell's popup act on it.
+  The Columns button opens a popup for the column count and width; these are
+  per tab and start from the preferences.
 - Web links always prompt: Open, Copy, Cancel.
 - Remote images (http/https) never load unasked. A bar above the visual view
   lists the hosts and the number of images and offers Load images / Don't

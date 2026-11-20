@@ -306,13 +306,13 @@ QMenu::indicator:unchecked { image: none; }
 QMenu::right-arrow { image: url(:/vn/icons/chevron-right.svg); width: 8px; height: 8px; right: 8px; }
 
 /* The zoom cell's popup: a menu-coloured panel with a slider. */
-#ZoomPopup { background: @menu; border: 1px solid @divider; border-radius: 3px; }
-#ZoomPopup QLabel { color: @text; }
-#ZoomPopup QToolButton#ZoomStep { border: none; border-radius: 3px; padding: 0 5px; color: @text; }
-#ZoomPopup QToolButton#ZoomStep:hover { background: @panelTitle; }
-#ZoomPopup QSlider::groove:horizontal { height: 4px; border-radius: 2px; background: @divider; }
-#ZoomPopup QSlider::sub-page:horizontal { height: 4px; border-radius: 2px; background: @switchOn; }
-#ZoomPopup QSlider::handle:horizontal { width: 10px; margin: -6px 0; border-radius: 3px; background: @button; border: 1px solid @divider; }
+#ZoomPopup, #ReadPopup { background: @menu; border: 1px solid @divider; border-radius: 3px; }
+#ZoomPopup QLabel, #ReadPopup QLabel { color: @text; }
+#ZoomPopup QToolButton#ZoomStep, #ReadPopup QToolButton#ZoomStep { border: none; border-radius: 3px; padding: 0 5px; color: @text; }
+#ZoomPopup QToolButton#ZoomStep:hover, #ReadPopup QToolButton#ZoomStep:hover { background: @panelTitle; }
+#ZoomPopup QSlider::groove:horizontal, #ReadPopup QSlider::groove:horizontal { height: 4px; border-radius: 2px; background: @divider; }
+#ZoomPopup QSlider::sub-page:horizontal, #ReadPopup QSlider::sub-page:horizontal { height: 4px; border-radius: 2px; background: @switchOn; }
+#ZoomPopup QSlider::handle:horizontal, #ReadPopup QSlider::handle:horizontal { width: 10px; margin: -6px 0; border-radius: 3px; background: @button; border: 1px solid @divider; }
 
 #TabStrip { background: @tabStrip; }
 QTabBar { background: transparent; }
@@ -346,15 +346,6 @@ QTreeWidget::item:selected, QTreeWidget::branch:selected { background: @selectio
 #Pill QToolButton:checked { background: @accent; }
 
 /* Read mode's bar left of the pill: − n +, then a slider, the zoom popup's. */
-#ReadBar QLabel { color: @text; }
-#ReadBar QFrame#ReadBarSeparator { background: @divider; border: none; }
-#ReadBar QToolButton[readStep="true"] { background: @button; border: 1px solid @divider; border-radius: 3px; color: @text; padding: 0; }
-#ReadBar QToolButton[readStep="true"]:hover { background: @buttonHover; }
-#ReadBar QToolButton[readStep="true"]:pressed { background: @panelTitle; }
-#ReadBar QToolButton[readStep="true"]:disabled { color: @mutedText; }
-#ReadBar QSlider::groove:horizontal { height: 4px; border-radius: 2px; background: @divider; }
-#ReadBar QSlider::sub-page:horizontal { height: 4px; border-radius: 2px; background: @switchOn; }
-#ReadBar QSlider::handle:horizontal { width: 10px; margin: -6px 0; border-radius: 3px; background: @button; border: 1px solid @divider; }
 
 #FindBar { background: @sideBar; border: 1px solid @divider; border-top: none; }
 #FindInput { background: @editor; border: 1px solid @divider; border-radius: 2px; }

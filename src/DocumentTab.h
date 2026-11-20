@@ -25,7 +25,6 @@ namespace vn {
 
 class EditorPill;
 class FindBar;
-class ReadBar;
 class TextView;
 class VisualView;
 
@@ -165,8 +164,8 @@ public:
     // while editing locks it. Where they cannot (the Visual Editor unlocked,
     // Source / Visual) the tab shows Scroll, keeping the same
     // line at the top and the caret at its start, and keeps the wish: columns
-    // come back, from the caret's line, where they can again. A bar at the top
-    // right sets the number of columns and their width; those are this tab's,
+    // come back, from the caret's line, where they can again. The Columns
+    // popup sets the number of columns and their width; those are this tab's,
     // not saved; Preferences give where a new tab starts.
     // The switch shows (not in Source / Visual).
     bool canShowColumns() const;
@@ -184,6 +183,8 @@ public:
     // 0: as many as fit.
     int readColumns() const { return m_readColumns; }
     int readChars() const { return m_readChars; }
+    int columnsShownCount() const;
+    int columnsFit() const;
     void setReadColumns(int columns);
     void setReadChars(int chars);
 
@@ -238,9 +239,6 @@ private:
     // Columns follow the wish, the mode and the lock; switched: the user
     // asked for them (or for Scroll) just now.
     void updateColumns(bool switched = false);
-    void updateReadBar();
-    int columnsShownCount() const;
-    int columnsFit() const;
 
     std::shared_ptr<TextFile> m_file;
     QTextDocument *m_doc;
@@ -272,7 +270,6 @@ private:
     // a preview, on its own an editor.
     bool m_splitLocked = true;
     bool m_visualLocked = false;
-    ReadBar *m_readBar = nullptr; // Made when columns first show.
     int m_readColumns = 0;
     int m_readChars = 70;
     bool m_wantsColumns = false;

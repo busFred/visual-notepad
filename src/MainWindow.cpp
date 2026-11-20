@@ -46,6 +46,7 @@
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QLabel>
 #include <QMenuBar>
 #include <QLocale>
@@ -190,6 +191,147 @@ private:
     bool m_divider;
     bool m_hover = false;
     std::function<void()> m_handler;
+};
+
+class ReadBarIcon : public QWidget
+{
+public:
+    enum class Kind { Columns, Width };
+
+    ReadBarIcon(Kind kind, QWidget *parent)
+        : QWidget(parent)
+        , m_kind(kind)
+    {
+        setFixedSize(16, 16);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(theme::color(theme::Role::text), 1.25, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.setBrush(Qt::NoBrush);
+        if (m_kind == Kind::Columns) {
+            painter.drawRoundedRect(QRectF(1.5, 2.5, 5.5, 11), 1, 1);
+            painter.drawRoundedRect(QRectF(9, 2.5, 5.5, 11), 1, 1);
+            return;
+        }
+        painter.drawLine(QPointF(2.5, 3.5), QPointF(2.5, 12.5));
+        painter.drawLine(QPointF(13.5, 3.5), QPointF(13.5, 12.5));
+        painter.drawLine(QPointF(2.5, 8), QPointF(13.5, 8));
+        painter.drawPolyline(QPolygonF({QPointF(5, 5.7), QPointF(2.7, 8), QPointF(5, 10.3)}));
+        painter.drawPolyline(QPolygonF({QPointF(11, 5.7), QPointF(13.3, 8), QPointF(11, 10.3)}));
+    }
+
+private:
+    Kind m_kind;
+};
+
+
+
+// Column controls use the same popup and slider styling as zoom.
+class ReadPopup : public QFrame
+{
+public:
+    ReadPopup(DocumentTab *tab, QWidget *parent) : QFrame(parent, Qt::Popup), m_tab(tab)
+    {
+        setObjectName(QStringLiteral("ReadPopup"));
+        setAttribute(Qt::WA_DeleteOnClose);
+        setAttribute(Qt::WA_StyledBackground);
+        auto *layout = new QGridLayout(this);
+        layout->setContentsMargins(12, 8, 12, 8);
+        layout->setSpacing(8);
+        auto *columns = new ReadBarIcon(ReadBarIcon::Kind::Columns, this);
+        columns->setToolTip(tr("Columns"));
+        layout->addWidget(columns, 0, 0);
+        auto *width = new ReadBarIcon(ReadBarIcon::Kind::Width, this);
+        width->setToolTip(tr("Characters per column"));
+        layout->addWidget(width, 1, 0);
+        const auto button = [this, layout](const QString &text, const char *name, int row, int column) {
+            auto *b = new QToolButton(this);
+            b->setObjectName(QStringLiteral("ZoomStep"));
+            b->setProperty("readControl", QLatin1String(name));
+            b->setText(text);
+            b->setAutoRaise(true);
+            b->setFocusPolicy(Qt::NoFocus);
+            layout->addWidget(b, row, column);
+            return b;
+        };
+        m_fewer = button(QStringLiteral("−"), "ReadFewerColumns", 0, 1);
+        m_count = new QLabel(this);
+        m_count->setObjectName(QStringLiteral("ReadColumnCount"));
+        m_count->setAlignment(Qt::AlignCenter);
+        layout->addWidget(m_count, 0, 2);
+        m_more = button(QStringLiteral("+"), "ReadMoreColumns", 0, 3);
+        m_fewer->setToolTip(tr("Fewer columns"));
+        m_more->setToolTip(tr("More columns (the most that fit is Auto)"));
+        m_narrower = button(QStringLiteral("−"), "ReadNarrower", 1, 1);
+        m_slider = new QSlider(Qt::Horizontal, this);
+        m_slider->setObjectName(QStringLiteral("ReadCharsSlider"));
+        m_slider->setRange(50, 100);
+        m_slider->setSingleStep(5);
+        m_slider->setPageStep(5);
+        m_slider->setFixedWidth(92);
+        m_slider->setFocusPolicy(Qt::NoFocus);
+        m_slider->setToolTip(tr("Characters per column"));
+        layout->addWidget(m_slider, 1, 2);
+        m_wider = button(QStringLiteral("+"), "ReadWider", 1, 3);
+        m_narrower->setToolTip(tr("Fewer characters per column"));
+        m_wider->setToolTip(tr("More characters per column"));
+        m_value = new QLabel(this);
+        m_value->setObjectName(QStringLiteral("ReadCharsValue"));
+        m_value->setMinimumWidth(m_value->fontMetrics().horizontalAdvance(QStringLiteral("100")));
+        m_value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        layout->addWidget(m_value, 1, 4);
+        connect(m_fewer, &QToolButton::clicked, this, [this] {
+            m_tab->setReadColumns(qMax(1, m_tab->columnsShownCount() - 1));
+            refresh();
+        });
+        connect(m_more, &QToolButton::clicked, this, [this] {
+            const int next = m_tab->columnsShownCount() + 1;
+            m_tab->setReadColumns(next >= m_tab->columnsFit() ? 0 : next);
+            refresh();
+        });
+        connect(m_narrower, &QToolButton::clicked, this, [this] { m_slider->setValue(m_slider->value() - 5); });
+        connect(m_wider, &QToolButton::clicked, this, [this] { m_slider->setValue(m_slider->value() + 5); });
+        connect(m_slider, &QSlider::valueChanged, this, [this](int value) {
+            m_tab->setReadChars(qBound(50, qRound(value / 5.0) * 5, 100));
+            refresh();
+        });
+        connect(tab, &QObject::destroyed, this, &QWidget::close);
+        connect(tab, &DocumentTab::readStateChanged, this, [this] {
+            if (!m_tab->showsColumns())
+                close();
+            else
+                refresh();
+        });
+        refresh();
+        adjustSize();
+    }
+
+private:
+    void refresh()
+    {
+        const int shown = m_tab->columnsShownCount();
+        const int fit = m_tab->columnsFit();
+        const int columns = m_tab->readColumns();
+        m_count->setText(columns == 0 ? tr("%1 (auto)").arg(shown) : QString::number(shown));
+        m_count->setToolTip(columns == 0 ? tr("Columns: as many as fit (%1)").arg(fit)
+                                         : tr("Columns: %1 of the %2 that fit").arg(shown).arg(fit));
+        m_fewer->setEnabled(shown > 1);
+        m_more->setEnabled(columns != 0);
+        const int chars = m_tab->readChars();
+        const QSignalBlocker blocker(m_slider);
+        m_slider->setValue(chars);
+        m_value->setText(QString::number(chars));
+        m_narrower->setEnabled(chars > 50);
+        m_wider->setEnabled(chars < 100);
+    }
+    DocumentTab *m_tab;
+    QToolButton *m_fewer, *m_more, *m_narrower, *m_wider;
+    QLabel *m_count, *m_value;
+    QSlider *m_slider;
 };
 
 // What the zoom cell opens: the half's name (in a split), − / slider / +
@@ -855,6 +997,14 @@ void MainWindow::createStatusBar()
             if (DocumentTab *tab = currentTab())
                 tab->setColumns(columns);
             updateStatus(); // (Clicking the shown view again leaves it checked.)
+            if (columns) {
+                if (DocumentTab *tab = currentTab(); tab && tab->showsColumns()) {
+                    auto *popup = new ReadPopup(tab, this);
+                    popup->move(m_columnsButton->mapToGlobal(QPoint(m_columnsButton->width(), 0))
+                                - QPoint(popup->width(), popup->height()));
+                    popup->show();
+                }
+            }
         });
     }
     statusBar()->addPermanentWidget(m_viewSwitch);

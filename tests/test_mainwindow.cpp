@@ -144,7 +144,7 @@ private Q_SLOTS:
     void adoptedTabKeepsItsZoom();
     void collapseCommands();
     void readModeStatusAndPages();
-    void readBarIsPerTabAndStartsFromPreferences();
+    void readPopupIsPerTabAndStartsFromPreferences();
     void viewSwitchComesFirstAndHides();
     void columnsMenuItemMirrorsTheSwitch();
     void columnsArePerTabAndNotSaved();
@@ -1396,7 +1396,7 @@ void TestMainWindow::readModeStatusAndPages()
 
 // The bar over a tab in read mode changes that tab only, and nothing is
 // saved; Preferences give where a new tab starts.
-void TestMainWindow::readBarIsPerTabAndStartsFromPreferences()
+void TestMainWindow::readPopupIsPerTabAndStartsFromPreferences()
 {
     vn::Settings &settings = vn::Settings::instance();
     settings.setValue(vn::key::readChars, 60);
@@ -1418,28 +1418,38 @@ void TestMainWindow::readBarIsPerTabAndStartsFromPreferences()
         QCOMPARE(tab->readColumns(), 1);
     }
     second->visualView()->grab();
-    auto *bar = second->findChild<QWidget *>(QStringLiteral("ReadBar"));
+    viewButton(window, true)->click();
+    auto *bar = window.findChild<QFrame *>(QStringLiteral("ReadPopup"));
     QVERIFY(bar && bar->isVisible());
     auto *slider = bar->findChild<QSlider *>(QStringLiteral("ReadCharsSlider"));
     auto *count = bar->findChild<QLabel *>(QStringLiteral("ReadColumnCount"));
-    auto *fewer = bar->findChild<QToolButton *>(QStringLiteral("ReadFewerColumns"));
-    auto *more = bar->findChild<QToolButton *>(QStringLiteral("ReadMoreColumns"));
-    QVERIFY(slider && count && fewer && more);
+    const auto control = [bar](const char *name) {
+        for (auto *button : bar->findChildren<QToolButton *>())
+            if (button->property("readControl").toString() == QLatin1String(name))
+                return button;
+        return static_cast<QToolButton *>(nullptr);
+    };
+    auto *fewer = control("ReadFewerColumns");
+    auto *more = control("ReadMoreColumns");
+    auto *narrower = control("ReadNarrower");
+    auto *wider = control("ReadWider");
+    QVERIFY(slider && count && fewer && more && narrower && wider);
+    wider->click();
+    QCOMPARE(slider->value(), 65);
+    narrower->click();
+    QCOMPARE(slider->value(), 60);
+    slider->setValue(50);
+    QVERIFY(!narrower->isEnabled());
+    slider->setValue(100);
+    QVERIFY(!wider->isEnabled());
+    slider->setValue(60);
     QCOMPARE(slider->value(), 60);
     QCOMPARE(bar->findChild<QLabel *>(QStringLiteral("ReadCharsValue"))->text(), QStringLiteral("60"));
     QCOMPARE(count->text(), QStringLiteral("1"));
     QVERIFY(!fewer->isEnabled());
-    // Left of the pill, at its height.
-    QToolButton *lock = nullptr;
-    for (QToolButton *button : second->findChildren<QToolButton *>())
-        if (button->toolTip() == QStringLiteral("Read-only"))
-            lock = button;
-    QVERIFY(lock);
-    const QRect pill = lock->parentWidget()->geometry();
-    QVERIFY(bar->geometry().right() < pill.left());
-    QCOMPARE(bar->geometry().top(), pill.top());
-    if (const QString file = qEnvironmentVariable("VN_SCREENSHOT"); !file.isEmpty())
-        window.grab().save(QString(file).replace(QStringLiteral(".png"), QStringLiteral("-readbar.png")));
+    const QPoint anchor = viewButton(window, true)->mapToGlobal(QPoint(viewButton(window, true)->width(), 0));
+    const QPoint offset = bar->pos() + QPoint(bar->width(), bar->height()) - anchor;
+    QVERIFY(qAbs(offset.x()) <= 2 && qAbs(offset.y()) <= 2);
 
     // Wider columns; + goes up to the most that fit, which is Auto.
     slider->setValue(70);
@@ -1461,6 +1471,14 @@ void TestMainWindow::readBarIsPerTabAndStartsFromPreferences()
     QCOMPARE(slider->value(), 70);
     QCOMPARE(second->readChars(), 70);
 
+    // Escape closes the popup, and clicking Columns again opens it.
+    QTest::keyClick(bar, Qt::Key_Escape);
+    QTRY_VERIFY(!window.findChild<QFrame *>(QStringLiteral("ReadPopup")));
+    viewButton(window, true)->click();
+    bar = window.findChild<QFrame *>(QStringLiteral("ReadPopup"));
+    QVERIFY(bar && bar->isVisible());
+    bar->close();
+
     // The other tab and the preferences are as they were.
     QCOMPARE(first->readChars(), 60);
     QCOMPARE(first->readColumns(), 1);
@@ -1475,9 +1493,7 @@ void TestMainWindow::readBarIsPerTabAndStartsFromPreferences()
     vn::DocumentTab *third = readingTab(window, QStringLiteral("bar3.md"));
     QVERIFY(third);
     QCOMPARE(third->readChars(), 85);
-    // Out of read mode the bar goes.
-    setLocked(second, false);
-    QVERIFY(!bar->isVisible());
+
 }
 
 QToolButton *TestMainWindow::viewButton(vn::MainWindow &window, bool columns)
@@ -1597,6 +1613,7 @@ void TestMainWindow::columnsMenuItemMirrorsTheSwitch()
     QVERIFY(item->isEnabled() && !item->isChecked());
 
     item->trigger();
+    QVERIFY(!window.findChild<QFrame *>(QStringLiteral("ReadPopup")));
     QVERIFY(tab->showsColumns());
     QVERIFY(tab->sourceView()->columnsShown());
     QVERIFY(viewButton(window, true)->isChecked());
@@ -1606,6 +1623,9 @@ void TestMainWindow::columnsMenuItemMirrorsTheSwitch()
     QVERIFY(!tab->showsColumns());
     QVERIFY(!item->isChecked());
     viewButton(window, true)->click();
+    auto *popup = window.findChild<QFrame *>(QStringLiteral("ReadPopup"));
+    QVERIFY(popup && popup->isVisible());
+    popup->close();
     QVERIFY(item->isChecked());
     item->trigger();
     QVERIFY(!tab->showsColumns());
@@ -1796,9 +1816,9 @@ void TestMainWindow::sourceColumnsStatusBarAndEditing()
     QTRY_COMPARE(range->text(), QStringLiteral("Lines 1–%1 of 213").arg(last + 1));
     QTRY_VERIFY(range->width() >= range->sizeHint().width());
     QCOMPARE(window.findChild<QLabel *>(QStringLiteral("PositionStatus"))->text(), QStringLiteral("Ln 1, Col 1"));
-    auto *bar = tab->findChild<QWidget *>(QStringLiteral("ReadBar"));
+    auto *bar = window.findChild<QFrame *>(QStringLiteral("ReadPopup"));
     QVERIFY(bar && bar->isVisible());
-    QVERIFY(bar->geometry().right() > tab->width() - 30);
+    bar->close();
     for (QToolButton *button : tab->findChildren<QToolButton *>()) {
         if (button->toolTip() == QStringLiteral("Read-only"))
             QVERIFY(!button->isVisible());
