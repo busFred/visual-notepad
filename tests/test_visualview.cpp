@@ -504,6 +504,7 @@ private Q_SLOTS:
     void blocksStartCollapsedWhenAsked();
     void readModeKeepsThePlace();
     void touchSwipeTurnsReadPages();
+    void touchFlickAtTheFirstPageLeavesTapsAlone();
     void readColumnsFollowWidthCharactersAndZoom();
     void pageTurnsGreyKeptLinesOnlyGoingForward();
     void readNudgesByButtonsWheelAndKeys();
@@ -5454,6 +5455,31 @@ void TestVisualView::touchSwipeTurnsReadPages()
     touch.release(0, start).commit();
     QCOMPARE(m_view->readScreen().start, first);
     QVERIFY(!m_view->hasSelection());
+}
+
+// A flick back on the first page moves nothing, so it stops at once: the
+// taps after it are taps (here a double tap that selects a word), not the
+// tap that stops a moving page.
+void TestVisualView::touchFlickAtTheFirstPageLeavesTapsAlone()
+{
+    startReading(QStringLiteral("A paragraph for testing a flick at the start.\n\n").repeated(150), 760, 380);
+    const auto first = m_view->readScreen().start;
+    QWidget *view = m_view->viewport();
+    auto touch = QTest::touchEvent(view, QTest::createTouchDevice(), false);
+    const QPoint start(200, 100);
+    touch.press(0, start).commit();
+    touch.move(0, start + QPoint(0, 60)).commit();
+    QTest::qWait(20);
+    touch.move(0, start + QPoint(0, 120)).commit();
+    touch.release(0, start + QPoint(0, 120)).commit();
+    QTest::qWait(100); // Long enough for a flick's first ticks.
+    QCOMPARE(m_view->readScreen().start, first);
+    const QPoint word = segmentOfLine(0).topLeft() + QPoint(30, 8);
+    for (int i = 0; i < 2; ++i) {
+        touch.press(0, word).commit();
+        touch.release(0, word).commit();
+    }
+    QVERIFY(m_view->hasSelection());
 }
 
 void TestVisualView::readModeKeepsThePlace()

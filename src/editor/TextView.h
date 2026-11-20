@@ -429,7 +429,8 @@ protected:
     // Paged views scroll in lines and use a sideways touch swipe to turn a page.
     virtual qreal touchPageLineHeight();
     virtual void touchTurnPage(bool forward);
-    virtual void touchNudge(int lines);
+    // Whether the page moved (not at its first or last place already).
+    virtual bool touchNudge(int lines);
     virtual bool touchTapActivates(const QPointF &point);
     void focusInEvent(QFocusEvent *event) override;
     void focusOutEvent(QFocusEvent *event) override;

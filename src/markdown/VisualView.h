@@ -250,7 +250,7 @@ protected:
     void wheelEvent(QWheelEvent *event) override;
     qreal touchPageLineHeight() override;
     void touchTurnPage(bool forward) override;
-    void touchNudge(int lines) override;
+    bool touchNudge(int lines) override;
     bool touchTapActivates(const QPointF &point) override;
     qreal textWidth() const override;
     int rowAtPoint(const QPointF &point, QPointF *origin) override;

@@ -1452,12 +1452,15 @@ void VisualView::touchTurnPage(bool forward)
         TextView::touchTurnPage(forward);
 }
 
-void VisualView::touchNudge(int lines)
+bool VisualView::touchNudge(int lines)
 {
-    if (readActive())
-        readNudge(lines);
-    else
-        TextView::touchNudge(lines);
+    if (!readActive())
+        return TextView::touchNudge(lines);
+    if (ensureReadScreen().empty())
+        return false;
+    const auto before = m_readFlow->screen().start;
+    readNudge(lines);
+    return m_readFlow->screen().start != before;
 }
 
 bool VisualView::touchTapActivates(const QPointF &point)

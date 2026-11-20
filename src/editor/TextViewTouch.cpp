@@ -156,9 +156,8 @@ bool TextView::touchScrollBy(qreal pixels)
     m_touchLineRemainder += pixels;
     const int lines = int(m_touchLineRemainder / m_touchPageLineHeight);
     m_touchLineRemainder -= lines * m_touchPageLineHeight;
-    if (lines != 0)
-        touchNudge(lines);
-    return true; // An animation tick can be smaller than a line.
+    // (An animation tick can be smaller than a line: that is no stop.)
+    return lines == 0 || touchNudge(lines);
 }
 
 void TextView::touchFlickTick()

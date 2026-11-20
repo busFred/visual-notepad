@@ -1034,10 +1034,13 @@ void TextView::touchTurnPage(bool forward)
         columnsPage(forward, false, false);
 }
 
-void TextView::touchNudge(int lines)
+bool TextView::touchNudge(int lines)
 {
-    if (m_columnsOn)
-        columnsNudge(lines);
+    if (!m_columnsOn || columnsScreen().empty())
+        return false;
+    const auto before = columnsScreen().start;
+    columnsNudge(lines);
+    return columnsScreen().start != before;
 }
 
 void TextView::columnsWheel(QWheelEvent *event)
