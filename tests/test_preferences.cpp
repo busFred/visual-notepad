@@ -707,9 +707,9 @@ void TestPreferences::oldLineSpacingsAreConverted()
     Settings::instance().useFile(path);
     const auto converted = [](double old, qreal base, const QFont &font) {
         const double wanted = old * base / QFontInfo(font).pixelSize();
-        double best = qRound(wanted * 100) / 100.0;
+        double best = 1.0;
         for (const double c : {1.0, 1.2, 1.35, 1.5, 1.6, 1.8, 2.0}) {
-            if (qAbs(c - wanted) <= 0.05)
+            if (qAbs(c - wanted) < qAbs(best - wanted))
                 best = c;
         }
         return best;
@@ -720,10 +720,10 @@ void TestPreferences::oldLineSpacingsAreConverted()
     const qreal textBase = qCeil(textMetrics.ascent() + textMetrics.descent() + textMetrics.leading());
     QCOMPARE(Settings::instance().value(key::lineSpacing).toDouble(),
              converted(1.0, QFontMetricsF(editor).height(), editor));
-    // 2.0 of old is more than any listed value: kept, not cut to 2.0.
+    // Values above the list snap to its highest choice.
     const double big = Settings::instance().value(key::textLineHeight).toDouble();
     QCOMPARE(big, converted(2.0, textBase, text));
-    QVERIFY(big > 2.0);
+    QCOMPARE(big, 2.0);
     // The old keys are gone, so the conversion happens once.
     Settings::instance().sync();
     QSettings file(path, QSettings::IniFormat);

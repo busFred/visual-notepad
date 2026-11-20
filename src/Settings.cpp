@@ -157,7 +157,7 @@ void Settings::migrate()
 }
 
 // What the preference lists offer (see PreferencesDialog): an old value close
-// to one of these becomes it, any other is kept as it is (the list shows it).
+// to one of these becomes the nearest choice.
 static constexpr double lineHeightChoices[] = {1.0, 1.2, 1.35, 1.5, 1.6, 1.8, 2.0};
 
 void Settings::migrateLineSpacing() const
@@ -180,11 +180,9 @@ void Settings::migrateLineSpacing() const
             m_store->remove(QLatin1String(oldKey));
             return;
         }
-        // (Rounded off, so as not to show fonts' fractions in the list; and
-        // within what the views take, 1 to 3.)
-        double best = std::clamp(std::round(wanted * 100) / 100.0, 1.0, 3.0);
+        double best = lineHeightChoices[0];
         for (const double choice : lineHeightChoices) {
-            if (qAbs(choice - wanted) <= 0.05)
+            if (qAbs(choice - wanted) < qAbs(best - wanted))
                 best = choice;
         }
         // (A value the user already chose with this version is kept.)
