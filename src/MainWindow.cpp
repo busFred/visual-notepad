@@ -308,8 +308,11 @@ public:
         m_value->setFixedWidth(m_value->fontMetrics().horizontalAdvance(QStringLiteral("100")));
         m_value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         layout->addWidget(m_value, 1, 4);
+        // One fewer than shown, not than asked for: with more asked than fit,
+        // one fewer than asked would change nothing on screen. (Never 0,
+        // which would mean "as many as fit" again.)
         connect(m_fewer, &QToolButton::clicked, this, [this] {
-            m_tab->setReadColumns(m_tab->columnsShownCount() - 1);
+            m_tab->setReadColumns(qMax(1, m_tab->columnsShownCount() - 1));
             refresh();
         });
         connect(m_more, &QToolButton::clicked, this, [this] {
