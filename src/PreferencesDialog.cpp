@@ -8,10 +8,12 @@
 #include "TouchScrollArea.h"
 
 #include <QAbstractButton>
+#include <QApplication>
 #include <QAbstractItemView>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QFontDialog>
+#include <QFontDatabase>
 #include <QFontInfo>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -504,10 +506,57 @@ QWidget *PreferencesDialog::addRow(const QString &label, QWidget *control)
     return row;
 }
 
+void PreferencesDialog::addReset(QWidget *row, QWidget *control, const char *settingKey, const char *secondKey, const QString &name)
+{
+    auto *button = smallButton({}, name.isEmpty() ? QString::fromLatin1(settingKey) + QStringLiteral("Reset") : name);
+    QSizePolicy policy = button->sizePolicy();
+    policy.setRetainSizeWhenHidden(true);
+    button->setSizePolicy(policy);
+    qobject_cast<QHBoxLayout *>(row->layout())->addWidget(button);
+    const auto icon = [button] {
+        QPixmap pixmap(QStringLiteral(":/vn/icons/reset.svg"));
+        QPainter painter(&pixmap);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        painter.fillRect(pixmap.rect(), theme::color(theme::Role::text));
+        painter.end();
+        button->setIcon(QIcon(pixmap));
+    };
+    icon();
+    connect(&theme::notifier(), &theme::Notifier::changed, button, icon);
+    connect(button, &QToolButton::clicked, this, [settingKey, secondKey] {
+        const Settings::ChangeBatch batch;
+        Settings::instance().reset(settingKey);
+        if (secondKey)
+            Settings::instance().reset(secondKey);
+    });
+    const auto refresh = [button, control, settingKey, secondKey] {
+        const Settings &settings = Settings::instance();
+        const QVariant def = settings.defaultValue(settingKey);
+        button->setVisible(settings.value(settingKey) != def ||
+                           (secondKey && settings.value(secondKey) != settings.defaultValue(secondKey)));
+        QString shown = def.toString();
+        if (auto *combo = qobject_cast<QComboBox *>(control)) {
+            const int index = combo->findData(def);
+            if (index >= 0)
+                shown = combo->itemText(index);
+        } else if (auto *spin = qobject_cast<QSpinBox *>(control)) {
+            shown = def.toInt() == spin->minimum() && !spin->specialValueText().isEmpty()
+                        ? spin->specialValueText() : spin->prefix() + def.toString() + spin->suffix();
+        } else if (qobject_cast<QAbstractButton *>(control)) {
+            shown = def.toBool() ? tr("On") : tr("Off");
+        } else if (secondKey) {
+            shown = control->property("defaultFontText").toString();
+        }
+        button->setToolTip(tr("Reset to default (%1)").arg(shown));
+    };
+    track(settingKey, refresh);
+    if (secondKey)
+        m_refreshers.insert(QString::fromLatin1(secondKey), refresh);
+}
+
 void PreferencesDialog::addInfo(QWidget *row, const QString &text)
 {
     auto *layout = qobject_cast<QHBoxLayout *>(row->layout());
-    auto *label = qobject_cast<QLabel *>(layout->itemAt(0)->widget());
     layout->setStretch(0, 0);
     auto *info = new QToolButton(row);
     info->setObjectName(QStringLiteral("PrefInfo"));
@@ -533,14 +582,13 @@ void PreferencesDialog::addInfo(QWidget *row, const QString &text)
         popup->move(at);
         popup->show();
     });
-    Q_UNUSED(label);
 }
 
 void PreferencesDialog::addSwitch(const QString &label, const char *settingKey)
 {
     auto *toggle = new Switch;
     toggle->setObjectName(QString::fromLatin1(settingKey));
-    addRow(label, toggle);
+    addReset(addRow(label, toggle), toggle, settingKey);
     connect(toggle, &QAbstractButton::toggled, this,
             [settingKey](bool on) { Settings::instance().setValue(settingKey, on); });
     track(settingKey, [toggle, settingKey] {
@@ -558,7 +606,7 @@ void PreferencesDialog::addCombo(const QString &label, const char *settingKey, c
     combo->setFixedHeight(26);
     for (const ComboItem &item : items)
         combo->addItem(item.text, item.value);
-    addRow(label, combo);
+    addReset(addRow(label, combo), combo, settingKey);
     connect(combo, &QComboBox::currentIndexChanged, this, [combo, settingKey](int index) {
         if (index >= 0)
             Settings::instance().setValue(settingKey, combo->itemData(index));
@@ -594,7 +642,7 @@ void PreferencesDialog::addTextInput(const QString &label, const char *settingKe
     edit->setPlaceholderText(placeholder);
     edit->setFixedHeight(26);
     edit->setMinimumWidth(200);
-    addRow(label, edit);
+    addReset(addRow(label, edit), edit, settingKey);
     connect(edit, &QLineEdit::editingFinished, this,
             [edit, settingKey] { Settings::instance().setValue(settingKey, edit->text()); });
     track(settingKey, [edit, settingKey] {
@@ -652,16 +700,19 @@ void PreferencesDialog::addFontRow(const QString &label, const QString &name, co
     input->onClicked = [this, familyKey, sizeKey, currentFont, monospaced] {
         chooseFont(familyKey, sizeKey, currentFont, monospaced);
     };
-    auto *reset = textButton(tr("Reset"), name + QStringLiteral("Reset"));
+    QFont defaultFont;
+    if (monospaced) {
+        defaultFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+        defaultFont.setFamilies({QFontDatabase::hasFamily(QStringLiteral("Consolas"))
+                                     ? QStringLiteral("Consolas") : QStringLiteral("Inconsolata"), defaultFont.family()});
+    } else {
+        defaultFont = QApplication::font();
+        defaultFont.setPointSizeF(defaultFont.pointSizeF() * 1.15);
+    }
+    input->setProperty("defaultFontText", QStringLiteral("%1 %2").arg(QFontInfo(defaultFont).family()).arg(qRound(defaultFont.pointSizeF())));
     layout->addWidget(input);
-    layout->addWidget(reset);
-    addRow(label, box);
+    addReset(addRow(label, box), input, familyKey, sizeKey, name + QStringLiteral("Reset"));
 
-    connect(reset, &QAbstractButton::clicked, this, [familyKey, sizeKey] {
-        const Settings::ChangeBatch batch;
-        Settings::instance().reset(familyKey);
-        Settings::instance().reset(sizeKey);
-    });
     auto refresh = [input, familyKey, currentFont] {
         const QFont font = currentFont();
         const QString family = Settings::instance().text(familyKey);
@@ -704,7 +755,7 @@ void PreferencesDialog::addTabWidthRow()
     layout->addWidget(minus);
     layout->addWidget(value);
     layout->addWidget(plus);
-    addRow(tr("Tab width"), box);
+    addReset(addRow(tr("Tab width"), box), box, key::tabWidth);
 
     auto step = [](int delta) {
         const int width = std::clamp(Settings::instance().number(key::tabWidth) + delta, 1, 16);
@@ -786,7 +837,9 @@ void PreferencesDialog::addReadModeRows()
     columns->setKeyboardTracking(false);
     columns->setFixedHeight(26);
     columns->setMinimumWidth(110);
-    addInfo(addRow(tr("Columns"), columns), tr("A new tab starts with as many columns as fit at the window's width, font size and zoom. After that, the count stays until you change it."));
+    QWidget *columnsRow = addRow(tr("Columns"), columns);
+    addReset(columnsRow, columns, key::readColumns);
+    addInfo(columnsRow, tr("A new tab starts with as many columns as fit at the window's width, font size and zoom. After that, the count stays until you change it."));
     connect(columns, &QSpinBox::valueChanged, this,
             [](int count) { Settings::instance().setValue(key::readColumns, count); });
     track(key::readColumns, [columns] {
@@ -800,7 +853,7 @@ void PreferencesDialog::addReadModeRows()
     spin->setKeyboardTracking(false); // one change when typing is done, not one per digit
     spin->setFixedHeight(26);
     spin->setMinimumWidth(110);
-    addRow(tr("Characters per column"), spin);
+    addReset(addRow(tr("Characters per column"), spin), spin, key::readChars);
     connect(spin, &QSpinBox::valueChanged, this, [spin](int chars) {
         // In steps of 5, as the bar's slider has them.
         const int stepped = qBound(50, qRound(chars / 5.0) * 5, 100);
@@ -834,7 +887,9 @@ void PreferencesDialog::addPictureCacheRow()
     spin->setKeyboardTracking(false); // one change when typing is done, not one per digit
     spin->setFixedHeight(26);
     spin->setMinimumWidth(110);
-    addInfo(addRow(tr("Picture cache size"), spin), hint);
+    QWidget *row = addRow(tr("Picture cache size"), spin);
+    addReset(row, spin, key::pictureCacheMiB);
+    addInfo(row, hint);
     connect(spin, &QSpinBox::valueChanged, this,
             [](int mib) { Settings::instance().setValue(key::pictureCacheMiB, mib); });
     track(key::pictureCacheMiB, [spin] {

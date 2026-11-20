@@ -91,6 +91,7 @@ private Q_SLOTS:
     void lineSpacingChangesRenderedHeight();
     void oldLineSpacingsAreConverted();
     void offListNumericValueIsSorted();
+    void preferenceResetButton();
     void syncAnchorRow();
     void encodingRows();
     void showPageSelectsCategory();
@@ -331,7 +332,14 @@ void TestPreferences::pictureCacheSpin()
     QCOMPARE(spin->minimum(), 16);
     QCOMPARE(spin->maximum(), 2048);
     QCOMPARE(spin->suffix(), QStringLiteral(" MiB"));
-    QVERIFY(spin->toolTip().contains(QStringLiteral("decoded pictures")));
+    QVERIFY(spin->toolTip().isEmpty());
+    auto *info = spin->parentWidget()->findChild<QToolButton *>(QStringLiteral("PrefInfo"));
+    QVERIFY(info);
+    info->click();
+    auto *popup = prefsWindow()->findChild<QFrame *>(QStringLiteral("PrefInfoPopup"));
+    QVERIFY(popup && popup->isVisible());
+    QVERIFY(popup->findChild<QLabel *>()->text().contains(QStringLiteral("decoded pictures")));
+    popup->close();
     QCOMPARE(spin->value(), 128); // The default.
 
     // Shows what is stored, also when it changes elsewhere.
@@ -661,7 +669,9 @@ void TestPreferences::textFontResetRestoresDefault()
     Settings::instance().setValue(key::textFontSize, 18);
     auto *reset = find<QAbstractButton>(QStringLiteral("textFontReset"));
     QVERIFY(reset);
+    QVERIFY(!reset->isHidden());
     reset->click();
+    QVERIFY(reset->isHidden());
     QCOMPARE(Settings::instance().text(key::textFontFamily), QString());
     QCOMPARE(Settings::instance().number(key::textFontSize), 0);
     // Default size: the UI font, 15% larger.
@@ -686,6 +696,19 @@ void TestPreferences::lineSpacingWritesKey()
 // The old values counted the font's own line height, the new ones count its
 // size: a stored old value becomes the same look, on a listed value if one is
 // within 0.05, else as it is (rounded to hundredths).
+void TestPreferences::preferenceResetButton()
+{
+    auto *button = find<QToolButton>(QString::fromLatin1(key::lineNumbers) + QStringLiteral("Reset"));
+    QVERIFY(button);
+    QVERIFY(button->isHidden());
+    Settings::instance().setValue(key::lineNumbers, false);
+    QVERIFY(!button->isHidden());
+    QVERIFY(button->toolTip().contains(QStringLiteral("On")));
+    button->click();
+    QCOMPARE(Settings::instance().flag(key::lineNumbers), true);
+    QVERIFY(button->isHidden());
+}
+
 void TestPreferences::offListNumericValueIsSorted()
 {
     Settings::instance().setValue(key::lineSpacing, 1.4);
