@@ -62,6 +62,8 @@ add_library(vn_app STATIC
     src/Theme.cpp
     src/DesktopSettings.cpp
     src/Theme.h
+    src/TouchContextMenu.cpp
+    src/TouchContextMenu.h
     src/WelcomeView.cpp
     src/WelcomeView.h
     src/editor/DocumentLayout.cpp
@@ -159,6 +161,11 @@ if(WIN32)
 endif()
 qt_add_executable(visnotepad WIN32 MACOSX_BUNDLE src/main.cpp ${VN_WIN_RC})
 target_link_libraries(visnotepad PRIVATE vn_app)
+if(WIN32)
+    # Let Qt synthesize mouse events only for unhandled touchscreen input.
+    qt_add_resources(visnotepad vn_windows_touch PREFIX "/qt/etc"
+                     BASE "packaging/windows" FILES "packaging/windows/qt.conf")
+endif()
 if(APPLE)
     # A bundle (visnotepad.app); scripts/package_macos.py fills in Qt, the
     # libraries and resources, and makes the disk image.

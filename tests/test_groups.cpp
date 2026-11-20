@@ -19,6 +19,7 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QScopeGuard>
+#include <QSignalSpy>
 #include <QTabBar>
 #include <QTemporaryDir>
 #include <QTest>
@@ -37,6 +38,7 @@ private Q_SLOTS:
     void initTestCase();
     void newFileFollowsActiveGroup();
     void tabClickActivatesGroup();
+    void touchHoldOpensTabMenu();
     void dropMovesTabBetweenGroups();
     void dropIsIgnoredForOtherMime();
     void moveToOtherWindow();
@@ -122,6 +124,25 @@ void TestGroups::newFileFollowsActiveGroup()
     QCOMPARE(window.windowTitle(), QStringLiteral("Untitled — Visual Notepad"));
     window.newFile();
     QCOMPARE(window.mainGroup()->count(), 2);
+}
+
+void TestGroups::touchHoldOpensTabMenu()
+{
+    EditorGroup group;
+    group.resize(550, 350);
+    // The bar uses the existing tab menu signal even without the main window.
+    group.tabBar()->addTab(QStringLiteral("Tab"));
+    group.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&group));
+    QTabBar *bar = group.tabBar();
+    QSignalSpy menu(&group, &EditorGroup::tabContextMenuRequested);
+    auto touch = QTest::touchEvent(bar, QTest::createTouchDevice(), false);
+    const QPoint at = bar->tabRect(0).center();
+    touch.press(0, at).commit();
+    QTest::qWait(550);
+    touch.release(0, at).commit();
+    QTRY_COMPARE(menu.size(), 1);
+    QCOMPARE(menu.first().first().toInt(), 0);
 }
 
 void TestGroups::tabClickActivatesGroup()

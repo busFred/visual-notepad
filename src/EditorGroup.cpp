@@ -2,6 +2,7 @@
 
 #include "DocumentTab.h"
 #include "Theme.h"
+#include "TouchContextMenu.h"
 #include "WelcomeView.h"
 
 #include <QApplication>
@@ -278,6 +279,7 @@ EditorGroup::EditorGroup(QWidget *parent)
     });
     connect(m_tabBar, &QTabBar::tabCloseRequested, this, &EditorGroup::tabCloseRequested);
     m_tabBar->setContextMenuPolicy(Qt::CustomContextMenu);
+    touch::enableContextMenu(m_tabBar);
     connect(m_tabBar, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
         const int index = m_tabBar->tabAt(pos);
         if (index >= 0)

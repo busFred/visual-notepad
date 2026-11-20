@@ -7,6 +7,8 @@
 #include "Theme.h"
 #include "markdown/MathRenderer.h"
 
+#include "TouchContextMenu.h"
+
 #include <QApplication>
 #include <QDir>
 #include <QIcon>
@@ -100,6 +102,7 @@ int main(int argc, char *argv[])
 
     vn::math::setWorkerProgram(QCoreApplication::applicationFilePath());
     vn::theme::apply(app);
+    vn::touch::installContextMenus(app);
     vn::TextFile::setHighlightInSlices(true);
 
     auto &session = vn::SessionManager::instance();
