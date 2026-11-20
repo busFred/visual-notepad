@@ -12,6 +12,7 @@
 #include <QFileInfo>
 #include <QLocalSocket>
 #include <QRandomGenerator>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QStringDecoder>
 #include <QThread>
@@ -45,31 +46,47 @@ constexpr char received = 'K';
 // cannot read: it makes the channel's name one they cannot guess, so they
 // cannot take the name first and receive the paths this user opens. Made
 // once, atomically, so that two first launches agree on it.
+QByteArray newKey()
+{
+    QByteArray key(32, Qt::Uninitialized);
+    QRandomGenerator::system()->generate(key.begin(), key.end());
+    return key.toHex();
+}
+
 QByteArray instanceKey()
 {
     const QString path = QFileInfo(Settings::instance().fileName()).dir().filePath(QStringLiteral("instance.key"));
     QDir().mkpath(QFileInfo(path).absolutePath());
+    constexpr QFileDevice::Permissions ownerOnly = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
     QFile file(path);
-    if (file.open(QIODevice::WriteOnly | QIODevice::NewOnly, QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
-        QByteArray key(32, Qt::Uninitialized);
-        QRandomGenerator::system()->generate(key.begin(), key.end());
-        key = key.toHex();
+    if (file.open(QIODevice::WriteOnly | QIODevice::NewOnly, ownerOnly)) {
+        const QByteArray key = newKey();
         if (file.write(key) == key.size() && file.flush())
             return key;
         file.remove();
         return {};
     }
-    // Made by another launch, which may still be writing it.
-    QDeadlineTimer deadline(timeoutMs);
+    // Made by another launch, which writes it right after making it: a
+    // moment is enough to see it whole.
+    QDeadlineTimer deadline(500);
     do {
         if (file.open(QIODevice::ReadOnly)) {
-            const QByteArray key = file.read(64);
+            const QByteArray key = file.read(65);
             file.close();
             if (key.size() == 64)
                 return key;
         }
         QThread::msleep(10);
     } while (!deadline.hasExpired());
+    // Still not a key (cut short by a crash or a power cut): a new one, put
+    // in place whole. (A launch that read the old one meanwhile runs on its
+    // own; the session lock keeps the two apart.)
+    QSaveFile replacement(path);
+    const QByteArray key = newKey();
+    if (replacement.open(QIODevice::WriteOnly) && replacement.write(key) == key.size() && replacement.commit()) {
+        QFile::setPermissions(path, ownerOnly);
+        return key;
+    }
     return {};
 }
 
@@ -85,12 +102,14 @@ QString serverName()
     identity += '\0';
     identity += qgetenv("VN_INSTANCE_NAME");
     const QByteArray hash = QCryptographicHash::hash(identity, QCryptographicHash::Sha256).toHex();
-    const QString name = QStringLiteral("visnotepad-") + QString::fromLatin1(hash.first(32));
+    // (Short, for the socket path's limit below; the key makes it unguessable.)
+    const QString name = QStringLiteral("visnotepad-") + QString::fromLatin1(hash.first(16));
 #ifdef Q_OS_UNIX
-    // A path in the user's runtime folder, which only they can enter (Qt
-    // makes it so, or gives none), not a bare name: Qt would put that in the
-    // shared temporary folder, where the socket's name shows and another user
-    // could take it once this user's copy has quit.
+    // A path in the user's runtime folder, not a bare name: Qt would put that
+    // in the shared temporary folder, where the socket's name shows and
+    // another user could take it once this user's copy has quit. On Linux Qt
+    // gives the folder only if it is the user's and closed to others; on
+    // macOS it is in the user's Library, which only they can enter.
     const QString dir = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
     if (dir.isEmpty())
         return {};
@@ -321,7 +340,8 @@ InstanceChannel::StartResult InstanceChannel::start(const QStringList &files)
             return StartResult::Alone;
         if (m_lock.tryLock())
             continue;
-        if (m_lock.error() != QLockFile::LockFailedError || elapsed.hasExpired(timeoutMs)) {
+        // (Without a channel name there is no copy to wait for.)
+        if (m_name.isEmpty() || m_lock.error() != QLockFile::LockFailedError || elapsed.hasExpired(timeoutMs)) {
             qWarning("Could not reach or start the Visual Notepad instance.");
             return failed();
         }
