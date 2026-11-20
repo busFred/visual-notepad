@@ -234,6 +234,7 @@ protected:
     void editStarting() override;
     void contextMenuEvent(QContextMenuEvent *event) override;
     bool viewportEvent(QEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
     // The commands on the selected cells, rows or columns (the context menu
     // of a selection); the labels count what is selected.
     void populateSelectionMenu(QMenu *menu);
@@ -849,9 +850,27 @@ private:
     ReadHit readHitAt(const QPointF &point, bool exact);
     // Pictures that moved to the next column: their chip and notes.
     QFont readNoteFont();
+    QString readPictureName(int row);
     QString readPartText(const std::vector<md::Segment> &segments, int index);
-    void paintReadPart(QPainter &painter, const std::vector<md::Segment> &segments, int index, bool lastColumn,
+    void paintReadPart(QPainter &painter, const std::vector<md::Segment> &segments, int index, int column,
                        const QRectF &rect);
+    struct ReadChip
+    {
+        int row;
+        int lastRow;
+        int column;
+        QRectF box;
+    };
+    class ReadChipPreview;
+    std::unique_ptr<RenderedBlock> makeReadChip(int row, int column, int *lastRow);
+    const ReadChip *paintedReadChipAt(const QPointF &point) const;
+    std::optional<ReadChip> readChipForPress(const QPointF &point);
+    bool readChipPressed(QMouseEvent *event);
+    bool readChipHovered(QMouseEvent *event);
+    void showReadChipPreview(ReadChip chip, bool touch);
+    void clearReadChipPreview();
+    void invalidateReadChips();
+    void paintReadPictureGlow(QPainter &painter, const QRect &dirty);
     // The row of the chip under a point (-1: none), and the viewer for it.
     int readChipAt(const QPointF &point);
     void openMovedPictures(int row);
@@ -874,6 +893,13 @@ private:
     bool readBarMoved(QMouseEvent *event);
     // The viewport origin of the row showing `line` (its first line), if on screen.
     std::optional<QPointF> rowOrigin(int line);
+
+    // From the last paint of each column, so hovering uses the layout already on screen.
+    std::vector<std::vector<ReadChip>> m_readChips;
+    ReadChipPreview *m_readChipPreview = nullptr;
+    QList<QRectF> m_readPictureGlow;
+    int m_readPreviewRow = -1;
+    bool m_readPreviewTouch = false;
 
     bool m_readMode = false;
     int m_readColumns = 0;

@@ -37,6 +37,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMouseEvent>
+#include <QPointingDevice>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QRandomGenerator>
@@ -507,6 +509,8 @@ private Q_SLOTS:
     void longTablesRepeatTheirHeader();
     void readFiguresFitTheColumnHeight();
     void readPicturesMoveToTheNextColumn();
+    void readChipPreview_data();
+    void readChipPreview();
     void findAndGoToLineShowTheirScreen();
     void readLineRangeIsTheScreens();
     void readModeClicks();
@@ -5932,6 +5936,135 @@ void TestVisualView::findAndGoToLineShowTheirScreen()
     QVERIFY(!m_view->isFolded(heading));
     const auto range = m_view->readLineRange();
     QVERIFY(range.first <= inside && inside <= range.second);
+}
+
+void TestVisualView::readChipPreview_data()
+{
+    QTest::addColumn<bool>("nextPage");
+    QTest::newRow("next column") << false;
+    QTest::newRow("next page") << true;
+}
+
+void TestVisualView::readChipPreview()
+{
+    QFETCH(bool, nextPage);
+    QTemporaryDir dir;
+    const QColor firstColor(Qt::darkGreen);
+    const QColor secondColor(Qt::darkBlue);
+    QImage picture(300, 180, QImage::Format_RGB32);
+    picture.fill(firstColor);
+    QVERIFY(picture.save(dir.filePath(QStringLiteral("a.png"))));
+    picture.fill(secondColor);
+    QVERIFY(picture.save(dir.filePath(QStringLiteral("b.png"))));
+    m_view->setBaseDirectory(dir.path());
+    m_view->setReadColumns(nextPage ? 1 : 2);
+    const QString paragraph = QStringLiteral("This paragraph takes up some of the space before the pictures, "
+                                             "so the figures eventually reach the bottom of a column.\n\n");
+    QPoint chip;
+    QPoint besideChip;
+    QRect pictureArea;
+    for (int before = 1; before <= 16 && chip.isNull(); ++before) {
+        m_view->setReadMode(false);
+        const QString text = paragraph.repeated(before)
+                             + QStringLiteral("![first](a.png)\n\n![second](b.png)\n");
+        startReading(text, 1300, 700);
+        const md::Screen &screen = m_view->readScreen();
+        const int firstLine = lineHolding(text, QStringLiteral("![first]"));
+        const int firstRow = static_cast<ProbeView *>(m_view)->rowIndexOf(firstLine);
+        const auto &segments = screen.columns[0].segments;
+        for (int i = 0; i < int(segments.size()); ++i) {
+            if (segments[i].part != md::Segment::Part::Chip || segments[i].row != firstRow)
+                continue;
+            const QRect box = m_view->readSegmentRect(0, i);
+            chip = QPoint(box.left() + 20, box.top() + 10);
+            besideChip = QPoint(box.right() - 10, chip.y());
+            pictureArea = segmentOfLine(firstLine).united(segmentOfLine(firstLine + 2));
+        }
+    }
+    QVERIFY(!chip.isNull());
+    QCOMPARE(pictureArea.isEmpty(), nextPage);
+
+    QWidget *viewport = m_view->viewport();
+    const auto popup = [this] { return m_view->findChild<QWidget *>(QStringLiteral("ReadChipPreview")); };
+    const auto popupVisible = [&] { return popup() && popup()->isVisible(); };
+    const auto glow = [&] {
+        return !pictureArea.isEmpty()
+               && countColor(viewport->grab(pictureArea).toImage(), theme::color(theme::Role::accent)) > 0;
+    };
+    const auto visible = [&] { return nextPage ? popupVisible() : glow(); };
+    const auto viewers = [this] { return m_view->window()->findChildren<ImageViewer *>(); };
+    const auto closeViewer = [&] {
+        viewers().first()->close();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    };
+    const auto start = m_view->readScreen().start;
+    const int reads = RenderedBlock::pictureFileReads();
+    const int renders = m_view->renderCount();
+
+    const auto moveMouse = [&](const QPoint &point) {
+        // The offscreen cursor warp used by QTest::mouseMove is marked as synthesized.
+        QMouseEvent move(QEvent::MouseMove, point, viewport->mapToGlobal(point), Qt::NoButton, {}, {});
+        QApplication::sendEvent(viewport, &move);
+    };
+    moveMouse(besideChip);
+    QVERIFY(!visible());
+    moveMouse(chip);
+    QTRY_VERIFY(visible());
+    QCOMPARE(popupVisible(), nextPage);
+    if (nextPage) {
+        QVERIFY(popup()->width() <= 320 && popup()->height() <= 240);
+        const QImage strip = popup()->grab().toImage();
+        const int half = strip.width() / 2;
+        QVERIFY(countColor(strip.copy(0, 0, half, strip.height()), firstColor) > 0);
+        QVERIFY(countColor(strip.copy(half, 0, strip.width() - half, strip.height()), secondColor) > 0);
+    }
+    QCOMPARE(RenderedBlock::pictureFileReads(), reads);
+    QCOMPARE(m_view->renderCount(), renders);
+    QCOMPARE(m_view->readScreen().start, start);
+    QVERIFY(viewers().isEmpty());
+    moveMouse(besideChip);
+    QTRY_VERIFY(!visible());
+    moveMouse(chip);
+    QTRY_VERIFY(visible());
+    QEvent leave(QEvent::Leave);
+    QApplication::sendEvent(viewport, &leave);
+    QTRY_VERIFY(!visible());
+
+    QPointingDevice touchScreen(QStringLiteral("Test touch screen"), 1, QInputDevice::DeviceType::TouchScreen,
+                                QPointingDevice::PointerType::Finger, QInputDevice::Capability::Position, 1, 0);
+    const auto tap = [&](const QPoint &point, QEvent::Type press, const QPointingDevice *device,
+                         Qt::MouseEventSource source) {
+        const QPointF global = viewport->mapToGlobal(point);
+        QMouseEvent down(press, point, point, global, Qt::LeftButton, Qt::LeftButton, {}, source, device);
+        QMouseEvent up(QEvent::MouseButtonRelease, point, point, global, Qt::LeftButton, {}, {}, source, device);
+        QApplication::sendEvent(viewport, &down);
+        QApplication::sendEvent(viewport, &up);
+    };
+    const auto touchTap = [&](const QPoint &point) {
+        tap(point, QEvent::MouseButtonPress, &touchScreen, Qt::MouseEventNotSynthesized);
+    };
+
+    touchTap(chip);
+    QTRY_VERIFY(visible());
+    QVERIFY(viewers().isEmpty());
+    QEvent touchLeave(QEvent::Leave);
+    QApplication::sendEvent(viewport, &touchLeave);
+    QVERIFY(visible());
+    touchTap(besideChip);
+    QTRY_VERIFY(!visible());
+    touchTap(chip);
+    QTRY_VERIFY(visible());
+    QVERIFY(viewers().isEmpty());
+    tap(chip, QEvent::MouseButtonDblClick, QPointingDevice::primaryPointingDevice(), Qt::MouseEventSynthesizedByQt);
+    QTRY_COMPARE(viewers().size(), 1);
+    QCOMPARE(viewers().first()->count(), 2);
+    QTRY_VERIFY(!visible());
+    closeViewer();
+
+    QTest::mouseClick(viewport, Qt::LeftButton, {}, chip);
+    QTRY_COMPARE(viewers().size(), 1);
+    QCOMPARE(viewers().first()->count(), 2);
+    closeViewer();
 }
 
 void TestVisualView::readLineRangeIsTheScreens()

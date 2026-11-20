@@ -890,6 +890,7 @@ void VisualView::noteEdit(int from, int, int added)
 void VisualView::rowsMayHaveChanged()
 {
     // Heights may have changed: read mode fills its screen again.
+    invalidateReadChips();
     m_readDirty = true;
     scheduleToolbarUpdate();
     // An edit ends the selection of cells, and moves what the mark pointed at.
@@ -923,6 +924,7 @@ void VisualView::showEvent(QShowEvent *event)
 void VisualView::hideEvent(QHideEvent *event)
 {
     TextView::hideEvent(event);
+    invalidateReadChips();
     scheduleToolbarUpdate();
     m_showsParse = false;
     m_unpainted = true;
@@ -1047,6 +1049,7 @@ void VisualView::layoutBanner()
 
 void VisualView::resizeEvent(QResizeEvent *event)
 {
+    invalidateReadChips();
     TextView::resizeEvent(event);
     layoutBanner();
     scheduleToolbarUpdate();
@@ -3528,6 +3531,7 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
         }
     }
     if (event->buttons() == Qt::NoButton) {
+        const bool onReadChip = readChipHovered(event);
         updateHover(event->position().toPoint());
         updateFigureBar(event->position().toPoint());
         // The edges of a table: arrows to select a column or a row, and the
@@ -3559,7 +3563,7 @@ void VisualView::mouseMoveEvent(QMouseEvent *event)
             QToolTip::hideText();
             return;
         }
-        if (readChipAt(event->position()) >= 0) {
+        if (onReadChip) {
             viewport()->setCursor(Qt::PointingHandCursor);
             QToolTip::hideText();
             return;
@@ -3607,6 +3611,8 @@ void VisualView::updateHover(const QPoint &point)
 bool VisualView::viewportEvent(QEvent *event)
 {
     if (event->type() == QEvent::Leave) {
+        if (!m_readPreviewTouch)
+            clearReadChipPreview();
         updateHover(QPoint(-1, -1));
         clearTableHover();
         // (Not left when the pointer went on to the bar.)
@@ -3886,16 +3892,12 @@ void VisualView::mousePressEvent(QMouseEvent *event)
     // (In read mode the caret the pointer places is on screen: no page turns to it.)
     const QScopedValueRollback<bool> pointing(m_readPointing, m_readPointing || readActive());
     // The scrollbar under a wide table or equation.
-    if (readActive() && readBarPressed(event))
+    if (readActive() && readBarPressed(event)) {
+        clearReadChipPreview();
         return;
-    // A chip where pictures were: the viewer, as a click on them.
-    if (readActive() && event->button() == Qt::LeftButton) {
-        if (const int chip = readChipAt(event->position()); chip >= 0) {
-            event->accept();
-            openMovedPictures(chip);
-            return;
-        }
     }
+    if (readChipPressed(event))
+        return;
     if (event->button() == Qt::LeftButton && !isReadOnly() && markdownEditing()) {
         TableSpot spot = tableSpotAt(event->position());
         const bool shift = (event->modifiers() & ~Qt::KeypadModifier) == Qt::ShiftModifier;
@@ -3933,6 +3935,8 @@ void VisualView::mouseDoubleClickEvent(QMouseEvent *event)
 {
     // (In read mode the caret the pointer places is on screen: no page turns to it.)
     const QScopedValueRollback<bool> pointing(m_readPointing, m_readPointing || readActive());
+    if (readChipPressed(event))
+        return;
     // The second click of a click on a fold is a click on it too: the first
     // changed what is under the pointer, and this one opens no source.
     if (event->button() == Qt::LeftButton && foldSpotAt(event->position()).where != FoldSpot::None) {

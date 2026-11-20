@@ -286,6 +286,8 @@ public:
     std::optional<Picture> firstPicture() const;
     // It at full size; null if it cannot be read.
     QImage pictureImage(const Picture &picture) const;
+    // The decoded figures the block already holds, at their rendered sizes.
+    QList<QImage> picturePreviews() const;
 
     // The pictures and diagrams of the block (not formulas), each in the box
     // of RenderContext::figureWidth and figureHeight, scaled by what the user

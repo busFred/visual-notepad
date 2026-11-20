@@ -1590,6 +1590,19 @@ public:
         return loaded ? url : QUrl();
     }
 
+    QList<QImage> figureImages() const
+    {
+        QList<QImage> images;
+        for (int i = 0; i < m_figureNames.size(); ++i) {
+            // sizeFigures() added these resources with the figure's fitted pixels.
+            const QUrl name(QStringLiteral("vn-figure:%1").arg(i));
+            const QImage image = resource(QTextDocument::ImageResource, name).value<QImage>();
+            if (!image.isNull())
+                images.append(image);
+        }
+        return images;
+    }
+
 protected:
     QVariant loadResource(int type, const QUrl &url) override
     {
@@ -3887,6 +3900,15 @@ std::vector<RenderedBlock::Figure> RenderedBlock::figures() const
         }
     }
     return result;
+}
+
+QList<QImage> RenderedBlock::picturePreviews() const
+{
+    if (m_kind == Kind::Image && !m_image.isNull())
+        return {m_image};
+    if (m_kind == Kind::Rich)
+        return static_cast<const ResourceDocument *>(m_doc.get())->figureImages();
+    return {};
 }
 
 QImage RenderedBlock::pictureImage(const Picture &picture) const

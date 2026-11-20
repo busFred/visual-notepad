@@ -13,12 +13,16 @@
 #include <QAbstractButton>
 #include <QApplication>
 #include <QFontMetricsF>
+#include <QFrame>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QScopedValueRollback>
+#include <QScreen>
 #include <QTextBlock>
 #include <QTimer>
+#include <QTouchEvent>
 #include <QWheelEvent>
 #include <QtMath>
 
@@ -45,7 +49,94 @@ constexpr qreal readMargin = 26;
 
 using ReadButton = columns::PageButton;
 
+constexpr int previewWidth = 320;
+constexpr int previewHeight = 240;
+constexpr int previewPadding = 6;
+constexpr int glowRoom = 6;
+
+bool isTouchMouse(const QMouseEvent *event)
+{
+    return event->pointingDevice()->type() == QInputDevice::DeviceType::TouchScreen
+           || event->source() == Qt::MouseEventSynthesizedByQt
+           || event->source() == Qt::MouseEventSynthesizedBySystem;
+}
+
 } // namespace
+
+class VisualView::ReadChipPreview : public QFrame
+{
+public:
+    explicit ReadChipPreview(QWidget *parent)
+        : QFrame(parent, Qt::ToolTip | Qt::WindowTransparentForInput | Qt::WindowDoesNotAcceptFocus)
+    {
+        setObjectName(QStringLiteral("ReadChipPreview"));
+        setAttribute(Qt::WA_StyledBackground);
+        setAttribute(Qt::WA_ShowWithoutActivating);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+    }
+
+    void showPictures(QList<QImage> pictures, const QRect &chip, const QRect &available)
+    {
+        m_pictures = std::move(pictures);
+        m_boxes.clear();
+        const int width = qMin(previewWidth, available.width()) - 2 * previewPadding;
+        const int height = qMin(previewHeight, available.height()) - 2 * previewPadding;
+        if (width <= 0 || height <= 0)
+            return;
+        const qreal gap = qMin<qreal>(4, qreal(width) / (4 * m_pictures.size()));
+        const qreal slot = (width - gap * (m_pictures.size() - 1)) / m_pictures.size();
+        qreal x = previewPadding;
+        qreal tallest = 0;
+        for (const QImage &image : std::as_const(m_pictures)) {
+            QSizeF size = image.deviceIndependentSize();
+            if (size.width() > slot || size.height() > height)
+                size.scale(slot, height, Qt::KeepAspectRatio);
+            m_boxes.append(QRectF(QPointF(x, 0), size));
+            tallest = qMax(tallest, size.height());
+            x += size.width() + gap;
+        }
+        for (QRectF &box : m_boxes)
+            box.moveTop(previewPadding + (tallest - box.height()) / 2);
+        const QSize size(qCeil(x - gap + previewPadding), qCeil(tallest + 2 * previewPadding));
+        int left = chip.right() + previewPadding;
+        int top = chip.top();
+        if (left + size.width() > available.right() + 1) {
+            left = chip.left() - previewPadding - size.width();
+            if (left < available.left()) {
+                left = chip.left();
+                top = chip.bottom() + previewPadding;
+                if (top + size.height() > available.bottom() + 1)
+                    top = chip.top() - previewPadding - size.height();
+            }
+        }
+        left = qBound(available.left(), left, available.right() + 1 - size.width());
+        top = qBound(available.top(), top, available.bottom() + 1 - size.height());
+        setGeometry(QRect(QPoint(left, top), size));
+        show();
+        update();
+    }
+
+    void clearPictures()
+    {
+        hide();
+        m_pictures.clear();
+        m_boxes.clear();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        QFrame::paintEvent(event);
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        for (qsizetype i = 0; i < m_boxes.size(); ++i)
+            painter.drawImage(m_boxes[i], m_pictures[i]);
+    }
+
+private:
+    QList<QImage> m_pictures;
+    QList<QRectF> m_boxes;
+};
 
 // ---------------------------------------------------------------------------
 // The rows as the flow reads them
@@ -205,6 +296,7 @@ void VisualView::setReadMode(bool on, int startLine)
     const bool wasActive = readActive();
     // The place, as a line position, at the width it was found at.
     const qreal position = wasActive ? m_readLinePosition : startLine >= 0 ? startLine : topLinePosition();
+    invalidateReadChips();
     m_readMode = on;
     m_readWheel = 0;
     m_readOffsets.clear();
@@ -351,6 +443,7 @@ const md::Screen &VisualView::ensureReadScreen()
     } else {
         return m_readFlow->screen();
     }
+    invalidateReadChips();
     const md::Screen &screen = m_readFlow->screen();
     if (screen.start.floatRow >= 0 && screen.start.floatRow < int(m_rows.size()))
         m_readLinePosition = linePositionAt(screen.start.floatRow, 0);
@@ -367,6 +460,7 @@ const md::Screen &VisualView::readScreen()
 
 void VisualView::readMoved()
 {
+    invalidateReadChips();
     const md::Screen &screen = m_readFlow->screen();
     if (screen.start.row < int(m_rows.size()))
         m_readLinePosition = linePositionAt(screen.start.row, screen.start.y);
@@ -796,6 +890,7 @@ void VisualView::paintRead(QPaintEvent *event)
     painter.fillRect(event->rect(), background);
     const md::Screen &screen = ensureReadScreen();
     const ReadLayout &l = readLayout();
+    m_readChips.resize(screen.columns.size());
     // A thin line down the middle of each gap.
     for (int c = 1; c < int(screen.columns.size()); ++c) {
         painter.fillRect(QRect(columns::dividerX(l.left + c * (l.width + l.gap), l.gap), l.top, 1, l.height),
@@ -806,6 +901,7 @@ void VisualView::paintRead(QPaintEvent *event)
         const QRectF band(left - readMargin, 0, l.width + 2 * readMargin, viewport()->height());
         if (!band.intersects(event->rect()))
             continue;
+        m_readChips[c].clear();
         qreal y = l.top;
         qreal keptBottom = -1;
         const auto &segments = screen.columns[c].segments;
@@ -813,7 +909,7 @@ void VisualView::paintRead(QPaintEvent *event)
             const md::Segment &s = segments[i];
             if (s.part != md::Segment::Part::Row) {
                 const qreal h = m_readFlow->drawnHeight(s);
-                paintReadPart(painter, segments, i, c + 1 == int(screen.columns.size()), QRectF(left, y, l.width, h));
+                paintReadPart(painter, segments, i, c, QRectF(left, y, l.width, h));
                 y += h;
                 continue;
             }
@@ -890,6 +986,7 @@ void VisualView::paintRead(QPaintEvent *event)
                              theme::color(theme::Role::divider));
         }
     }
+    paintReadPictureGlow(painter, event->rect());
 }
 
 QFont VisualView::readNoteFont()
@@ -899,16 +996,11 @@ QFont VisualView::readNoteFont()
     return font;
 }
 
-// The pictures from row to the end of its group (a chip's), their count.
-static int picturesFrom(const md::ReadFlow &flow, md::RowSource &rows, int row)
+QString VisualView::readPictureName(int row)
 {
-    const int last = flow.pictureGroup(row).second;
-    int count = 0;
-    for (int r = row; r <= last; ++r) {
-        if (rows.kind(r) == md::RowKind::Picture)
-            ++count;
-    }
-    return count;
+    const Row &r = m_rows[row].row;
+    const RenderedBlock *block = r.rendered ? renderedForRow(r) : nullptr;
+    return block && block->kind() == RenderedBlock::Kind::Image ? tr("Diagram") : tr("Image");
 }
 
 // What a chip says, and the notes over and under moved pictures.
@@ -925,15 +1017,7 @@ QString VisualView::readPartText(const std::vector<md::Segment> &segments, int i
         if (r == s.row)
             k = total;
     }
-    const auto single = [this](int row) {
-        const RenderedBlock *block = m_rows[row].row.rendered ? renderedForRow(m_rows[row].row) : nullptr;
-        return block && block->kind() == RenderedBlock::Kind::Image ? tr("Diagram") : tr("Image");
-    };
     switch (s.part) {
-    case md::Segment::Part::Chip: {
-        const int count = picturesFrom(*m_readFlow, *m_readRows, s.row);
-        return count == 1 ? single(s.row) : tr("%1 images").arg(count);
-    }
     case md::Segment::Part::FromNote: {
         const QString from = s.page ? tr("from the previous page") : tr("from the previous column");
         int shown = 0;
@@ -942,7 +1026,7 @@ QString VisualView::readPartText(const std::vector<md::Segment> &segments, int i
                 ++shown;
         }
         if (k == 1 && shown == total)
-            return total == 1 ? tr("%1 %2").arg(single(s.row), from) : tr("%1 images %2").arg(total).arg(from);
+            return total == 1 ? tr("%1 %2").arg(readPictureName(s.row), from) : tr("%1 images %2").arg(total).arg(from);
         if (shown <= 1)
             return tr("Image %1 of %2 %3").arg(k).arg(total).arg(from);
         return tr("Images %1\u2013%2 of %3 %4").arg(k).arg(k + shown - 1).arg(total).arg(from);
@@ -953,6 +1037,7 @@ QString VisualView::readPartText(const std::vector<md::Segment> &segments, int i
             return tr("Image %1 continues %2 \u203A").arg(k).arg(where);
         return tr("Images %1\u2013%2 continue %3 \u203A").arg(k).arg(total).arg(where);
     }
+    case md::Segment::Part::Chip:
     case md::Segment::Part::Row:
         break;
     }
@@ -960,14 +1045,13 @@ QString VisualView::readPartText(const std::vector<md::Segment> &segments, int i
 }
 
 void VisualView::paintReadPart(QPainter &painter, const std::vector<md::Segment> &segments, int index,
-                               bool lastColumn, const QRectF &rect)
+                               int column, const QRectF &rect)
 {
     const md::Segment &s = segments[index];
-    const QString text = readPartText(segments, index);
     if (s.part == md::Segment::Part::Chip) {
-        // As a collapsed block's chip, saying where the pictures went.
-        const QString where = lastColumn ? tr("\u00B7 on the next page") : tr("\u00B7 in the next column");
-        const auto chip = RenderedBlock::createChip({text, where}, renderContext());
+        int lastRow;
+        const auto chip = makeReadChip(s.row, column, &lastRow);
+        m_readChips[column].push_back({s.row, lastRow, column, chip->chipRect().translated(rect.topLeft())});
         painter.save();
         chip->paint(painter, rect.topLeft(), rect.width(), {});
         painter.restore();
@@ -976,8 +1060,22 @@ void VisualView::paintReadPart(QPainter &painter, const std::vector<md::Segment>
     painter.save();
     painter.setFont(readNoteFont());
     RenderedBlock::drawSecondaryText(painter, rect.adjusted(0, 0, 0, -2),
-                                     Qt::AlignLeft | Qt::AlignBottom | Qt::TextSingleLine, text);
+                                     Qt::AlignLeft | Qt::AlignBottom | Qt::TextSingleLine, readPartText(segments, index));
     painter.restore();
+}
+
+std::unique_ptr<RenderedBlock> VisualView::makeReadChip(int row, int column, int *lastRow)
+{
+    *lastRow = m_readFlow->pictureGroup(row).second;
+    int count = 0;
+    for (int r = row; r <= *lastRow; ++r) {
+        if (m_readRows->kind(r) == md::RowKind::Picture)
+            ++count;
+    }
+    const QString text = count == 1 ? readPictureName(row) : tr("%1 images").arg(count);
+    const bool lastColumn = column + 1 == int(m_readFlow->screen().columns.size());
+    const QString where = lastColumn ? tr("\u00B7 on the next page") : tr("\u00B7 in the next column");
+    return RenderedBlock::createChip({text, where}, renderContext());
 }
 
 int VisualView::readChipAt(const QPointF &point)
@@ -996,6 +1094,210 @@ int VisualView::readChipAt(const QPointF &point)
     if (point.y() < top || point.y() >= top + chip->chipRect().height() + 2 * 2)
         return -1;
     return s.row;
+}
+
+const VisualView::ReadChip *VisualView::paintedReadChipAt(const QPointF &point) const
+{
+    if (!readActive() || !m_readFlow || m_readDirty || m_readNeedsStart
+        || m_readFlow->geometry().revision != m_readRevision)
+        return nullptr;
+    for (const auto &column : m_readChips) {
+        for (const ReadChip &chip : column) {
+            if (chip.box.contains(point))
+                return &chip;
+        }
+    }
+    return nullptr;
+}
+
+bool VisualView::readChipHovered(QMouseEvent *event)
+{
+    const ReadChip *chip = paintedReadChipAt(event->position());
+    if (isTouchMouse(event))
+        return chip != nullptr;
+    if (!chip)
+        clearReadChipPreview();
+    else if (m_readPreviewRow != chip->row || m_readPreviewTouch)
+        showReadChipPreview(*chip, false);
+    return chip != nullptr;
+}
+
+std::optional<VisualView::ReadChip> VisualView::readChipForPress(const QPointF &point)
+{
+    if (const ReadChip *chip = paintedReadChipAt(point))
+        return *chip;
+    // A tap can arrive before the repaint queued by a caret or page change.
+    const ReadHit hit = readHitAt(point, true);
+    if (hit.index < 0)
+        return std::nullopt;
+    const md::Segment &segment = m_readFlow->screen().columns[hit.column].segments[hit.index];
+    if (segment.part != md::Segment::Part::Chip)
+        return std::nullopt;
+    int lastRow;
+    const auto chip = makeReadChip(segment.row, hit.column, &lastRow);
+    const QRectF box = chip->chipRect().translated(readColumnRect(hit.column).left(), hit.top);
+    if (!box.contains(point))
+        return std::nullopt;
+    return ReadChip{segment.row, lastRow, hit.column, box};
+}
+
+bool VisualView::readChipPressed(QMouseEvent *event)
+{
+    if (readActive() && event->button() == Qt::LeftButton) {
+        if (isTouchMouse(event)) {
+            if (const auto chip = readChipForPress(event->position())) {
+                event->accept();
+                if (m_readPreviewTouch && m_readPreviewRow == chip->row) {
+                    const int row = chip->row;
+                    clearReadChipPreview();
+                    openMovedPictures(row);
+                } else {
+                    showReadChipPreview(*chip, true);
+                }
+                return true;
+            }
+        } else if (event->type() == QEvent::MouseButtonPress) {
+            const int row = readChipAt(event->position());
+            clearReadChipPreview();
+            if (row >= 0) {
+                event->accept();
+                openMovedPictures(row);
+                return true;
+            }
+        }
+    }
+    clearReadChipPreview();
+    return false;
+}
+
+bool VisualView::eventFilter(QObject *watched, QEvent *event)
+{
+    // A tap on a page button or elsewhere in the window also dismisses the preview.
+    if (m_readPreviewTouch && watched != viewport() && watched->isWidgetType()) {
+        if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonDblClick)
+            clearReadChipPreview();
+        if (event->type() == QEvent::TouchBegin) {
+            const auto *touch = static_cast<QTouchEvent *>(event);
+            if (touch->points().isEmpty())
+                return TextView::eventFilter(watched, event);
+            const QPointF point = viewport()->mapFromGlobal(touch->points().front().globalPosition());
+            // The touch may pass through a parent before Qt synthesizes a mouse press.
+            if (!paintedReadChipAt(point))
+                clearReadChipPreview();
+        }
+    }
+    return TextView::eventFilter(watched, event);
+}
+
+void VisualView::showReadChipPreview(ReadChip chip, bool touch)
+{
+    clearReadChipPreview();
+    m_readPreviewRow = chip.row;
+    m_readPreviewTouch = touch;
+    if (touch)
+        qApp->installEventFilter(this);
+
+    const auto cachedBlock = [this](int row) -> const RenderedBlock * {
+        const RowInfo &info = m_rows[row];
+        if (!info.row.rendered || info.span < 0)
+            return nullptr;
+        if (const Render *render = memoized(info.row))
+            return render->block.get();
+        // The row may have left the view's recent renders, but the cache can still hold it.
+        const auto key = m_renderKeys.find(info.row.firstLine);
+        const Render *render = key != m_renderKeys.end() ? m_cache.object(key->second.key) : nullptr;
+        return render ? render->block.get() : nullptr;
+    };
+    const md::Screen &screen = m_readFlow->screen();
+    for (int c = chip.column + 1; c < int(screen.columns.size()); ++c) {
+        const auto &segments = screen.columns[c].segments;
+        if (segments.empty() || segments.front().part != md::Segment::Part::FromNote
+            || segments.front().row < chip.row || segments.front().row > chip.lastRow)
+            break;
+        const QRect column = readColumnRect(c);
+        int y = column.top() + m_readFlow->drawnHeight(segments.front());
+        for (size_t i = 1; i < segments.size(); ++i) {
+            const md::Segment &segment = segments[i];
+            if (segment.row > chip.lastRow || segment.part != md::Segment::Part::Row)
+                break;
+            const int height = segment.yTo - segment.yFrom;
+            if (const RenderedBlock *block = cachedBlock(segment.row)) {
+                const QRectF piece(column.left(), y, column.width(), height);
+                const QPointF origin(piece.left(), piece.top() - segment.yFrom);
+                for (const RenderedBlock::Figure &figure : block->figures()) {
+                    const QRectF rect = figure.rect.translated(origin).intersected(piece);
+                    if (!rect.isEmpty()) {
+                        m_readPictureGlow.append(rect);
+                        viewport()->update(rect.adjusted(-glowRoom, -glowRoom, glowRoom, glowRoom).toAlignedRect());
+                    }
+                }
+            }
+            y += height;
+        }
+    }
+
+    // A group can continue on the next page after filling the remaining columns.
+    const int next = screen.end.floatRow;
+    if (next < chip.row || next > chip.lastRow)
+        return;
+    QList<QImage> pictures;
+    for (int row = next; row <= chip.lastRow; ++row) {
+        if (const RenderedBlock *block = cachedBlock(row))
+            pictures.append(block->picturePreviews());
+    }
+    if (pictures.isEmpty())
+        return;
+    if (!m_readChipPreview)
+        m_readChipPreview = new ReadChipPreview(this);
+    const QRect box(viewport()->mapToGlobal(chip.box.topLeft().toPoint()), chip.box.size().toSize());
+    const QScreen *screenAtChip = QGuiApplication::screenAt(box.center());
+    m_readChipPreview->showPictures(std::move(pictures), box,
+                                   (screenAtChip ? screenAtChip : viewport()->screen())->availableGeometry());
+}
+
+void VisualView::clearReadChipPreview()
+{
+    if (m_readPreviewRow < 0)
+        return;
+    if (m_readPreviewTouch)
+        qApp->removeEventFilter(this);
+    m_readPreviewTouch = false;
+    m_readPreviewRow = -1;
+    if (m_readChipPreview)
+        m_readChipPreview->clearPictures();
+    for (const QRectF &rect : std::as_const(m_readPictureGlow))
+        viewport()->update(rect.adjusted(-glowRoom, -glowRoom, glowRoom, glowRoom).toAlignedRect());
+    m_readPictureGlow.clear();
+}
+
+void VisualView::invalidateReadChips()
+{
+    clearReadChipPreview();
+    m_readChips.clear();
+}
+
+void VisualView::paintReadPictureGlow(QPainter &painter, const QRect &dirty)
+{
+    if (m_readPictureGlow.isEmpty())
+        return;
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setBrush(Qt::NoBrush);
+    const QColor accent = theme::color(theme::Role::accent);
+    for (const QRectF &rect : std::as_const(m_readPictureGlow)) {
+        if (!rect.adjusted(-glowRoom, -glowRoom, glowRoom, glowRoom).intersects(dirty))
+            continue;
+        const QRectF border = rect.adjusted(-1, -1, 1, 1);
+        QColor glow = accent;
+        for (int width = 10; width >= 4; width -= 2) {
+            glow.setAlphaF(accent.alphaF() * (12 - width) / 48);
+            painter.setPen(QPen(glow, width));
+            painter.drawRoundedRect(border, 3, 3);
+        }
+        painter.setPen(QPen(accent, 2));
+        painter.drawRoundedRect(border, 3, 3);
+    }
+    painter.restore();
 }
 
 // The viewer, for the pictures of a chip's group (from the first of the
