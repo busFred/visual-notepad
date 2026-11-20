@@ -13,6 +13,7 @@
 #include <QSettings>
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace vn {
@@ -173,8 +174,15 @@ void Settings::migrateLineSpacing() const
         // The old number counted the font's line height; the new one counts
         // its size. An old value stays the same line height on screen.
         const double wanted = m_store->value(QLatin1String(oldKey)).toDouble() * (pixels > 0 ? base / pixels : 1.2);
-        // (Rounded off, so as not to show fonts' fractions in the list.)
-        double best = qRound(wanted * 100) / 100.0;
+        // A value no one could have chosen (written by hand, or broken):
+        // the default instead.
+        if (!std::isfinite(wanted) || wanted <= 0) {
+            m_store->remove(QLatin1String(oldKey));
+            return;
+        }
+        // (Rounded off, so as not to show fonts' fractions in the list; and
+        // within what the views take, 1 to 3.)
+        double best = std::clamp(std::round(wanted * 100) / 100.0, 1.0, 3.0);
         for (const double choice : lineHeightChoices) {
             if (qAbs(choice - wanted) <= 0.05)
                 best = choice;

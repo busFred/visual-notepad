@@ -729,6 +729,16 @@ void TestPreferences::oldLineSpacingsAreConverted()
     QSettings file(path, QSettings::IniFormat);
     QVERIFY(!file.contains(QStringLiteral("editor/lineSpacing")));
     QVERIFY(!file.contains(QStringLiteral("markdown/textLineHeight")));
+    // A broken old value (none could choose 0) gives the default, and goes.
+    {
+        QSettings broken(dir.filePath(QStringLiteral("broken.ini")), QSettings::IniFormat);
+        broken.setValue(QStringLiteral("editor/lineSpacing"), 0);
+    }
+    Settings::instance().useFile(dir.filePath(QStringLiteral("broken.ini")));
+    QCOMPARE(Settings::instance().value(key::lineSpacing).toDouble(), 1.35);
+    Settings::instance().sync();
+    QVERIFY(!QSettings(dir.filePath(QStringLiteral("broken.ini")), QSettings::IniFormat)
+                 .contains(QStringLiteral("editor/lineSpacing")));
     // A file with no old values gets the new defaults.
     Settings::instance().useFile(dir.filePath(QStringLiteral("fresh.ini")));
     QCOMPARE(Settings::instance().value(key::lineSpacing).toDouble(), 1.35);
