@@ -414,6 +414,7 @@ TextView::TextView(QTextDocument *document, QWidget *parent)
     setFocusPolicy(Qt::StrongFocus);
     setAttribute(Qt::WA_InputMethodEnabled);
     viewport()->setCursor(Qt::IBeamCursor);
+    viewport()->setAttribute(Qt::WA_AcceptTouchEvents);
     viewport()->setAutoFillBackground(false);
     setFont(theme::editorFont());
 
@@ -2139,7 +2140,11 @@ void TextView::paintEvent(QPaintEvent *event)
 bool TextView::event(QEvent *event)
 {
     if (event->type() == QEvent::Show) restartSettling();
-    if (event->type() == QEvent::Hide) m_settleTimer.stop();
+    if (event->type() == QEvent::Hide) {
+        m_settleTimer.stop();
+        m_touchFlick.stop();
+        m_touchMode = TouchMode::Idle;
+    }
     if (event->type() == QEvent::ShortcutOverride) {
         // Keep plain typing, Tab and editing keys in the editor even if a
         // window shortcut uses them.
@@ -2724,14 +2729,23 @@ void TextView::wheelEvent(QWheelEvent *event)
     qreal dy = event->pixelDelta().y();
     if (dy == 0)
         dy = event->angleDelta().y() / 120.0 * 3 * m_lineHeight;
+    event->accept();
+    scrollByPixels(-dy);
+}
+
+bool TextView::scrollByPixels(qreal pixels)
+{
+    const int oldRow = m_topRow;
+    const qreal oldOffset = m_topOffset;
     // Scroll by pixels across rows of different heights.
-    m_topOffset -= dy;
+    m_topOffset += pixels;
     normalizeScroll();
     ensureShownMeasured();
     updateScrollBars();
     viewport()->update();
-    event->accept();
+    const bool moved = m_topRow != oldRow || m_topOffset != oldOffset;
     Q_EMIT scrolled();
+    return moved;
 }
 
 void TextView::focusInEvent(QFocusEvent *event)
@@ -2868,6 +2882,8 @@ void TextView::timerEvent(QTimerEvent *event)
         if (pending) m_settleTimer.start(10, this);
         if (m_columnsOn && m_columns->dirty) columnsScreen();
         updateScrollBars();
+    } else if (event->timerId() == m_touchFlick.timerId()) {
+        touchFlickTick();
     } else if (event->timerId() == m_blink.timerId()) {
         m_caretOn = !m_caretOn;
         updateBlinkingCarets();

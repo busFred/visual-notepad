@@ -79,6 +79,7 @@ add_library(vn_app STATIC
     src/editor/Search.cpp
     src/editor/Search.h
     src/editor/TextView.cpp
+    src/editor/TextViewTouch.cpp
     src/editor/TextViewFormat.cpp
     src/editor/TableSizePicker.cpp
     src/editor/TableSizePicker.h

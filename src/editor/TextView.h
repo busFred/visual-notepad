@@ -36,6 +36,7 @@ class QDropEvent;
 class QImage;
 class QMenu;
 class QTextDocument;
+class QTouchEvent;
 
 class FenceProbe; // (tests)
 
@@ -411,6 +412,7 @@ protected:
     void requestRelayout();
 
     bool event(QEvent *event) override;
+    bool viewportEvent(QEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
@@ -433,6 +435,10 @@ protected:
     void dropEvent(QDropEvent *event) override;
 
 private:
+    bool handleTouch(QTouchEvent *event);
+    void touchFlickTick();
+    bool scrollByPixels(qreal pixels);
+
     // Columns of source lines; see setColumnsShown (TextViewColumns.cpp).
     struct Columns;
     class ColumnRows;
@@ -854,6 +860,15 @@ private:
     qreal m_maxLineWidth = 0;
     bool m_updatingScrollBars = false;
     bool m_scrollBarsHidden = false;
+
+    // Touch scrolling keeps pixels within a row, like the wheel.
+    enum class TouchMode { Idle, Tap, Scroll, Ignore };
+    TouchMode m_touchMode = TouchMode::Idle;
+    QPointF m_touchStart, m_touchLast;
+    QElapsedTimer m_touchTime;
+    qint64 m_touchLastMove = 0;
+    qreal m_touchVelocity = 0;
+    QBasicTimer m_touchFlick;
 
     // Mouse.
     bool m_dragging = false;

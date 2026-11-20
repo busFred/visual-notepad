@@ -83,6 +83,8 @@ private Q_SLOTS:
     void init();
     void cleanup();
 
+    void touchDragScrollsWithoutSelecting();
+    void mouseDragStillSelects();
     void columnsShowLinesInColumns();
     void columnsNumberEachColumnsLines();
     void columnsCutWrappedLinesBetweenRows();
@@ -358,6 +360,38 @@ void TestTextView::cleanup()
 {
     delete m_view;
     delete m_doc;
+}
+
+void TestTextView::touchDragScrollsWithoutSelecting()
+{
+    setText(QStringLiteral("alpha beta gamma\n").repeated(150));
+    QWidget *view = m_view->viewport();
+    auto *device = QTest::createTouchDevice();
+    auto touch = QTest::touchEvent(view, device, false);
+    const QPoint start(110, 300);
+    touch.press(0, start).commit();
+    QTest::qWait(20);
+    touch.move(0, start - QPoint(0, 60)).commit();
+    QTest::qWait(20);
+    const QPoint end = start - QPoint(0, 120);
+    touch.move(0, end).commit();
+    const qreal dragged = m_view->scrollPixels();
+    QVERIFY(dragged > 80);
+    touch.release(0, end).commit();
+    QTRY_VERIFY(m_view->scrollPixels() > dragged + 20);
+    QCOMPARE(m_view->textCursor().position(), 0);
+    QVERIFY(!m_view->hasSelection());
+}
+
+void TestTextView::mouseDragStillSelects()
+{
+    setText(QStringLiteral("alpha beta gamma\n").repeated(40));
+    QWidget *view = m_view->viewport();
+    QTest::mousePress(view, Qt::LeftButton, Qt::NoModifier, QPoint(80, 20));
+    QTest::mouseMove(view, QPoint(145, 65));
+    QTest::mouseRelease(view, Qt::LeftButton, Qt::NoModifier, QPoint(145, 65));
+    QVERIFY(m_view->hasSelection());
+    QCOMPARE(m_view->scrollPixels(), qreal(0));
 }
 
 void TestTextView::setText(const QString &text)
