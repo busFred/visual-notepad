@@ -16,6 +16,7 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QStringDecoder>
+#include <QTemporaryFile>
 #include <QThread>
 #include <QTimer>
 #include <QtEndian>
@@ -52,56 +53,61 @@ constexpr int maxReaders = 16;
 // What the running copy answers once a request is in its queue.
 constexpr char received = 'K';
 
-// A random key kept in the user's own settings folder, which other users
-// cannot read: it makes the channel's name one they cannot guess, so they
-// cannot take the name first and receive the paths this user opens. Made,
-// or remade when cut short (by a crash or a power cut), under a lock of its
-// own, so that launches at once all read the one key.
-// The key at `path` if it is whole and the user's alone, else empty.
-QByteArray readKey(const QString &path)
+// The key at `path` if it is whole, else empty; `exposed`: whether others
+// can read it. (Not on Windows, where these bits don't say who may read: the
+// folder's ACL does.)
+QByteArray readKey(const QString &path, bool *exposed)
 {
+    *exposed = false;
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly))
         return {};
     const QByteArray key = file.read(65);
     file.close();
-    if (key.size() != 64)
-        return {};
 #ifdef Q_OS_UNIX
-    // One others could read is no secret any more: replaced. (Not on
-    // Windows, where these bits don't say who may read: the folder's ACL
-    // does.) Unless the filesystem keeps no permissions (a FAT drive, some
-    // network mounts): then every key would look so, and replacing it would
-    // only change the channel's name at every launch.
-    constexpr QFileDevice::Permissions others = QFileDevice::ReadGroup | QFileDevice::ReadOther;
-    if (file.permissions() & others) {
-        QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-        if (QFile(path).permissions() & others)
-            return key;
-        // (Gone, so that the launch making the new one doesn't take this
-        // one back now that it looks private.)
-        QFile::remove(path);
-        return {};
-    }
+    *exposed = file.permissions() & (QFileDevice::ReadGroup | QFileDevice::ReadOther);
 #endif
-    return key;
+    return key.size() == 64 ? key : QByteArray();
 }
 
+// Whether files made in `dir` keep owner-only permissions (not on a FAT
+// drive or some network mounts, where every file looks readable by all).
+bool keepsPermissions(const QString &dir)
+{
+    QTemporaryFile probe(QDir(dir).filePath(QStringLiteral("instance-probe-XXXXXX")));
+    if (!probe.open())
+        return true;
+    return !(probe.permissions() & (QFileDevice::ReadGroup | QFileDevice::ReadOther));
+}
+
+// A random key kept in the user's own settings folder, which other users
+// cannot read: it makes the channel's name one they cannot guess, so they
+// cannot take the name first and receive the paths this user opens. Made,
+// or remade when cut short (by a crash or a power cut), under a lock of its
+// own, so that launches at once all read the one key.
 QByteArray instanceKey()
 {
     const QString path = QFileInfo(Settings::instance().fileName()).dir().filePath(QStringLiteral("instance.key"));
-    // Nearly always there and whole: read without the lock, which launches
-    // at once (one per file opened together) would otherwise queue on. (A
-    // key is only ever put in place whole, by QSaveFile.)
-    if (const QByteArray key = readKey(path); !key.isEmpty())
+    // Nearly always there, whole and private: read without the lock, which
+    // launches at once (one per file opened together) would otherwise queue
+    // on. Nothing here changes the file: that is done under the lock alone,
+    // so that launches at once all end with the one key. (A key is only ever
+    // put in place whole, by QSaveFile.)
+    bool exposed = false;
+    if (const QByteArray key = readKey(path, &exposed); !key.isEmpty() && !exposed)
         return key;
     QDir().mkpath(QFileInfo(path).absolutePath());
     QLockFile lock(path + QStringLiteral(".lock"));
     if (!lock.tryLock(timeoutMs))
         return {};
     // Another launch may have made it while this one waited.
-    if (const QByteArray key = readKey(path); !key.isEmpty())
-        return key;
+    if (const QByteArray key = readKey(path, &exposed); !key.isEmpty()) {
+        // One others could read is no secret any more: replaced. Unless no
+        // file here can be private: then replacing it would only change the
+        // channel's name at every launch.
+        if (!exposed || !keepsPermissions(QFileInfo(path).absolutePath()))
+            return key;
+    }
     constexpr QFileDevice::Permissions ownerOnly = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
     QByteArray key(32, Qt::Uninitialized);
     QRandomGenerator::system()->generate(key.begin(), key.end());
