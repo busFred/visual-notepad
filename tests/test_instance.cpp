@@ -282,8 +282,9 @@ void TestInstance::unreachableCopyKeepsItsSession()
     second.setProcessEnvironment(environment(m_dir.filePath(QStringLiteral("run-b/") + QString(110, u'd'))));
     second.start(QStringLiteral(VN_APP_PATH), {secondPath});
     QVERIFY2(second.waitForStarted(), qPrintable(second.errorString()));
-    // It waits out the lock, then opens its file itself and stays.
-    QTest::qWait(8000);
+    // It can't reach the first and the lock is taken: it opens its file
+    // itself, without the session, and stays.
+    QTest::qWait(1500);
     QCOMPARE(second.state(), QProcess::Running);
     QCOMPARE(first.state(), QProcess::Running);
     QCOMPARE(sessionPaths(), QStringList{firstPath});
