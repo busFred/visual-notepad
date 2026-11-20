@@ -40,6 +40,7 @@ bool TextView::handleTouch(QTouchEvent *event)
     if (type == QEvent::TouchBegin) {
         if (points.isEmpty() || viewport()->childAt(points.first().position().toPoint()))
             return false; // Let a button or an inline editor handle the contact.
+        m_touchStoppedFlick = m_touchFlick.isActive();
         m_touchFlick.stop();
         m_touchMode = TouchMode::Tap;
         m_touchStart = m_touchLast = points.first().position();
@@ -101,6 +102,12 @@ bool TextView::handleTouch(QTouchEvent *event)
             m_touchMode = TouchMode::Idle;
             if (mode == TouchMode::Tap) {
                 const QPointF global = point.globalPosition();
+                // A tap to stop the page moving, as in a list: not a click
+                // (no caret moved, no link or picture opened).
+                if (m_touchStoppedFlick && now < touch::holdTime) {
+                    m_touchTap.reset();
+                    return true;
+                }
                 if (now >= touch::holdTime) {
                     m_touchTap.reset();
                     touch::postContextMenu(viewport(), global);

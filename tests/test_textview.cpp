@@ -85,6 +85,7 @@ private Q_SLOTS:
     void cleanup();
 
     void touchDragScrollsWithoutSelecting();
+    void touchTapStopsAFlickWithoutClicking();
     void touchDoubleTapSelectsAWord();
     void touchHoldOpensContextMenu();
     void touchHoldAndDragSelectsText();
@@ -388,6 +389,28 @@ void TestTextView::touchDragScrollsWithoutSelecting()
     QTRY_VERIFY(m_view->scrollPixels() > dragged + 20);
     QCOMPARE(m_view->textCursor().position(), 0);
     QVERIFY(!m_view->hasSelection());
+}
+
+void TestTextView::touchTapStopsAFlickWithoutClicking()
+{
+    setText(QStringLiteral("alpha beta gamma\n").repeated(150));
+    QWidget *view = m_view->viewport();
+    auto touch = QTest::touchEvent(view, QTest::createTouchDevice(), false);
+    const QPoint start(110, 300);
+    const QPoint end = start - QPoint(0, 120);
+    touch.press(0, start).commit();
+    touch.move(0, start - QPoint(0, 60)).commit();
+    QTest::qWait(20);
+    touch.move(0, end).commit();
+    touch.release(0, end).commit();
+    // At once, while the flick moves the page (touchDragScrollsWithoutSelecting
+    // shows it does): waiting could see it end first on a busy machine.
+    touch.press(0, end).commit();
+    touch.release(0, end).commit();
+    const qreal stopped = m_view->scrollPixels();
+    QTest::qWait(100);
+    QCOMPARE(m_view->scrollPixels(), stopped);
+    QCOMPARE(m_view->textCursor().position(), 0);
 }
 
 void TestTextView::touchDoubleTapSelectsAWord()

@@ -880,6 +880,7 @@ private:
     qreal m_touchPageLineHeight = 0;
     qreal m_touchLineRemainder = 0;
     QBasicTimer m_touchFlick;
+    bool m_touchStoppedFlick = false; // This contact stopped a flick: its tap clicks nothing.
     touch::DoubleTap m_touchTap;
 
     // Mouse.
