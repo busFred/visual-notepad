@@ -112,7 +112,10 @@ QByteArray instanceKey()
     QByteArray key(32, Qt::Uninitialized);
     QRandomGenerator::system()->generate(key.begin(), key.end());
     key = key.toHex();
-    // Whole or not at all, and the user's alone before it holds the key.
+    // Whole or not at all, and the user's alone before it holds the key. (The
+    // old one goes first: QSaveFile won't replace a file that is read-only.
+    // Launches reading meanwhile find none and wait on this lock.)
+    QFile::remove(path);
     QSaveFile replacement(path);
     if (!replacement.open(QIODevice::WriteOnly) || !replacement.setPermissions(ownerOnly)
         || replacement.write(key) != key.size() || !replacement.commit())

@@ -188,12 +188,13 @@ void TestInstance::routesPendingFile()
 #ifdef Q_OS_LINUX
 void TestInstance::simultaneousLaunches_data()
 {
-    QTest::addColumn<int>("oldKey"); // 0: none, 1: cut short, 2: whole but readable by others
+    QTest::addColumn<int>("oldKey"); // 0: none, 1: cut short, 2: whole but readable by others, 3: so and read-only
     QTest::newRow("no key yet") << 0;
     // (Left empty by a crash: both launches must still agree on its new one.)
     QTest::newRow("cut-short key") << 1;
     // (No secret any more: replaced by a new one, the user's alone.)
     QTest::newRow("exposed key") << 2;
+    QTest::newRow("exposed read-only key") << 3;
 }
 
 void TestInstance::simultaneousLaunches()
@@ -213,10 +214,11 @@ void TestInstance::simultaneousLaunches()
         QVERIFY(QDir().mkpath(config + QStringLiteral("/visnotepad")));
         QFile key(config + QStringLiteral("/visnotepad/instance.key"));
         QVERIFY(key.open(QIODevice::WriteOnly));
-        if (oldKey == 2) {
+        if (oldKey >= 2) {
             QCOMPARE(key.write(exposed), exposed.size());
             key.close();
-            QVERIFY(key.setPermissions(key.permissions() | QFileDevice::ReadGroup | QFileDevice::ReadOther));
+            const QFileDevice::Permissions readable = QFileDevice::ReadOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther;
+            QVERIFY(key.setPermissions(oldKey == 3 ? readable : key.permissions() | readable));
         }
     }
     auto environment = QProcessEnvironment::systemEnvironment();
