@@ -358,7 +358,12 @@ void InstanceChannel::acceptConnections()
             }
             if (socket->bytesAvailable() < size)
                 return;
-            const auto files = instanceRequest::decode(socket->read(size));
+            auto files = instanceRequest::decode(socket->read(size));
+            // Not now (a dialog asks, such as whether to save before a window
+            // or the app closes): no answer, and the launch opens the files
+            // on its own rather than in a window about to go.
+            if (m_accepting && !m_accepting())
+                files.reset();
             // Answered before the files open: opening can show a dialog,
             // which would keep the launch waiting past its timeout.
             if (files) {

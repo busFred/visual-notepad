@@ -5,6 +5,7 @@
 #include <QLockFile>
 #include <QStringList>
 
+#include <functional>
 #include <optional>
 
 namespace vn {
@@ -30,6 +31,8 @@ public:
 
     InstanceChannel();
     StartResult start(const QStringList &files);
+    // Asked for each request: false turns it away unanswered.
+    void setAccepting(std::function<bool()> accepting) { m_accepting = std::move(accepting); }
 
 Q_SIGNALS:
     void requested(const QStringList &files);
@@ -41,6 +44,7 @@ private:
     // Keep the lock until the server has closed and removed its socket.
     QLockFile m_lock;
     int m_readers = 0;
+    std::function<bool()> m_accepting;
     QLocalServer m_server;
 };
 

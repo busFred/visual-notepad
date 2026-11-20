@@ -96,6 +96,7 @@ int main(int argc, char *argv[])
     vn::ExternalFiles externalFiles(app);
     vn::InstanceChannel instance;
     QObject::connect(&instance, &vn::InstanceChannel::requested, &externalFiles, &vn::ExternalFiles::request);
+    instance.setAccepting([] { return !QApplication::activeModalWidget(); });
     // Only the process that owns the channel's lock reads or writes the
     // session. A running copy that doesn't take the files (stuck, quitting)
     // still owns it: then run on our own, as opening the files matters more
