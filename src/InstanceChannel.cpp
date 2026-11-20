@@ -218,38 +218,71 @@ qsizetype messageSize(QByteArrayView header)
     return payloadSize <= maxPayload ? headerSize + payloadSize : 0;
 }
 
-bool sendRequest(QLocalSocket &socket, const QStringList &files)
+enum class Probe { Connected, Absent, Unreachable };
+
+// Connects to the running copy, if there is one.
+Probe connectTo(QLocalSocket &socket, const QString &name)
+{
+#ifdef Q_OS_WIN
+    // As QLocalSocket connects, but at the identification level: the pipe's
+    // server may learn who connects, not act as them. (Qt opens pipes at the
+    // default level, which lets a server with the right to impersonate, a
+    // service for one, act as this user: one that took the name first.)
+    const QString path = QStringLiteral("\\\\.\\pipe\\") + name;
+    const HANDLE pipe = CreateFileW(reinterpret_cast<LPCWSTR>(path.utf16()), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                    OPEN_EXISTING, FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                                    nullptr);
+    if (pipe == INVALID_HANDLE_VALUE)
+        return GetLastError() == ERROR_FILE_NOT_FOUND ? Probe::Absent : Probe::Unreachable;
+    if (!socket.setSocketDescriptor(reinterpret_cast<qintptr>(pipe))) {
+        CloseHandle(pipe);
+        return Probe::Unreachable;
+    }
+    return Probe::Connected;
+#else
+    socket.connectToServer(name);
+    if (socket.state() == QLocalSocket::ConnectedState || socket.waitForConnected(100))
+        return Probe::Connected;
+    return socket.error() == QLocalSocket::ServerNotFoundError || socket.error() == QLocalSocket::ConnectionRefusedError
+               ? Probe::Absent
+               : Probe::Unreachable;
+#endif
+}
+
+enum class Sent { Taken, NotTaken, NotOurs };
+
+Sent sendRequest(QLocalSocket &socket, const QStringList &files)
 {
     const QByteArray message = instanceRequest::encode(files);
     if (message.isEmpty()) {
         qWarning("Cannot forward these file paths to Visual Notepad.");
-        return false;
+        return Sent::NotTaken;
     }
 #ifdef Q_OS_WIN
     if (!serverIsOurs(socket)) {
-        qWarning("The Visual Notepad channel belongs to another user.");
-        return false;
+        qWarning("The Visual Notepad channel's name is taken by another user.");
+        return Sent::NotOurs;
     }
     // The shell may have granted this launch permission to take focus.
     AllowSetForegroundWindow(ASFW_ANY);
 #endif
     if (socket.write(message) != message.size())
-        return false;
+        return Sent::NotTaken;
     QDeadlineTimer deadline(timeoutMs);
     while (socket.bytesToWrite() > 0) {
         if (!socket.waitForBytesWritten(int(deadline.remainingTime())) && socket.bytesToWrite() > 0)
-            return false;
+            return Sent::NotTaken;
     }
     // Only an answer says the files are on their way: a copy that is stuck,
     // quitting or too busy to read takes the bytes and drops them.
     while (socket.bytesAvailable() < 1) {
         if (!socket.waitForReadyRead(int(deadline.remainingTime())))
-            return false;
+            return Sent::NotTaken;
     }
     char answer = 0;
     const bool ok = socket.read(&answer, 1) == 1 && answer == received;
     socket.disconnectFromServer();
-    return ok;
+    return ok ? Sent::Taken : Sent::NotTaken;
 }
 
 } // namespace
@@ -328,25 +361,26 @@ InstanceChannel::StartResult InstanceChannel::start(const QStringList &files)
     for (;;) {
         if (!m_name.isEmpty()) {
             QLocalSocket socket;
-            socket.connectToServer(m_name);
-            if (socket.state() == QLocalSocket::ConnectedState || socket.waitForConnected(100)) {
-                if (sendRequest(socket, files))
+            const Probe probe = connectTo(socket, m_name);
+            if (probe == Probe::Connected) {
+                switch (sendRequest(socket, files)) {
+                case Sent::Taken:
                     return StartResult::Forwarded;
-                qWarning("Could not send the launch request to Visual Notepad.");
-                return failed();
-            }
-            if (m_lock.isLocked()) {
+                case Sent::NotTaken:
+                    qWarning("Could not send the launch request to Visual Notepad.");
+                    return failed();
+                case Sent::NotOurs:
+                    // As if no copy ran (none of ours does on that name): the
+                    // lock decides who has the session, without a channel.
+                    break;
+                }
+            } else if (probe == Probe::Absent && m_lock.isLocked()) {
                 // Hold the election lock before probing again and removing a
                 // stale socket. A slow or concurrent primary keeps its lock.
-                if (socket.error() == QLocalSocket::ServerNotFoundError
-                    || socket.error() == QLocalSocket::ConnectionRefusedError) {
-                    QLocalServer::removeServer(m_name);
-                    if (m_server.listen(m_name))
-                        return StartResult::Listening;
-                    qWarning() << m_server.errorString();
-                } else {
-                    qWarning() << socket.errorString();
-                }
+                QLocalServer::removeServer(m_name);
+                if (m_server.listen(m_name))
+                    return StartResult::Listening;
+                qWarning() << m_server.errorString();
             }
         }
         // The lock is ours but there is no channel to offer: the session is
