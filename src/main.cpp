@@ -119,7 +119,11 @@ int main(int argc, char *argv[])
     auto &session = vn::SessionManager::instance();
     session.start();
     if (files.isEmpty()) {
-        // (Nothing to restore in a session not ours, nor when asked for a new window.)
+        // (Nothing to restore in a session not ours. A new window asked for:
+        // unsaved work from the last session stays in its backups for the
+        // next start, as when files are given.)
+        if (sessionOwned && parser.isSet(newWindow))
+            session.carryOverUnsaved();
         if (!sessionOwned || parser.isSet(newWindow) || !session.restore()) {
             auto *window = new vn::MainWindow;
             window->setAttribute(Qt::WA_DeleteOnClose);
@@ -143,8 +147,9 @@ int main(int argc, char *argv[])
     // were taken (their launches were told so), so new launches make them,
     // once this one has let go of the channel and the session. The first
     // takes them over; the others hand theirs to it.
-    // (Not when the system ends the app: logout or shutdown is no time to
-    // start it again.)
+    // (Not when a signal ended the app: a shutdown or logout is no time to
+    // start it again. One from a session manager's request may still try,
+    // which the ending session then refuses or ends.)
     const QList<QStringList> waiting = externalFiles.takeWaiting();
     if (!waiting.isEmpty() && !vn::SessionManager::instance().endedBySystem()) {
         instance.release();

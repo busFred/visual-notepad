@@ -383,7 +383,6 @@ void SessionManager::backupIfDirty()
 
 void SessionManager::onCommitData(QSessionManager &)
 {
-    m_endedBySystem = true;
     // Never cancel the shutdown. The work is safe in backups and comes back
     // on the next start, so closing the windows must not ask about it.
     if (!enabled() || m_windows.isEmpty())

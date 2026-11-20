@@ -45,7 +45,9 @@ public:
 
     // True while the final quit is closing windows: closeEvent must not prompt.
     bool isQuitting() const { return m_quitting; }
-    // Whether the system ended the app (logout, shutdown, a signal), not the user.
+    // Whether a signal ended the app (SIGTERM, SIGHUP, SIGINT), not the user.
+    // (Not set by a session manager's save request: that can be cancelled,
+    // and Qt says nothing when it is.)
     bool endedBySystem() const { return m_endedBySystem; }
 
     // File > Quit: asks about unsaved changes, saves the session, then closes
