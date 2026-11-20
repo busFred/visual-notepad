@@ -88,6 +88,8 @@ void TestInstance::protocol()
     QVERIFY(!isFresh(10'000 + 4'500, 10'000)); // (A clock set back.)
     QVERIFY(!isFresh(std::numeric_limits<qint64>::min(), 10'000));
     QVERIFY(!isFresh(std::numeric_limits<qint64>::max(), 10'000));
+    QVERIFY(!isFresh(0, std::numeric_limits<qint64>::min()));
+    QVERIFY(!isFresh(0, std::numeric_limits<qint64>::max()));
 
     QByteArray malformed = message;
     malformed[4] = 3; // Unknown protocol version.

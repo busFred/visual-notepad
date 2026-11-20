@@ -20,6 +20,8 @@
 #include <QTimer>
 #include <QtEndian>
 
+#include <limits>
+
 #ifdef Q_OS_UNIX
 #include <unistd.h>
 #endif
@@ -289,6 +291,8 @@ bool instanceRequest::isFresh(qint64 sent, qint64 now)
     // by the launch itself.
     // (As a range: a difference of extreme times would overflow.)
     constexpr qint64 window = timeoutMs - 1000;
+    if (now < std::numeric_limits<qint64>::min() + window || now > std::numeric_limits<qint64>::max() - window)
+        return false;
     return sent > now - window && sent < now + window;
 }
 
