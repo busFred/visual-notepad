@@ -158,6 +158,7 @@ private Q_SLOTS:
     void readModeStatusAndPages();
     void readPopupIsPerTabAndStartsFromPreferences();
     void readPopupNarrowsAndRestoresWidth();
+    void readPopupFollowsColumnsButtonWhenStatusChanges();
     void columnsResolvePreferenceOnce_data();
     void columnsResolvePreferenceOnce();
     void viewSwitchComesFirstAndHides();
@@ -1590,6 +1591,35 @@ void TestMainWindow::readPopupNarrowsAndRestoresWidth()
     QCOMPARE(tab->readChars(), 50);
     fewer->click();
     QCOMPARE(slider->value(), 50);
+}
+
+void TestMainWindow::readPopupFollowsColumnsButtonWhenStatusChanges()
+{
+    vn::MainWindow window;
+    const QRect screen = window.screen()->availableGeometry();
+    window.resize(qMin(screen.width(), 1000), 600);
+    window.move(screen.topLeft());
+    auto *tab = readingTab(window, QStringLiteral("placement.md"));
+    QVERIFY(tab);
+    tab->setColumns(false);
+    setLocked(tab, false);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QCoreApplication::processEvents();
+    auto *range = window.findChild<QLabel *>(QStringLiteral("RangeStatus"));
+    QVERIFY(range && !range->isVisible());
+
+    auto *button = viewButton(window, true);
+    const auto rightEdge = [](QWidget *widget) { return widget->mapToGlobal(QPoint(widget->width(), 0)).x(); };
+    const int before = rightEdge(button);
+    button->click();
+    auto *popup = window.findChild<QFrame *>(QStringLiteral("ReadPopup"));
+    QVERIFY(popup && popup->isVisible());
+    QCoreApplication::processEvents();
+    QVERIFY(range->isVisible());
+    QVERIFY(range->text().startsWith(QStringLiteral("Lines ")));
+    QVERIFY(qAbs(rightEdge(button) - before) > 2);
+    QCOMPARE_LE(qAbs(rightEdge(popup) - rightEdge(button)), 2);
 }
 
 void TestMainWindow::columnsResolvePreferenceOnce_data()

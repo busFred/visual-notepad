@@ -235,11 +235,14 @@ private:
 
 // A status bar cell's popup: above the cell, right edges lined up, kept on
 // the cell's screen.
-void showAbove(QWidget *popup, QWidget *cell)
+void showAbove(QWidget *popup, QWidget *cell, QStatusBar *statusBar)
 {
     // Its size as shown: the style sheet's padding applies at polish.
     popup->ensurePolished();
     popup->adjustSize();
+    // The click may have changed the status text. Lay out the cells before
+    // reading the anchor's position.
+    statusBar->layout()->activate();
     QRect box(cell->mapToGlobal(QPoint(cell->width(), 0)) - QPoint(popup->width(), popup->height()), popup->size());
     if (const QScreen *screen = cell->screen()) {
         const QRect available = screen->availableGeometry();
@@ -1017,7 +1020,7 @@ void MainWindow::createStatusBar()
             updateStatus(); // (Clicking the shown view again leaves it checked.)
             if (columns) {
                 if (DocumentTab *tab = currentTab(); tab && tab->showsColumns()) {
-                    showAbove(new ReadPopup(tab, this), m_columnsButton);
+                    showAbove(new ReadPopup(tab, this), m_columnsButton, statusBar());
                 }
             }
         });
@@ -2580,7 +2583,7 @@ void MainWindow::showZoomPopup()
     const QString half = !tab->showsBothHalves() ? QString()
                          : tab->zoomsVisual() ? tr("Visual")
                                                               : tr("Source");
-    showAbove(new ZoomPopup(tab, half, this), m_zoom);
+    showAbove(new ZoomPopup(tab, half, this), m_zoom, statusBar());
 }
 
 void MainWindow::goToLine()
