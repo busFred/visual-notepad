@@ -20,6 +20,7 @@
 #include <QTimer>
 #include <QtEndian>
 
+#include <cstdlib>
 #include <limits>
 
 #ifdef Q_OS_UNIX
@@ -31,6 +32,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <aclapi.h>
 #endif
 
 namespace vn {
@@ -161,16 +163,44 @@ QByteArray processUser(HANDLE process)
 
 // Pipe names are one namespace for all users, and anyone can list them: the
 // copy that made this pipe must be this user's, or it gets no paths.
+//
+// By the pipe's owner, not by its server's process: a process number can
+// pass to another process once the first has gone, while the pipe's
+// handle lives on. QLocalServer (with UserAccessOption) makes the user the
+// owner of its pipes.
 bool serverIsOurs(const QLocalSocket &socket)
 {
-    ULONG pid = 0;
-    if (!GetNamedPipeServerProcessId(reinterpret_cast<HANDLE>(socket.socketDescriptor()), &pid))
+    PSID owner = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (GetSecurityInfo(reinterpret_cast<HANDLE>(socket.socketDescriptor()), SE_KERNEL_OBJECT,
+                        OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr, nullptr, &descriptor)
+        != ERROR_SUCCESS)
         return false;
-    const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!process)
+    const QByteArray theirs = owner && IsValidSid(owner)
+                                  ? QByteArray(static_cast<const char *>(owner), int(GetLengthSid(owner)))
+                                  : QByteArray();
+    LocalFree(descriptor);
+    const QByteArray ours = processUser(GetCurrentProcess());
+    return !ours.isEmpty() && theirs == ours;
+}
+
+// The client of an accepted connection, checked as the server reads its
+// request: a pipe another user made first under the name (Qt joins it
+// rather than failing) could otherwise pass their requests to this copy.
+bool clientIsOurs(const QLocalSocket &socket)
+{
+    const HANDLE pipe = reinterpret_cast<HANDLE>(socket.socketDescriptor());
+    if (!ImpersonateNamedPipeClient(pipe))
         return false;
-    const QByteArray theirs = processUser(process);
-    CloseHandle(process);
+    HANDLE token = nullptr;
+    const bool opened = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token);
+    // Back to this process's own identity, or nothing more may run.
+    if (!RevertToSelf())
+        std::abort();
+    if (!opened)
+        return false;
+    const QByteArray theirs = tokenUser(token);
+    CloseHandle(token);
     const QByteArray ours = processUser(GetCurrentProcess());
     return !ours.isEmpty() && theirs == ours;
 }
@@ -271,8 +301,11 @@ Sent sendRequest(QLocalSocket &socket, const QStringList &files)
         qWarning("The Visual Notepad channel's name is taken by another user.");
         return Sent::NotOurs;
     }
-    // The shell may have granted this launch permission to take focus.
-    AllowSetForegroundWindow(ASFW_ANY);
+    // The shell may have granted this launch permission to take focus:
+    // pass it on to the running copy alone.
+    ULONG server = 0;
+    if (GetNamedPipeServerProcessId(reinterpret_cast<HANDLE>(socket.socketDescriptor()), &server))
+        AllowSetForegroundWindow(server);
 #endif
     if (socket.write(message) != message.size())
         return Sent::NotTaken;
@@ -373,6 +406,9 @@ InstanceChannel::StartResult InstanceChannel::start(const QStringList &files)
     // The copy that had the channel went (its lock with it) while taking the
     // request: this launch takes over, without asking that channel again.
     bool takeOver = false;
+    // Another user's pipe has the name: no copy of ours can be reached there,
+    // so there is none to wait for.
+    bool nameTaken = false;
     for (;;) {
         if (!m_name.isEmpty()) {
             QLocalSocket socket;
@@ -391,6 +427,7 @@ InstanceChannel::StartResult InstanceChannel::start(const QStringList &files)
                 case Sent::NotOurs:
                     // As if no copy ran (none of ours does on that name): the
                     // lock decides who has the session, without a channel.
+                    nameTaken = true;
                     break;
                 }
             } else if (probe == Probe::Absent && m_lock.isLocked()) {
@@ -408,8 +445,8 @@ InstanceChannel::StartResult InstanceChannel::start(const QStringList &files)
             return StartResult::Alone;
         if (m_lock.tryLock())
             continue;
-        // (Without a channel name there is no copy to wait for.)
-        if (m_name.isEmpty() || m_lock.error() != QLockFile::LockFailedError || elapsed.hasExpired(timeoutMs)) {
+        // (Without a channel name, or with it taken, there is no copy to wait for.)
+        if (m_name.isEmpty() || nameTaken || m_lock.error() != QLockFile::LockFailedError || elapsed.hasExpired(timeoutMs)) {
             qWarning("Could not reach or start the Visual Notepad instance.");
             return failed();
         }
@@ -455,6 +492,11 @@ void InstanceChannel::acceptConnections()
                 return;
             qint64 sent = 0;
             auto files = instanceRequest::decode(socket->read(size), &sent);
+#ifdef Q_OS_WIN
+            // (After the read: a pipe's client can be checked only then.)
+            if (files && !clientIsOurs(*socket))
+                files.reset();
+#endif
             // Read too late (this copy was busy): the launch has given up
             // and opens the files itself; opening them here too would make two.
             if (files && !instanceRequest::isFresh(sent, QDateTime::currentMSecsSinceEpoch()))
