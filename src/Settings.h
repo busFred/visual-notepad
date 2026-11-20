@@ -71,6 +71,7 @@ inline constexpr char statusBar[] = "view/statusBar";
 inline constexpr char outline[] = "view/outline";
 inline constexpr char zoom[] = "view/zoom"; // percent
 inline constexpr char theme[] = "view/theme"; // "modern" | "standard" | "classic"
+inline constexpr char lastTabClosed[] = "view/lastTabClosed"; // "keep" | "close"
 // Not a preference: announced through changed() when the list changes.
 inline constexpr char recentFiles[] = "state/recentFiles";
 // Shortcut overrides live under "shortcuts/<command id>".

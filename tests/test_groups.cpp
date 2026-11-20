@@ -10,12 +10,15 @@
 #include "Session.h"
 #include "Settings.h"
 #include "Theme.h"
+#include "WelcomeView.h"
 #include "editor/TextView.h"
 
 #include <QApplication>
 #include <QDropEvent>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMimeData>
+#include <QScopeGuard>
 #include <QTabBar>
 #include <QTemporaryDir>
 #include <QTest>
@@ -37,6 +40,8 @@ private Q_SLOTS:
     void dropMovesTabBetweenGroups();
     void dropIsIgnoredForOtherMime();
     void moveToOtherWindow();
+    void closingLastTab_data();
+    void closingLastTab();
     void lastTabDraggedOutClosesWindow();
     void droppedNowhereOpensWindow();
     void tabsListBothGroups();
@@ -68,6 +73,7 @@ private:
 void TestGroups::initTestCase()
 {
     QVERIFY(m_dir.isValid());
+    vn::SessionManager::setDataDir(m_dir.filePath(QStringLiteral("session")));
     vn::theme::apply(*qApp);
 }
 
@@ -223,6 +229,60 @@ void TestGroups::moveToOtherWindow()
     // The source no longer follows the tab.
     QCOMPARE(source.currentTab(), source.mainGroup()->tab(0));
     QCOMPARE(target.windowTitle(), QStringLiteral("%1 — Visual Notepad").arg(name));
+}
+
+void TestGroups::closingLastTab_data()
+{
+    QTest::addColumn<bool>("closeWindow");
+    QTest::newRow("keep-window") << false;
+    QTest::newRow("close-window") << true;
+}
+
+void TestGroups::closingLastTab()
+{
+    QFETCH(bool, closeWindow);
+    auto &settings = vn::Settings::instance();
+    const auto reset = qScopeGuard([&settings] { settings.reset(vn::key::lastTabClosed); });
+    if (closeWindow)
+        settings.setValue(vn::key::lastTabClosed, QStringLiteral("close"));
+
+    MainWindow other;
+    MainWindow window;
+    show(other);
+    show(window);
+    window.newFile();
+    window.newFile();
+    QVERIFY(window.closeTabs(0, MainWindow::CloseScope::This));
+    QVERIFY(window.isVisible());
+    QCOMPARE(window.tabCount(), 1);
+    window.currentTab()->document()->setPlainText(QStringLiteral("unsaved"));
+
+    auto response = QMessageBox::Cancel;
+    int prompts = 0;
+    QTimer answer;
+    connect(&answer, &QTimer::timeout, this, [&] {
+        if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            ++prompts;
+            box->done(response);
+        }
+    });
+    answer.start(10);
+    QVERIFY(!window.closeTabs(0, MainWindow::CloseScope::All));
+    QCOMPARE(prompts, 1);
+    QVERIFY(window.isVisible());
+    QCOMPARE(window.tabCount(), 1);
+
+    response = QMessageBox::Discard;
+    QVERIFY(window.closeTabs(0, MainWindow::CloseScope::All));
+    QCOMPARE(prompts, 2);
+    QCOMPARE(window.tabCount(), 0);
+    QCOMPARE(window.isVisible(), !closeWindow);
+    QCOMPARE(vn::SessionManager::instance().windows().contains(&window), !closeWindow);
+    QVERIFY(other.isVisible());
+    if (!closeWindow) {
+        auto *welcome = window.findChild<vn::WelcomeView *>();
+        QVERIFY(welcome && welcome->isVisible());
+    }
 }
 
 void TestGroups::lastTabDraggedOutClosesWindow()

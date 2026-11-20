@@ -1926,7 +1926,7 @@ bool MainWindow::confirmDiscard(DocumentTab *tab)
     return answer == QMessageBox::Discard;
 }
 
-bool MainWindow::closeTab(EditorGroup *group, int index)
+bool MainWindow::closeTab(EditorGroup *group, int index, bool closingAfterDrag)
 {
     DocumentTab *tab = group->tab(index);
     // Only the last tab of a document asks; the others just go.
@@ -1944,8 +1944,18 @@ bool MainWindow::closeTab(EditorGroup *group, int index)
         group->currentTab()->editor()->setFocus();
     removeGroupIfEmpty(group);
     // Its changes were saved or discarded; drop the backup now.
-    SessionManager::instance().sync();
+    if (!closeIfNoTabs(closingAfterDrag))
+        SessionManager::instance().sync();
     return true;
+}
+
+bool MainWindow::closeIfNoTabs(bool closingAfterDrag)
+{
+    // Files loading in the background still need their window. Dragging the
+    // last tab out otherwise keeps its existing close behavior.
+    return tabCount() == 0 && !isOpening()
+           && (closingAfterDrag || Settings::instance().text(key::lastTabClosed) == QLatin1String("close"))
+           && close();
 }
 
 int MainWindow::tabCount() const
@@ -2403,8 +2413,8 @@ void MainWindow::receiveTab(DocumentTab *tab, EditorGroup *group, int index)
     source->detachTab(tab);
     addTab(tab, group, index);
     // Only a drag-out empties a window this way, so no unsaved-changes prompt.
-    if (source != this && source->tabCount() == 0)
-        source->close();
+    if (source != this)
+        source->closeIfNoTabs(true);
 }
 
 DocumentTab *MainWindow::copyTab(DocumentTab *tab, EditorGroup *group, int index)
@@ -2465,9 +2475,7 @@ void MainWindow::dropTabs(const QList<DocumentTab *> &tabs, EditorGroup *target,
             // the existing editor and closes the moved one).
             if (auto *owner = qobject_cast<MainWindow *>(tab->window())) {
                 if (EditorGroup *its = owner->groupOf(tab))
-                    owner->closeTab(its, its->indexOf(tab));
-                if (owner != this && owner->tabCount() == 0)
-                    owner->close();
+                    owner->closeTab(its, its->indexOf(tab), owner != this);
             }
             last = existing;
         } else {
@@ -2514,8 +2522,8 @@ MainWindow *MainWindow::moveTabsToNewWindow(const QList<DocumentTab *> &tabs, st
     if (globalPos)
         window->move(*globalPos - QPoint(60, 14));
     window->show();
-    if (closeIfEmpty && tabCount() == 0)
-        close();
+    if (!copy)
+        closeIfNoTabs(closeIfEmpty);
     return window;
 }
 

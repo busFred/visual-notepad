@@ -988,6 +988,9 @@ void PreferencesDialog::buildViewPage()
     addSwitch(tr("Show Outline panel for Markdown files"), key::outline);
     addCombo(tr("Default zoom level"), key::zoom, {{QStringLiteral("90%"), 90}, {QStringLiteral("100%"), 100},
                                                    {QStringLiteral("110%"), 110}, {QStringLiteral("125%"), 125}});
+    addHeading(tr("Windows"));
+    addCombo(tr("When the last tab is closed"), key::lastTabClosed,
+             {{tr("Keep the window open"), QStringLiteral("keep")}, {tr("Close the window"), QStringLiteral("close")}});
     endPage(tr("View"), QStringLiteral("view"));
 }
 

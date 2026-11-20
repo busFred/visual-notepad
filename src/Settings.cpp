@@ -63,6 +63,7 @@ const QHash<QString, QVariant> &defaults()
         {key::outline, true},
         {key::zoom, 100},
         {key::theme, QStringLiteral("modern")},
+        {key::lastTabClosed, QStringLiteral("keep")},
     };
     return values;
 }

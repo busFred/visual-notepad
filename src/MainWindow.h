@@ -219,7 +219,8 @@ private:
     SaveConflictChoice askSaveConflict(DocumentTab *tab);
     // Asks and acts; true when nothing is left unsaved.
     bool resolveSaveConflict(DocumentTab *tab);
-    bool closeTab(EditorGroup *group, int index);
+    bool closeTab(EditorGroup *group, int index, bool closingAfterDrag = false);
+    bool closeIfNoTabs(bool closingAfterDrag = false);
     bool closeTabs(EditorGroup *group, int index, CloseScope scope);
     void showTabContextMenu(EditorGroup *group, int index, const QPoint &globalPos);
     void revealInFileManager(const QString &path);
