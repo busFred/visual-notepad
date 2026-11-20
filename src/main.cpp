@@ -134,12 +134,17 @@ int main(int argc, char *argv[])
 
     externalFiles.finishStartup();
     const int code = app.exec();
-    // Files handed over while a dialog asked, and then the app quit: they
-    // were taken (the launch was told so), so a new launch opens them, once
-    // this one has let go of the channel and the session.
-    if (const QStringList waiting = externalFiles.takeWaiting(); !waiting.isEmpty()) {
+    // Requests handed over while a dialog asked, and then the app quit: they
+    // were taken (their launches were told so), so new launches make them,
+    // once this one has let go of the channel and the session. The first
+    // takes them over; the others hand theirs to it.
+    if (const QList<QStringList> waiting = externalFiles.takeWaiting(); !waiting.isEmpty()) {
         instance.release();
-        QProcess::startDetached(QCoreApplication::applicationFilePath(), QStringList{QStringLiteral("--")} + waiting);
+        for (const QStringList &arguments : vn::ExternalFiles::commandLines(waiting)) {
+            if (!QProcess::startDetached(QCoreApplication::applicationFilePath(), arguments))
+                qWarning("Could not start Visual Notepad again for files handed over while quitting: %s",
+                         qPrintable(arguments.join(u' ')));
+        }
     }
     return code;
 }

@@ -61,12 +61,36 @@ void ExternalFiles::finishStartup()
     dispatch();
 }
 
-QStringList ExternalFiles::takeWaiting()
+QList<QStringList> ExternalFiles::takeWaiting()
 {
-    QStringList files;
-    while (!m_requests.isEmpty())
-        files += m_requests.dequeue();
-    return files;
+    QList<QStringList> requests(m_requests.cbegin(), m_requests.cend());
+    m_requests.clear();
+    return requests;
+}
+
+QList<QStringList> ExternalFiles::commandLines(const QList<QStringList> &requests)
+{
+    constexpr qsizetype room = 16'000;
+    QList<QStringList> launches;
+    for (const QStringList &files : requests) {
+        if (files.isEmpty()) {
+            launches.append(QStringList());
+            continue;
+        }
+        QStringList arguments{QStringLiteral("--")};
+        qsizetype length = 0;
+        for (const QString &file : files) {
+            if (arguments.size() > 1 && length + file.size() + 3 > room) {
+                launches.append(arguments);
+                arguments = {QStringLiteral("--")};
+                length = 0;
+            }
+            arguments.append(file);
+            length += file.size() + 3; // (Quotes and a space.)
+        }
+        launches.append(arguments);
+    }
+    return launches;
 }
 
 MainWindow *ExternalFiles::lastActiveWindow() const

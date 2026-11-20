@@ -294,8 +294,27 @@ void TestInstance::waitsForADialog()
     dialog->show();
     QTRY_VERIFY(QApplication::activeModalWidget());
     router.request({path, path});
-    QCOMPARE(router.takeWaiting(), (QStringList{path, path}));
+    router.request({}); // A new window.
+    const QList<QStringList> waiting = router.takeWaiting();
+    QCOMPARE(waiting, (QList<QStringList>{{path, path}, {}}));
     QVERIFY(router.takeWaiting().isEmpty());
+
+    // As command lines: each request its own, the new window's empty, and a
+    // long one split so that none is near the system's limit.
+    QCOMPARE(ExternalFiles::commandLines(waiting),
+             (QList<QStringList>{{QStringLiteral("--"), path, path}, {}}));
+    QStringList many;
+    for (int i = 0; i < 2000; ++i)
+        many.append(m_dir.filePath(QStringLiteral("file-%1.txt").arg(i)));
+    const QList<QStringList> lines = ExternalFiles::commandLines({many});
+    QVERIFY(lines.size() > 1);
+    QStringList again;
+    for (const QStringList &line : lines) {
+        QCOMPARE(line.first(), QStringLiteral("--"));
+        QVERIFY(line.join(u' ').size() < 20'000);
+        again += line.mid(1);
+    }
+    QCOMPARE(again, many);
 }
 
 #ifdef Q_OS_LINUX
