@@ -31,6 +31,7 @@
 #include <QTextDocument>
 #include <QTextStream>
 #include <QTimer>
+#include <QtMath>
 #include <QToolTip>
 
 #include <algorithm>
@@ -2450,15 +2451,23 @@ QFont VisualView::bodyFont() const
     return body;
 }
 
+// The height Qt takes a proportional line height of: the font's ascent,
+// descent and leading, rounded up (as BlockRenderer's lineGap has it).
+static qreal proportionBase(const QFont &font)
+{
+    const QFontMetricsF metrics(font);
+    return qCeil(metrics.ascent() + metrics.descent() + metrics.leading());
+}
+
 qreal VisualView::bodyLineHeightRatio(const QFont &font) const
 {
     // The setting counts the font size (as in VS Code), but rendered text
     // takes its line height as a share of the font's own line height: the
     // share that makes a line round(size x factor) pixels high.
     const int pixels = QFontInfo(font).pixelSize();
-    const qreal height = QFontMetricsF(font).height();
+    const qreal base = proportionBase(font);
     const qreal factor = Settings::instance().value(key::textLineHeight).toDouble();
-    return pixels > 0 && height > 0 ? qRound(pixels * factor) / height : factor;
+    return pixels > 0 && base > 0 ? qRound(pixels * factor) / base : factor;
 }
 
 qreal VisualView::bodyLineHeight() const
@@ -2467,7 +2476,7 @@ qreal VisualView::bodyLineHeight() const
     // spacing have no say in the rendered view): the factor times the font
     // size, as the rendered text's line height has it (see context()).
     const QFont font = bodyFont();
-    return QFontMetricsF(font).height() * bodyLineHeightRatio(font);
+    return proportionBase(font) * bodyLineHeightRatio(font);
 }
 
 RenderContext VisualView::context() const

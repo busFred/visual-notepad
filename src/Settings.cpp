@@ -9,6 +9,7 @@
 #include <QFontInfo>
 #include <QFontMetricsF>
 #include <QGuiApplication>
+#include <QtMath>
 #include <QSettings>
 
 #include <algorithm>
@@ -164,14 +165,14 @@ void Settings::migrateLineSpacing() const
         return;
     // Set first: the fonts below read settings too.
     m_spacingMigrated = true;
-    const auto convert = [this](const char *oldKey, const char *newKey, const QFont &font) {
+    // `base`: the height the old number multiplied, for that font.
+    const auto convert = [this](const char *oldKey, const char *newKey, const QFont &font, qreal base) {
         if (!m_store->contains(QLatin1String(oldKey)))
             return;
-        const QFontMetricsF metrics(font);
         const int pixels = QFontInfo(font).pixelSize();
         // The old number counted the font's line height; the new one counts
         // its size. An old value stays the same line height on screen.
-        const double wanted = m_store->value(QLatin1String(oldKey)).toDouble() * (pixels > 0 ? metrics.height() / pixels : 1.2);
+        const double wanted = m_store->value(QLatin1String(oldKey)).toDouble() * (pixels > 0 ? base / pixels : 1.2);
         double best = lineHeightChoices[0];
         for (const double choice : lineHeightChoices) {
             if (qAbs(choice - wanted) < qAbs(best - wanted))
@@ -182,8 +183,14 @@ void Settings::migrateLineSpacing() const
             m_store->setValue(QLatin1String(newKey), best);
         m_store->remove(QLatin1String(oldKey));
     };
-    convert(key::legacyLineSpacing, key::lineSpacing, theme::editorFont());
-    convert(key::legacyTextLineHeight, key::textLineHeight, theme::textFont());
+    // The editor's lines were the font's height times it; rendered text's,
+    // as Qt takes a proportional line height, its ascent, descent and leading.
+    const QFont editor = theme::editorFont();
+    const QFont text = theme::textFont();
+    const QFontMetricsF textMetrics(text);
+    convert(key::legacyLineSpacing, key::lineSpacing, editor, QFontMetricsF(editor).height());
+    convert(key::legacyTextLineHeight, key::textLineHeight, text,
+            qCeil(textMetrics.ascent() + textMetrics.descent() + textMetrics.leading()));
 }
 
 QVariant Settings::defaultValue(const char *key) const
