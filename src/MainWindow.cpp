@@ -40,6 +40,7 @@
 #include <QMimeDatabase>
 #include <QPushButton>
 #include <QScopedValueRollback>
+#include <QScreen>
 #include <QScrollBar>
 #include <QSet>
 #include <QUrl>
@@ -230,6 +231,23 @@ protected:
 private:
     Kind m_kind;
 };
+
+// A status bar cell's popup: above the cell, right edges lined up, kept on
+// the cell's screen.
+void showAbove(QWidget *popup, QWidget *cell)
+{
+    // Its size as shown: the style sheet's padding applies at polish.
+    popup->ensurePolished();
+    popup->adjustSize();
+    QRect box(cell->mapToGlobal(QPoint(cell->width(), 0)) - QPoint(popup->width(), popup->height()), popup->size());
+    if (const QScreen *screen = cell->screen()) {
+        const QRect available = screen->availableGeometry();
+        box.moveLeft(qBound(available.left(), box.left(), available.right() + 1 - box.width()));
+        box.moveTop(qBound(available.top(), box.top(), available.bottom() + 1 - box.height()));
+    }
+    popup->move(box.topLeft());
+    popup->show();
+}
 
 // Column controls use the same popup and slider styling as zoom.
 class ReadPopup : public QFrame
@@ -1001,10 +1019,7 @@ void MainWindow::createStatusBar()
             updateStatus(); // (Clicking the shown view again leaves it checked.)
             if (columns) {
                 if (DocumentTab *tab = currentTab(); tab && tab->showsColumns()) {
-                    auto *popup = new ReadPopup(tab, this);
-                    popup->move(m_columnsButton->mapToGlobal(QPoint(m_columnsButton->width(), 0))
-                                - QPoint(popup->width(), popup->height()));
-                    popup->show();
+                    showAbove(new ReadPopup(tab, this), m_columnsButton);
                 }
             }
         });
@@ -2559,9 +2574,7 @@ void MainWindow::showZoomPopup()
     const QString half = !tab->showsBothHalves() ? QString()
                          : tab->zoomsVisual() ? tr("Visual")
                                                               : tr("Source");
-    auto *popup = new ZoomPopup(tab, half, this);
-    popup->move(m_zoom->mapToGlobal(QPoint(m_zoom->width(), 0)) - QPoint(popup->width(), popup->height()));
-    popup->show();
+    showAbove(new ZoomPopup(tab, half, this), m_zoom);
 }
 
 void MainWindow::goToLine()

@@ -24,6 +24,7 @@
 
 #include <QTextDocument>
 #include <QScrollBar>
+#include <QScreen>
 #include <QSignalSpy>
 #include <QTextBlock>
 #include <QStatusBar>
@@ -1447,8 +1448,13 @@ void TestMainWindow::readPopupIsPerTabAndStartsFromPreferences()
     QCOMPARE(bar->findChild<QLabel *>(QStringLiteral("ReadCharsValue"))->text(), QStringLiteral("60"));
     QCOMPARE(count->text(), QStringLiteral("1"));
     QVERIFY(!fewer->isEnabled());
-    const QPoint anchor = viewButton(window, true)->mapToGlobal(QPoint(viewButton(window, true)->width(), 0));
-    const QPoint offset = bar->pos() + QPoint(bar->width(), bar->height()) - anchor;
+    // Above the button, right edges lined up, as far as the screen allows.
+    QWidget *button = viewButton(window, true);
+    QRect expected(button->mapToGlobal(QPoint(button->width(), 0)) - QPoint(bar->width(), bar->height()), bar->size());
+    const QRect available = button->screen()->availableGeometry();
+    expected.moveLeft(qBound(available.left(), expected.left(), available.right() + 1 - expected.width()));
+    expected.moveTop(qBound(available.top(), expected.top(), available.bottom() + 1 - expected.height()));
+    const QPoint offset = bar->pos() - expected.topLeft();
     QVERIFY(qAbs(offset.x()) <= 2 && qAbs(offset.y()) <= 2);
 
     // Wider columns; + goes up to the most that fit, which is Auto.
