@@ -46,6 +46,7 @@ bool TextView::handleTouch(QTouchEvent *event)
         m_touchStart = m_touchLast = points.first().position();
         m_touchTime.start();
         m_touchLastMove = 0;
+        m_touchMoveDone = 0;
         m_touchVelocity = 0;
         m_touchPageLineHeight = touchPageLineHeight();
         m_touchLineRemainder = 0;
@@ -90,6 +91,7 @@ bool TextView::handleTouch(QTouchEvent *event)
             const QPointF delta = m_touchLast - at;
             const qreal speed = delta.y() / qMax<qint64>(8, now - m_touchLastMove);
             m_touchVelocity = qBound(-maxVelocity, speed, maxVelocity);
+            m_touchLastMove = now;
             m_touchLast = at;
             if (m_touchPageLineHeight == 0 && !m_wordWrap)
                 horizontalScrollBar()->setValue(horizontalScrollBar()->value() + qRound(delta.x()));
@@ -97,8 +99,8 @@ bool TextView::handleTouch(QTouchEvent *event)
                 touchScrollBy(delta.y());
             // Once the move is done: laying out what scrolled in is no pause
             // of the finger's (on a slow machine it could pass for one and
-            // keep a flick from starting).
-            m_touchLastMove = m_touchTime.elapsed();
+            // keep a flick from starting). The speed keeps the move's own time.
+            m_touchMoveDone = m_touchTime.elapsed();
         }
         if (type == QEvent::TouchEnd) {
             const TouchMode mode = m_touchMode;
@@ -134,7 +136,7 @@ bool TextView::handleTouch(QTouchEvent *event)
                     && qAbs(movement.x()) > qAbs(movement.y())) {
                     touchTurnPage(movement.x() < 0);
                 }
-            } else if (mode == TouchMode::Scroll && now - m_touchLastMove < flickPause
+            } else if (mode == TouchMode::Scroll && now - m_touchMoveDone < flickPause
                        && qAbs(m_touchVelocity) >= minVelocity) {
                 m_touchTime.restart();
                 m_touchFlick.start(16, Qt::PreciseTimer, this);

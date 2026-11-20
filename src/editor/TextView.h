@@ -878,7 +878,8 @@ private:
     TouchMode m_touchMode = TouchMode::Idle;
     QPointF m_touchStart, m_touchLast;
     QElapsedTimer m_touchTime;
-    qint64 m_touchLastMove = 0;
+    qint64 m_touchLastMove = 0; // When the last move came (for the finger's speed).
+    qint64 m_touchMoveDone = 0; // When its scrolling was done (for a pause before lifting).
     qreal m_touchVelocity = 0;
     qreal m_touchPageLineHeight = 0;
     qreal m_touchLineRemainder = 0;
