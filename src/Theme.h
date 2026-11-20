@@ -99,6 +99,9 @@ void apply(QApplication &app);
 QFont editorFont();
 // Proportional font for rendered Markdown text, before editor zoom.
 QFont textFont();
+// What each is with no font or size chosen in Preferences.
+QFont defaultEditorFont();
+QFont defaultTextFont();
 
 // Shared syntax definitions, including the app's own highlighting theme.
 KSyntaxHighlighting::Repository &syntaxRepository();

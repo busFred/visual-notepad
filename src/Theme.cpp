@@ -620,10 +620,11 @@ static bool hasConsolas()
     return installed;
 }
 
-QFont editorFont()
+// The code font with no font chosen (family) and no size: what editorFont()
+// gives by default, and what Preferences resets to.
+static QFont builtInEditorFont(const QString &family)
 {
     QFont font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    const QString family = Settings::instance().text(key::fontFamily);
     if (!family.isEmpty()) {
         font.setFamilies({family, font.family()});
     } else if (hasConsolas()) {
@@ -638,21 +639,37 @@ QFont editorFont()
         // only Inconsolata registered, so no stretch finds it.)
     }
     font.setStyleHint(QFont::Monospace);
+    return font;
+}
+
+QFont defaultEditorFont()
+{
+    return builtInEditorFont({});
+}
+
+QFont editorFont()
+{
+    QFont font = builtInEditorFont(Settings::instance().text(key::fontFamily));
     if (const int size = Settings::instance().number(key::fontSize); size > 0)
         font.setPointSize(size);
     return font;
 }
 
-QFont textFont()
+QFont defaultTextFont()
 {
     QFont font = QApplication::font();
+    font.setPointSizeF(font.pointSizeF() * 1.15); // Slightly larger than the UI.
+    return font;
+}
+
+QFont textFont()
+{
     const Settings &settings = Settings::instance();
+    QFont font = defaultTextFont();
     if (const QString family = settings.text(key::textFontFamily); !family.isEmpty())
         font.setFamily(family);
     if (const int size = settings.number(key::textFontSize); size > 0)
         font.setPointSize(size);
-    else
-        font.setPointSizeF(font.pointSizeF() * 1.15); // Slightly larger than the UI.
     return font;
 }
 

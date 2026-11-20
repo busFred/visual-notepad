@@ -8,12 +8,10 @@
 #include "TouchScrollArea.h"
 
 #include <QAbstractButton>
-#include <QApplication>
 #include <QAbstractItemView>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QFontDialog>
-#include <QFontDatabase>
 #include <QFontInfo>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -27,7 +25,6 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QScreen>
-#include <QGuiApplication>
 #include <QScrollArea>
 #include <QSet>
 #include <QSignalBlocker>
@@ -514,7 +511,8 @@ void PreferencesDialog::addReset(QWidget *row, QWidget *control, const char *set
     button->setSizePolicy(policy);
     qobject_cast<QHBoxLayout *>(row->layout())->addWidget(button);
     const auto icon = [button] {
-        QPixmap pixmap(QStringLiteral(":/vn/icons/reset.svg"));
+        // At the screen's density, then in the text colour.
+        QPixmap pixmap = QIcon(QStringLiteral(":/vn/icons/reset.svg")).pixmap(QSize(16, 16), button->devicePixelRatioF());
         QPainter painter(&pixmap);
         painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
         painter.fillRect(pixmap.rect(), theme::color(theme::Role::text));
@@ -569,6 +567,8 @@ void PreferencesDialog::addInfo(QWidget *row, const QString &text)
         auto *popup = new QFrame(this, Qt::Popup);
         popup->setObjectName(QStringLiteral("PrefInfoPopup"));
         popup->setAttribute(Qt::WA_DeleteOnClose);
+        // A click on the ⓘ that closes it doesn't open it again.
+        popup->setAttribute(Qt::WA_NoMouseReplay);
         auto *box = new QVBoxLayout(popup);
         auto *message = new QLabel(text, popup);
         message->setWordWrap(true);
@@ -700,15 +700,7 @@ void PreferencesDialog::addFontRow(const QString &label, const QString &name, co
     input->onClicked = [this, familyKey, sizeKey, currentFont, monospaced] {
         chooseFont(familyKey, sizeKey, currentFont, monospaced);
     };
-    QFont defaultFont;
-    if (monospaced) {
-        defaultFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-        defaultFont.setFamilies({QFontDatabase::hasFamily(QStringLiteral("Consolas"))
-                                     ? QStringLiteral("Consolas") : QStringLiteral("Inconsolata"), defaultFont.family()});
-    } else {
-        defaultFont = QApplication::font();
-        defaultFont.setPointSizeF(defaultFont.pointSizeF() * 1.15);
-    }
+    const QFont defaultFont = monospaced ? theme::defaultEditorFont() : theme::defaultTextFont();
     input->setProperty("defaultFontText", QStringLiteral("%1 %2").arg(QFontInfo(defaultFont).family()).arg(qRound(defaultFont.pointSizeF())));
     layout->addWidget(input);
     addReset(addRow(label, box), input, familyKey, sizeKey, name + QStringLiteral("Reset"));
@@ -896,8 +888,6 @@ void PreferencesDialog::addPictureCacheRow()
         const QSignalBlocker blocker(spin);
         spin->setValue(Settings::instance().number(key::pictureCacheMiB));
     });
-
-
 }
 
 void PreferencesDialog::addMacroTable()
@@ -1054,7 +1044,14 @@ void PreferencesDialog::addColorsRow()
     auto *customize = textButton(tr("Customize colors…"), QStringLiteral("customizeColors"), box);
     boxLayout->addWidget(summary);
     boxLayout->addWidget(customize);
-    addRow(tr("Colors"), box);
+    // (Room where other rows have their reset button, to line up with them.)
+    QWidget *row = addRow(tr("Colors"), box);
+    auto *room = smallButton({}, QStringLiteral("colorsResetRoom"));
+    QSizePolicy policy = room->sizePolicy();
+    policy.setRetainSizeWhenHidden(true);
+    room->setSizePolicy(policy);
+    room->hide();
+    qobject_cast<QHBoxLayout *>(row->layout())->addWidget(room);
 
     const auto refresh = [summary] {
         const QString id = theme::currentThemeId();
