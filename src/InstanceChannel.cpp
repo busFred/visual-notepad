@@ -85,7 +85,12 @@ QByteArray instanceKey()
 
 QString serverName()
 {
+    // The session folder too: copies on two sessions (two data folders) are
+    // two channels, as they hold two locks (lockPath), so neither ever
+    // removes the other's socket as a stale one.
     QByteArray identity = QFileInfo(Settings::instance().fileName()).absolutePath().toUtf8();
+    identity += '\0';
+    identity += QDir(SessionManager::dataDir()).absolutePath().toUtf8();
     identity += '\0';
     identity += instanceKey();
     identity += '\0';
