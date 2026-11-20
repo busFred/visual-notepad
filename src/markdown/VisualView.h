@@ -251,6 +251,7 @@ protected:
     qreal touchPageLineHeight() override;
     void touchTurnPage(bool forward) override;
     bool touchNudge(int lines) override;
+    bool touchCanNudge(int direction) override;
     bool touchTapActivates(const QPointF &point) override;
     qreal textWidth() const override;
     int rowAtPoint(const QPointF &point, QPointF *origin) override;

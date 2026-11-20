@@ -1034,6 +1034,13 @@ void TextView::touchTurnPage(bool forward)
         columnsPage(forward, false, false);
 }
 
+bool TextView::touchCanNudge(int direction)
+{
+    if (!m_columnsOn || columnsScreen().empty())
+        return false;
+    return direction > 0 ? !columnsScreen().atEnd : !columnsScreen().atStart;
+}
+
 bool TextView::touchNudge(int lines)
 {
     if (!m_columnsOn || columnsScreen().empty())

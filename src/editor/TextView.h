@@ -431,6 +431,8 @@ protected:
     virtual void touchTurnPage(bool forward);
     // Whether the page moved (not at its first or last place already).
     virtual bool touchNudge(int lines);
+    // Whether the page can move that way (1: on, -1: back).
+    virtual bool touchCanNudge(int direction);
     virtual bool touchTapActivates(const QPointF &point);
     void focusInEvent(QFocusEvent *event) override;
     void focusOutEvent(QFocusEvent *event) override;

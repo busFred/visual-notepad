@@ -1452,6 +1452,14 @@ void VisualView::touchTurnPage(bool forward)
         TextView::touchTurnPage(forward);
 }
 
+bool VisualView::touchCanNudge(int direction)
+{
+    if (!readActive())
+        return TextView::touchCanNudge(direction);
+    const md::Screen &screen = ensureReadScreen();
+    return !screen.empty() && (direction > 0 ? !screen.atEnd : !screen.atStart);
+}
+
 bool VisualView::touchNudge(int lines)
 {
     if (!readActive())

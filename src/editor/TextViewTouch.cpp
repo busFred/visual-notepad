@@ -155,6 +155,10 @@ bool TextView::touchScrollBy(qreal pixels)
 {
     if (m_touchPageLineHeight == 0)
         return scrollByPixels(pixels);
+    // At the first or last place that way already: a stop, even for a tick
+    // smaller than a line (a slow flick would otherwise run on unseen).
+    if (pixels != 0 && !touchCanNudge(pixels > 0 ? 1 : -1))
+        return false;
 
     m_touchLineRemainder += pixels;
     const int lines = int(m_touchLineRemainder / m_touchPageLineHeight);
