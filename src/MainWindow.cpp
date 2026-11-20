@@ -69,6 +69,7 @@
 #include <KSyntaxHighlighting/Repository>
 
 #include <algorithm>
+#include <utility>
 #include <cmath>
 #include <map>
 
@@ -1652,6 +1653,8 @@ void MainWindow::finishPendingOpens()
         if (entry->opened)
             entry->opened(tab);
     }
+    if (m_closeWhenOpened && !isOpening())
+        closeIfNoTabs(*std::exchange(m_closeWhenOpened, std::nullopt));
 }
 
 void MainWindow::adoptTab(DocumentTab *tab)
@@ -1970,11 +1973,17 @@ bool MainWindow::closeTab(EditorGroup *group, int index, bool closingAfterDrag)
 
 bool MainWindow::closeIfNoTabs(bool closingAfterDrag)
 {
-    // Files loading in the background still need their window. Dragging the
-    // last tab out otherwise keeps its existing close behavior.
-    return tabCount() == 0 && !isOpening()
-           && (closingAfterDrag || Settings::instance().text(key::lastTabClosed) == QLatin1String("close"))
-           && close();
+    // Dragging the last tab out keeps its existing close behavior.
+    if (tabCount() != 0
+        || (!closingAfterDrag && Settings::instance().text(key::lastTabClosed) != QLatin1String("close")))
+        return false;
+    // Files loading in the background still need their window: decide again
+    // once they are in (finishPendingOpens), if none of them made a tab.
+    if (isOpening()) {
+        m_closeWhenOpened = closingAfterDrag;
+        return false;
+    }
+    return close();
 }
 
 int MainWindow::tabCount() const

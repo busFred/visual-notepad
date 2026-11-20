@@ -221,6 +221,9 @@ private:
     bool resolveSaveConflict(DocumentTab *tab);
     bool closeTab(EditorGroup *group, int index, bool closingAfterDrag = false);
     bool closeIfNoTabs(bool closingAfterDrag = false);
+    // Set when the last tab went while files were still loading: whether it
+    // was dragged out (see closeIfNoTabs).
+    std::optional<bool> m_closeWhenOpened;
     bool closeTabs(EditorGroup *group, int index, CloseScope scope);
     void showTabContextMenu(EditorGroup *group, int index, const QPoint &globalPos);
     void revealInFileManager(const QString &path);
