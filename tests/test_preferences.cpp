@@ -90,6 +90,7 @@ private Q_SLOTS:
     void lineSpacingWritesKey();
     void lineSpacingChangesRenderedHeight();
     void oldLineSpacingsAreConverted();
+    void offListNumericValueIsSorted();
     void syncAnchorRow();
     void encodingRows();
     void showPageSelectsCategory();
@@ -692,6 +693,17 @@ void TestPreferences::lineSpacingWritesKey()
 // The old values counted the font's own line height, the new ones count its
 // size: a stored old value becomes the same look, on a listed value if one is
 // within 0.05, else as it is (rounded to hundredths).
+void TestPreferences::offListNumericValueIsSorted()
+{
+    Settings::instance().setValue(key::lineSpacing, 1.4);
+    auto *combo = find<QComboBox>(key::lineSpacing);
+    QVERIFY(combo);
+    const int index = combo->findData(1.4);
+    QVERIFY(index > 0 && index < combo->count() - 1);
+    QCOMPARE(combo->itemData(index - 1).toDouble(), 1.35);
+    QCOMPARE(combo->itemData(index + 1).toDouble(), 1.5);
+}
+
 void TestPreferences::oldLineSpacingsAreConverted()
 {
     const QString before = Settings::instance().fileName();

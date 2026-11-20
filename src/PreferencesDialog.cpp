@@ -536,8 +536,19 @@ void PreferencesDialog::addCombo(const QString &label, const char *settingKey, c
         int index = combo->findData(value);
         if (index < 0) {
             // A value written by hand or by a newer version: show it rather than hide it.
-            combo->addItem(value.toString(), value);
-            index = combo->count() - 1;
+            const auto numeric = [](const QVariant &v) {
+                return v.metaType().id() == QMetaType::Int || v.metaType().id() == QMetaType::Double;
+            };
+            index = combo->count();
+            if (numeric(value) && combo->count() > 0 && numeric(combo->itemData(0))) {
+                for (int i = 0; i < combo->count(); ++i) {
+                    if (value.toDouble() < combo->itemData(i).toDouble()) {
+                        index = i;
+                        break;
+                    }
+                }
+            }
+            combo->insertItem(index, value.toString(), value);
         }
         combo->setCurrentIndex(index);
     });
