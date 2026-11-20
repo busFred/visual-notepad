@@ -56,7 +56,7 @@ protected:
 private:
     class Canvas;
 
-    void setScale(qreal scale, const QPointF &anchor);
+    void setScale(qreal scale, const QPointF &anchor, const QPointF &pan = {});
     QPointF viewCentre() const;
     qreal lowestScale() const;
     void refresh(); // Repaint, and bring the controls up to date.

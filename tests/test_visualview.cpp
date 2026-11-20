@@ -523,6 +523,8 @@ private Q_SLOTS:
     void tablesScrollWhenTheirLongestWordsDoNotFit();
     void viewersLeaveTheWindowUsable();
     void tableViewerIsTheRealTable();
+    void pictureViewerTouchZoomsAndTogglesSize();
+    void blockViewerTouchZoomsAndPans();
     void tableGridLooksAsQtDrawsIt();
     void reflowedBlocksAreMadeBlocks();
     void zoomedBlocksLookAsFreshOnes_data();
@@ -6722,6 +6724,75 @@ void TestVisualView::tableViewerIsTheRealTable()
             ink += QColor(upper.pixel(x, y)) != editor;
     QVERIFY(ink > 200);
     QVERIFY2(gradualShare(upper) < 0.2, qPrintable(QString::number(gradualShare(upper))));
+    closeViewers(m_view->window());
+}
+
+void TestVisualView::pictureViewerTouchZoomsAndTogglesSize()
+{
+    QImage image(1600, 1200, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    ImageViewer viewer(image, QStringLiteral("Picture"));
+    viewer.resize(480, 360);
+    viewer.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&viewer));
+    const qreal fitted = viewer.fitScale();
+    auto touch = QTest::touchEvent(&viewer, QTest::createTouchDevice(), false);
+    const QPoint a(180, 145);
+    const QPoint b(260, 145);
+    touch.press(0, a).commit();
+    touch.stationary(0).press(1, b).commit();
+    touch.move(0, a - QPoint(40, 0)).move(1, b + QPoint(40, 0)).commit();
+    QCOMPARE(viewer.scale(), 2 * fitted);
+    touch.release(0, a - QPoint(40, 0)).release(1, b + QPoint(40, 0)).commit();
+    const QPoint at(220, 145);
+    const auto doubleTap = [&] {
+        for (int i = 0; i < 2; ++i) {
+            touch.press(0, at).commit();
+            touch.release(0, at).commit();
+        }
+    };
+    doubleTap();
+    QCOMPARE(viewer.scale(), fitted);
+    doubleTap();
+    QCOMPARE(viewer.scale(), 1 / viewer.devicePixelRatioF());
+    doubleTap();
+    QCOMPARE(viewer.scale(), fitted);
+}
+
+void TestVisualView::blockViewerTouchZoomsAndPans()
+{
+    const QString text = wideDocument();
+    const int table = lineHolding(text, QStringLiteral("| Run"));
+    startReading(text, 1000, 1000);
+    BlockViewer *viewer = openViewer(m_view, m_view->readOpenRect(table));
+    QVERIFY(viewer);
+    viewer->resize(520, 480);
+    QWidget *canvas = viewer->viewport();
+    auto touch = QTest::touchEvent(canvas, QTest::createTouchDevice(), false);
+    const QPoint a(140, 100);
+    const QPoint b(260, 100);
+    const QPoint shift(35, 0);
+    touch.press(0, a).press(1, b).commit();
+    touch.move(0, a + shift - QPoint(60, 0)).move(1, b + shift + QPoint(60, 0)).commit();
+    QCOMPARE(viewer->scale(), 2.0);
+    const QPointF blockOrigin = viewer->toViewport(QPointF(0, viewer->block().stripHeight()));
+    QVERIFY(qAbs(blockOrigin.x() - (-200 + shift.x())) <= 1);
+    touch.release(0, a + shift - QPoint(60, 0)).release(1, b + shift + QPoint(60, 0)).commit();
+    touch.press(0, b).commit();
+    touch.move(0, b - QPoint(70, 0)).commit();
+    touch.release(0, b - QPoint(70, 0)).commit();
+    QCOMPARE(viewer->toViewport(QPointF(0, viewer->block().stripHeight())).x(), blockOrigin.x() - 70);
+    QVERIFY(viewer->selectedText().isEmpty());
+    for (int i = 0; i < 2; ++i) {
+        touch.press(0, b).commit();
+        touch.release(0, b).commit();
+    }
+    QCOMPARE(viewer->scale(), viewer->fitScale());
+    for (int i = 0; i < 2; ++i) {
+        touch.press(0, b).commit();
+        touch.release(0, b).commit();
+    }
+    QCOMPARE(viewer->scale(), 1.0);
     closeViewers(m_view->window());
 }
 

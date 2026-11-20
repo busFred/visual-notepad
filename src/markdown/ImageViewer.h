@@ -55,7 +55,9 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;
 
 private:
-    void setScale(qreal scale, const QPointF &anchor);
+    void setScale(qreal scale, const QPointF &anchor, const QPointF &pan = {});
+    void panBy(const QPointF &delta);
+    void toggleActualSize(const QPointF &anchor);
     QPointF windowCentre() const;
     qreal lowestScale() const;
     void refresh(); // Repaint, and bring the controls up to date.

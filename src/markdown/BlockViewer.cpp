@@ -1,6 +1,7 @@
 #include "BlockViewer.h"
 
 #include "../Theme.h"
+#include "ViewerTouch.h"
 #include "ZoomBar.h"
 
 #include <QAbstractScrollArea>
@@ -38,6 +39,17 @@ public:
         setFrameShape(QFrame::NoFrame);
         viewport()->setAutoFillBackground(false);
         setFocusPolicy(Qt::StrongFocus);
+        new ViewerTouch(viewport(), [this](const QPointF &delta) {
+            horizontalScrollBar()->setValue(horizontalScrollBar()->value() - qRound(delta.x()));
+            verticalScrollBar()->setValue(verticalScrollBar()->value() - qRound(delta.y()));
+        }, [this](qreal factor, const QPointF &from, const QPointF &to) {
+            m_owner->setScale(m_owner->scale() * factor, from, to - from);
+        }, [this](const QPointF &at) {
+            if (m_owner->m_fitted || std::abs(m_owner->scale() - m_owner->fitScale()) < 1e-9)
+                m_owner->actualSize(at);
+            else
+                m_owner->fit();
+        });
     }
 
     // Where the block's top-left is in the viewport.
@@ -262,7 +274,7 @@ void BlockViewer::zoomAt(const QPointF &anchor, qreal factor)
     setScale(m_scale * factor, anchor);
 }
 
-void BlockViewer::setScale(qreal scale, const QPointF &anchor)
+void BlockViewer::setScale(qreal scale, const QPointF &anchor, const QPointF &pan)
 {
     // Zooming out past the fitted size has nothing to show.
     scale = qBound(lowestScale(), scale, maxScale);
@@ -275,9 +287,9 @@ void BlockViewer::setScale(qreal scale, const QPointF &anchor)
     // the scroll puts the point back under the anchor.
     const QSizeF size = scaledSize();
     if (size.width() >= m_canvas->viewport()->width())
-        m_canvas->horizontalScrollBar()->setValue(qRound(point.x() * m_scale - anchor.x()));
+        m_canvas->horizontalScrollBar()->setValue(qRound(point.x() * m_scale - anchor.x() - pan.x()));
     if (size.height() >= m_canvas->viewport()->height())
-        m_canvas->verticalScrollBar()->setValue(qRound(point.y() * m_scale - anchor.y()));
+        m_canvas->verticalScrollBar()->setValue(qRound(point.y() * m_scale - anchor.y() - pan.y()));
     refresh();
 }
 

@@ -1,5 +1,6 @@
 #include "ImageViewer.h"
 
+#include "ViewerTouch.h"
 #include "ZoomBar.h"
 #include "../editor/ReadControls.h"
 
@@ -59,6 +60,11 @@ ImageViewer::ImageViewer(const QImage &image, const QString &title, QWidget *par
         const qreal low = lowestScale();
         setScale(low * std::pow(maxScale / low, fraction), windowCentre());
     });
+    new ViewerTouch(this, [this](const QPointF &delta) { panBy(delta); },
+                    [this](qreal factor, const QPointF &from, const QPointF &to) {
+                        setScale(m_scale * factor, from, to - from);
+                    },
+                    [this](const QPointF &at) { toggleActualSize(at); });
 }
 
 ImageViewer::ImageViewer(std::vector<Entry> pictures, int index, QWidget *parent)
@@ -157,14 +163,14 @@ void ImageViewer::zoomAt(const QPointF &anchor, qreal factor)
     setScale(m_scale * factor, anchor);
 }
 
-void ImageViewer::setScale(qreal scale, const QPointF &anchor)
+void ImageViewer::setScale(qreal scale, const QPointF &anchor, const QPointF &pan)
 {
     // Zooming out past the fitted size has nothing to show.
     scale = qBound(lowestScale(), scale, maxScale);
     // The image point under the anchor stays under it.
     const QPointF imagePoint = (anchor - m_offset) / m_scale;
     m_scale = scale;
-    m_offset = anchor - imagePoint * m_scale;
+    m_offset = anchor + pan - imagePoint * m_scale;
     m_fitted = std::abs(m_scale - fitScale()) < 1e-9;
     clampOffset();
     refresh();
@@ -229,8 +235,13 @@ void ImageViewer::mouseMoveEvent(QMouseEvent *event)
 {
     if (!m_panning)
         return;
-    m_offset += event->position() - m_lastPos;
+    panBy(event->position() - m_lastPos);
     m_lastPos = event->position();
+}
+
+void ImageViewer::panBy(const QPointF &delta)
+{
+    m_offset += delta;
     clampOffset();
     update();
 }
@@ -247,8 +258,13 @@ void ImageViewer::mouseDoubleClickEvent(QMouseEvent *event)
 {
     if (event->button() != Qt::LeftButton)
         return;
+    toggleActualSize(event->position());
+}
+
+void ImageViewer::toggleActualSize(const QPointF &anchor)
+{
     if (m_fitted && std::abs(fitScale() - 1 / devicePixelRatioF()) > 1e-9)
-        actualSize(event->position());
+        actualSize(anchor);
     else
         fit();
 }

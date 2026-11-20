@@ -100,6 +100,8 @@ add_library(vn_app STATIC
     src/markdown/Folding.cpp
     src/markdown/Folding.h
     src/markdown/ImageViewer.cpp
+    src/markdown/ViewerTouch.cpp
+    src/markdown/ViewerTouch.h
     src/markdown/ImageViewer.h
     src/markdown/MarkdownEditing.cpp
     src/markdown/MarkdownEditing.h
