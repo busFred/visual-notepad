@@ -20,6 +20,10 @@ bool TextView::viewportEvent(QEvent *event)
 {
     if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::Wheel)
         m_touchFlick.stop();
+    // QAbstractScrollArea also recognizes a two-finger pan. The raw
+    // touchscreen sequence already decides what the fingers do here.
+    if (event->type() == QEvent::Gesture && m_touchMode != TouchMode::Idle)
+        return true;
     if (auto *finger = touch::screenEvent(event)) {
         if (handleTouch(finger)) {
             event->accept();
@@ -45,21 +49,38 @@ bool TextView::handleTouch(QTouchEvent *event)
     }
     if (m_touchMode == TouchMode::Idle)
         return false;
-    if (type == QEvent::TouchCancel) {
-        m_touchMode = TouchMode::Idle;
+    if (type == QEvent::TouchCancel || points.size() != 1) {
+        if (m_touchMode == TouchMode::Select) {
+            m_dragging = false;
+            m_autoScroll.stop();
+        }
+        m_touchTap.reset();
+        // Keep consuming the sequence after any second finger.
+        m_touchMode = type == QEvent::TouchCancel || type == QEvent::TouchEnd ? TouchMode::Idle : TouchMode::Ignore;
         return true;
     }
-    if (points.size() != 1)
-        m_touchMode = TouchMode::Ignore; // Keep consuming the sequence after any second finger.
 
     if (m_touchMode != TouchMode::Ignore && type != QEvent::TouchBegin) {
         const QEventPoint &point = points.first();
         const QPointF at = point.position();
         const QPointF movement = at - m_touchStart;
         const qint64 now = m_touchTime.elapsed();
-        if (m_touchMode == TouchMode::Tap && movement.manhattanLength() >= QApplication::startDragDistance())
-            m_touchMode = TouchMode::Scroll;
+        if (m_touchMode == TouchMode::Tap && movement.manhattanLength() >= QApplication::startDragDistance()) {
+            m_touchTap.reset();
+            if (now >= touch::holdTime) {
+                m_touchMode = TouchMode::Select;
+                setFocus(Qt::MouseFocusReason);
+                m_dragUnit = Unit::Word;
+                m_dragOrigin = wordAt(positionAt(m_touchStart));
+                m_dragging = true;
+                setCaretRanges({m_dragOrigin}, 0);
+            } else {
+                m_touchMode = TouchMode::Scroll;
+            }
+        }
 
+        if (m_touchMode == TouchMode::Select)
+            touch::sendMouse(viewport(), QEvent::MouseMove, point.globalPosition(), event);
         if (m_touchMode == TouchMode::Scroll && at != m_touchLast) {
             const QPointF delta = m_touchLast - at;
             const qreal speed = delta.y() / qMax<qint64>(8, now - m_touchLastMove);
@@ -75,10 +96,20 @@ bool TextView::handleTouch(QTouchEvent *event)
             m_touchMode = TouchMode::Idle;
             if (mode == TouchMode::Tap) {
                 const QPointF global = point.globalPosition();
-                const QPointer<QWidget> target = viewport();
-                touch::sendMouse(target, QEvent::MouseButtonPress, global, event);
-                if (target)
-                    touch::sendMouse(target, QEvent::MouseButtonRelease, global, event);
+                if (now >= touch::holdTime) {
+                    m_touchTap.reset();
+                    touch::postContextMenu(viewport(), global);
+                } else if (m_touchTap.tap(global)) {
+                    setFocus(Qt::MouseFocusReason);
+                    setCaretRanges({wordAt(positionAt(at))}, 0);
+                } else {
+                    const QPointer<QWidget> target = viewport();
+                    touch::sendMouse(target, QEvent::MouseButtonPress, global, event);
+                    if (target)
+                        touch::sendMouse(target, QEvent::MouseButtonRelease, global, event);
+                }
+            } else if (mode == TouchMode::Select) {
+                touch::sendMouse(viewport(), QEvent::MouseButtonRelease, point.globalPosition(), event);
             } else if (mode == TouchMode::Scroll && now - m_touchLastMove < flickPause
                        && qAbs(m_touchVelocity) >= minVelocity) {
                 m_touchTime.restart();

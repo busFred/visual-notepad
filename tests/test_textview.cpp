@@ -13,6 +13,7 @@
 #include <QVBoxLayout>
 #include <QClipboard>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QScrollBar>
 #include <QMenu>
 #include <QMouseEvent>
@@ -84,6 +85,10 @@ private Q_SLOTS:
     void cleanup();
 
     void touchDragScrollsWithoutSelecting();
+    void touchDoubleTapSelectsAWord();
+    void touchHoldOpensContextMenu();
+    void touchHoldAndDragSelectsText();
+    void touchPinchLeavesDocumentAlone();
     void mouseDragStillSelects();
     void columnsShowLinesInColumns();
     void columnsNumberEachColumnsLines();
@@ -381,6 +386,77 @@ void TestTextView::touchDragScrollsWithoutSelecting()
     QTRY_VERIFY(m_view->scrollPixels() > dragged + 20);
     QCOMPARE(m_view->textCursor().position(), 0);
     QVERIFY(!m_view->hasSelection());
+}
+
+void TestTextView::touchDoubleTapSelectsAWord()
+{
+    setText(QStringLiteral("alpha beta gamma"));
+    auto *probe = static_cast<ProbeView *>(m_view);
+    QWidget *view = probe->viewport();
+    auto touch = QTest::touchEvent(view, QTest::createTouchDevice(), false);
+    const QPoint at(qRound(probe->left() + QFontMetricsF(probe->font()).horizontalAdvance(QStringLiteral("alpha be"))),
+                    probe->rowHeight() / 2 + 4);
+    touch.press(0, at).commit();
+    touch.release(0, at).commit();
+    QVERIFY(probe->textCursor().position() > 6);
+    QVERIFY(!probe->hasSelection());
+    touch.press(0, at).commit();
+    touch.release(0, at).commit();
+    QCOMPARE(probe->selectedText(), QStringLiteral("beta"));
+}
+
+void TestTextView::touchHoldOpensContextMenu()
+{
+    setText(QStringLiteral("alpha beta gamma"));
+    QWidget *view = m_view->viewport();
+    auto touch = QTest::touchEvent(view, QTest::createTouchDevice(), false);
+    const QPoint at(100, 50);
+    bool sawMenu = false;
+    // Close the menu once it opens to let its nested event loop return.
+    QTimer check;
+    connect(&check, &QTimer::timeout, this, [&] {
+        if (auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget())) {
+            sawMenu = menu->actions().size() >= 4;
+            menu->close();
+        }
+    });
+    check.start(10);
+    touch.press(0, at).commit();
+    QTest::qWait(550);
+    touch.release(0, at).commit();
+    QTRY_VERIFY(sawMenu);
+}
+
+void TestTextView::touchHoldAndDragSelectsText()
+{
+    setText(QStringLiteral("alpha beta gamma\none two three\nfour five six"));
+    auto *probe = static_cast<ProbeView *>(m_view);
+    QWidget *view = probe->viewport();
+    auto touch = QTest::touchEvent(view, QTest::createTouchDevice(), false);
+    const QPoint at(qRound(probe->left()) + 10, probe->rowHeight() / 2 + 4);
+    const QPoint end = at + QPoint(20, probe->rowHeight());
+    touch.press(0, at).commit();
+    QTest::qWait(550);
+    touch.move(0, end).commit();
+    touch.release(0, end).commit();
+    QVERIFY(probe->selectedText().contains(QStringLiteral("gamma")));
+    QCOMPARE(probe->scrollPixels(), qreal(0));
+}
+
+void TestTextView::touchPinchLeavesDocumentAlone()
+{
+    setText(QStringLiteral("alpha beta gamma\n").repeated(40));
+    QWidget *view = m_view->viewport();
+    auto touch = QTest::touchEvent(view, QTest::createTouchDevice(), false);
+    QSignalSpy zoom(m_view, &TextView::zoomRequested);
+    touch.press(0, QPoint(120, 100)).press(1, QPoint(160, 140)).commit();
+    touch.move(0, QPoint(70, 110)).move(1, QPoint(210, 230)).commit();
+    touch.release(0, QPoint(70, 110)).stationary(1).commit();
+    touch.move(1, QPoint(210, 150)).commit();
+    touch.release(1, QPoint(210, 150)).commit();
+    QCOMPARE(m_view->textCursor().position(), 0);
+    QCOMPARE(m_view->scrollPixels(), qreal(0));
+    QVERIFY(zoom.isEmpty());
 }
 
 void TestTextView::mouseDragStillSelects()

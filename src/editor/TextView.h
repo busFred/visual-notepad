@@ -8,6 +8,7 @@
 // hooks.
 #pragma once
 
+#include "../TouchInput.h"
 #include "../markdown/MarkdownEditing.h"
 #include "LineLayout.h"
 #include "Search.h"
@@ -862,13 +863,14 @@ private:
     bool m_scrollBarsHidden = false;
 
     // Touch scrolling keeps pixels within a row, like the wheel.
-    enum class TouchMode { Idle, Tap, Scroll, Ignore };
+    enum class TouchMode { Idle, Tap, Scroll, Select, Ignore };
     TouchMode m_touchMode = TouchMode::Idle;
     QPointF m_touchStart, m_touchLast;
     QElapsedTimer m_touchTime;
     qint64 m_touchLastMove = 0;
     qreal m_touchVelocity = 0;
     QBasicTimer m_touchFlick;
+    touch::DoubleTap m_touchTap;
 
     // Mouse.
     bool m_dragging = false;

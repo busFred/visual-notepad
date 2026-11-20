@@ -2143,7 +2143,12 @@ bool TextView::event(QEvent *event)
     if (event->type() == QEvent::Hide) {
         m_settleTimer.stop();
         m_touchFlick.stop();
+        if (m_touchMode == TouchMode::Select) {
+            m_dragging = false;
+            m_autoScroll.stop();
+        }
         m_touchMode = TouchMode::Idle;
+        m_touchTap.reset();
     }
     if (event->type() == QEvent::ShortcutOverride) {
         // Keep plain typing, Tab and editing keys in the editor even if a
@@ -2436,7 +2441,8 @@ void TextView::mousePressEvent(QMouseEvent *event)
             return;
     }
     // Third click in a row: select the line (the paragraph in rendered text).
-    if (m_doubleClickTime.isValid() && m_doubleClickTime.elapsed() <= QApplication::doubleClickInterval()
+    if (event->pointingDevice()->type() != QInputDevice::DeviceType::TouchScreen && m_doubleClickTime.isValid()
+        && m_doubleClickTime.elapsed() <= QApplication::doubleClickInterval()
         && (event->position() - m_doubleClickPos).manhattanLength() <= QApplication::startDragDistance() * 2) {
         m_doubleClickTime.invalidate();
         m_dragUnit = Unit::Line;

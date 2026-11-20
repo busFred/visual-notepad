@@ -1,6 +1,9 @@
 #pragma once
 
-#include <QCoreApplication>
+#include <QApplication>
+#include <QContextMenuEvent>
+#include <QElapsedTimer>
+#include <QStyleHints>
 #include <QMouseEvent>
 #include <QTouchEvent>
 #include <QWidget>
@@ -33,6 +36,39 @@ inline void sendMouse(QWidget *widget, QEvent::Type type, const QPointF &global,
                       Qt::MouseEventSynthesizedByApplication, touch->pointingDevice());
     mouse.setTimestamp(touch->timestamp());
     QCoreApplication::sendEvent(widget, &mouse);
+}
+
+inline constexpr qint64 holdTime = 500;
+
+class DoubleTap
+{
+public:
+    bool tap(const QPointF &position)
+    {
+        const auto *hints = QApplication::styleHints();
+        const bool second = m_time.isValid() && m_time.elapsed() <= hints->mouseDoubleClickInterval()
+                            && (position - m_last).manhattanLength() <= hints->touchDoubleTapDistance();
+        if (second) {
+            reset();
+        } else {
+            m_last = position;
+            m_time.start();
+        }
+        return second;
+    }
+
+    void reset() { m_time.invalidate(); }
+
+private:
+    QElapsedTimer m_time;
+    QPointF m_last;
+};
+
+inline void postContextMenu(QWidget *target, const QPointF &global)
+{
+    const QPoint at = global.toPoint();
+    // Context menus may run a nested event loop. Deliver after touch end.
+    QCoreApplication::postEvent(target, new QContextMenuEvent(QContextMenuEvent::Other, target->mapFromGlobal(at), at));
 }
 
 } // namespace vn::touch
