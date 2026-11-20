@@ -7,6 +7,7 @@
 
 class QLabel;
 class QSlider;
+class QSizeF;
 
 namespace vn {
 
@@ -33,5 +34,11 @@ private:
     QSlider *m_slider;
     QLabel *m_percent;
 };
+
+// The size a viewer window opens at: its content at 100% (`natural`, in
+// device-independent pixels) plus `padding`, shrunk keeping its shape when it
+// would pass 80% of the host window or the screen; never below the window's
+// minimum size.
+QSize viewerWindowSize(const QSizeF &natural, const QSize &padding, const QWidget *window);
 
 } // namespace vn

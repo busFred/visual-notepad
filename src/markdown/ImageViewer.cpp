@@ -7,7 +7,6 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QScreen>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -34,22 +33,7 @@ ImageViewer::ImageViewer(const QImage &image, const QString &title, QWidget *par
     // The controls float over the bottom of the picture.
     m_bar = new ZoomBar(this);
     // The content is centred, so leave room on both sides of the floating bar.
-    const QSize padding(int(2 * margin), int(2 * (margin + m_bar->height())));
-    QSize cap(900, 650);
-    if (parent)
-        cap = parent->window()->size() * 4 / 5;
-    if (const QScreen *screen = this->screen())
-        cap = cap.boundedTo(screen->availableGeometry().size());
-    cap = cap.expandedTo(minimumSize());
-    QSizeF content = QSizeF(m_image.size()) / devicePixelRatioF();
-    if (!content.isEmpty()) {
-        content.scale(QSizeF((cap - padding).expandedTo(QSize(1, 1))), Qt::KeepAspectRatio);
-        const QSizeF natural = QSizeF(m_image.size()) / devicePixelRatioF();
-        if (content.width() > natural.width())
-            content = natural;
-    }
-    resize((QSize(int(std::ceil(content.width())), int(std::ceil(content.height()))) + padding)
-               .expandedTo(minimumSize()).boundedTo(cap));
+    resize(viewerWindowSize(QSizeF(m_image.size()) / devicePixelRatioF(), QSize(int(2 * margin), int(2 * (margin + m_bar->height()))), this));
 
     connect(m_bar, &ZoomBar::fitRequested, this, [this] { fit(); });
     connect(m_bar, &ZoomBar::zoomOutRequested, this, [this] { zoomAt(windowCentre(), 1 / 1.25); });

@@ -10,7 +10,6 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QScreen>
 #include <QScrollBar>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -174,22 +173,7 @@ BlockViewer::BlockViewer(std::unique_ptr<RenderedBlock> block, const QString &ti
     // The controls float over the bottom of the block.
     m_bar = new ZoomBar(m_canvas->viewport());
     // The content is centred, so leave room on both sides of the floating bar.
-    const QSize padding(int(2 * margin), int(2 * (margin + m_bar->height())));
-    QSize cap(900, 650);
-    if (parent)
-        cap = parent->window()->size() * 4 / 5;
-    if (const QScreen *screen = this->screen())
-        cap = cap.boundedTo(screen->availableGeometry().size());
-    cap = cap.expandedTo(minimumSize());
-    QSizeF content = m_block->contentSize();
-    if (!content.isEmpty()) {
-        content.scale(QSizeF((cap - padding).expandedTo(QSize(1, 1))), Qt::KeepAspectRatio);
-        const QSizeF natural = m_block->contentSize();
-        if (content.width() > natural.width())
-            content = natural;
-    }
-    resize((QSize(int(std::ceil(content.width())), int(std::ceil(content.height()))) + padding)
-               .expandedTo(minimumSize()).boundedTo(cap));
+    resize(viewerWindowSize(m_block->contentSize(), QSize(int(2 * margin), int(2 * (margin + m_bar->height()))), this));
 
     connect(m_bar, &ZoomBar::fitRequested, this, [this] { fit(); });
     connect(m_bar, &ZoomBar::zoomOutRequested, this, [this] { zoomAt(viewCentre(), 1 / 1.25); });

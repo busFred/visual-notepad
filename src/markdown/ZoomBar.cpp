@@ -2,9 +2,11 @@
 
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QScreen>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QToolButton>
+#include <QtMath>
 
 namespace vn {
 
@@ -58,6 +60,24 @@ void ZoomBar::setZoom(qreal fraction, int percent)
     const QSignalBlocker block(m_slider);
     m_slider->setValue(qRound(qBound<qreal>(0, fraction, 1) * sliderSteps));
     m_percent->setText(QStringLiteral("%1%").arg(percent));
+}
+
+QSize viewerWindowSize(const QSizeF &natural, const QSize &padding, const QWidget *window)
+{
+    QSize cap(900, 650);
+    if (const QWidget *parent = window->parentWidget())
+        cap = parent->window()->size() * 4 / 5;
+    if (const QScreen *screen = window->screen())
+        cap = cap.boundedTo(screen->availableGeometry().size());
+    cap = cap.expandedTo(window->minimumSize());
+    QSizeF content = natural;
+    // Only ever smaller: a small picture opens at its real size.
+    if (!content.isEmpty() && (content.width() > cap.width() - padding.width()
+                               || content.height() > cap.height() - padding.height()))
+        content.scale(QSizeF((cap - padding).expandedTo(QSize(1, 1))), Qt::KeepAspectRatio);
+    return (QSize(qCeil(content.width()), qCeil(content.height())) + padding)
+        .expandedTo(window->minimumSize())
+        .boundedTo(cap);
 }
 
 } // namespace vn
