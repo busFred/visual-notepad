@@ -193,6 +193,8 @@ private:
     std::function<void()> m_handler;
 };
 
+// The read popup's glyphs, in the text colour: two columns, or a width
+// between two bars.
 class ReadBarIcon : public QWidget
 {
 public:
@@ -227,8 +229,6 @@ protected:
 private:
     Kind m_kind;
 };
-
-
 
 // Column controls use the same popup and slider styling as zoom.
 class ReadPopup : public QFrame

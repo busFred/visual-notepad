@@ -271,7 +271,7 @@ private:
     bool m_splitLocked = true;
     bool m_visualLocked = false;
     int m_readColumns = 0;
-    int m_readChars = 70;
+    int m_readChars = 75;
     bool m_wantsColumns = false;
     // The view showing columns, if any.
     TextView *m_columnsView = nullptr;

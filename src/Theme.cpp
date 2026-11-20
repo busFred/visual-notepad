@@ -345,8 +345,6 @@ QTreeWidget::item:selected, QTreeWidget::branch:selected { background: @selectio
 #Pill QToolButton:hover { background: @panelTitle; }
 #Pill QToolButton:checked { background: @accent; }
 
-/* Read mode's bar left of the pill: − n +, then a slider, the zoom popup's. */
-
 #FindBar { background: @sideBar; border: 1px solid @divider; border-top: none; }
 #FindInput { background: @editor; border: 1px solid @divider; border-radius: 2px; }
 #FindInput[focused="true"] { border-color: @switchOn; }

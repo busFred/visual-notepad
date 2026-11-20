@@ -401,7 +401,6 @@ PreferencesDialog::PreferencesDialog(QWidget *parent)
     } else {
         resize(640, 520);
     }
-
 }
 
 void PreferencesDialog::closeEvent(QCloseEvent *event)
