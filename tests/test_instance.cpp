@@ -75,20 +75,28 @@ void TestInstance::protocol()
     QVERIFY(!decode(message.chopped(1)));
     QVERIFY(!decode(message + 'x'));
 
+    qint64 sent = 0;
+    QVERIFY(decode(encode(files, 1234), &sent));
+    QCOMPARE(sent, 1234);
+    // A launch waits five seconds for its answer: one older is left alone.
+    QVERIFY(isFresh(10'000, 10'000 + 3'000));
+    QVERIFY(!isFresh(10'000, 10'000 + 4'500));
+    QVERIFY(!isFresh(10'000 + 4'500, 10'000)); // (A clock set back.)
+
     QByteArray malformed = message;
-    malformed[4] = 2; // Unknown protocol version.
+    malformed[4] = 3; // Unknown protocol version.
     QVERIFY(!decode(malformed));
     malformed = message;
     malformed[5] = char(0xff); // Payload size over the limit.
     QVERIFY(!decode(malformed));
     malformed = message;
-    malformed.replace(9, 3, "rel"); // A relative path.
+    malformed.replace(17, 3, "rel"); // A relative path.
     QVERIFY(!decode(malformed));
     malformed = message;
-    malformed[10] = char(0xff); // Invalid UTF-8 inside an absolute path.
+    malformed[18] = char(0xff); // Invalid UTF-8 inside an absolute path.
     QVERIFY(!decode(malformed));
     malformed = message;
-    malformed.replace(9, 3, "\xef\xbb\xbf"); // A BOM is part of the supplied path.
+    malformed.replace(17, 3, "\xef\xbb\xbf"); // A BOM is part of the supplied path.
     QVERIFY(!decode(malformed));
 }
 

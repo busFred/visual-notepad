@@ -5,6 +5,7 @@
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDeadlineTimer>
 #include <QDir>
 #include <QElapsedTimer>
@@ -34,8 +35,10 @@ namespace vn {
 
 namespace {
 
-constexpr QByteArrayView magic("VNOP\x01");
-constexpr qsizetype headerSize = magic.size() + sizeof(quint32);
+constexpr QByteArrayView magic("VNOP\x02");
+constexpr qsizetype sizeAt = magic.size();
+constexpr qsizetype sentAt = sizeAt + sizeof(quint32);
+constexpr qsizetype headerSize = sentAt + sizeof(qint64);
 constexpr qsizetype maxPayload = 256 * 1024;
 constexpr int timeoutMs = 5000;
 constexpr int maxReaders = 16;
@@ -204,13 +207,14 @@ bool isAbsoluteFilePath(const QString &path)
 #endif
 }
 
-// Each request starts with magic and version, followed by a big-endian
-// payload size, then one NUL-terminated UTF-8 string per file.
+// Each request starts with magic and version, a big-endian payload size and
+// the time it was sent (ms since the epoch), then one NUL-terminated UTF-8
+// string per file.
 qsizetype messageSize(QByteArrayView header)
 {
     if (header.size() < headerSize || !header.startsWith(magic))
         return 0;
-    const quint32 payloadSize = qFromBigEndian<quint32>(header.data() + magic.size());
+    const quint32 payloadSize = qFromBigEndian<quint32>(header.data() + sizeAt);
     return payloadSize <= maxPayload ? headerSize + payloadSize : 0;
 }
 
@@ -250,10 +254,19 @@ bool sendRequest(QLocalSocket &socket, const QStringList &files)
 
 } // namespace
 
-QByteArray instanceRequest::encode(const QStringList &files)
+bool instanceRequest::isFresh(qint64 sent, qint64 now)
+{
+    // Well inside the time the launch waits for its answer (timeoutMs from
+    // before it sent): one older has been given up on, and its files opened
+    // by the launch itself.
+    return qAbs(now - sent) < timeoutMs - 1000;
+}
+
+QByteArray instanceRequest::encode(const QStringList &files, qint64 sent)
 {
     QByteArray message = magic.toByteArray();
     message.resize(headerSize);
+    qToBigEndian<qint64>(sent < 0 ? QDateTime::currentMSecsSinceEpoch() : sent, message.data() + sentAt);
     for (const QString &path : files) {
         if (path.size() >= maxPayload || !isAbsoluteFilePath(path) || !path.isValidUtf16())
             return {};
@@ -263,14 +276,16 @@ QByteArray instanceRequest::encode(const QStringList &files)
         message.append(bytes);
         message.append('\0');
     }
-    qToBigEndian<quint32>(quint32(message.size() - headerSize), message.data() + magic.size());
+    qToBigEndian<quint32>(quint32(message.size() - headerSize), message.data() + sizeAt);
     return message;
 }
 
-std::optional<QStringList> instanceRequest::decode(QByteArrayView message)
+std::optional<QStringList> instanceRequest::decode(QByteArrayView message, qint64 *sent)
 {
     if (const qsizetype size = messageSize(message); size == 0 || size != message.size())
         return std::nullopt;
+    if (sent)
+        *sent = qFromBigEndian<qint64>(message.data() + sentAt);
     QStringList files;
     QStringDecoder utf8(QStringDecoder::Utf8, QStringConverter::Flag::Stateless | QStringConverter::Flag::ConvertInitialBom);
     QByteArrayView payload = message.sliced(headerSize);
@@ -378,7 +393,12 @@ void InstanceChannel::acceptConnections()
             }
             if (socket->bytesAvailable() < size)
                 return;
-            auto files = instanceRequest::decode(socket->read(size));
+            qint64 sent = 0;
+            auto files = instanceRequest::decode(socket->read(size), &sent);
+            // Read too late (this copy was busy): the launch has given up
+            // and opens the files itself; opening them here too would make two.
+            if (files && !instanceRequest::isFresh(sent, QDateTime::currentMSecsSinceEpoch()))
+                files.reset();
             // Not now (a dialog asks, such as whether to save before a window
             // or the app closes): no answer, and the launch opens the files
             // on its own rather than in a window about to go.
@@ -386,10 +406,11 @@ void InstanceChannel::acceptConnections()
                 files.reset();
             // Answered before the files open: opening can show a dialog,
             // which would keep the launch waiting past its timeout.
-            if (files) {
-                socket->write(&received, 1);
+            // (Nor opened if the answer cannot even be written.)
+            if (files && socket->write(&received, 1) != 1)
+                files.reset();
+            if (files)
                 socket->flush();
-            }
             socket->disconnectFromServer(); // (After the answer is written; then deleted.)
             if (files)
                 Q_EMIT requested(*files);

@@ -12,9 +12,12 @@ namespace vn {
 
 namespace instanceRequest {
 
-// An empty file list requests a new untitled window.
-QByteArray encode(const QStringList &files);
-std::optional<QStringList> decode(QByteArrayView message);
+// An empty file list requests a new untitled window. `sent`: when the
+// request was sent, in ms since the epoch (negative: now).
+QByteArray encode(const QStringList &files, qint64 sent = -1);
+std::optional<QStringList> decode(QByteArrayView message, qint64 *sent = nullptr);
+// Whether a request sent at `sent` is still awaited by its launch at `now`.
+bool isFresh(qint64 sent, qint64 now);
 
 } // namespace instanceRequest
 
