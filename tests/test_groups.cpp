@@ -45,6 +45,7 @@ private Q_SLOTS:
     void closingLastTab_data();
     void closingLastTab();
     void lastTabDraggedOutClosesWindow();
+    void lastTabMovedByMenuKeepsWindow();
     void droppedNowhereOpensWindow();
     void tabsListBothGroups();
     void doubleClickingHandleEvensGroups();
@@ -304,6 +305,25 @@ void TestGroups::closingLastTab()
         auto *welcome = window.findChild<vn::WelcomeView *>();
         QVERIFY(welcome && welcome->isVisible());
     }
+}
+
+// Moving the last tab with the menu is no close: the window stays, whatever
+// the preference for closing the last tab says.
+void TestGroups::lastTabMovedByMenuKeepsWindow()
+{
+    auto &settings = vn::Settings::instance();
+    const auto reset = qScopeGuard([&settings] { settings.reset(vn::key::lastTabClosed); });
+    settings.setValue(vn::key::lastTabClosed, QStringLiteral("close"));
+    MainWindow window;
+    window.newFile();
+    show(window);
+    DocumentTab *tab = window.mainGroup()->tab(0);
+    window.moveTabToNewWindow(tab);
+    auto *other = qobject_cast<MainWindow *>(tab->window());
+    QVERIFY(other && other != &window);
+    const auto closeOther = qScopeGuard([other] { other->close(); });
+    QCOMPARE(window.tabCount(), 0);
+    QVERIFY(window.isVisible());
 }
 
 void TestGroups::lastTabDraggedOutClosesWindow()

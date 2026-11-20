@@ -2526,8 +2526,10 @@ MainWindow *MainWindow::moveTabsToNewWindow(const QList<DocumentTab *> &tabs, st
     if (globalPos)
         window->move(*globalPos - QPoint(60, 14));
     window->show();
-    if (!copy)
-        closeIfNoTabs(closeIfEmpty);
+    // A move is no close: the preference for the last tab doesn't apply, and
+    // the window goes only when asked (a tab dragged out), as before it.
+    if (!copy && closeIfEmpty)
+        closeIfNoTabs(true);
     return window;
 }
 
