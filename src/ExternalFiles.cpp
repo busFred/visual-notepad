@@ -7,6 +7,9 @@
 #include <QApplication>
 #include <QFileOpenEvent>
 #include <QScopedValueRollback>
+#include <QTimer>
+
+#include <utility>
 
 namespace vn {
 
@@ -26,11 +29,15 @@ bool ExternalFiles::eventFilter(QObject *watched, QEvent *event)
         }
     }
 #ifdef Q_OS_MACOS
-    // Finder sends FileOpen events, including for a drop on the Dock icon.
+    // Finder sends FileOpen events, including for a drop on the Dock icon:
+    // one per file, back to back. Gather those of one go into one request, so
+    // that "A new window" opens the files together, not a window each.
     if (event->type() == QEvent::FileOpen) {
         const QString file = static_cast<QFileOpenEvent *>(event)->file();
         if (!file.isEmpty()) {
-            request({file});
+            if (m_finderFiles.isEmpty())
+                QTimer::singleShot(0, this, [this] { request(std::exchange(m_finderFiles, {})); });
+            m_finderFiles.append(file);
             return true;
         }
     }

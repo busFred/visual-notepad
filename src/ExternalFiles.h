@@ -30,6 +30,7 @@ private:
 
     QList<QPointer<MainWindow>> m_activationOrder;
     QQueue<QStringList> m_requests;
+    QStringList m_finderFiles; // FileOpen events not yet made a request
     bool m_ready = false;
     bool m_dispatching = false;
 };
