@@ -58,7 +58,7 @@ bool ViewerTouch::eventFilter(QObject *, QEvent *event)
                 return true;
             }
             if (m_contact.elapsed() < touch::holdTime) {
-                if (m_taps.tap(point.globalPosition()))
+                if (m_taps.tap(point.globalPosition()) && m_toggle)
                     m_toggle(point.position());
                 return true;
             }
@@ -83,7 +83,7 @@ bool ViewerTouch::eventFilter(QObject *, QEvent *event)
             std::swap(first, second);
         const QPointF centre = (first->position() + second->position()) / 2;
         const qreal distance = QLineF(first->position(), second->position()).length();
-        if (m_first == first->id() && m_second == second->id() && m_distance > 0 && distance > 0)
+        if (m_zoom && m_first == first->id() && m_second == second->id() && m_distance > 0 && distance > 0)
             m_zoom(distance / m_distance, m_last, centre);
         m_first = first->id();
         m_second = second->id();

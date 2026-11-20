@@ -38,17 +38,12 @@ public:
         setFrameShape(QFrame::NoFrame);
         viewport()->setAutoFillBackground(false);
         setFocusPolicy(Qt::StrongFocus);
+        // A finger moves the table or equation about; pinching and the
+        // double tap that zoom are the picture window's only.
         new ViewerTouch(viewport(), [this](const QPointF &delta) {
             horizontalScrollBar()->setValue(horizontalScrollBar()->value() - qRound(delta.x()));
             verticalScrollBar()->setValue(verticalScrollBar()->value() - qRound(delta.y()));
-        }, [this](qreal factor, const QPointF &from, const QPointF &to) {
-            m_owner->setScale(m_owner->scale() * factor, from, to - from);
-        }, [this](const QPointF &at) {
-            if (m_owner->m_fitted || std::abs(m_owner->scale() - m_owner->fitScale()) < 1e-9)
-                m_owner->actualSize(at);
-            else
-                m_owner->fit();
-        });
+        }, {}, {});
     }
 
     // Where the block's top-left is in the viewport.

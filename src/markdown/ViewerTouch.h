@@ -14,6 +14,7 @@ public:
     using Zoom = std::function<void(qreal factor, const QPointF &from, const QPointF &to)>;
     using Toggle = std::function<void(const QPointF &at)>;
 
+    // An empty zoom or toggle: pinches and double taps do nothing.
     ViewerTouch(QWidget *canvas, Pan pan, Zoom zoom, Toggle toggle);
 
 protected:

@@ -524,7 +524,7 @@ private Q_SLOTS:
     void viewersLeaveTheWindowUsable();
     void tableViewerIsTheRealTable();
     void pictureViewerTouchZoomsAndTogglesSize();
-    void blockViewerTouchZoomsAndPans();
+    void blockViewerTouchPans();
     void tableGridLooksAsQtDrawsIt();
     void reflowedBlocksAreMadeBlocks();
     void zoomedBlocksLookAsFreshOnes_data();
@@ -6773,7 +6773,7 @@ void TestVisualView::pictureViewerTouchZoomsAndTogglesSize()
     QCOMPARE(viewer.scale(), fitted);
 }
 
-void TestVisualView::blockViewerTouchZoomsAndPans()
+void TestVisualView::blockViewerTouchPans()
 {
     const QString text = wideDocument();
     const int table = lineHolding(text, QStringLiteral("| Run"));
@@ -6781,32 +6781,30 @@ void TestVisualView::blockViewerTouchZoomsAndPans()
     BlockViewer *viewer = openViewer(m_view, m_view->readOpenRect(table));
     QVERIFY(viewer);
     viewer->resize(520, 480);
+    viewer->actualSize(QPointF(0, 0));
+    const qreal scale = viewer->scale();
     QWidget *canvas = viewer->viewport();
     auto touch = QTest::touchEvent(canvas, QTest::createTouchDevice(), false);
+    // A pinch is no zoom here (the picture window's only).
     const QPoint a(140, 100);
     const QPoint b(260, 100);
-    const QPoint shift(35, 0);
     touch.press(0, a).press(1, b).commit();
-    touch.move(0, a + shift - QPoint(60, 0)).move(1, b + shift + QPoint(60, 0)).commit();
-    QCOMPARE(viewer->scale(), 2.0);
+    touch.move(0, a - QPoint(60, 0)).move(1, b + QPoint(60, 0)).commit();
+    touch.release(0, a - QPoint(60, 0)).release(1, b + QPoint(60, 0)).commit();
+    QCOMPARE(viewer->scale(), scale);
+    // A finger moves the table, selecting nothing.
     const QPointF blockOrigin = viewer->toViewport(QPointF(0, viewer->block().stripHeight()));
-    QVERIFY(qAbs(blockOrigin.x() - (-200 + shift.x())) <= 1);
-    touch.release(0, a + shift - QPoint(60, 0)).release(1, b + shift + QPoint(60, 0)).commit();
     touch.press(0, b).commit();
     touch.move(0, b - QPoint(70, 0)).commit();
     touch.release(0, b - QPoint(70, 0)).commit();
     QCOMPARE(viewer->toViewport(QPointF(0, viewer->block().stripHeight())).x(), blockOrigin.x() - 70);
     QVERIFY(viewer->selectedText().isEmpty());
+    // Nor does a double tap zoom.
     for (int i = 0; i < 2; ++i) {
         touch.press(0, b).commit();
         touch.release(0, b).commit();
     }
-    QCOMPARE(viewer->scale(), viewer->fitScale());
-    for (int i = 0; i < 2; ++i) {
-        touch.press(0, b).commit();
-        touch.release(0, b).commit();
-    }
-    QCOMPARE(viewer->scale(), 1.0);
+    QCOMPARE(viewer->scale(), scale);
     closeViewers(m_view->window());
 }
 
