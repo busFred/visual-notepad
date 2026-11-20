@@ -151,7 +151,8 @@ void TestPreferences::touchFlickScrollsShortcuts()
     touch.move(0, start - QPoint(0, 50)).commit();
     QTest::qWait(25);
     touch.move(0, end).commit();
-    QTest::qWait(20);
+    // Lifted at once: a pause before lifting stops a flick, and a busy test
+    // machine can stretch any wait here into one.
     const int dragged = bar->value();
     QVERIFY(dragged > 0);
     touch.release(0, end).commit();
