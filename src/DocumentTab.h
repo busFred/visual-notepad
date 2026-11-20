@@ -238,9 +238,11 @@ private:
     void mirrorSelection(TextView *from, TextView *to);
     void setActiveView(TextView *view);
     void applyMarkdownState();
+    // "As many as fit" (a count of 0) becomes the count that fits, once, at
+    // the first columns layout shown; the count then stays.
+    void resolveReadColumns();
     // Columns follow the wish, the mode and the lock; switched: the user
     // asked for them (or for Scroll) just now.
-    void resolveReadColumns();
     void updateColumns(bool switched = false);
 
     std::shared_ptr<TextFile> m_file;

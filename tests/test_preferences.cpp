@@ -693,9 +693,6 @@ void TestPreferences::lineSpacingWritesKey()
     QCOMPARE(combo->currentText(), QStringLiteral("1.2"));
 }
 
-// The old values counted the font's own line height, the new ones count its
-// size: a stored old value becomes the same look, on a listed value if one is
-// within 0.05, else as it is (rounded to hundredths).
 void TestPreferences::preferenceResetButton()
 {
     auto *button = find<QToolButton>(QString::fromLatin1(key::lineNumbers) + QStringLiteral("Reset"));
@@ -720,6 +717,8 @@ void TestPreferences::offListNumericValueIsSorted()
     QCOMPARE(combo->itemData(index + 1).toDouble(), 1.5);
 }
 
+// The old values counted the font's own line height, the new ones count its
+// size: a stored old value becomes the listed value nearest the same look.
 void TestPreferences::oldLineSpacingsAreConverted()
 {
     const QString before = Settings::instance().fileName();
