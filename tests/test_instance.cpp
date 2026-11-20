@@ -34,6 +34,7 @@ private Q_SLOTS:
     void routesPendingFile();
     void waitsForADialog();
 #ifdef Q_OS_LINUX
+    void simultaneousLaunches_data();
     void simultaneousLaunches();
     void unreachableCopyKeepsItsSession();
 #endif
@@ -178,17 +179,33 @@ void TestInstance::routesPendingFile()
 }
 
 #ifdef Q_OS_LINUX
+void TestInstance::simultaneousLaunches_data()
+{
+    QTest::addColumn<bool>("cutShortKey");
+    QTest::newRow("no key yet") << false;
+    // (Left empty by a crash: both launches must still agree on its new one.)
+    QTest::newRow("cut-short key") << true;
+}
+
 void TestInstance::simultaneousLaunches()
 {
-    const QString firstPath = write(QStringLiteral("launch1.txt"));
-    const QString secondPath = write(QStringLiteral("launch2.txt"));
+    QFETCH(bool, cutShortKey);
+    const QString tag = cutShortKey ? QStringLiteral("-cut") : QString();
+    const QString firstPath = write(QStringLiteral("launch1%1.txt").arg(tag));
+    const QString secondPath = write(QStringLiteral("launch2%1.txt").arg(tag));
     QVERIFY(!firstPath.isEmpty());
     QVERIFY(!secondPath.isEmpty());
 
     // XDG directories isolate both settings and recovery files of the children.
-    const QString data = m_dir.filePath(QStringLiteral("launch-data"));
+    const QString data = m_dir.filePath(QStringLiteral("launch-data") + tag);
+    const QString config = m_dir.filePath(QStringLiteral("launch-config") + tag);
+    if (cutShortKey) {
+        QVERIFY(QDir().mkpath(config + QStringLiteral("/visnotepad")));
+        QFile empty(config + QStringLiteral("/visnotepad/instance.key"));
+        QVERIFY(empty.open(QIODevice::WriteOnly));
+    }
     auto environment = QProcessEnvironment::systemEnvironment();
-    environment.insert(QStringLiteral("XDG_CONFIG_HOME"), m_dir.filePath(QStringLiteral("launch-config")));
+    environment.insert(QStringLiteral("XDG_CONFIG_HOME"), config);
     environment.insert(QStringLiteral("XDG_DATA_HOME"), data);
     environment.insert(QStringLiteral("VN_INSTANCE_NAME"), QStringLiteral("test-instance"));
 
@@ -209,7 +226,7 @@ void TestInstance::simultaneousLaunches()
     QVERIFY2(forwarded.exitCode() == 0, forwarded.readAllStandardError().constData());
     // The two first launches agreed on one key (else both would be primaries,
     // above), kept where only this user can read it.
-    QFile key(m_dir.filePath(QStringLiteral("launch-config/visnotepad/instance.key")));
+    QFile key(config + QStringLiteral("/visnotepad/instance.key"));
     QVERIFY(key.exists());
     QCOMPARE(key.permissions() & (QFileDevice::ReadGroup | QFileDevice::ReadOther), QFileDevice::Permissions());
     QVERIFY(key.open(QIODevice::ReadOnly));

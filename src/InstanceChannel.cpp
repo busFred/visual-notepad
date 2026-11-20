@@ -47,50 +47,31 @@ constexpr char received = 'K';
 
 // A random key kept in the user's own settings folder, which other users
 // cannot read: it makes the channel's name one they cannot guess, so they
-// cannot take the name first and receive the paths this user opens. Made
-// once, atomically, so that two first launches agree on it.
-QByteArray newKey()
-{
-    QByteArray key(32, Qt::Uninitialized);
-    QRandomGenerator::system()->generate(key.begin(), key.end());
-    return key.toHex();
-}
-
+// cannot take the name first and receive the paths this user opens. Made,
+// or remade when cut short (by a crash or a power cut), under a lock of its
+// own, so that launches at once all read the one key.
 QByteArray instanceKey()
 {
     const QString path = QFileInfo(Settings::instance().fileName()).dir().filePath(QStringLiteral("instance.key"));
     QDir().mkpath(QFileInfo(path).absolutePath());
-    constexpr QFileDevice::Permissions ownerOnly = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
-    QFile file(path);
-    if (file.open(QIODevice::WriteOnly | QIODevice::NewOnly, ownerOnly)) {
-        const QByteArray key = newKey();
-        if (file.write(key) == key.size() && file.flush())
-            return key;
-        file.remove();
+    QLockFile lock(path + QStringLiteral(".lock"));
+    if (!lock.tryLock(timeoutMs))
         return {};
+    QFile file(path);
+    if (file.open(QIODevice::ReadOnly)) {
+        const QByteArray key = file.read(65);
+        file.close();
+        if (key.size() == 64)
+            return key;
     }
-    // Made by another launch, which writes it right after making it: a
-    // moment is enough to see it whole.
-    QDeadlineTimer deadline(500);
-    do {
-        if (file.open(QIODevice::ReadOnly)) {
-            const QByteArray key = file.read(65);
-            file.close();
-            if (key.size() == 64)
-                return key;
-        }
-        QThread::msleep(10);
-    } while (!deadline.hasExpired());
-    // Still not a key (cut short by a crash or a power cut): a new one, put
-    // in place whole. (A launch that read the old one meanwhile runs on its
-    // own; the session lock keeps the two apart.)
-    QSaveFile replacement(path);
-    const QByteArray key = newKey();
-    if (replacement.open(QIODevice::WriteOnly) && replacement.write(key) == key.size() && replacement.commit()) {
-        QFile::setPermissions(path, ownerOnly);
-        return key;
-    }
-    return {};
+    QByteArray key(32, Qt::Uninitialized);
+    QRandomGenerator::system()->generate(key.begin(), key.end());
+    key = key.toHex();
+    QSaveFile replacement(path); // (Whole or not at all.)
+    if (!replacement.open(QIODevice::WriteOnly) || replacement.write(key) != key.size() || !replacement.commit())
+        return {};
+    QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    return key;
 }
 
 QString serverName()
