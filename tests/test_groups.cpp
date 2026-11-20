@@ -10,11 +10,13 @@
 #include "Session.h"
 #include "Settings.h"
 #include "Theme.h"
+#include "TouchContextMenu.h"
 #include "WelcomeView.h"
 #include "editor/TextView.h"
 
 #include <QApplication>
 #include <QDropEvent>
+#include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
@@ -39,6 +41,7 @@ private Q_SLOTS:
     void newFileFollowsActiveGroup();
     void tabClickActivatesGroup();
     void touchHoldOpensTabMenu();
+    void touchDoubleTapSelectsAWordInATextField();
     void dropMovesTabBetweenGroups();
     void dropIsIgnoredForOtherMime();
     void moveToOtherWindow();
@@ -144,6 +147,29 @@ void TestGroups::touchHoldOpensTabMenu()
     touch.release(0, at).commit();
     QTRY_COMPARE(menu.size(), 1);
     QCOMPARE(menu.first().first().toInt(), 0);
+}
+
+// Text fields take the long press for their menu (TouchContextMenu); a
+// second quick tap is still their double click, which selects a word.
+void TestGroups::touchDoubleTapSelectsAWordInATextField()
+{
+    QLineEdit edit(QStringLiteral("alpha beta gamma"));
+    vn::touch::enableContextMenu(&edit);
+    edit.resize(300, 30);
+    edit.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&edit));
+    QPoint at;
+    for (int x = 0; x < edit.width() && at.isNull(); ++x) {
+        if (edit.cursorPositionAt(QPoint(x, edit.height() / 2)) == 8) // In "beta".
+            at = QPoint(x, edit.height() / 2);
+    }
+    QVERIFY(!at.isNull());
+    auto touch = QTest::touchEvent(&edit, QTest::createTouchDevice(), false);
+    for (int i = 0; i < 2; ++i) {
+        touch.press(0, at).commit();
+        touch.release(0, at).commit();
+    }
+    QCOMPARE(edit.selectedText(), QStringLiteral("beta"));
 }
 
 void TestGroups::tabClickActivatesGroup()
