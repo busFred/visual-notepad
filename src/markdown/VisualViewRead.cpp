@@ -36,8 +36,6 @@ namespace {
 // The room around the columns and the buttons are the source view's columns' too.
 constexpr int readTop = columns::topRoom;
 constexpr int readBottom = columns::bottomRoom;
-constexpr int readSideRoom = columns::sideRoom;
-constexpr int readGap = columns::gap;
 constexpr int pageArrowSize = columns::pageArrowSize;
 constexpr int pageArrowInset = columns::pageArrowInset;
 constexpr int lineButtonSize = columns::lineButtonSize;
@@ -321,8 +319,13 @@ void VisualView::setReadColumns(int columns)
     columns = qMax(0, columns);
     if (m_readColumns == columns)
         return;
+    const int oldWidth = readActive() ? readLayout().width : 0;
     m_readColumns = columns;
     if (readActive()) {
+        if (readLayout().width != oldWidth) {
+            hideFigureBar();
+            relayout(); // Figures and text lay out at the new width.
+        }
         placeReadControls();
         viewport()->update();
         noteReadScreen();
@@ -331,7 +334,7 @@ void VisualView::setReadColumns(int columns)
 
 void VisualView::setReadChars(int chars)
 {
-    chars = qBound(20, chars, 400);
+    chars = qBound(20, chars, 100);
     if (m_readChars == chars)
         return;
     m_readChars = chars;
@@ -353,6 +356,11 @@ int VisualView::readColumnCount()
     return readActive() ? readLayout().count : 1;
 }
 
+std::pair<int, int> VisualView::readColumnChars()
+{
+    return readActive() ? readLayout().shownChars : std::pair{50, 50};
+}
+
 const VisualView::ReadLayout &VisualView::readLayout() const
 {
     ReadLayout &l = m_readLayout;
@@ -371,11 +379,11 @@ const VisualView::ReadLayout &VisualView::readLayout() const
     QFont body = theme::textFont();
     body.setPointSizeF(body.pointSizeF() * fontSize / theme::editorFont().pointSizeF());
     const qreal charWidth = QFontMetricsF(body).averageCharWidth();
-    const int room = qMax(1, size.width() - 2 * readSideRoom);
-    l.gap = readGap;
-    l.width = qBound(1, qRound(m_readChars * charWidth), room);
-    l.fit = qMax(1, (room + l.gap) / (l.width + l.gap));
-    l.count = m_readColumns > 0 ? qMin(m_readColumns, l.fit) : l.fit;
+    const auto sizing = columns::sizing(size.width(), charWidth, 0, m_readColumns, m_readChars);
+    l.width = sizing.textWidth;
+    l.fit = sizing.fit;
+    l.count = sizing.count;
+    l.shownChars = {sizing.chars, sizing.maxChars};
     l.gap = columns::spreadGap(size.width(), l.count, l.width);
     const int total = l.count * l.width + (l.count - 1) * l.gap;
     l.left = (size.width() - total) / 2;
@@ -529,12 +537,19 @@ void VisualView::noteReadScreen()
     QTimer::singleShot(0, this, [this] {
         m_readNewsPending = false;
         ReadNews news;
-        if (readActive() && m_readFlow && !m_readFlow->screen().empty()) {
-            const md::Screen &screen = m_readFlow->screen();
-            const md::LineRange range = m_readFlow->lineRange();
-            news = {screen.start, screen.end, range.first, range.last, readLayout().fit};
-        } else if (readActive()) {
-            news.fit = readLayout().fit;
+        if (readActive()) {
+            const ReadLayout &layout = readLayout();
+            news.fit = layout.fit;
+            news.count = layout.count;
+            news.chars = layout.shownChars;
+            if (m_readFlow && !m_readFlow->screen().empty()) {
+                const md::Screen &screen = m_readFlow->screen();
+                const md::LineRange range = m_readFlow->lineRange();
+                news.start = screen.start;
+                news.end = screen.end;
+                news.first = range.first;
+                news.last = range.last;
+            }
         }
         placeReadControls(); // (The columns may have moved: a zoom, a font.)
         if (news == m_readNews)

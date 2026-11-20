@@ -20,6 +20,18 @@ inline constexpr int lineButtonSize = 20;
 inline constexpr int lineButtonTop = 18;
 inline constexpr int lineButtonBottom = 24; // From the bottom edge to its top.
 
+struct Sizing
+{
+    int count;
+    int fit;
+    int chars;
+    int maxChars;
+    int textWidth;
+};
+
+// Both views fit columns the same way. Source also needs room for its gutter.
+Sizing sizing(int viewWidth, qreal charWidth, int textInset, int wanted, int chars);
+
 // The gap between count columns of columnWidth in a view viewWidth wide:
 // the room the columns leave, shared evenly between the gaps and the two
 // sides, so a gap is never narrower than a side; but the sides keep sideRoom

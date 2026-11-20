@@ -93,6 +93,7 @@ private Q_SLOTS:
     void touchSwipeTurnsSourceColumnPages();
     void mouseDragStillSelects();
     void columnsShowLinesInColumns();
+    void columnsFitAroundTheGutter();
     void columnsNumberEachColumnsLines();
     void columnsCutWrappedLinesBetweenRows();
     void columnsScrollSidewaysOneByOne();
@@ -2421,6 +2422,46 @@ void TestTextView::columnsShowLinesInColumns()
     m_view->setColumnsShown(true, 40);
     m_view->grab();
     QCOMPARE(m_view->columnLineRange().first, 40);
+}
+
+void TestTextView::columnsFitAroundTheGutter()
+{
+    showColumns(300);
+    auto *probe = static_cast<ProbeView *>(m_view);
+    m_view->setColumnCount(1);
+    m_view->setColumnChars(85);
+    const int inset = m_view->columnRect(0).width() - qRound(probe->widthForText());
+    const qreal charWidth = probe->widthForText() / 85;
+    const auto resizeFor = [&](int chars) {
+        const int viewportWidth = 2 * 56 + 40 + 2 * (inset + qRound(chars * charWidth));
+        m_view->resize(m_view->width() + viewportWidth - m_view->viewport()->width(), m_view->height());
+    };
+
+    resizeFor(72);
+    QCOMPARE(m_view->maxColumnCount(), 2);
+    QCOMPARE(m_view->columnChars(), (std::pair{85, 100}));
+    m_view->setColumnCount(2);
+    QCOMPARE(m_view->shownColumnCount(), 2);
+    QCOMPARE(m_view->columnChars(), (std::pair{70, 70}));
+    QVERIFY(qAbs(m_view->columnRect(1).width() - inset - qRound(70 * charWidth)) <= 1);
+
+    const QFont original = m_view->font();
+    QFont zoomed = original;
+    zoomed.setPointSizeF(original.pointSizeF() * 1.5);
+    m_view->setFont(zoomed);
+    QCOMPARE(m_view->shownColumnCount(), 1);
+    m_view->setFont(original);
+    QCOMPARE(m_view->shownColumnCount(), 2);
+
+    resizeFor(49);
+    QCOMPARE(m_view->maxColumnCount(), 1);
+    QCOMPARE(m_view->shownColumnCount(), 1);
+    QCOMPARE(m_view->columnChars(), (std::pair{85, 100}));
+    resizeFor(72);
+    QCOMPARE(m_view->shownColumnCount(), 2);
+    QCOMPARE(m_view->columnChars(), (std::pair{70, 70}));
+    m_view->setColumnCount(1);
+    QCOMPARE(m_view->columnChars(), (std::pair{85, 100}));
 }
 
 // Each column has its own gutter; a wrapped row has no number, nor has a

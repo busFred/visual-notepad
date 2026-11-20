@@ -1055,6 +1055,8 @@ void VisualView::resizeEvent(QResizeEvent *event)
     layoutBanner();
     scheduleToolbarUpdate();
     placeReadControls();
+    if (readActive())
+        noteReadScreen();
     // Figures fit the height shown: only blocks with them render again.
     if (m_figuresRendered && figureBoxHeight() != m_rendersFigureHeight)
         relayout();

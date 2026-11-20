@@ -7,6 +7,24 @@
 
 namespace vn::columns {
 
+Sizing sizing(int viewWidth, qreal charWidth, int textInset, int wanted, int chars)
+{
+    const int room = qMax(1, viewWidth - 2 * sideRoom);
+    const auto textWidth = [charWidth](int n) { return qMax(1, qRound(n * charWidth)); };
+    // Standalone views also accept widths below the tab's 50-character minimum.
+    const int minimum = qMin(50, chars);
+    const int fit = qMax(1, (room + gap) / (textInset + textWidth(minimum) + gap));
+    const int fitAtWish = qMax(1, (room + gap) / (textInset + textWidth(chars) + gap));
+    const int count = wanted > 0 ? qMin(wanted, fit) : fitAtWish;
+    const int available = qMax(1, (room + gap) / count - gap - textInset);
+    int maxChars = 100;
+    while (maxChars > minimum && textWidth(maxChars) > available)
+        maxChars = qMax(minimum, maxChars - 5);
+    const int shown = qMin(chars, maxChars);
+    // There is always one column, even when it has less room than the minimum.
+    return {count, fit, shown, maxChars, qMin(textWidth(shown), available)};
+}
+
 int spreadGap(int viewWidth, int count, int columnWidth)
 {
     if (count < 2)

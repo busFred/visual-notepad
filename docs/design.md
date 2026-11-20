@@ -82,8 +82,14 @@ no bevels. Values live in `src/Theme.h`.
   zoom, line ending, encoding, language (clickable), sizing grip. Zoom is
   per tab and, in Source / Visual, per half: the half last clicked has a 2 px
   accent line, and the keys, Ctrl+wheel and the cell's popup act on it.
-  The Columns button opens a popup for the column count and width; these are
-  per tab and start from the preferences.
+  The Columns button opens a popup with the shown count above the width
+  slider. Both rows have − and + buttons. The per-tab count and width start
+  from the preferences. "As many as fit" picks the count once, at the first
+  layout, using the preferred width. Columns narrow in steps of five
+  characters down to 50 to fit the count; if fewer fit even at 50, fewer
+  show. The slider ends at the widest setting that fits the shown count.
+  Adding or removing columns, resizing, and zooming preserve the requested
+  width. The slider and its − and + buttons change it.
 - Web links always prompt: Open, Copy, Cancel.
 - Remote images (http/https) never load unasked. A bar above the visual view
   lists the hosts and the number of images and offers Load images / Don't

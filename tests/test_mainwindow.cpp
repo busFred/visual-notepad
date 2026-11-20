@@ -16,10 +16,12 @@
 
 #include "markdown/VisualView.h"
 
+#include <QFontMetricsF>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMimeData>
 #include <QSlider>
+#include <QStyleOptionSlider>
 #include <QWheelEvent>
 
 #include <QTextDocument>
@@ -91,6 +93,15 @@ QString firstHeading(const QTreeWidget *outline)
     return outline->topLevelItemCount() ? outline->topLevelItem(0)->text(0) : QString();
 }
 
+QToolButton *readControl(const QFrame *popup, const char *name)
+{
+    for (auto *button : popup->findChildren<QToolButton *>()) {
+        if (button->property("readControl").toString() == QLatin1String(name))
+            return button;
+    }
+    return nullptr;
+}
+
 // Spins the event loop until the outline's worker thread has been started
 // (not until it is done: that is only noticed by the next event loop pass).
 bool waitUntilBusy(const vn::MainWindow &window)
@@ -146,6 +157,9 @@ private Q_SLOTS:
     void collapseCommands();
     void readModeStatusAndPages();
     void readPopupIsPerTabAndStartsFromPreferences();
+    void readPopupNarrowsAndRestoresWidth();
+    void columnsResolvePreferenceOnce_data();
+    void columnsResolvePreferenceOnce();
     void viewSwitchComesFirstAndHides();
     void columnsMenuItemMirrorsTheSwitch();
     void columnsArePerTabAndNotSaved();
@@ -1424,16 +1438,10 @@ void TestMainWindow::readPopupIsPerTabAndStartsFromPreferences()
     QVERIFY(bar && bar->isVisible());
     auto *slider = bar->findChild<QSlider *>(QStringLiteral("ReadCharsSlider"));
     auto *count = bar->findChild<QLabel *>(QStringLiteral("ReadColumnCount"));
-    const auto control = [bar](const char *name) {
-        for (auto *button : bar->findChildren<QToolButton *>())
-            if (button->property("readControl").toString() == QLatin1String(name))
-                return button;
-        return static_cast<QToolButton *>(nullptr);
-    };
-    auto *fewer = control("ReadFewerColumns");
-    auto *more = control("ReadMoreColumns");
-    auto *narrower = control("ReadNarrower");
-    auto *wider = control("ReadWider");
+    auto *fewer = readControl(bar, "ReadFewerColumns");
+    auto *more = readControl(bar, "ReadMoreColumns");
+    auto *narrower = readControl(bar, "ReadNarrower");
+    auto *wider = readControl(bar, "ReadWider");
     QVERIFY(slider && count && fewer && more && narrower && wider);
     wider->click();
     QCOMPARE(slider->value(), 65);
@@ -1457,25 +1465,24 @@ void TestMainWindow::readPopupIsPerTabAndStartsFromPreferences()
     const QPoint offset = bar->pos() - expected.topLeft();
     QVERIFY(qAbs(offset.x()) <= 2 && qAbs(offset.y()) <= 2);
 
-    // Wider columns; + goes up to the most that fit, which is Auto.
-    slider->setValue(70);
+    slider->setValue(72);
+    QCOMPARE(slider->value(), 70);
     QCOMPARE(second->readChars(), 70);
     QCOMPARE(second->visualView()->readChars(), 70);
-    const int fit = second->visualView()->readMaxColumns();
+    const int fit = second->columnsFit();
     QVERIFY(fit >= 2);
-    while (more->isEnabled())
+    for (int next = 2; next <= fit; ++next) {
+        QVERIFY(more->isEnabled());
         more->click();
-    QCOMPARE(second->readColumns(), 0);
-    QCOMPARE(second->visualView()->readColumnCount(), fit);
-    QCOMPARE(count->text(), QStringLiteral("%1 (auto)").arg(fit));
+        QCOMPARE(second->readColumns(), next);
+    }
+    QVERIFY(!more->isEnabled());
+    QCOMPARE(second->columnsShownCount(), fit);
+    QCOMPARE(count->text(), QString::number(fit));
     QVERIFY(fewer->isEnabled());
     fewer->click();
     QCOMPARE(second->readColumns(), fit - 1);
     QCOMPARE(count->text(), QString::number(fit - 1));
-    // (Steps of 5.)
-    slider->setValue(72);
-    QCOMPARE(slider->value(), 70);
-    QCOMPARE(second->readChars(), 70);
 
     // Escape closes the popup, and clicking Columns again opens it.
     QTest::keyClick(bar, Qt::Key_Escape);
@@ -1500,6 +1507,136 @@ void TestMainWindow::readPopupIsPerTabAndStartsFromPreferences()
     QVERIFY(third);
     QCOMPARE(third->readChars(), 85);
 
+}
+
+void TestMainWindow::readPopupNarrowsAndRestoresWidth()
+{
+    vn::MainWindow window;
+    window.resize(1200, 600);
+    auto *tab = readingTab(window, QStringLiteral("width.md"));
+    QVERIFY(tab);
+    tab->setReadColumns(1);
+    tab->setReadChars(85);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *view = tab->visualView();
+    QFont body = vn::theme::textFont();
+    body.setPointSizeF(body.pointSizeF() * view->font().pointSizeF() / vn::theme::editorFont().pointSizeF());
+    const qreal charWidth = QFontMetricsF(body).averageCharWidth();
+    // Leave room for two 72-character columns, which puts the slider's end at 70.
+    const auto resizeFor = [&](int chars) {
+        const int viewportWidth = 2 * 56 + 40 + 2 * qRound(chars * charWidth);
+        window.resize(window.width() + viewportWidth - view->viewport()->width(), window.height());
+    };
+    resizeFor(72);
+    QTRY_COMPARE(tab->columnsFit(), 2);
+    viewButton(window, true)->click();
+    auto *popup = window.findChild<QFrame *>(QStringLiteral("ReadPopup"));
+    QVERIFY(popup && popup->isVisible());
+    auto *more = readControl(popup, "ReadMoreColumns");
+    auto *fewer = readControl(popup, "ReadFewerColumns");
+    auto *wider = readControl(popup, "ReadWider");
+    auto *slider = popup->findChild<QSlider *>(QStringLiteral("ReadCharsSlider"));
+    auto *count = popup->findChild<QLabel *>(QStringLiteral("ReadColumnCount"));
+    auto *value = popup->findChild<QLabel *>(QStringLiteral("ReadCharsValue"));
+    QVERIFY(more && fewer && wider && slider && count && value);
+    QCOMPARE(count->text(), QStringLiteral("1"));
+    QCOMPARE(count->geometry().center().x(), slider->geometry().center().x());
+    QCOMPARE(value->width(), value->fontMetrics().horizontalAdvance(QStringLiteral("100")));
+    QCOMPARE(slider->maximum(), 100);
+    QCOMPARE(slider->value(), 85);
+
+    QVERIFY(more->isEnabled());
+    more->click();
+    QCOMPARE(count->text(), QStringLiteral("2"));
+    QCOMPARE(tab->readColumns(), 2);
+    QCOMPARE(tab->readChars(), 85);
+    QCOMPARE(slider->minimum(), 50);
+    QCOMPARE(slider->maximum(), 70);
+    QCOMPARE(slider->sliderPosition(), 70);
+    QCOMPARE(value->text(), QStringLiteral("70"));
+    QVERIFY(!wider->isEnabled());
+    QVERIFY(!more->isEnabled());
+
+    fewer->click();
+    QCOMPARE(count->text(), QStringLiteral("1"));
+    QCOMPARE(slider->maximum(), 100);
+    QCOMPARE(slider->sliderPosition(), 85);
+    QCOMPARE(value->text(), QStringLiteral("85"));
+
+    // The window loses room for two even at 50, then gets it back.
+    resizeFor(49);
+    QTRY_VERIFY(!more->isEnabled());
+    QCOMPARE(count->text(), QStringLiteral("1"));
+    QCOMPARE(tab->readChars(), 85);
+    resizeFor(72);
+    QTRY_VERIFY(more->isEnabled());
+    more->click();
+
+    QStyleOptionSlider option;
+    option.initFrom(slider);
+    option.orientation = Qt::Horizontal;
+    option.minimum = slider->minimum();
+    option.maximum = slider->maximum();
+    option.sliderPosition = slider->sliderPosition();
+    option.sliderValue = slider->value();
+    const QPoint handle = slider->style()
+                              ->subControlRect(QStyle::CC_Slider, &option, QStyle::SC_SliderHandle, slider)
+                              .center();
+    const QPoint left(0, handle.y());
+    QTest::mousePress(slider, Qt::LeftButton, {}, handle);
+    QTest::mouseMove(slider, left);
+    QTest::mouseRelease(slider, Qt::LeftButton, {}, left);
+    QCOMPARE(tab->readChars(), 50);
+    fewer->click();
+    QCOMPARE(slider->value(), 50);
+}
+
+void TestMainWindow::columnsResolvePreferenceOnce_data()
+{
+    QTest::addColumn<bool>("visual");
+    QTest::newRow("visual") << true;
+    QTest::newRow("source") << false;
+}
+
+void TestMainWindow::columnsResolvePreferenceOnce()
+{
+    QFETCH(bool, visual);
+    auto &settings = vn::Settings::instance();
+    settings.setValue(vn::key::readColumns, 0);
+    settings.setValue(vn::key::readChars, 85);
+    const auto restore = qScopeGuard([&] {
+        settings.reset(vn::key::readColumns);
+        settings.reset(vn::key::readChars);
+    });
+    vn::MainWindow window;
+    window.resize(2000, 600);
+    auto *tab = visual ? readingTab(window, QStringLiteral("initial.md"))
+                       : codeTab(window, QStringLiteral("initial.py"), 212);
+    QVERIFY(tab);
+    tab->setColumns(true);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QTRY_VERIFY(tab->readColumns() >= 2);
+    const int initial = tab->readColumns();
+    QCOMPARE(tab->columnsShownCount(), initial);
+    QCOMPARE(tab->columnsChars().first, 85);
+    const int width = visual ? tab->visualView()->readColumnRect(0).width()
+                             : tab->sourceView()->columnRect(0).width();
+    const int viewport = tab->editor()->viewport()->width();
+    QCOMPARE(initial, (viewport - 2 * 56 + 40) / (width + 40));
+
+    window.resize(3200, 600);
+    QTRY_VERIFY(tab->columnsFit() > initial);
+    QCOMPARE(tab->readColumns(), initial);
+    QCOMPARE(tab->columnsShownCount(), initial);
+    window.resize(600, 600);
+    QTRY_VERIFY(tab->columnsShownCount() < initial);
+    QCOMPARE(tab->readColumns(), initial);
+    QCOMPARE(tab->readChars(), 85);
+    window.resize(2000, 600);
+    QTRY_COMPARE(tab->columnsShownCount(), initial);
+    QCOMPARE(tab->columnsChars().first, 85);
 }
 
 QToolButton *TestMainWindow::viewButton(vn::MainWindow &window, bool columns)

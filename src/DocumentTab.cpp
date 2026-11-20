@@ -169,7 +169,7 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
                                                          : ViewMode::Visual;
     m_sourceZoom = m_visualZoom = Settings::instance().number(key::zoom);
     m_readColumns = qBound(0, Settings::instance().number(key::readColumns), 99);
-    m_readChars = qBound(50, Settings::instance().number(key::readChars), 100);
+    setReadChars(Settings::instance().number(key::readChars));
     applySettings();
     connect(&Settings::instance(), &Settings::changed, this, &DocumentTab::onSettingChanged);
 
@@ -198,10 +198,10 @@ DocumentTab::DocumentTab(std::shared_ptr<TextFile> file, QWidget *parent)
     connect(m_editor, &TextView::columnsChanged, this, [this] {
         if (m_columnsView != m_editor)
             return;
+        resolveReadColumns();
         Q_EMIT readStateChanged();
     });
     m_editor->setColumnCount(m_readColumns);
-    m_editor->setColumnChars(m_readChars);
 
     // What the file shares with every tab showing it.
     TextFile *f = m_file.get();
@@ -405,6 +405,7 @@ void DocumentTab::ensureVisualView()
     connect(m_visual, &VisualView::readChanged, this, [this] {
         if (m_columnsView != m_visual)
             return;
+        resolveReadColumns();
         // The hidden source view keeps the place too: the session saves it,
         // and Source mode opens there.
         if (const auto [first, last] = m_visual->readLineRange(); first >= 0)
@@ -558,10 +559,24 @@ int DocumentTab::columnsFit() const
     return isReadMode() ? m_visual->readMaxColumns() : 1;
 }
 
+std::pair<int, int> DocumentTab::columnsChars() const
+{
+    if (m_columnsView == m_editor)
+        return m_editor->columnChars();
+    return isReadMode() ? m_visual->readColumnChars() : std::pair{50, 50};
+}
+
+void DocumentTab::resolveReadColumns()
+{
+    // Only the first visible columns layout uses the preference's fit at the
+    // requested width. A hidden tab or a Visual parse still waiting has no layout yet.
+    if (m_readColumns == 0 && m_columnsView && m_columnsView->isVisible()
+        && (!isReadMode() || m_visual->showsReadColumns()))
+        setReadColumns(columnsShownCount());
+}
+
 void DocumentTab::setReadColumns(int columns)
 {
-    // 0 is Auto; a count the window cannot fit gets what fits (the view's
-    // business), so there is no fixed top here.
     m_readColumns = qMax(0, columns);
     m_editor->setColumnCount(m_readColumns);
     if (m_visual)
@@ -570,7 +585,7 @@ void DocumentTab::setReadColumns(int columns)
 
 void DocumentTab::setReadChars(int chars)
 {
-    m_readChars = qBound(50, chars, 100);
+    m_readChars = qRound(qBound(50, chars, 100) / 5.0) * 5;
     m_editor->setColumnChars(m_readChars);
     if (m_visual)
         m_visual->setReadChars(m_readChars);
@@ -605,6 +620,7 @@ void DocumentTab::updateColumns(bool switched)
                 m_editor->setColumnsShown(true, start);
             else
                 m_visual->setReadMode(true, start);
+            resolveReadColumns();
         } else if (old && m_wantsColumns && top >= 0) {
             // Columns cannot show here: Scroll, with the same text at the top
             // and the caret at its start, ready to edit.
@@ -722,6 +738,7 @@ void DocumentTab::showEvent(QShowEvent *event)
         applySettings();
     }
     m_file->applyPendingSettings();
+    resolveReadColumns();
 }
 
 bool DocumentTab::eventFilter(QObject *watched, QEvent *event)

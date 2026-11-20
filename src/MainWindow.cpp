@@ -285,7 +285,7 @@ public:
         layout->addWidget(m_count, 0, 2);
         m_more = button(QStringLiteral("+"), "ReadMoreColumns", 0, 3);
         m_fewer->setToolTip(tr("Fewer columns"));
-        m_more->setToolTip(tr("More columns (the most that fit is Auto)"));
+        m_more->setToolTip(tr("More columns"));
         m_narrower = button(QStringLiteral("−"), "ReadNarrower", 1, 1);
         m_slider = new QSlider(Qt::Horizontal, this);
         m_slider->setObjectName(QStringLiteral("ReadCharsSlider"));
@@ -301,22 +301,22 @@ public:
         m_wider->setToolTip(tr("More characters per column"));
         m_value = new QLabel(this);
         m_value->setObjectName(QStringLiteral("ReadCharsValue"));
-        m_value->setMinimumWidth(m_value->fontMetrics().horizontalAdvance(QStringLiteral("100")));
+        m_value->ensurePolished();
+        m_value->setFixedWidth(m_value->fontMetrics().horizontalAdvance(QStringLiteral("100")));
         m_value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         layout->addWidget(m_value, 1, 4);
         connect(m_fewer, &QToolButton::clicked, this, [this] {
-            m_tab->setReadColumns(qMax(1, m_tab->columnsShownCount() - 1));
+            m_tab->setReadColumns(m_tab->columnsShownCount() - 1);
             refresh();
         });
         connect(m_more, &QToolButton::clicked, this, [this] {
-            const int next = m_tab->columnsShownCount() + 1;
-            m_tab->setReadColumns(next >= m_tab->columnsFit() ? 0 : next);
+            m_tab->setReadColumns(m_tab->columnsShownCount() + 1);
             refresh();
         });
         connect(m_narrower, &QToolButton::clicked, this, [this] { m_slider->setValue(m_slider->value() - 5); });
         connect(m_wider, &QToolButton::clicked, this, [this] { m_slider->setValue(m_slider->value() + 5); });
         connect(m_slider, &QSlider::valueChanged, this, [this](int value) {
-            m_tab->setReadChars(qBound(50, qRound(value / 5.0) * 5, 100));
+            m_tab->setReadChars(value);
             refresh();
         });
         connect(tab, &QObject::destroyed, this, &QWidget::close);
@@ -334,19 +334,16 @@ private:
     void refresh()
     {
         const int shown = m_tab->columnsShownCount();
-        const int fit = m_tab->columnsFit();
-        const int columns = m_tab->readColumns();
-        m_count->setText(columns == 0 ? tr("%1 (auto)").arg(shown) : QString::number(shown));
-        m_count->setToolTip(columns == 0 ? tr("Columns: as many as fit (%1)").arg(fit)
-                                         : tr("Columns: %1 of the %2 that fit").arg(shown).arg(fit));
+        m_count->setText(QString::number(shown));
         m_fewer->setEnabled(shown > 1);
-        m_more->setEnabled(columns != 0);
-        const int chars = m_tab->readChars();
+        m_more->setEnabled(shown < m_tab->columnsFit());
+        const auto [chars, maxChars] = m_tab->columnsChars();
         const QSignalBlocker blocker(m_slider);
+        m_slider->setMaximum(maxChars);
         m_slider->setValue(chars);
         m_value->setText(QString::number(chars));
         m_narrower->setEnabled(chars > 50);
-        m_wider->setEnabled(chars < 100);
+        m_wider->setEnabled(chars < maxChars);
     }
     DocumentTab *m_tab;
     QToolButton *m_fewer, *m_more, *m_narrower, *m_wider;

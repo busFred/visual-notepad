@@ -5539,9 +5539,12 @@ void TestVisualView::readColumnsFollowWidthCharactersAndZoom()
         return qMax(1, (room + 40) / (width + 40));
     };
     startReading(readDocument(), 1500, 600);
-    QCOMPARE(m_view->readMaxColumns(), fits(75));
+    const int viewportWidth = 2 * 56 + 2 * 40 + 3 * qRound(55 * charWidth());
+    m_view->resize(m_view->width() + viewportWidth - m_view->viewport()->width(), 600);
+    m_view->grab();
+    QCOMPARE(m_view->readMaxColumns(), fits(50));
     QVERIFY(m_view->readMaxColumns() >= 2);
-    QCOMPARE(m_view->readColumnCount(), m_view->readMaxColumns());
+    QCOMPARE(m_view->readColumnCount(), fits(75));
     QCOMPARE(int(m_view->readScreen().columns.size()), m_view->readColumnCount());
     QCOMPARE(m_view->readColumnRect(0).width(), qRound(75 * charWidth()));
     // Centred: the spare room is the margins.
@@ -5556,12 +5559,20 @@ void TestVisualView::readColumnsFollowWidthCharactersAndZoom()
     // The text is laid out at the column's width.
     QCOMPARE(static_cast<ProbeView *>(m_view)->columnWidth(), qreal(firstColumn.width()));
 
-    // Fewer characters: more columns.
-    const int at70 = m_view->readMaxColumns();
+    // Asking for all the columns that fit at 50 narrows the 75-character wish.
+    const int at75 = m_view->readColumnCount();
+    const int fit = m_view->readMaxColumns();
+    QVERIFY(fit > at75);
+    m_view->setReadColumns(fit);
+    QCOMPARE(m_view->readColumnCount(), fit);
+    QVERIFY(m_view->readColumnChars().first < 75);
+    QCOMPARE(m_view->readColumnRect(0).width(), qRound(m_view->readColumnChars().first * charWidth()));
+    m_view->setReadColumns(1);
+    QCOMPARE(m_view->readColumnChars().first, 75);
+    QCOMPARE(m_view->readColumnRect(0).width(), qRound(75 * charWidth()));
+    m_view->setReadColumns(fit);
     m_view->setReadChars(50);
     m_view->grab();
-    QCOMPARE(m_view->readMaxColumns(), fits(50));
-    QVERIFY(m_view->readMaxColumns() > at70);
     // Zoomed in, characters are wider: fewer.
     const int at50 = m_view->readMaxColumns();
     QFont zoomed = m_view->font();
@@ -5582,7 +5593,7 @@ void TestVisualView::readColumnsFollowWidthCharactersAndZoom()
     QTRY_VERIFY(m_view->viewport()->width() < 450);
     m_view->grab();
     QCOMPARE(m_view->readMaxColumns(), 1);
-    QCOMPARE(m_view->readColumnRect(0).width(), m_view->viewport()->width() - 2 * 56);
+    QCOMPARE(m_view->readColumnRect(0).width(), qMin(qRound(50 * charWidth()), m_view->viewport()->width() - 2 * 56));
 }
 
 void TestVisualView::pageTurnsGreyKeptLinesOnlyGoingForward()

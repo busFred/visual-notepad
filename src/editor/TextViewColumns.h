@@ -67,7 +67,7 @@ struct TextView::Columns
     ColumnRows rows;
     md::ReadFlow flow;
     ColumnLayout layout;
-    int wanted = 0; // 0: as many as fit.
+    int wanted = 0; // 0: as many as fit at the requested width.
     int chars = 70;
     // Of the rows: a line added or removed, or every line laid out anew.
     int revision = 0;
@@ -89,13 +89,14 @@ struct TextView::Columns
     } barDrag;
     int wheel = 0;
     bool wheelPixels = false;
-    // What columnsChanged() last told: the lines on screen, the fit and the count.
+    // What columnsChanged() last told: the lines on screen and the column sizing.
     struct News
     {
         int first = -1;
         int last = -1;
         int fit = 0;
         int count = 0;
+        std::pair<int, int> chars;
         bool shown = false;
         bool operator==(const News &) const = default;
     } news;

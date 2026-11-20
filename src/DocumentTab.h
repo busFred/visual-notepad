@@ -180,11 +180,13 @@ public:
     // The source lines on screen in columns (0-based, both included), or
     // (-1, -1) (also before a large document's first parse).
     std::pair<int, int> readLineRange() const;
-    // 0: as many as fit.
+    // The count and width to use when there is room. A count of 0 awaits the first layout.
     int readColumns() const { return m_readColumns; }
     int readChars() const { return m_readChars; }
     int columnsShownCount() const;
     int columnsFit() const;
+    // Shown and maximum characters per column at the shown count.
+    std::pair<int, int> columnsChars() const;
     void setReadColumns(int columns);
     void setReadChars(int chars);
 
@@ -238,6 +240,7 @@ private:
     void applyMarkdownState();
     // Columns follow the wish, the mode and the lock; switched: the user
     // asked for them (or for Scroll) just now.
+    void resolveReadColumns();
     void updateColumns(bool switched = false);
 
     std::shared_ptr<TextFile> m_file;

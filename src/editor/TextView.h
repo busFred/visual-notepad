@@ -196,12 +196,14 @@ public:
     // the first) moves the view on (back) by one column, not a page.
     void setColumnsShown(bool on, int startLine = -1);
     bool columnsShown() const { return m_columnsOn; }
-    // 0: as many as fit.
+    // 0: as many as fit at the requested width.
     void setColumnCount(int columns);
     // Characters of text per column, in the editor font's character width.
     void setColumnChars(int chars);
     int shownColumnCount();
     int maxColumnCount();
+    // Shown and maximum characters per column at the shown count.
+    std::pair<int, int> columnChars();
     // The lines on screen in columns (0-based, both included), or (-1, -1).
     std::pair<int, int> columnLineRange();
     void columnsPageForward();
@@ -461,6 +463,7 @@ private:
         int left = 0;     // Of the first column, its gutter included.
         int top = 0;
         int width = 0;    // Of a column's text.
+        std::pair<int, int> chars;
         int textLeft = 0; // From a column's left edge to its text.
         int gap = 0;
         int height = 0;   // What the lines get; the scroll bars go below.

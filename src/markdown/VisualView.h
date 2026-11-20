@@ -153,9 +153,9 @@ public:
     QRect tableCellViewRect(int line, int row, int col);
 
     // Read mode: what a locked Visual mode shows in Columns (DocumentTab
-    // turns it on). The document flows through columns of `chars` characters of body text
-    // (at the font and zoom of the moment), as many as fit or the number
-    // asked for if fewer, centred, a screen at a time (md::ReadFlow): page
+    // turns it on). The document flows through columns of body text (at the
+    // font and zoom of the moment). They narrow to fit the count, and fewer
+    // show if they still cannot fit. Centred, a screen at a time (md::ReadFlow): page
     // turns, nudges of a line, no scroll bar. Where the view is, is a source
     // line, which every change of layout keeps, and so does leaving read mode.
     // Before a large document's first parse (its source shows line by line)
@@ -166,15 +166,17 @@ public:
     // The source line the screen starts on in read mode (where leaving it
     // scrolls to).
     int readTopLine() const { return int(m_readLinePosition); }
-    // 0: as many columns as fit.
+    // 0: as many columns as fit at the requested width.
     void setReadColumns(int columns);
     int readColumns() const { return m_readColumns; }
     void setReadChars(int chars);
     int readChars() const { return m_readChars; }
-    // How many columns fit (what Auto uses), and how many show; 1 out of
+    // How many columns fit at the minimum width, and how many show; 1 out of
     // read mode.
     int readMaxColumns();
     int readColumnCount();
+    // Shown and maximum characters per column at the shown count.
+    std::pair<int, int> readColumnChars();
     // The moves. Out of read mode they do nothing.
     void readPageForward();
     void readPageBack();
@@ -823,6 +825,7 @@ private:
         qreal fontSize = 0;
         int chars = 0;
         int columns = 0; // Asked for.
+        std::pair<int, int> shownChars;
         int serial = -1; // m_readLayoutSerial.
         int count = 1;   // Shown.
         int fit = 1;     // That fit.
@@ -933,7 +936,7 @@ private:
         int line = -1;
         qreal grab = 0;
     } m_readBarDrag;
-    // What readChanged() last told: the screen's start and end, the lines, and the fit.
+    // What readChanged() last told: the screen, the lines and the column sizing.
     struct ReadNews
     {
         md::Position start;
@@ -941,6 +944,8 @@ private:
         int first = -1;
         int last = -1;
         int fit = 0;
+        int count = 0;
+        std::pair<int, int> chars;
         bool operator==(const ReadNews &) const = default;
     } m_readNews;
     bool m_readNewsPending = false;

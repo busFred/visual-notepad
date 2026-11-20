@@ -181,7 +181,7 @@ void TextView::setColumnCount(int columns)
 
 void TextView::setColumnChars(int chars)
 {
-    chars = qBound(20, chars, 400);
+    chars = qBound(20, chars, 100);
     columnState();
     if (m_columns->chars == chars)
         return;
@@ -203,6 +203,11 @@ int TextView::maxColumnCount()
     return m_columnsOn ? columnLayout().fit : 1;
 }
 
+std::pair<int, int> TextView::columnChars()
+{
+    return m_columnsOn ? columnLayout().chars : std::pair{50, 50};
+}
+
 // A character of text: the editor font's (one width for every character in a
 // monospaced font, the average otherwise).
 qreal TextView::columnsCharWidth() const
@@ -216,14 +221,13 @@ const TextView::ColumnLayout &TextView::columnLayout()
 {
     ColumnLayout &l = m_columns->layout;
     const QSize size = viewport()->size();
-    const qreal charWidth = columnsCharWidth();
     l = {};
-    const int room = qMax(1, size.width() - 2 * columns::sideRoom);
-    l.gap = columns::gap;
     l.textLeft = gutterWidth() + qRound(m_leftMargin);
-    l.width = qBound(1, qRound(m_columns->chars * charWidth), qMax(1, room - l.textLeft));
-    l.fit = qMax(1, (room + l.gap) / (l.columnWidth() + l.gap));
-    l.count = m_columns->wanted > 0 ? qMin(m_columns->wanted, l.fit) : l.fit;
+    const auto sizing = columns::sizing(size.width(), columnsCharWidth(), l.textLeft, m_columns->wanted, m_columns->chars);
+    l.width = sizing.textWidth;
+    l.fit = sizing.fit;
+    l.count = sizing.count;
+    l.chars = {sizing.chars, sizing.maxChars};
     l.gap = columns::spreadGap(size.width(), l.count, l.columnWidth());
     const int total = l.count * l.columnWidth() + (l.count - 1) * l.gap;
     l.left = (size.width() - total) / 2;
@@ -401,8 +405,10 @@ void TextView::noteColumns()
             const std::pair<int, int> range = columnLineRange();
             news.first = range.first;
             news.last = range.second;
-            news.fit = columnLayout().fit;
-            news.count = columnLayout().count;
+            const ColumnLayout &layout = columnLayout();
+            news.fit = layout.fit;
+            news.count = layout.count;
+            news.chars = layout.chars;
         }
         c.newsPending = false;
         placeColumnControls(); // (The columns may have moved: a zoom, a font.)
