@@ -41,6 +41,10 @@ add_library(vn_app STATIC
     src/EditorGroup.h
     src/EvenSplitter.cpp
     src/EvenSplitter.h
+    src/ExternalFiles.cpp
+    src/ExternalFiles.h
+    src/InstanceChannel.cpp
+    src/InstanceChannel.h
     src/MainWindow.cpp
     src/MainWindow.h
     src/PlainText.cpp

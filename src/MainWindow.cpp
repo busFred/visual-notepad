@@ -1481,23 +1481,25 @@ bool MainWindow::openFile(const QString &path, std::function<void(DocumentTab *)
         }
     }
 
-    // Already on its way to a tab (here or in another window).
-    if (!file && TextFile::isLoadingPath(path))
-        return true;
-
     // Open in another window: a new tab on the same document.
     if (!file) {
+        const auto loading = TextFile::findLoading(path);
+        if (loading && std::any_of(m_pendingOpens.cbegin(), m_pendingOpens.cend(),
+                                   [&loading](const auto &entry) { return entry->file == loading; }))
+            return true;
         // A very big file takes long and much memory: only when asked for.
-        if (const qint64 size = QFileInfo(path).size(); size >= TextFile::confirmLoadBytes && !confirmLargeOpen(path, size))
+        const qint64 size = loading ? 0 : QFileInfo(path).size();
+        if (size >= TextFile::confirmLoadBytes && !confirmLargeOpen(path, size))
             return false;
-        file = TextFile::create();
-        if (QFileInfo(path).size() >= TextFile::largeLoadBytes) {
+        file = loading ? loading : TextFile::create();
+        if (loading || size >= TextFile::largeLoadBytes) {
             auto pending = std::make_shared<PendingOpen>();
             pending->file = file;
             pending->path = path;
             pending->opened = std::move(opened);
             watchLoad(pending);
-            file->loadAsync(path);
+            if (!loading)
+                file->loadAsync(path);
             return true;
         }
         if (!file->load(path)) {

@@ -103,6 +103,12 @@ target_link_libraries(test_groups PRIVATE vn_app Qt6::Test)
 add_test(NAME groups COMMAND test_groups)
 set_tests_properties(groups PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
 
+qt_add_executable(test_instance test_instance.cpp)
+target_link_libraries(test_instance PRIVATE vn_app Qt6::Test)
+target_compile_definitions(test_instance PRIVATE VN_APP_PATH="$<TARGET_FILE:visnotepad>")
+add_test(NAME instance COMMAND test_instance)
+set_tests_properties(instance PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=${VN_TEST_QPA}")
+
 qt_add_executable(test_markdown_editing test_markdown_editing.cpp)
 target_link_libraries(test_markdown_editing PRIVATE vn_app Qt6::Test)
 add_test(NAME markdown_editing COMMAND test_markdown_editing)

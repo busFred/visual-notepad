@@ -991,6 +991,8 @@ void PreferencesDialog::buildViewPage()
     addHeading(tr("Windows"));
     addCombo(tr("When the last tab is closed"), key::lastTabClosed,
              {{tr("Keep the window open"), QStringLiteral("keep")}, {tr("Close the window"), QStringLiteral("close")}});
+    addCombo(tr("Open files from the file manager in"), key::externalFilesWindow,
+             {{tr("The last active window"), QStringLiteral("active")}, {tr("A new window"), QStringLiteral("new")}});
     endPage(tr("View"), QStringLiteral("view"));
 }
 

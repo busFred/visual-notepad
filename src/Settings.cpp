@@ -64,6 +64,7 @@ const QHash<QString, QVariant> &defaults()
         {key::zoom, 100},
         {key::theme, QStringLiteral("modern")},
         {key::lastTabClosed, QStringLiteral("keep")},
+        {key::externalFilesWindow, QStringLiteral("active")},
     };
     return values;
 }

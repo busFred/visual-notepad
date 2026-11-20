@@ -269,10 +269,10 @@ public:
     // registered (and so not found) until it has.
     void beginLoading(TextFile *file, const QString &path) { m_loading.insert(file, keyFor(path)); }
     void endLoading(TextFile *file) { m_loading.remove(file); }
-    bool isLoading(const QString &path) const
+    TextFile *findLoading(const QString &path) const
     {
         const QString key = keyFor(path);
-        return !key.isEmpty() && std::any_of(m_loading.cbegin(), m_loading.cend(), [&](const QString &k) { return k == key; });
+        return key.isEmpty() ? nullptr : m_loading.key(key);
     }
 
     // Registers the file under its current path if no other file has it.
@@ -673,7 +673,13 @@ bool TextFile::isLoading() const
 
 bool TextFile::isLoadingPath(const QString &path)
 {
-    return TextFileRegistry::instance().isLoading(path);
+    return TextFileRegistry::instance().findLoading(path) != nullptr;
+}
+
+std::shared_ptr<TextFile> TextFile::findLoading(const QString &path)
+{
+    TextFile *file = TextFileRegistry::instance().findLoading(path);
+    return file ? file->shared_from_this() : nullptr;
 }
 
 void TextFile::cancelLoad()

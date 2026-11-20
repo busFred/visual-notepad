@@ -1,4 +1,6 @@
 #include "DesktopSettings.h"
+#include "ExternalFiles.h"
+#include "InstanceChannel.h"
 #include "MainWindow.h"
 #include "Session.h"
 #include "TextFile.h"
@@ -12,10 +14,6 @@
 
 #include <cstring>
 
-#ifdef Q_OS_MACOS
-#include <QFileOpenEvent>
-#endif
-
 #ifdef Q_OS_WIN
 #include <cstdio>
 #include <cstring>
@@ -23,50 +21,6 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#endif
-
-#ifdef Q_OS_MACOS
-namespace {
-
-// Finder hands files to an application (opening one, Open With, a drop on
-// the Dock icon) as FileOpen events, not as arguments: each opens in the
-// active window, or in a new one if there is none.
-class FileOpenHandler : public QObject
-{
-public:
-    using QObject::QObject;
-
-protected:
-    bool eventFilter(QObject *watched, QEvent *event) override
-    {
-        if (event->type() != QEvent::FileOpen)
-            return QObject::eventFilter(watched, event);
-        const QString file = static_cast<QFileOpenEvent *>(event)->file();
-        if (file.isEmpty())
-            return false;
-        auto *window = qobject_cast<vn::MainWindow *>(QApplication::activeWindow());
-        if (!window) {
-            for (QWidget *widget : QApplication::topLevelWidgets()) {
-                auto *candidate = qobject_cast<vn::MainWindow *>(widget);
-                if (candidate && candidate->isVisible()) {
-                    window = candidate;
-                    break;
-                }
-            }
-        }
-        if (!window) {
-            window = new vn::MainWindow;
-            window->setAttribute(Qt::WA_DeleteOnClose);
-            window->show();
-        }
-        window->openFile(file);
-        window->raise();
-        window->activateWindow();
-        return true;
-    }
-};
-
-} // namespace
 #endif
 
 int main(int argc, char *argv[])
@@ -129,19 +83,30 @@ int main(int argc, char *argv[])
     parser.addPositionalArgument(QStringLiteral("files"), QStringLiteral("Files to open."), QStringLiteral("[files...]"));
     parser.process(app);
 
-    vn::math::setWorkerProgram(QCoreApplication::applicationFilePath());
-    vn::theme::apply(app);
-    vn::TextFile::setHighlightInSlices(true);
-#ifdef Q_OS_MACOS
-    app.installEventFilter(new FileOpenHandler(&app));
-#endif
-
-    auto &session = vn::SessionManager::instance();
-    session.start();
-    // Absolute at once: nothing later depends on the current folder.
+    // Resolve paths in the launching process, which may have a different
+    // working directory from the one that will open them.
     QStringList files = parser.positionalArguments();
     for (QString &file : files)
         file = QDir::current().absoluteFilePath(file);
+    vn::ExternalFiles externalFiles(app);
+    vn::InstanceChannel instance;
+    QObject::connect(&instance, &vn::InstanceChannel::requested, &externalFiles, &vn::ExternalFiles::request);
+    // Only the process that owns the channel can read or write the session.
+    switch (instance.start(files)) {
+    case vn::InstanceChannel::StartResult::Forwarded:
+        return 0;
+    case vn::InstanceChannel::StartResult::Failed:
+        return 1;
+    case vn::InstanceChannel::StartResult::Listening:
+        break;
+    }
+
+    vn::math::setWorkerProgram(QCoreApplication::applicationFilePath());
+    vn::theme::apply(app);
+    vn::TextFile::setHighlightInSlices(true);
+
+    auto &session = vn::SessionManager::instance();
+    session.start();
     if (files.isEmpty()) {
         if (!session.restore()) {
             auto *window = new vn::MainWindow;
@@ -160,5 +125,6 @@ int main(int argc, char *argv[])
         window->show();
     }
 
+    externalFiles.finishStartup();
     return app.exec();
 }

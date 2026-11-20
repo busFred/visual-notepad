@@ -59,6 +59,8 @@ public:
     static std::shared_ptr<TextFile> createDeferred(const QString &path);
     // The registered file for `path` (any spelling of it), or null.
     static std::shared_ptr<TextFile> find(const QString &path);
+    // A file loading on a worker, to share the load between windows.
+    static std::shared_ptr<TextFile> findLoading(const QString &path);
     // Every live file, registered or not.
     static QList<TextFile *> all();
     // Looks at every file on disk again soon; for window activation.
